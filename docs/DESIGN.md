@@ -609,17 +609,21 @@ to `needs_human` (§3). `site.submit_for_review` returns a review URL and can ne
 
 ## 13. Decomposition & sequencing
 
-~4 sub-projects; each gets a spec + plan under `docs/specs/`:
+Each sub-project gets a spec + plan under `docs/specs/`:
 
 1. **Engine core** (+ `local` site + `testkit` mock agent + full unit/integration
-   tests) — the foundation. **Spec next.**
-2. **mechanic playbook + `meta` site adapter** — first real job-type end-to-end.
-3. **Control-plane server + React SPA wiring** — status + control (UI generated
+   tests) — the foundation. Spec + plan done (`engine-core.md`).
+2. **`dexter` playbook + `devserver` site** — fan `/dexter:solve` across internal
+   devservers with cross-host dedup + learning-banking. Spec done
+   (`dexter-playbook.md`). First real end-to-end job-type.
+3. **mechanic playbook + full `meta` site adapter** — test-fix (buck2/testinfra).
+4. **Control-plane server + React SPA wiring** — status + control (UI generated
    in parallel via `web/UI_BRIEF.md`).
-4. **rigger playbook** — validates genericity (different shape from mechanic).
-5. **medic** — designed-for; stub/optional.
+5. **rigger playbook** — validates genericity (different shape from mechanic).
+6. **medic** — designed-for; stub/optional.
 
-Ordering is adjustable; the engine core must land first.
+Ordering is adjustable; the engine core must land first. Agent adapters
+(`claude` in scope; `codex` later) ship with the engine (§4).
 
 ---
 
