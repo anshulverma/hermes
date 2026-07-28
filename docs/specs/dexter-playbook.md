@@ -120,14 +120,18 @@ for `<goal>`."* dexter stops at a published diff; the guard blocks landing (§7)
 ### 2.5 verify(run, ticket, result, site) → bool
 
 Independent master-side re-verify (no-trust rule): do **not** trust
-`result.fix.verified`. Confirm at least one of, through the site/box:
-- the published diff's CI signal is green (`ci_status`/a signal re-query), **or**
-- re-running the minimal repro dexter recorded now passes, **and**
-- the knowledge entry passes `kb.py validate`.
+`result.fix.verified`. Re-confirm the **fix** through the site/box (every check is a
+site call, so tests stub it on the `local` site with no dexter) via at least one
+independent signal:
+- the published diff's CI signal is green (re-query `ci_status` through the site), **or**
+- re-running the minimal repro dexter recorded now passes (through the site).
 
-Return `True` iff independently confirmed → ticket admitted to `reducing`;
-`False` → ticket routed to `needs_human` (integrity signal: dexter claimed success
-the master could not confirm).
+Return `True` iff at least one signal independently confirms the fix → ticket admitted
+to `reducing`; `False` → ticket routed to `needs_human` (integrity signal: dexter
+claimed success the master could not confirm). Knowledge-entry validity is **not**
+re-checked here — the learning is validated only when banked in `reduce` (§2.6, via
+the injectable sink), so `verify` needs no dexter tooling and the master's sole
+dexter coupling stays the single point in §5.
 
 ### 2.6 reduce(run, "solve", findings, site) → list[Reduction]
 

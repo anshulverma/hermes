@@ -20,7 +20,7 @@ Commit after each slice.
   `~/.claude/plugins/local`).
 - `engine/__init__.py`, `engine/config.py` (`resolve_home()`, env vars:
   `HERMES_HOME`, `HERMES_HEARTBEAT_S=30`, `HERMES_SITE=local`, `HERMES_AGENT=claude`,
-  `HERMES_BIND`, networked-mount guard).
+  networked-mount guard).
 - `integrations/claude-code/` stub: `.claude-plugin/plugin.json` (name `hermes`),
   `/hermes:*` command stubs, `skills/hermes/SKILL.md` — all thin wrappers that shell
   out to the `hermes` CLI (fleshed out in Slice 10).
@@ -78,8 +78,10 @@ returns last n; `data` round-trips JSON.
 
 **Deliverables** — `playbook.py` (`Playbook` Protocol + registry `register`/
 `load`), `site.py` (`Site` Protocol + registry, `HealthReport.ok`), `agent.py`
-(`Agent` Protocol + registry `register`/`load`), `sites/local/site.py` (`LocalSite`:
-`health`, `resource_classes`, `guarantees_no_ship`, `provision` = git worktree;
+(`Agent` Protocol + registry `register`/`load`), `sites/local/site.py` (`LocalSite`
+— the full `Site` protocol: `discover_hosts` (localhost), `provision` = git worktree,
+`health`, `resource_classes`, `guarantees_no_ship`, `issue_source` = read the canned
+JSON, `submit_for_review` = local branch + `file://` ref (never lands);
 `run_worker` deferred to Slice 7), `testkit/example_playbook.py` (`EchoPlaybook`),
 `testkit/mock_agent.py` (`MockAgent(Agent)`: scenario-table adapter, registered as
 `mock`), `testkit/fixtures.py` (temp `HERMES_HOME`, canned issue file).
@@ -90,7 +92,9 @@ and merges the agent adapter's `health_checks`; `EchoPlaybook.seed` yields ticke
 from the canned issues; its `reduce` optionally emits a reduction with
 `needs_human_ticket_ids` and its `verify` optionally returns False (both
 config-driven, for the Slice 5/9 needs_human paths); `MockAgent.parse_result` returns
-the scenario's deterministic `Result` for a given envelope.
+the scenario's deterministic `Result` for a given envelope; `LocalSite.discover_hosts`
+returns the local host, `issue_source` reads the canned issue file, and
+`submit_for_review` returns a `file://` review ref without ever pushing (no-ship).
 
 **Acceptance** — an `EchoPlaybook` + `LocalSite` pair loads and seeds; mock agent
 produces each Result outcome deterministically.
@@ -236,7 +240,8 @@ with zero Meta/SSH/real-claude dependency.
 ## Slice 10 — CLI
 
 **Deliverables** — `cli.py` + `commands/` (`run`, `run {pause|resume|stop}`,
-`reduction {accept|reject}`, `ticket requeue`, `serve`, `crew`, `status`, `show`,
+`reduction {accept|reject}`, `ticket requeue`, `serve --host` (worker loop, §10 —
+**not** `serve --api`, which is sub-project 3), `crew`, `status`, `show`,
 `--dry-run`), console entrypoint `hermes`; the control/reduction/requeue
 subcommands are thin wrappers over `queue.set_run_state`/`accept_reduction`/
 `reject_reduction`/`requeue_needs_human` (§9/§10).

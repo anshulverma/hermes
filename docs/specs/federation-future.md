@@ -77,7 +77,8 @@ deputy.** No separate inter-node protocol is invented.
   invalidates in-flight parent sessions, which reconnect). Non-loopback binding
   carries the same trusted-network/proxy caveat already noted in DESIGN §10.
 - Deputies are **provisioned like crew** (SSH bootstrap: install Hermes, start its
-  API server, health-gate on admission), then driven over the API.
+  control-plane API server with `hermes serve --api` — not the `hermes serve --host`
+  worker loop — health-gate on admission), then driven over the API.
 
 ## 5. Work assignment (sharding & routing)
 

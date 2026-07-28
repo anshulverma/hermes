@@ -57,7 +57,7 @@ engine/
   queue.py         # seed_tickets, claim_ticket, record_result, requeue*, state machine
   leases.py        # acquire, renew, reclaim_expired
   crew.py          # register, add (provision+health-gate), drain, remove, heartbeat sweep
-  drivers.py       # Driver model (goal + command); runtime-agnostic (no CLI specifics)
+  drivers.py       # Driver model (command + args + loop); runtime-agnostic (no CLI specifics)
   transport.py     # local_transport, ssh_transport, serve_once_for_host
   dispatch.py      # serve loop (per-host worker), master loop, reduce/advance driver
   playbook.py      # Playbook Protocol + registry/loader
@@ -89,7 +89,7 @@ and the agent adapters spawns subprocesses.
 ```
 $HERMES_HOME/
   queue.db                 # SQLite, WAL, mode 0600 (§4)
-  api_token                # bearer token (created by `serve`; sub-project 3 uses it)
+  api_token                # bearer token (created by `hermes serve --api`, sub-project 3; not engine-core)
   logs/                    # serve loop logs
   tickets/<ticket_id>/
     envelope.json          # dispatched GoalEnvelope (§6)
@@ -495,8 +495,9 @@ filters (test/demo source).
   `health_json`/`state`, requeues tickets of hosts gone `down`, renews leases,
   reclaims expired ones, re-admits recovered hosts, and un-parks tickets of any
   class that regained capacity (`queue.unpark_ready`); `drain`/`remove`.
-- **drivers.py** — the runtime-agnostic **Driver model** (`goal`, optional
-  methodology `command`, `args`, `loop`). It carries **no** CLI specifics: turning a
+- **drivers.py** — the runtime-agnostic **Driver model** (methodology `command`,
+  `args`, `loop`; the per-ticket completion condition `goal` is **not** here — it
+  lives on the GoalEnvelope, §6). It carries **no** CLI specifics: turning a
   Driver + envelope into a concrete headless invocation and parsing the output is
   the **agent adapter's** job (`agent.build_invocation` / `agent.parse_result`, §8).
   `timeout_s` is enforced by the transport's `timeout` wrapper (no `--max-turns`).
@@ -559,7 +560,7 @@ filters (test/demo source).
   starts an in-process `serve_loop` per such host**, so a single
   `hermes run --site local` without `--dry-run` actually claims and executes
   tickets and drives the run to a terminal state (AC2, §13); on a distributed
-  site, remote worker boxes run their own `hermes serve` (below) instead.
+  site, remote worker boxes run their own `hermes serve --host` (below) instead.
 - `hermes run {pause|resume|stop} <run_id>` — apply a run control action via
   `queue.set_run_state` (§5, §9); prints the resulting `runs.state` and errors on
   an illegal transition (e.g. resume of a terminal run).
@@ -601,8 +602,8 @@ reports + estimates without dispatching.
 
 ## 12. Testkit (mock agent) & test strategy
 
-- **`testkit/mock_agent.py`** — a fake worker invoked by `LocalSite.run_worker`
-  in tests (selected via `HERMES_MOCK_AGENT=1`): reads `envelope.json`,
+- **`testkit/mock_agent.py`** — a fake agent adapter invoked by `LocalSite.run_worker`
+  in tests (selected via `HERMES_AGENT=mock`): reads `envelope.json`,
   **recomputes `payload_sha256` over the received `payload` and returns
   `contract_fail` on mismatch** (§6), otherwise per a scenario table writes a
   deterministic `result.json` (ok / contract_fail / driver_error / timeout /

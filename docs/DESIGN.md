@@ -128,8 +128,8 @@ class Site(Protocol):
     name: str
     def discover_hosts(self) -> list[str]: ...           # optional auto-enumeration
     def provision(self, host, base_ref) -> None: ...     # idempotent
-    def health(self, host) -> HealthReport: ...          # §7
-    def run_worker(self, host, envelope) -> Result: ...  # the remote-exec recipe
+    def health(self, host, agent) -> HealthReport: ...   # §7 (delegates agent checks to `agent`)
+    def run_worker(self, host, envelope, agent) -> Result: ...  # the remote-exec recipe (runs `agent`)
     def resource_classes(self) -> list[str]: ...         # e.g. ["cpu","gpu"]
     def submit_for_review(self, host, change) -> str: ... # returns a review URL; never lands
     def issue_source(self, query: IssueQuery) -> list[Issue]: ...  # e.g. failing-test dashboard
@@ -222,7 +222,7 @@ hermes/                          # standalone repo (was: a dir in the plugins re
     db/  (schema.sql, migrate.py)
     queue.py     dispatch.py   transport.py
     crew.py      leases.py     contracts.py    events.py
-    drivers.py                  # Driver model (goal + command), runtime-agnostic
+    drivers.py                  # Driver model (command + args), runtime-agnostic
     playbook.py  site.py  agent.py   # the THREE extension-point protocols + loaders
     cli.py                      # the `hermes` CLI
   server/                        # FastAPI JSON API + websocket event feed
@@ -232,10 +232,12 @@ hermes/                          # standalone repo (was: a dir in the plugins re
     codex/                       # CodexAgent                        [later]
   sites/
     local/                       # reference site: localhost + git + shell
+    devserver/                   # internal-devserver adapter (for dexter)   [sub-project 2]
     meta/                        # Meta devserver adapter (od hosts, ssh, buck2/sl/jf,
                                  #   testinfra, gpu/re, guards, health)   [deploy-time]
   playbooks/
     mechanic/  (test-fix)   rigger/  (training-eff)   medic/  (SEV-RCA, later)
+    dexter/    (SEV/RCA solve, cross-host)                                 [sub-project 2]
   integrations/
     claude-code/                 # THE Claude Code plugin: /hermes:* commands + skill
                                  #   → shell out to the `hermes` CLI; symlinked into
@@ -373,7 +375,7 @@ Adding a host is one command or one UI button; the site adapter encapsulates the
 ```
 hermes crew add <host>
   → site.provision(host, base_ref)      # idempotent: workspace, agent, guard, warm caches
-  → report = site.health(host)          # structured probe
+  → report = site.health(host, agent)   # structured probe (agent supplies its own checks)
   → admit iff report.ok, else show exactly which checks failed
 ```
 
@@ -514,9 +516,11 @@ master or worker. GPU/RE specifics live entirely in the `meta` site's
 
 ## 10. Control plane & status (goals #3, #5)
 
-- **API** (`server/`, FastAPI): REST for runs/tickets/crew/health/leases/
-  findings/reductions + a **websocket** feed backed by the `events` table. Control
-  actions: start/resume/stop run, add/drain/remove host,
+- **API** (`server/`, FastAPI; started by **`hermes serve --api`** — distinct from
+  the per-host worker loop `hermes serve --host` in the engine-core CLI): REST for
+  runs/tickets/crew/health/leases/findings/reductions + a **websocket** feed backed
+  by the `events` table. Control
+  actions: pause/resume/stop run, add/drain/remove host,
   requeue/reprioritize/park ticket, **accept/reject reduction**
   (`POST /reductions/{id}/accept` · `POST /reductions/{id}/reject`, transitioning
   `review_state` `pending → accepted`/`rejected` (§5) and emitting a
@@ -532,8 +536,8 @@ master or worker. GPU/RE specifics live entirely in the `meta` site's
 - **Auth & binding (required — these actions are destructive and workers run
   `bypassPermissions`).** The server **binds to `127.0.0.1` by default**
   (`HERMES_BIND`, overridable to `0.0.0.0` only behind a trusted proxy). A
-  **bearer token** (generated on first `hermes serve`, stored 0600 at
-  `$HERMES_HOME/api_token`, rotatable via `hermes serve --rotate-token`) is
+  **bearer token** (generated on first `hermes serve --api`, stored 0600 at
+  `$HERMES_HOME/api_token`, rotatable via `hermes serve --api --rotate-token`) is
   **required on every mutating request** (`POST`/`DELETE`, i.e. all control
   actions above) and on the **websocket handshake** (`?token=` or
   `Authorization` header). Read-only `GET` endpoints are token-gated too whenever
@@ -554,7 +558,7 @@ master or worker. GPU/RE specifics live entirely in the `meta` site's
     pastes the token (or the trusted proxy supplies it), again held in memory only.
 - **Token lifecycle.** The token is a single shared secret with **no TTL** (it
   does not expire on its own) and **no per-actor scoping/permissions** — every
-  holder has full control-plane authority. `hermes serve --rotate-token`
+  holder has full control-plane authority. `hermes serve --api --rotate-token`
   generates a new token and **immediately invalidates all in-flight sessions**:
   subsequent requests bearing the old token get `401`, and every open websocket
   authenticated with it is closed with code `4401` (clients must re-fetch/re-enter
