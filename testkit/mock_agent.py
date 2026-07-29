@@ -34,12 +34,17 @@ DEFAULT_SCENARIO = "ok"
 
 
 class MockAgent:
-    """Deterministic fake agent driven by a scenario table (§8, §12)."""
+    """Deterministic fake agent driven by a scenario table (§8, §12).
+
+    Extended in Task 12A to support (ticket_id, attempt) keying so retries can
+    yield different outcomes (e.g., infra_failed on attempt 1, ok on attempt 2).
+    """
 
     name = "mock"
 
     def __init__(self, healthy: bool = True, scenarios: dict | None = None):
         self.healthy = healthy
+        # Support both simple string keys (backward compat) and (ticket_id, attempt) tuple keys
         self.scenarios = dict(SCENARIOS)
         if scenarios:
             self.scenarios.update(scenarios)
@@ -55,7 +60,22 @@ class MockAgent:
         return ["true"]
 
     def _scenario_for(self, envelope: dict) -> str:
+        """Resolve the scenario name from envelope.
+
+        First tries (ticket_id, attempt) key, then falls back to payload scenario.
+        """
+        ticket_id = envelope.get("ticket_id")
         payload = envelope.get("payload") or {}
+        attempt = payload.get("attempt")
+
+        # Try (ticket_id, attempt) tuple key first
+        if ticket_id is not None and attempt is not None:
+            key = (ticket_id, attempt)
+            if key in self.scenarios:
+                # Return the key itself for lookup (not scenario name)
+                return key
+
+        # Fall back to scenario name from payload
         return payload.get("scenario", DEFAULT_SCENARIO)
 
     def parse_result(self, raw: str, envelope: dict) -> Result:
@@ -83,10 +103,19 @@ class MockAgent:
                 evidence_ref=None,
             )
 
-        name = self._scenario_for(envelope)
-        outcome, termination_reason = self.scenarios.get(
-            name, self.scenarios[DEFAULT_SCENARIO]
-        )
+        key = self._scenario_for(envelope)
+        # Handle both string keys and tuple keys
+        if isinstance(key, tuple):
+            outcome, termination_reason = self.scenarios.get(
+                key, self.scenarios[DEFAULT_SCENARIO]
+            )
+        else:
+            outcome, termination_reason = self.scenarios.get(
+                key, self.scenarios[DEFAULT_SCENARIO]
+            )
+
+        # For error messages, convert key to string
+        name = str(key) if isinstance(key, tuple) else key
         if outcome == "ok":
             result_ref = f"result://{envelope.get('ticket_id', 'mock')}"
             error_summary = None
