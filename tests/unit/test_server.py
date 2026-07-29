@@ -2704,7 +2704,6 @@ def test_run_metrics_endpoint_deterministic_buckets(loopback_client: TestClient,
     Buckets span from run.created_at to latest event/attempt ts (deterministic, no wall-clock).
     """
     import sqlite3
-    import time
 
     db_path = str(temp_home / "queue.db")
     conn = sqlite3.connect(db_path)

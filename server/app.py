@@ -6,6 +6,7 @@ GET-gated on non-loopback, SPA serving with token bootstrap injection (loopback 
 """
 import asyncio
 import json
+import math
 import os
 import secrets
 from pathlib import Path
@@ -746,7 +747,6 @@ def create_app(bind: str | None = None) -> FastAPI:
                 }
 
             # Generate buckets from run_created_at to range_end
-            import math
             num_buckets = math.ceil((range_end - run_created_at) / bucket_s)
             if num_buckets == 0:
                 num_buckets = 1  # At least one bucket if there's any data
@@ -772,11 +772,13 @@ def create_app(bind: str | None = None) -> FastAPI:
             ).fetchall()
 
             buckets = []
+            # Cumulative done/failed are monotonic non-decreasing (accumulated from non-negative per-bucket counts)
             done_cumulative = 0
             failed_cumulative = 0
 
             # Track crew state: dict of host -> online/offline
             crew_state: dict[str, bool] = {}
+            crew_event_idx = 0  # Advancing cursor across buckets (single-pass O(events))
 
             for i in range(num_buckets):
                 bucket_start = run_created_at + i * bucket_s
@@ -797,14 +799,16 @@ def create_app(bind: str | None = None) -> FastAPI:
                 done_cumulative += bucket_done
                 failed_cumulative += bucket_failed
 
-                # Update crew state up to bucket_end
-                for event_ts, event_kind, event_host in crew_events:
+                # Update crew state up to bucket_end (single-cursor advancing from last position)
+                while crew_event_idx < len(crew_events):
+                    event_ts, event_kind, event_host = crew_events[crew_event_idx]
                     if event_ts >= bucket_end:
                         break
                     if event_kind in ('crew_added', 'crew_health'):
                         crew_state[event_host] = True
                     elif event_kind in ('crew_down', 'crew_drained'):
                         crew_state[event_host] = False
+                    crew_event_idx += 1
 
                 # Crew online count at bucket end
                 crew_online = sum(1 for online in crew_state.values() if online)
