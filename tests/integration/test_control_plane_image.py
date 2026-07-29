@@ -17,8 +17,6 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.docker
-
 _ENGINE = shutil.which("podman") or shutil.which("docker")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _IMAGE = "hermes-control-plane:pytest"
@@ -94,6 +92,7 @@ def _rm_volume():
     )
 
 
+@pytest.mark.docker
 @pytest.mark.skipif(_ENGINE is None, reason="podman/docker not available")
 def test_control_plane_image_e2e(tmp_path):
     """DOCKER e2e: build, run, GET /api/health returns 200, migrations applied."""
