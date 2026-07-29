@@ -220,4 +220,180 @@ describe('TicketDrawer', () => {
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
+
+  describe('Requeue control (Phase D3)', () => {
+    it('should show Requeue button for guard-routed needs_human ticket', async () => {
+      const guardRoutedDetail = {
+        ...mockTicketDetail,
+        ticket: {
+          ...mockTicketDetail.ticket,
+          state: 'needs_human',  // Raw engine state (will be normalized by fetchTicketDetail)
+          reduction_id: null,  // Guard-routed
+        },
+      };
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => guardRoutedDetail,
+      });
+
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Requeue')).toBeInTheDocument();
+      });
+    });
+
+    it('should NOT show Requeue button for reduction-flagged needs_human ticket', async () => {
+      const reductionFlaggedDetail = {
+        ...mockTicketDetail,
+        ticket: {
+          ...mockTicketDetail.ticket,
+          state: 'needs_human',  // Raw engine state (will be normalized by fetchTicketDetail)
+          reduction_id: 42,  // Reduction-flagged
+        },
+      };
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => reductionFlaggedDetail,
+      });
+
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/investigate issue/i)).toBeInTheDocument();
+      });
+
+      expect(screen.queryByText('Requeue')).not.toBeInTheDocument();
+    });
+
+    it('should NOT show Requeue button for non-needs_human ticket', async () => {
+      const queuedDetail = {
+        ...mockTicketDetail,
+        ticket: {
+          ...mockTicketDetail.ticket,
+          state: 'queued',
+          reduction_id: null,
+        },
+      };
+
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => queuedDetail,
+      });
+
+      const queuedTicket = { ...mockTicket, state: 'queued' };
+
+      render(<TicketDrawer isOpen={true} ticket={queuedTicket} onClose={() => {}} />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/investigate issue/i)).toBeInTheDocument();
+      });
+
+      expect(screen.queryByText('Requeue')).not.toBeInTheDocument();
+    });
+
+    it('should call requeueTicket and refresh detail when Requeue clicked', async () => {
+      const guardRoutedDetail = {
+        ...mockTicketDetail,
+        ticket: {
+          ...mockTicketDetail.ticket,
+          state: 'needs_human',  // Raw engine state (will be normalized by fetchTicketDetail)
+          reduction_id: null,
+        },
+      };
+
+      const requeuedDetail = {
+        ...guardRoutedDetail,
+        ticket: {
+          ...guardRoutedDetail.ticket,
+          state: 'queued',  // After requeue
+        },
+      };
+
+      // First call: initial detail fetch
+      // Second call: requeue POST
+      // Third call: refresh detail fetch
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => guardRoutedDetail,
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => ({ state: 'queued' }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => requeuedDetail,
+        });
+
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      // Wait for initial load
+      await waitFor(() => {
+        expect(screen.getByText('Requeue')).toBeInTheDocument();
+      });
+
+      // Click requeue
+      const requeueButton = screen.getByText('Requeue');
+      requeueButton.click();
+
+      // Wait for requeue to complete and detail to refresh
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledWith(
+          '/api/tickets/test-run/t-0/requeue',
+          expect.objectContaining({
+            method: 'POST',
+          })
+        );
+      });
+
+      // Verify detail was refreshed (third call to fetch detail)
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledTimes(3);
+      });
+    });
+
+    it('should show error when requeue returns 409', async () => {
+      const guardRoutedDetail = {
+        ...mockTicketDetail,
+        ticket: {
+          ...mockTicketDetail.ticket,
+          state: 'needs_human',  // Raw engine state (will be normalized by fetchTicketDetail)
+          reduction_id: null,
+        },
+      };
+
+      // First call: initial detail fetch
+      // Second call: requeue POST (409 error)
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: async () => guardRoutedDetail,
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "ticket 'test-run/t-0' is 'queued', not 'needs_human'; cannot operator-requeue" }),
+        });
+
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      // Wait for initial load
+      await waitFor(() => {
+        expect(screen.getByText('Requeue')).toBeInTheDocument();
+      });
+
+      // Click requeue
+      const requeueButton = screen.getByText('Requeue');
+      requeueButton.click();
+
+      // Wait for error to show
+      await waitFor(() => {
+        expect(screen.getByText(/not 'needs_human'/)).toBeInTheDocument();
+      });
+    });
+  });
 });

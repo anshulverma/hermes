@@ -302,7 +302,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         """Get full ticket detail.
 
         Returns:
-        - ticket: all ticket fields including parsed subject
+        - ticket: all ticket fields including parsed subject and reduction_id
         - payload: parsed payload_json (GoalEnvelope)
         - result: strict latest result (max id attempt) or null
         - attempt_timeline: all attempts ordered oldest→newest
@@ -315,7 +315,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             # Get ticket
             ticket_row = conn.execute(
                 """SELECT id, run_id, phase, state, resource_req, priority,
-                          attempts, worker_host, payload_json, created_at, updated_at
+                          attempts, worker_host, reduction_id, payload_json, created_at, updated_at
                    FROM tickets WHERE id=?""",
                 (ticket_id,),
             ).fetchone()
@@ -325,7 +325,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
             (
                 tid, run_id, phase, state, resource_req, priority,
-                attempts, worker_host, payload_json, created_at, updated_at
+                attempts, worker_host, reduction_id, payload_json, created_at, updated_at
             ) = ticket_row
 
             # Parse payload
@@ -342,6 +342,7 @@ def create_app(bind: str | None = None) -> FastAPI:
                 "priority": priority,
                 "attempts": attempts,
                 "host": worker_host,
+                "reduction_id": reduction_id,
                 "subject": subject,
                 "created_at": created_at,
                 "updated_at": updated_at,
@@ -1018,6 +1019,39 @@ def create_app(bind: str | None = None) -> FastAPI:
 
             # Return the run's new state
             state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
+            return {"state": state}
+        finally:
+            conn.close()
+
+    # --- Ticket Control Endpoints (D3) ---
+
+    @app.post("/api/tickets/{ticket_id}/requeue")
+    def requeue_ticket(ticket_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Requeue a guard-routed needs_human ticket.
+
+        Returns the ticket's new state on success.
+        404 if ticket unknown, 409 if not needs_human.
+        """
+        from engine.queue import requeue_needs_human
+
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Explicit existence check: 404 if ticket doesn't exist
+            ticket_exists = conn.execute("SELECT 1 FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+            if ticket_exists is None:
+                raise HTTPException(status_code=404, detail=f"Ticket {ticket_id!r} not found")
+
+            # Attempt requeue: 409 if not needs_human
+            try:
+                requeue_needs_human(conn, ticket_id)
+            except ValueError as e:
+                # Not needs_human or other error
+                raise HTTPException(status_code=409, detail=str(e))
+
+            # Return the ticket's new state
+            state = conn.execute("SELECT state FROM tickets WHERE id=?", (ticket_id,)).fetchone()[0]
             return {"state": state}
         finally:
             conn.close()

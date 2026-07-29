@@ -2242,3 +2242,192 @@ def test_crew_remove_unknown_host_404(loopback_client: TestClient, temp_home: Pa
         headers={"Authorization": f"Bearer {token}"}
     )
     assert response.status_code == 404
+
+
+# --- D3 Ticket Requeue Tests ---
+
+
+def test_ticket_detail_includes_reduction_id(loopback_client: TestClient, temp_home: Path):
+    """GET /api/tickets/{id} includes reduction_id (null and set cases)."""
+    import sqlite3
+
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed a run
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('run-1', 'example', 'local', 'running', 'phase-1', 'main', '{}', 0, 0)"""
+    )
+
+    # Seed a guard-routed needs_human ticket (reduction_id NULL)
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('ticket-guard', 'run-1', 'phase-1', 'needs_human', 'cpu', 100, 1,
+                   NULL, NULL, '{"goal":"test"}', 0, 0)"""
+    )
+
+    # Seed a reduction-flagged needs_human ticket (reduction_id SET)
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('ticket-reduction', 'run-1', 'phase-1', 'needs_human', 'cpu', 100, 1,
+                   NULL, 42, '{"goal":"test"}', 0, 0)"""
+    )
+
+    conn.commit()
+    conn.close()
+
+    # Test guard-routed ticket (reduction_id should be null)
+    response = loopback_client.get("/api/tickets/ticket-guard")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ticket"]["id"] == "ticket-guard"
+    assert data["ticket"]["reduction_id"] is None
+
+    # Test reduction-flagged ticket (reduction_id should be 42)
+    response = loopback_client.get("/api/tickets/ticket-reduction")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ticket"]["id"] == "ticket-reduction"
+    assert data["ticket"]["reduction_id"] == 42
+
+
+def test_requeue_guard_routed_needs_human_ticket_200(loopback_client: TestClient, temp_home: Path):
+    """POST /api/tickets/{id}/requeue on guard-routed needs_human ticket => 200 + state queued."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed a run
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('run-requeue', 'example', 'local', 'running', 'phase-1', 'main', '{}', 0, 0)"""
+    )
+
+    # Seed a guard-routed needs_human ticket
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('ticket-nh', 'run-requeue', 'phase-1', 'needs_human', 'cpu', 100, 2,
+                   'worker-1', NULL, '{"goal":"test"}', 0, 0)"""
+    )
+
+    conn.commit()
+    conn.close()
+
+    # Requeue the ticket
+    response = loopback_client.post(
+        "/api/tickets/ticket-nh/requeue",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["state"] == "queued"
+
+    # Verify in database: state=queued, worker_host=NULL, reduction_id=NULL, attempts unchanged
+    conn = sqlite3.connect(db_path)
+    row = conn.execute(
+        "SELECT state, worker_host, reduction_id, attempts FROM tickets WHERE id='ticket-nh'"
+    ).fetchone()
+    assert row is not None
+    state, worker_host, reduction_id, attempts = row
+    assert state == "queued"
+    assert worker_host is None
+    assert reduction_id is None
+    assert attempts == 2  # Unchanged
+
+    # Verify ticket_requeued event was emitted
+    event_row = conn.execute(
+        "SELECT kind, ticket_id FROM events WHERE kind='ticket_requeued' AND ticket_id='ticket-nh'"
+    ).fetchone()
+    assert event_row is not None
+    conn.close()
+
+
+def test_requeue_non_needs_human_ticket_409(loopback_client: TestClient, temp_home: Path):
+    """POST /api/tickets/{id}/requeue on non-needs_human ticket => 409."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed a run
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('run-409', 'example', 'local', 'running', 'phase-1', 'main', '{}', 0, 0)"""
+    )
+
+    # Seed a queued ticket (not needs_human)
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('ticket-queued', 'run-409', 'phase-1', 'queued', 'cpu', 100, 1,
+                   NULL, NULL, '{"goal":"test"}', 0, 0)"""
+    )
+
+    conn.commit()
+    conn.close()
+
+    # Try to requeue the queued ticket
+    response = loopback_client.post(
+        "/api/tickets/ticket-queued/requeue",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 409
+
+    # Should contain error detail
+    data = response.json()
+    assert "detail" in data
+    assert "queued" in data["detail"]
+    assert "not 'needs_human'" in data["detail"]
+
+
+def test_requeue_unknown_ticket_404(loopback_client: TestClient, temp_home: Path):
+    """POST /api/tickets/{unknown}/requeue => 404."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+
+    response = loopback_client.post(
+        "/api/tickets/unknown-ticket/requeue",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 404
+
+    data = response.json()
+    assert "detail" in data
+    assert "unknown" in data["detail"].lower() or "not found" in data["detail"].lower()
+
+
+def test_requeue_requires_auth(loopback_client: TestClient, temp_home: Path):
+    """POST /api/tickets/{id}/requeue without token => 401."""
+    import sqlite3
+
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed a run and ticket
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('run-auth', 'example', 'local', 'running', 'phase-1', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('ticket-auth', 'run-auth', 'phase-1', 'needs_human', 'cpu', 100, 1,
+                   NULL, NULL, '{"goal":"test"}', 0, 0)"""
+    )
+    conn.commit()
+    conn.close()
+
+    # Try to requeue without token
+    response = loopback_client.post("/api/tickets/ticket-auth/requeue")
+    assert response.status_code == 401

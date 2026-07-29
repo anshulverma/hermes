@@ -170,6 +170,7 @@ export type TicketDetail = {
     priority: number;
     attempts: number;
     host: string | null;
+    reduction_id?: number | null;
     subject: string;
     created_at: number;
     updated_at: number;
@@ -386,5 +387,20 @@ export async function drainCrew(host: string): Promise<{ state: string }> {
 export async function removeCrew(host: string): Promise<{ status: string }> {
   return fetchJSON<{ status: string }>(`/api/crew/${host}`, {
     method: 'DELETE',
+  });
+}
+
+/**
+ * Ticket control endpoints (Phase D3).
+ * POST /api/tickets/{id}/requeue
+ */
+
+export type TicketControlResponse = {
+  state: string;
+};
+
+export async function requeueTicket(ticketId: string): Promise<TicketControlResponse> {
+  return fetchJSON<TicketControlResponse>(`/api/tickets/${ticketId}/requeue`, {
+    method: 'POST',
   });
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
+import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
 import { clearToken, setToken } from './auth';
 
 describe('API client', () => {
@@ -516,6 +516,64 @@ describe('API client', () => {
         }) as any;
 
         await expect(removeCrew('unknown')).rejects.toThrow("Crew member 'unknown' not found");
+      });
+    });
+  });
+
+  describe('Ticket control endpoints (Phase D3)', () => {
+    beforeEach(() => {
+      setToken('test-token');
+    });
+
+    describe('requeueTicket', () => {
+      it('should POST to /api/tickets/{id}/requeue with auth header', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ state: 'queued' }),
+        }) as any;
+
+        const result = await requeueTicket('ticket-123');
+
+        expect(result).toEqual({ state: 'queued' });
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/tickets/ticket-123/requeue',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token',
+            }),
+          })
+        );
+      });
+
+      it('should throw 404 if ticket not found', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: "Ticket 'unknown' not found" }),
+        }) as any;
+
+        await expect(requeueTicket('unknown')).rejects.toThrow("Ticket 'unknown' not found");
+      });
+
+      it('should throw 409 with server detail if ticket not needs_human', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "ticket 'ticket-123' is 'queued', not 'needs_human'; cannot operator-requeue" }),
+        }) as any;
+
+        await expect(requeueTicket('ticket-123')).rejects.toThrow("ticket 'ticket-123' is 'queued', not 'needs_human'; cannot operator-requeue");
+      });
+
+      it('should throw AuthError on 401', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+        }) as any;
+
+        await expect(requeueTicket('ticket-123')).rejects.toThrow(AuthError);
       });
     });
   });

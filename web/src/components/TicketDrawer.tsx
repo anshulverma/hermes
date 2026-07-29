@@ -6,9 +6,10 @@
 
 import { useEffect, useState } from 'react';
 import type { Ticket, TicketDetail } from '../api/client';
-import { fetchTicketDetail } from '../api/client';
+import { fetchTicketDetail, requeueTicket } from '../api/client';
 import { Drawer, StatusPill, Badge } from '../ds';
 import { normalizeTicketState, normalizeTicketDetail } from '../api/normalize';
+import { AuthError } from '../api/client';
 
 type TicketDrawerProps = {
   isOpen: boolean;
@@ -20,16 +21,20 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
   const [detail, setDetail] = useState<TicketDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [requeueLoading, setRequeueLoading] = useState(false);
+  const [requeueError, setRequeueError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isOpen || !ticket) {
       setDetail(null);
       setError(null);
+      setRequeueError(null);
       return;
     }
 
     setLoading(true);
     setError(null);
+    setRequeueError(null);
 
     fetchTicketDetail(ticket.id)
       .then((data) => {
@@ -41,6 +46,30 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
         setLoading(false);
       });
   }, [isOpen, ticket]);
+
+  const handleRequeue = async () => {
+    if (!ticket) return;
+
+    setRequeueLoading(true);
+    setRequeueError(null);
+
+    try {
+      await requeueTicket(ticket.id);
+      // Refresh the ticket detail
+      const data = await fetchTicketDetail(ticket.id);
+      setDetail(normalizeTicketDetail(data));
+      setRequeueLoading(false);
+    } catch (err) {
+      if (err instanceof AuthError) {
+        setRequeueError('Authentication required');
+      } else if (err instanceof Error) {
+        setRequeueError(err.message);
+      } else {
+        setRequeueError('Failed to requeue ticket');
+      }
+      setRequeueLoading(false);
+    }
+  };
 
   if (!ticket) {
     return null;
@@ -76,6 +105,33 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
         {/* Detail loaded */}
         {detail && !loading && !error && (
           <>
+            {/* Requeue control (D3) - only for guard-routed needs_human tickets */}
+            {detail.ticket.state === 'needs-human' && !detail.ticket.reduction_id && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <button
+                  onClick={handleRequeue}
+                  disabled={requeueLoading}
+                  style={{
+                    padding: '8px 16px',
+                    background: 'var(--bg-primary)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border-primary)',
+                    borderRadius: 6,
+                    cursor: requeueLoading ? 'not-allowed' : 'pointer',
+                    fontSize: 13,
+                    fontWeight: 500,
+                  }}
+                >
+                  {requeueLoading ? 'Requeuing...' : 'Requeue'}
+                </button>
+                {requeueError && (
+                  <div style={{ color: 'var(--error-text)', fontSize: 12 }}>
+                    {requeueError}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Subject */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Subject</span>
