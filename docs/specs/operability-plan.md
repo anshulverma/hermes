@@ -79,22 +79,33 @@ slice. Section references (`§2.3`, `D1`…) point at the operability spec and l
 
 ### Top-risk designs (baked into the slices, from the hardening report)
 
-- **D9 setuptools discovery + testkit decoupling (Slice 0).** Two verified layout
-  facts: (1) `sites/` has **no** `__init__.py` (PEP-420 namespace package) while
-  `sites/local`, `sites/ssh`, `sites/devserver` each have one — plain
-  `find_packages` silently drops the three site subpackages; (2)
-  `_load_playbook_site_agent` (`engine/cli.py:31-32`) **unconditionally** imports
-  `testkit.example_playbook` + `testkit.mock_agent`, so a testkit-excluded wheel
-  breaks **every** `hermes run` (incl. `dexter`). Fix (recommended A): add empty
-  `sites/__init__.py`, then the exact `[tool.setuptools.packages.find]` block below;
-  **plus** make those two `testkit` imports conditional.
+- **D9 setuptools discovery + testkit decoupling + build-backend fix (Slice 0).**
+  Three verified facts: (1) `sites/` has **no** `__init__.py` (PEP-420 namespace
+  package) while `sites/local`, `sites/ssh`, `sites/devserver` each have one — plain
+  `find_packages` silently drops all three site subpackages **and** `sites` itself
+  (verified: with the exact globs below, discovery returns only
+  `engine, engine.db, server, agents, agents.claude, playbooks, playbooks.dexter`
+  until `sites/__init__.py` is added, after which all 11 production packages
+  resolve and no test/web/infra dir leaks); (2) `_load_playbook_site_agent`
+  (`engine/cli.py:31-32`) **unconditionally** imports `testkit.example_playbook` +
+  `testkit.mock_agent`, so a testkit-excluded wheel breaks **every** `hermes run`
+  (incl. `dexter`); (3) `pyproject.toml` declares `build-backend =
+  "setuptools.build_backend"`, which **does not exist** (verified: `import
+  setuptools.build_backend` → `ModuleNotFoundError`; the real backend is
+  `setuptools.build_meta`) — so `python -m build` / `pip install .` fail on the
+  backend *before* discovery even runs. Fix (recommended A): correct the
+  build-backend, add empty `sites/__init__.py`, then the exact
+  `[tool.setuptools.packages.find]` block below; **plus** make those two `testkit`
+  imports conditional.
 - **D5 SIGTERM single shared stop flag (Slice 5).** One process-global
   `threading.Event` in `engine/shutdown.py`, set by a SIGTERM+SIGINT handler
   installed **only** on the loop-driving entry paths (`cmd_run`, worker `cmd_serve
   --host`); `serve --api` installs none and defers to uvicorn (no handler conflict).
   The **same** object is checked at the top of `serve_loop`'s `while True:`
-  (`dispatch.py:81`) and `master_loop`'s `while` (`dispatch.py:196`), so the
-  in-process co-loops on `local` (`dispatch.py:218`) stop together.
+  (`dispatch.py:81`) and — critically — in `master_loop` **immediately after**
+  `crew.heartbeat_sweep` (`dispatch.py:202`) and again after the per-host
+  `serve_loop` fan-out (`dispatch.py:218`), so the sweep is always the *last* action
+  before the master returns and the in-process co-loops on `local` stop together.
 - **Prune-safety predicate (Slice 6).** Deletable iff every clause holds — terminal
   run ∈ {`done`,`failed`,`stopped`}, terminal ticket ∈ {`done`,`failed`},
   `ended_at`/`ts < cutoff`, null `ended_at` never pruned. WAL-aware: one committed
@@ -113,11 +124,18 @@ its pinned constraints). No behavior change to the running engine.
 **Files.**
 - `sites/__init__.py` (new, empty — the single missing `__init__.py`, turning the
   whole tree into regular packages).
-- `pyproject.toml` (add `[tool.setuptools.packages.find]`).
+- `pyproject.toml` (fix the invalid `build-backend`; add
+  `[tool.setuptools.packages.find]`).
 - `engine/cli.py::_load_playbook_site_agent` (make the two `testkit` imports
   conditional).
 
 **Behavior to pin (§6.1, D9 exact).**
+- **Fix the build backend (blocker, precedes discovery).** `pyproject.toml`
+  currently has `build-backend = "setuptools.build_backend"` (line 24), a module
+  that does not exist; change it to the canonical `build-backend =
+  "setuptools.build_meta"`. Without this, no build/install succeeds regardless of
+  discovery, so this is the true first fix in the slice. `requires =
+  ["setuptools>=61.0"]` stays.
 - Add the discovery block (recommended fix A — deterministic, one code line):
   ```toml
   [tool.setuptools.packages.find]
@@ -141,6 +159,10 @@ its pinned constraints). No behavior change to the running engine.
   dev/editable-install path (README quickstart uses `pip install -e '.[dev,server]'`).
 
 **Tests first (RED)** — `tests/unit/test_packaging.py` (new):
+- **Build-backend valid** (fast, no build): parse `pyproject.toml`, assert
+  `build-system.build-backend == "setuptools.build_meta"`, and assert the module
+  imports (`importlib.import_module("setuptools.build_meta")`) — this catches the
+  `setuptools.build_backend` typo without a full build.
 - **Discovery** (fast, no build): call
   `setuptools.find_packages(where=".", include=[...], exclude=[...])` (or
   `find_namespace_packages` for B) with the exact globs and assert the returned set
@@ -159,8 +181,9 @@ its pinned constraints). No behavior change to the running engine.
 - **Invariant regression** — `test_invariants.py::test_engine_core_imports_only_stdlib`
   still passes (no `engine/` third-party import added).
 
-**DoD.** `find_packages` yields the full production set with the three `sites.*`
-subpackages and no test/web/infra dirs; `hermes run dexter` no longer needs
+**DoD.** The build-backend is the valid `setuptools.build_meta`; `find_packages`
+yields the full production set with the three `sites.*` subpackages and no
+test/web/infra dirs; a wheel builds and installs; `hermes run dexter` no longer needs
 `testkit`; `run_tests.sh` GREEN.
 
 ---
@@ -362,39 +385,59 @@ stopping **together** via one shared flag. The API path defers to uvicorn.
 - `server/app.py` (FastAPI lifespan start/stop log lines only).
 
 **Behavior to pin (§4.1, D5 exact).**
-- `engine/shutdown.py` exposes a module-global `stop_event = threading.Event()` (or a
-  small accessor), plus `install_handlers()` that registers a SIGTERM **and** SIGINT
-  handler which does nothing but `stop_event.set()` (no I/O in a signal handler).
-- `serve_loop` checks `stop_event.is_set()` at the **top** of its `while True:`
+- `engine/shutdown.py` exposes a module-global `stop_event = threading.Event()`
+  (created once at import, **never reassigned**) plus `install_handlers()` that
+  registers a SIGTERM **and** SIGINT handler which does nothing but
+  `stop_event.set()` (no I/O in a signal handler). The loops take an optional
+  `stop_event=None` param and resolve it **at call time** (`ev = stop_event or
+  shutdown.stop_event`) — never capturing the global as a def-time default (which
+  would freeze a stale object) — so a test-injected `Event` and the process-global
+  are one shared object.
+- `serve_loop` checks `ev.is_set()` at the **top** of its `while True:`
   (`dispatch.py:81`) and returns the count processed so far.
-- `master_loop` checks it at the **top** of its `while` (`dispatch.py:196`) **and**
-  after the per-host `serve_loop` fan-out (`dispatch.py:218`), before reduce. Both
-  loops read the **same** flag object (default-arg to the global; **injectable** for
-  tests), so the `local` in-process co-loops stop together.
-- **On signal:** finish the in-flight cycle (checks are only at loop tops, never
-  mid-`record_result`), stop claiming new tickets, run **one** final
-  `crew.heartbeat_sweep` (`dispatch.py:202`) so leases are renewed/reclaimed and none
-  dangles, log a graceful-shutdown INFO line, close the DB, exit `0`. A ticket already
+- `master_loop` places its checks so `crew.heartbeat_sweep` is always the final
+  housekeeping pass before return:
+  - **after `crew.heartbeat_sweep` (`dispatch.py:202`)** (between `heartbeat_sweep`
+    and the progression block, ~`:205`): if set, `return` the run state — the sweep
+    just ran, so this is the clean between-cycles exit and the final pass.
+  - **after the per-host `serve_loop` fan-out (`dispatch.py:218`), before
+    `_reduce_and_advance` (`:221`)**: if set, `continue` (skip reduce/advance so
+    shutdown seeds no new work); the next iteration re-runs `heartbeat_sweep`
+    (`:202`, now reflecting the just-stopped fan-out) and exits via the first check.
+  This guarantees exactly one final sweep *after* the last fan-out with no
+  mid-transaction abort. `master_loop` **forwards its resolved `ev`** to each
+  `serve_loop(...)` call (`dispatch.py:218`, add `stop_event=ev`) so a test-injected
+  flag is genuinely shared by the co-loops (otherwise the inner `serve_loop` would
+  re-resolve to the module global and miss the injected object).
+- **On signal:** finish the in-flight cycle (checks are only at loop tops/boundaries,
+  never mid-`record_result`), stop claiming new tickets (the `serve_loop` top check),
+  run **one** final `crew.heartbeat_sweep` (`dispatch.py:202`, guaranteed last per
+  the placement above) so leases are renewed/reclaimed and none dangles, log a
+  graceful-shutdown INFO line, close the DB, exit `0`. A ticket already
   `dispatched`/`running` on a worker is left for the reclaim path (lease TTL /
   heartbeat down-requeue) — no loss, no double-run.
 - Handler installed **only** on `cmd_run` and worker `cmd_serve --host`;
   `cmd_serve_api` installs none (uvicorn owns SIGTERM and drains requests/WS).
   `create_app()` adds a FastAPI lifespan start/stop log line; WS clients already
-  tolerate disconnect (`server/app.py:1321`).
+  tolerate disconnect (`server/app.py:1322`, `except WebSocketDisconnect`).
 
 **Tests first (RED)** — `tests/unit/test_shutdown.py` (new) + one integration test:
 - **Unit (injected flag).** Seed a run with several tickets on `LocalSite`+`MockAgent`;
-  set the injected `stop_event` after N cycles (via a `now`/cycle hook or by
-  pre-setting it) and assert: `master_loop`/`serve_loop` exit at a **cycle boundary**;
-  no `attempts` row has a null-then-abandoned `ended_at` mid-transaction; no lease
-  dangles past the final housekeeping pass; a still-`dispatched` ticket remains
-  reclaimable (not lost, not double-run).
+  inject a `threading.Event` subclass whose `is_set()` returns `True` only after its
+  Nth call (a deterministic "stop after N boundary checks" double, no real signals),
+  and assert: `master_loop`/`serve_loop` exit at a **cycle boundary**; no `attempts`
+  row has a null-then-abandoned `ended_at` mid-transaction; a `heartbeat_sweep` ran
+  as the last housekeeping action so no lease dangles; a still-`dispatched` ticket
+  remains reclaimable (not lost, not double-run). Also test the pre-set-flag path
+  (immediate clean exit at the first boundary).
 - **Same-flag co-stop.** Assert the master and its in-process serve loops read the
   identical `Event` object (set it once ⇒ both stop).
 - **Integration** (`tests/integration/`): launch `hermes serve --host` (or `run`) in
-  a subprocess against a seeded temp `HERMES_HOME`, send a real `SIGTERM`, assert
-  exit `0` and a graceful-shutdown log line in captured stderr, and that the DB
-  re-opens cleanly (`apply_migrations` no-op).
+  a subprocess against a seeded temp `HERMES_HOME` **with enough in-flight work for
+  the signal to land mid-loop** (many seeded tickets and/or a `MockAgent` with a
+  small per-invocation sleep, so the loop is demonstrably still cycling), send a real
+  `SIGTERM`, assert exit `0` and a graceful-shutdown log line in captured stderr, and
+  that the DB re-opens cleanly (`apply_migrations` no-op).
 
 **DoD.** SIGTERM/SIGINT stop the loops cleanly at a boundary; the shared flag stops
 `local` co-loops together; the API path is unchanged (uvicorn-owned); DB stays
@@ -431,9 +474,31 @@ stdlib `sqlite3` only); `engine/cli.py` (`cmd_db` + `db` subparser group).
   - **`events` with non-null `ticket_id`** — ticket terminal AND run terminal AND
     `ts < cutoff`. (A `stopped` run can own a `running`/`dispatched` ticket whose
     reclaim is in flight; keying off run-terminal alone would delete live audit.)
+    `events` has **no** foreign keys (schema.sql), so the eligibility JOINs are
+    plain inner joins on the id strings — an event whose `ticket_id`/`run_id` no
+    longer resolves simply fails the join and is **not** deleted (conservative):
+    ```sql
+    DELETE FROM events WHERE id IN (
+      SELECT e.id FROM events e
+      JOIN tickets t ON t.id = e.ticket_id
+      JOIN runs    r ON r.id = t.run_id
+      WHERE e.ticket_id IS NOT NULL
+        AND t.state IN ('done','failed')
+        AND r.state IN ('done','failed','stopped')
+        AND e.ts < :cutoff);
+    ```
   - **`events` with null `ticket_id`, non-null `run_id`** — run terminal AND
-    `ts < cutoff`.
-  - **`events` with null `run_id`** (fleet-wide crew/lease events) — `ts < cutoff`.
+    `ts < cutoff`:
+    ```sql
+    DELETE FROM events WHERE id IN (
+      SELECT e.id FROM events e
+      JOIN runs r ON r.id = e.run_id
+      WHERE e.ticket_id IS NULL AND e.run_id IS NOT NULL
+        AND r.state IN ('done','failed','stopped')
+        AND e.ts < :cutoff);
+    ```
+  - **`events` with null `run_id`** (fleet-wide crew/lease events) — `ts < cutoff`
+    (`DELETE FROM events WHERE run_id IS NULL AND ts < :cutoff`).
   - `--run R` restricts every clause to that run. `--dry-run` reports counts, deletes
     nothing. Default cutoffs conservative (90 days). Emits **no** event; logs an INFO
     row-count summary per table.
