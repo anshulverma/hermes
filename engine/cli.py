@@ -27,18 +27,23 @@ def _load_playbook_site_agent(args):
 
     Imports the registration modules first.
     """
-    # Import modules that register example/local/mock
-    import testkit.example_playbook
-    import testkit.mock_agent
+    # Import production modules unconditionally
     import sites.local.site
-    # Import modules that register dexter/devserver/claude
     import playbooks.dexter
     import sites.devserver.site
     import agents.claude
 
-    pb = playbook.load(args.playbook if hasattr(args, 'playbook') else 'example')
-    st = site.load(args.site)
+    # Import testkit modules only when needed
+    playbook_name = args.playbook if hasattr(args, 'playbook') else 'example'
+    if playbook_name == "example":
+        import testkit.example_playbook
+
     ag_name = getattr(args, 'agent', None) or config.agent()
+    if ag_name == "mock":
+        import testkit.mock_agent
+
+    pb = playbook.load(playbook_name)
+    st = site.load(args.site)
     ag = agent.load(ag_name)
     return pb, st, ag
 
