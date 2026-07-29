@@ -4,7 +4,9 @@ The flagship distributed-integration slice: it stands up SEVERAL worker nodes as
 REAL containers and drives them, over REAL SSH, through one shared run (the
 deterministic ``build_fleet_scenario``) until the fleet converges — proving the
 distributed machinery the single-box tier cannot: the real ``ssh_transport``,
-multi-host claim atomicity (no double-claim), and host-down requeue.
+multi-host distribution with no double-claim (the driver here is synchronous
+round-robin, so this proves distribution + no-double-claim, not concurrent claim-race
+atomicity — that is covered by the queue unit tests), and host-down requeue.
 
 Gated behind ``@pytest.mark.docker`` so ``pytest -m "not docker"`` skips it and
 CI runs it only where Docker/podman is available. Approach (harness §3): host-as-

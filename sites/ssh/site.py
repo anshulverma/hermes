@@ -277,13 +277,17 @@ class SSHSite:
             # Other non-zero exits: the worker RAN but failed; pass through and
             # let the agent parse the worker's outcome.
 
-            # 3) scp the result back and parse it.
+            # 3) scp the result back and parse it. check=True so a nonzero scp
+            #    (host died between serve-once and the fetch) RAISES -> TransportError
+            #    -> no-penalty requeue_transport (matches this method's contract),
+            #    rather than silently returning raw="" (which would penalize).
             try:
                 subprocess.run(
                     ["scp", *scp_opts, f"{dest}:{remote_result}", local_result],
                     capture_output=True,
                     text=True,
                     timeout=self.connect_timeout + 20,
+                    check=True,
                 )
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 raise transport.TransportError(
