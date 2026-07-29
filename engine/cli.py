@@ -454,10 +454,6 @@ def cmd_serve_once(args):
     import subprocess
     import shutil
 
-    # Import modules that register agents
-    import testkit.mock_agent
-    # TODO: import agents.claude when it exists
-
     envelope_path = args.envelope
     result_path = args.result
     timeout_s = args.timeout
@@ -473,8 +469,15 @@ def cmd_serve_once(args):
         print(f"Error: invalid JSON in envelope: {e}", file=sys.stderr)
         return 1
 
-    # 2. Load the agent via HERMES_AGENT (default claude)
+    # 2. Load the agent via HERMES_AGENT (default claude). Register the requested
+    #    adapter via import side-effect: agents.claude for production; testkit's
+    #    MockAgent only for the mock path (production serve-once does not depend on
+    #    the test-only testkit package).
     agent_name = config.agent()  # reads HERMES_AGENT, defaults to "claude"
+    if agent_name == "mock":
+        import testkit.mock_agent  # noqa: F401  (registers "mock")
+    else:
+        import agents.claude  # noqa: F401  (registers "claude")
     try:
         ag = agent.load(agent_name)
     except KeyError as e:
