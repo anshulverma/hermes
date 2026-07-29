@@ -192,12 +192,44 @@ class DexterPlaybook:
     # --- verify / reduce (stubs for Slices 3-4) -------------------------
 
     def verify(self, run: Run, ticket: Ticket, result: Result, site: "Site") -> bool:
-        """Verify a solve result (stub for Slice 3).
+        """Verify a solve result (§2.5: shape gate + D3 duck-type, fail-safe).
 
-        Raises:
-            NotImplementedError: Filled in Slice 3.
+        Returns:
+            True iff shape gate passes AND independent fix re-check confirms.
+            False otherwise (malformed payload, re-check fails, or absent re-check).
         """
-        raise NotImplementedError("verify() is a stub; filled in Slice 3")
+        from engine import contracts
+
+        # 1. SHAPE GATE: reconstruct outer result dict and validate
+        result_dict = {
+            "outcome": result.outcome,
+            "termination_reason": result.termination_reason,
+            "result_ref": result.result_ref,
+            "evidence_ref": result.evidence_ref,
+            "started_at": result.started_at,
+            "ended_at": result.ended_at,
+            "error_summary": result.error_summary,
+            "payload": result.payload,
+        }
+
+        try:
+            contracts.validate_result(result_dict, self.result_schema("solve"))
+        except contracts.ContractError:
+            # Shape gate failed
+            return False
+
+        # 2. INDEPENDENT FIX RE-CHECK (D3, duck-typed)
+        fn = getattr(site, "recheck_fix", None)
+        if callable(fn):
+            # Site provides recheck_fix: use it
+            return bool(fn(result.payload))
+        else:
+            # Site does NOT provide recheck_fix: fail safe
+            # UNLESS verify_recheck_optional is set (test hook)
+            if run.config.get("verify_recheck_optional"):
+                return True  # Admit on shape gate alone (test hook)
+            else:
+                return False  # Never false pass (fail safe)
 
     def reduce(
         self, run: Run, phase: str, findings: list[Finding], site: "Site"

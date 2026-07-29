@@ -422,20 +422,182 @@ def test_is_done_returns_true():
     assert pb.is_done(run) is True
 
 
-# --- verify / reduce stubs ---
+# --- verify (Slice 3) ---
 
 
-def test_verify_raises_not_implemented():
-    """verify() raises NotImplementedError (stub for Slice 3)."""
+def test_verify_valid_payload_recheck_true():
+    """verify() with valid §2.3 payload + recheck_fix→True ⇒ True."""
     from playbooks.dexter.playbook import DexterPlaybook
 
     pb = DexterPlaybook()
     run = _run()
     ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
-    result = _result({})
 
-    with pytest.raises(NotImplementedError):
-        pb.verify(run, ticket, result, None)
+    # Valid §2.3 payload
+    payload = {
+        "reproduced": True,
+        "root_cause": {
+            "signature": "NPE-config-init-001",
+            "cause_category": "null_pointer",
+        },
+        "fix": {"verified": True},
+        "knowledge_entry": {"validated": False},
+        "evidence_ref": None,
+    }
+    result = _result(payload)
+
+    # Fake site with recheck_fix returning True
+    class FakeSite:
+        def recheck_fix(self, result_payload):
+            return True
+
+    verified = pb.verify(run, ticket, result, FakeSite())
+    assert verified is True
+
+
+def test_verify_valid_payload_recheck_false():
+    """verify() with valid §2.3 payload + recheck_fix→False ⇒ False."""
+    from playbooks.dexter.playbook import DexterPlaybook
+
+    pb = DexterPlaybook()
+    run = _run()
+    ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
+
+    # Valid §2.3 payload
+    payload = {
+        "reproduced": True,
+        "root_cause": {
+            "signature": "NPE-config-init-001",
+            "cause_category": "null_pointer",
+        },
+        "fix": {"verified": True},
+        "knowledge_entry": {"validated": False},
+        "evidence_ref": None,
+    }
+    result = _result(payload)
+
+    # Fake site with recheck_fix returning False
+    class FakeSite:
+        def recheck_fix(self, result_payload):
+            return False
+
+    verified = pb.verify(run, ticket, result, FakeSite())
+    assert verified is False
+
+
+def test_verify_malformed_payload_recheck_true():
+    """verify() with malformed payload (missing root_cause) + recheck_fix→True ⇒ False (shape gate wins)."""
+    from playbooks.dexter.playbook import DexterPlaybook
+
+    pb = DexterPlaybook()
+    run = _run()
+    ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
+
+    # Malformed payload: missing root_cause
+    payload = {
+        "reproduced": True,
+        "fix": {"verified": True},
+        "knowledge_entry": {"validated": False},
+        "evidence_ref": None,
+    }
+    result = _result(payload)
+
+    # Fake site with recheck_fix returning True
+    class FakeSite:
+        def recheck_fix(self, result_payload):
+            return True
+
+    verified = pb.verify(run, ticket, result, FakeSite())
+    assert verified is False
+
+
+def test_verify_no_recheck_fix_fails_safe():
+    """verify() with site without recheck_fix ⇒ False (fail-safe)."""
+    from playbooks.dexter.playbook import DexterPlaybook
+
+    pb = DexterPlaybook()
+    run = _run()
+    ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
+
+    # Valid §2.3 payload
+    payload = {
+        "reproduced": True,
+        "root_cause": {
+            "signature": "NPE-config-init-001",
+            "cause_category": "null_pointer",
+        },
+        "fix": {"verified": True},
+        "knowledge_entry": {"validated": False},
+        "evidence_ref": None,
+    }
+    result = _result(payload)
+
+    # Site without recheck_fix
+    class BareSite:
+        pass
+
+    verified = pb.verify(run, ticket, result, BareSite())
+    assert verified is False
+
+
+def test_verify_no_recheck_fix_optional_admits():
+    """verify() with site without recheck_fix ⇒ True when run.config['verify_recheck_optional'] set."""
+    from playbooks.dexter.playbook import DexterPlaybook
+
+    pb = DexterPlaybook()
+    run = _run(config={"verify_recheck_optional": True})
+    ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
+
+    # Valid §2.3 payload
+    payload = {
+        "reproduced": True,
+        "root_cause": {
+            "signature": "NPE-config-init-001",
+            "cause_category": "null_pointer",
+        },
+        "fix": {"verified": True},
+        "knowledge_entry": {"validated": False},
+        "evidence_ref": None,
+    }
+    result = _result(payload)
+
+    # Site without recheck_fix
+    class BareSite:
+        pass
+
+    verified = pb.verify(run, ticket, result, BareSite())
+    assert verified is True
+
+
+def test_verify_ignores_payload_verified_field():
+    """verify() ignores fix.verified=true, uses recheck_fix (no-trust rule)."""
+    from playbooks.dexter.playbook import DexterPlaybook
+
+    pb = DexterPlaybook()
+    run = _run()
+    ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
+
+    # Payload with fix.verified=true (should be ignored)
+    payload = {
+        "reproduced": True,
+        "root_cause": {
+            "signature": "NPE-config-init-001",
+            "cause_category": "null_pointer",
+        },
+        "fix": {"verified": True},
+        "knowledge_entry": {"validated": False},
+        "evidence_ref": None,
+    }
+    result = _result(payload)
+
+    # Fake site with recheck_fix returning False (independent check fails)
+    class FakeSite:
+        def recheck_fix(self, result_payload):
+            return False
+
+    verified = pb.verify(run, ticket, result, FakeSite())
+    # Even though fix.verified=true, verify returns False because recheck_fix→False
+    assert verified is False
 
 
 def test_reduce_raises_not_implemented():
