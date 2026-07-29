@@ -25,7 +25,8 @@ def _connect():
 def _load_playbook_site_agent(args):
     """Load and return (playbook, site, agent) from args and registries.
 
-    Imports the registration modules first.
+    Imports the registration modules first. Returns None for playbook if
+    args has no playbook attribute (callers that discard it are unaffected).
     """
     # Import production modules unconditionally
     import sites.local.site
@@ -34,7 +35,7 @@ def _load_playbook_site_agent(args):
     import agents.claude
 
     # Import testkit modules only when needed
-    playbook_name = args.playbook if hasattr(args, 'playbook') else 'example'
+    playbook_name = getattr(args, 'playbook', None)
     if playbook_name == "example":
         import testkit.example_playbook
 
@@ -42,7 +43,7 @@ def _load_playbook_site_agent(args):
     if ag_name == "mock":
         import testkit.mock_agent
 
-    pb = playbook.load(playbook_name)
+    pb = playbook.load(playbook_name) if playbook_name else None
     st = site.load(args.site)
     ag = agent.load(ag_name)
     return pb, st, ag
@@ -439,7 +440,7 @@ def cmd_serve(args):
         return cmd_serve_api(args)
 
     # Worker mode (original behavior)
-    pb, st, ag = _load_playbook_site_agent(args)
+    _, st, ag = _load_playbook_site_agent(args)
     host = args.host
     if not host:
         print("Error: --host is required for worker mode", file=sys.stderr)
@@ -485,6 +486,12 @@ def cmd_serve(args):
         phase=run_row[5],
         reductions=[],
     )
+
+    # Resolve the playbook from the run's stored playbook name
+    playbook_name = run.playbook
+    if playbook_name == "example":
+        import testkit.example_playbook
+    pb = playbook.load(playbook_name)
 
     # TODO(dexter): --goals FILE seeding
 

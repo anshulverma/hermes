@@ -237,6 +237,101 @@ print("OK")
         f"mock agent failed:\n{result.stderr}\n{result.stdout}"
 
 
+def test_crew_add_no_testkit_import():
+    """crew add with no --playbook arg does NOT import testkit (no example default)."""
+    workspace = Path(__file__).parent.parent.parent
+
+    script = f"""
+import sys
+
+sys.path.insert(0, r"{workspace}")
+
+from engine.cli import _load_playbook_site_agent
+import argparse
+
+# Simulate crew add args: site and agent present, NO playbook attribute
+args = argparse.Namespace(
+    site="local",
+    agent="claude"
+)
+# Note: no args.playbook attribute at all
+
+pb, st, ag = _load_playbook_site_agent(args)
+
+# Check no testkit.* in sys.modules
+testkit_modules = [m for m in sys.modules if m.startswith("testkit")]
+if testkit_modules:
+    print("FAIL: testkit modules imported:", testkit_modules, file=sys.stderr)
+    sys.exit(1)
+
+# Verify playbook is None when not provided
+assert pb is None, f"Expected None playbook, got {{pb}}"
+assert st.name == "local", f"Expected local site, got {{st.name}}"
+assert ag.name == "claude", f"Expected claude agent, got {{ag.name}}"
+
+print("OK")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(workspace)},
+    )
+
+    assert result.returncode == 0, \
+        f"testkit was imported for crew add (no playbook):\n{result.stderr}\n{result.stdout}"
+    assert result.stdout.strip() == "OK"
+
+
+def test_serve_worker_resolves_playbook_from_run():
+    """serve worker mode resolves playbook from the run's stored playbook name, not example default."""
+    workspace = Path(__file__).parent.parent.parent
+
+    script = f"""
+import sys
+
+sys.path.insert(0, r"{workspace}")
+
+from engine.cli import _load_playbook_site_agent
+import argparse
+
+# Simulate serve --host args: site and agent present, NO playbook attribute
+args = argparse.Namespace(
+    site="local",
+    agent="claude"
+)
+
+pb, st, ag = _load_playbook_site_agent(args)
+
+# Check no testkit.* in sys.modules (no example imported)
+testkit_modules = [m for m in sys.modules if m.startswith("testkit")]
+if testkit_modules:
+    print("FAIL: testkit modules imported:", testkit_modules, file=sys.stderr)
+    sys.exit(1)
+
+# Verify playbook is None (will be resolved from run later)
+assert pb is None, f"Expected None playbook, got {{pb}}"
+assert st.name == "local", f"Expected local site, got {{st.name}}"
+assert ag.name == "claude", f"Expected claude agent, got {{ag.name}}"
+
+print("OK")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "PYTHONPATH": str(workspace)},
+    )
+
+    assert result.returncode == 0, \
+        f"testkit was imported for serve worker (no playbook):\n{result.stderr}\n{result.stdout}"
+    assert result.stdout.strip() == "OK"
+
+
 def test_invariants_stdlib_scan_still_passes():
     """Regression: test_engine_core_imports_only_stdlib still passes."""
     # This just delegates to the existing test to ensure it still passes
