@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fetchHealth, fetchRuns, fetchRun, type HealthResponse, type Run } from './client';
+import { fetchHealth, fetchRuns, fetchRun, fetchReductions, type HealthResponse, type Run, type Reduction } from './client';
 
 describe('API client', () => {
   beforeEach(() => {
@@ -116,6 +116,49 @@ describe('API client', () => {
       }) as any;
 
       await expect(fetchRun('no-such-run')).rejects.toThrow('HTTP error! status: 404');
+    });
+  });
+
+  describe('fetchReductions', () => {
+    it('should normalize member ticket states from engine vocab to UI vocab', async () => {
+      // Phase B6 Finding 1: server returns needs_human (engine), must normalize to needs-human (UI)
+      const mockResponse: Reduction[] = [
+        {
+          id: 1,
+          run_id: 'run-001',
+          phase: 'reduce',
+          kind: 'test',
+          json: { title: 'Test finding' },
+          review_state: 'pending',
+          member_ticket_ids: ['t-1', 't-2'],
+          member_tickets: [
+            { id: 't-1', state: 'needs_human', phase: 'reduce' },  // RAW engine state
+            { id: 't-2', state: 'done', phase: 'reduce' },
+          ],
+        },
+      ];
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => mockResponse,
+      }) as any;
+
+      const result = await fetchReductions('run-001');
+
+      // Assert that member ticket states are normalized
+      expect(result[0].member_tickets[0].state).toBe('needs-human');  // underscore → hyphen
+      expect(result[0].member_tickets[1].state).toBe('done');  // no change
+      expect(fetch).toHaveBeenCalledWith('/api/runs/run-001/reductions');
+    });
+
+    it('should preserve phase filter in query string', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      }) as any;
+
+      await fetchReductions('run-001', 'reduce');
+      expect(fetch).toHaveBeenCalledWith('/api/runs/run-001/reductions?phase=reduce');
     });
   });
 });

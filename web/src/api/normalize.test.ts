@@ -147,7 +147,10 @@ describe('deriveFindingStatus', () => {
     expect(deriveFindingStatus(reduction)).toBe('in progress');
   });
 
-  it('should normalize member ticket states (needs_human -> needs-human)', () => {
+  it('should detect needs-human status from normalized state', () => {
+    // Phase B6 Finding 2: deriveFindingStatus expects UI-normalized states (needs-human).
+    // The normalization happens in fetchReductions pipeline (see client.test.ts).
+    // This test verifies the pure function behavior with already-normalized inputs.
     const reduction = {
       id: 10,
       run_id: 'test-run',
@@ -157,18 +160,9 @@ describe('deriveFindingStatus', () => {
       json: {},
       member_ticket_ids: ['t-1'],
       member_tickets: [
-        { id: 't-1', state: 'needs_human', phase: 'work' },
+        { id: 't-1', state: 'needs-human', phase: 'work' },  // UI-normalized state
       ],
     };
-    // The normalization happens when the data comes from API
-    // deriveFindingStatus expects normalized state
-    // So we test that needs-human (normalized) is detected
-    const normalizedReduction = {
-      ...reduction,
-      member_tickets: [
-        { id: 't-1', state: 'needs-human', phase: 'work' },
-      ],
-    };
-    expect(deriveFindingStatus(normalizedReduction)).toBe('needs-human');
+    expect(deriveFindingStatus(reduction)).toBe('needs-human');
   });
 });

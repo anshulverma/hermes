@@ -6,7 +6,7 @@
 import { useState, useEffect } from 'react';
 import { fetchReductions } from '../api/client';
 import type { Reduction } from '../api/client';
-import { deriveFindingStatus, normalizeTicketState } from '../api/normalize';
+import { deriveFindingStatus } from '../api/normalize';
 import { Card, Badge, StatusPill, Divider, EmptyState } from '../ds';
 
 type FindingsProps = {
@@ -160,7 +160,7 @@ export default function Findings({ runId }: FindingsProps) {
                         borderRadius: 'var(--radius-lg)',
                       }}
                     >
-                      <StatusPill state={normalizeTicketState(ticket.state)} size="sm" />
+                      <StatusPill state={ticket.state} size="sm" />
                       <span
                         style={{
                           fontFamily: 'var(--font-mono)',

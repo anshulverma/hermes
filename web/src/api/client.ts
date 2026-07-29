@@ -230,5 +230,15 @@ export async function fetchReductions(runId: string, phase?: string): Promise<Re
 
   const queryString = params.toString();
   const url = `/api/runs/${runId}/reductions${queryString ? '?' + queryString : ''}`;
-  return fetchJSON<Reduction[]>(url);
+  const reductions = await fetchJSON<Reduction[]>(url);
+
+  // Normalize member ticket states: engine vocab (needs_human) → UI vocab (needs-human)
+  // so deriveFindingStatus sees consistent values (Phase B6 fix)
+  return reductions.map(r => ({
+    ...r,
+    member_tickets: r.member_tickets.map(t => ({
+      ...t,
+      state: t.state.replace(/_/g, '-'),
+    })),
+  }));
 }
