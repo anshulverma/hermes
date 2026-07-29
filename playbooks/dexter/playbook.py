@@ -222,7 +222,10 @@ class DexterPlaybook:
         fn = getattr(site, "recheck_fix", None)
         if callable(fn):
             # Site provides recheck_fix: use it
-            return bool(fn(result.payload))
+            try:
+                return bool(fn(result.payload))
+            except Exception:
+                return False  # D3 fail-safe: re-check could not run → do not admit
         else:
             # Site does NOT provide recheck_fix: fail safe
             # UNLESS verify_recheck_optional is set (test hook)

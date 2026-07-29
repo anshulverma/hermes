@@ -600,6 +600,37 @@ def test_verify_ignores_payload_verified_field():
     assert verified is False
 
 
+def test_verify_recheck_fix_raises_fails_safe():
+    """verify() with recheck_fix raising exception ⇒ False (D3 fail-safe), does not propagate."""
+    from playbooks.dexter.playbook import DexterPlaybook
+
+    pb = DexterPlaybook()
+    run = _run()
+    ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
+
+    # Valid §2.3 payload
+    payload = {
+        "reproduced": True,
+        "root_cause": {
+            "signature": "NPE-config-init-001",
+            "cause_category": "null_pointer",
+        },
+        "fix": {"verified": True},
+        "knowledge_entry": {"validated": False},
+        "evidence_ref": None,
+    }
+    result = _result(payload)
+
+    # Fake site with recheck_fix raising an exception
+    class FakeSite:
+        def recheck_fix(self, result_payload):
+            raise RuntimeError("probe failed")
+
+    # verify should return False (fail-safe), NOT propagate the exception
+    verified = pb.verify(run, ticket, result, FakeSite())
+    assert verified is False
+
+
 def test_reduce_raises_not_implemented():
     """reduce() raises NotImplementedError (stub for Slice 4)."""
     from playbooks.dexter.playbook import DexterPlaybook
