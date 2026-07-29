@@ -1,6 +1,6 @@
 """Tests for engine dataclasses and enums.
 
-TDD: write tests first to ensure models match the spec.
+TDD: write tests first to ensure the dataclasses behave as intended.
 """
 import pytest
 
