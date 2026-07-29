@@ -202,3 +202,7 @@ export async function fetchEvents(filters?: EventFilters): Promise<Event[]> {
   const url = `/api/events${queryString ? '?' + queryString : ''}`;
   return fetchJSON<Event[]>(url);
 }
+
+export async function fetchEventKinds(): Promise<string[]> {
+  return fetchJSON<string[]>('/api/events/kinds');
+}

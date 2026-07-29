@@ -488,4 +488,21 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    @app.get("/api/events/kinds")
+    def get_event_kinds() -> list[str]:
+        """Get distinct event kinds present in the database.
+
+        Returns a sorted list of event kinds (SELECT DISTINCT kind FROM events ORDER BY kind).
+        """
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT kind FROM events ORDER BY kind"
+            ).fetchall()
+            return [row[0] for row in rows]
+        finally:
+            conn.close()
+
     return app

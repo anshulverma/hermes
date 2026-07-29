@@ -5,7 +5,7 @@
  */
 
 import { useState, useEffect } from 'react';
-import { fetchEvents } from '../api/client';
+import { fetchEvents, fetchEventKinds } from '../api/client';
 import type { Event } from '../api/client';
 import { EmptyState } from '../ds';
 
@@ -51,6 +51,18 @@ export default function ActivityFeed() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [kindFilter, setKindFilter] = useState<string>('all');
+  const [availableKinds, setAvailableKinds] = useState<string[]>([]);
+
+  // Fetch available kinds on mount
+  useEffect(() => {
+    fetchEventKinds()
+      .then((kinds) => {
+        setAvailableKinds(kinds);
+      })
+      .catch((err) => {
+        console.error('Failed to fetch event kinds:', err);
+      });
+  }, []);
 
   // Fetch events
   useEffect(() => {
@@ -125,12 +137,11 @@ export default function ActivityFeed() {
           }}
         >
           <option value="all">all events</option>
-          <option value="ticket_claimed">ticket_claimed</option>
-          <option value="result_recorded">result_recorded</option>
-          <option value="phase_advanced">phase_advanced</option>
-          <option value="needs_human">needs_human</option>
-          <option value="crew_health">crew_health</option>
-          <option value="lease_acquired">lease_acquired</option>
+          {availableKinds.map((kind) => (
+            <option key={kind} value={kind}>
+              {kind}
+            </option>
+          ))}
         </select>
         <span style={{ color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
           {events.length} shown

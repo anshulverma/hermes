@@ -1020,3 +1020,56 @@ def test_leases_endpoint_empty_when_all_expired(client: TestClient, seeded_run: 
 
     leases = response.json()
     assert len(leases) == 0
+
+
+def test_event_kinds_endpoint_returns_distinct_sorted_kinds(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/events/kinds returns DISTINCT event kinds sorted, matching SELECT DISTINCT kind."""
+    # Seed events with ≥3 distinct kinds (with duplicates)
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    import time
+    now = time.time()
+
+    # Insert events: 3 distinct kinds with duplicates
+    kinds_to_insert = [
+        "ticket_claimed",
+        "result_recorded",
+        "ticket_claimed",  # duplicate
+        "phase_advanced",
+        "result_recorded",  # duplicate
+        "ticket_claimed",  # duplicate
+    ]
+
+    for i, kind in enumerate(kinds_to_insert):
+        conn.execute(
+            """INSERT INTO events (ts, kind, run_id, message, data_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (now + i, kind, seeded_run, f"Event {i}", '{}'),
+        )
+    conn.commit()
+
+    # Get expected kinds from direct SELECT DISTINCT query
+    expected_kinds = [
+        row[0] for row in conn.execute(
+            "SELECT DISTINCT kind FROM events ORDER BY kind"
+        ).fetchall()
+    ]
+    conn.close()
+
+    # Endpoint should return the same
+    response = client.get("/api/events/kinds")
+    assert response.status_code == 200
+
+    kinds = response.json()
+    assert isinstance(kinds, list)
+
+    # Should match the DISTINCT query result
+    assert kinds == expected_kinds
+
+    # Verify we got exactly 3 distinct kinds sorted
+    assert len(kinds) == 3
+    assert kinds == sorted(kinds)
+    assert "phase_advanced" in kinds
+    assert "result_recorded" in kinds
+    assert "ticket_claimed" in kinds

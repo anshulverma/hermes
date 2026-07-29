@@ -42,9 +42,19 @@ const mockEvents = [
 describe('ActivityFeed', () => {
   beforeEach(() => {
     mockFetch.mockClear();
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => mockEvents,
+    // Mock both endpoints: events and event kinds
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/events/kinds' || url.startsWith('/api/events/kinds')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ['ticket_claimed', 'result_recorded', 'phase_advanced'],
+        });
+      }
+      // Default: return mockEvents for /api/events
+      return Promise.resolve({
+        ok: true,
+        json: async () => mockEvents,
+      });
     });
   });
 
@@ -150,5 +160,46 @@ describe('ActivityFeed', () => {
 
     // Should show loading indicator
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
+  });
+
+  it('should populate kind filter options from fetchEventKinds, not hardcoded', async () => {
+    // Mock fetchEventKinds to return a custom set of kinds
+    const mockKinds = ['kind_a', 'kind_b'];
+
+    mockFetch.mockImplementation((url: string) => {
+      if (url === '/api/events/kinds') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => mockKinds,
+        });
+      }
+      if (url === '/api/events') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => [],
+        });
+      }
+      return Promise.reject(new Error(`Unexpected fetch: ${url}`));
+    });
+
+    render(<ActivityFeed />);
+
+    await waitFor(() => {
+      const select = screen.getByRole('combobox');
+      const options = Array.from(select.querySelectorAll('option')).map(
+        (opt) => (opt as HTMLOptionElement).value
+      );
+
+      // Should have "all" + the two dynamic kinds
+      expect(options).toEqual(['all', 'kind_a', 'kind_b']);
+
+      // Should NOT have hardcoded kinds
+      expect(options).not.toContain('ticket_claimed');
+      expect(options).not.toContain('result_recorded');
+      expect(options).not.toContain('phase_advanced');
+      expect(options).not.toContain('needs_human');
+      expect(options).not.toContain('crew_health');
+      expect(options).not.toContain('lease_acquired');
+    });
   });
 });
