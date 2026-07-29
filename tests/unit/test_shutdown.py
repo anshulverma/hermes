@@ -262,10 +262,15 @@ def test_master_loop_stops_with_final_heartbeat_sweep(
     assert final_state == "running"
 
     # No leases should be dangling (heartbeat_sweep ran last)
-    # Since we stopped mid-run, there should be no active leases (heartbeat_sweep reclaimed them)
-    active_leases = conn.execute("SELECT COUNT(*) FROM leases").fetchone()[0]
-    # This assertion depends on heartbeat_sweep behavior; for now just check DB is consistent
-    assert active_leases >= 0  # No crash, DB is queryable
+    # After final heartbeat_sweep, any remaining lease must belong to a ticket in a
+    # reclaimable state (queued/dispatched/running/parked/reducing). A lease for a
+    # terminal ticket (done/failed/needs_human) would violate the sweep's contract.
+    dangling_leases = conn.execute(
+        """SELECT COUNT(*) FROM leases l
+           JOIN tickets t ON l.ticket_id = t.id
+           WHERE t.state IN ('done', 'failed', 'needs_human')"""
+    ).fetchone()[0]
+    assert dangling_leases == 0, "heartbeat_sweep left a lease for a terminal ticket"
 
     # No attempts should have null ended_at
     null_ended = conn.execute(
