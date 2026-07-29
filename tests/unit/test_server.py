@@ -526,3 +526,302 @@ def test_ticket_detail_not_found(client: TestClient, temp_home: Path):
     assert response.status_code == 404
     data = response.json()
     assert "detail" in data
+
+
+def test_crew_endpoint_returns_all_members(client: TestClient, temp_home: Path):
+    """GET /api/crew returns all crew members with parsed resources, capabilities, and health."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed crew members with varied states and health
+    members = [
+        {
+            "id": "host-1",
+            "site": "local",
+            "state": "idle",
+            "capabilities": '["python", "gpu"]',
+            "resources_json": '{"cpu": 8, "gpu": 2}',
+            "health_json": json.dumps({
+                "reachable": True,
+                "agent_ok": True,
+                "auth_ok": True,
+                "workspace_ready": True,
+                "guard_installed": True,
+                "latency_ms": 42
+            }),
+            "current_ticket": None,
+            "last_heartbeat": now - 10,
+            "registered_at": now - 3600
+        },
+        {
+            "id": "host-2",
+            "site": "local",
+            "state": "busy",
+            "capabilities": '["python"]',
+            "resources_json": '{"cpu": 4}',
+            "health_json": json.dumps({
+                "reachable": True,
+                "agent_ok": False,
+                "auth_ok": True,
+                "workspace_ready": True,
+                "guard_installed": True,
+                "latency_ms": 150
+            }),
+            "current_ticket": "test-run/t-1",
+            "last_heartbeat": now - 5,
+            "registered_at": now - 7200
+        },
+        {
+            "id": "host-3",
+            "site": "local",
+            "state": "down",
+            "capabilities": '[]',
+            "resources_json": '{"cpu": 16}',
+            "health_json": None,  # Never set
+            "current_ticket": None,
+            "last_heartbeat": now - 600,
+            "registered_at": now - 1800
+        }
+    ]
+
+    for m in members:
+        conn.execute(
+            """INSERT INTO crew
+               (id, site, state, capabilities, resources_json, health_json,
+                current_ticket, last_heartbeat, registered_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (m["id"], m["site"], m["state"], m["capabilities"],
+             m["resources_json"], m["health_json"], m["current_ticket"],
+             m["last_heartbeat"], m["registered_at"])
+        )
+    conn.commit()
+
+    # Fetch crew
+    response = client.get("/api/crew")
+    assert response.status_code == 200
+
+    crew = response.json()
+    assert len(crew) == 3
+
+    # Verify against direct sqlite query
+    db_crew = conn.execute(
+        """SELECT id, site, state, capabilities, resources_json, health_json,
+                  current_ticket, last_heartbeat
+           FROM crew ORDER BY id"""
+    ).fetchall()
+    conn.close()
+
+    # Sort both by id for comparison
+    crew_sorted = sorted(crew, key=lambda x: x["id"])
+
+    for c, db_row in zip(crew_sorted, db_crew):
+        assert c["id"] == db_row[0]
+        assert c["site"] == db_row[1]
+        assert c["state"] == db_row[2]
+
+        # Capabilities and resources should be parsed
+        assert c["capabilities"] == json.loads(db_row[3])
+        assert c["resources"] == json.loads(db_row[4])
+
+        # Health should be parsed (or null)
+        if db_row[5]:
+            health = json.loads(db_row[5])
+            assert c["health"]["reachable"] == health["reachable"]
+            assert c["health"]["agent_ok"] == health["agent_ok"]
+            assert c["health"]["auth_ok"] == health["auth_ok"]
+            assert c["health"]["workspace_ready"] == health["workspace_ready"]
+            assert c["health"]["guard_installed"] == health["guard_installed"]
+            assert c["health"]["latency_ms"] == health["latency_ms"]
+        else:
+            assert c["health"] is None
+
+        assert c["current_ticket"] == db_row[6]
+        assert c["last_heartbeat"] == db_row[7]
+
+
+def test_leases_endpoint_returns_only_live_leases(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/leases returns only live (unexpired) leases with correct remaining_s."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed leases: some live, some expired
+    leases = [
+        {
+            "id": "lease-1",
+            "run_id": seeded_run,
+            "resource_class": "cpu",
+            "ticket_id": f"{seeded_run}/t-0",
+            "host": "host-1",
+            "acquired_at": now - 600,
+            "ttl_s": 1800,
+            "expires_at": now + 1200  # Live (expires in 20 min)
+        },
+        {
+            "id": "lease-2",
+            "run_id": seeded_run,
+            "resource_class": "gpu",
+            "ticket_id": f"{seeded_run}/t-1",
+            "host": "host-2",
+            "acquired_at": now - 3600,
+            "ttl_s": 1800,
+            "expires_at": now - 1800  # Expired 30 min ago
+        },
+        {
+            "id": "lease-3",
+            "run_id": seeded_run,
+            "resource_class": "cpu",
+            "ticket_id": f"{seeded_run}/t-2",
+            "host": "host-1",
+            "acquired_at": now - 300,
+            "ttl_s": 1800,
+            "expires_at": now + 1500  # Live (expires in 25 min)
+        }
+    ]
+
+    for lease in leases:
+        conn.execute(
+            """INSERT INTO leases
+               (id, run_id, resource_class, ticket_id, host, acquired_at, ttl_s, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (lease["id"], lease["run_id"], lease["resource_class"],
+             lease["ticket_id"], lease["host"], lease["acquired_at"],
+             lease["ttl_s"], lease["expires_at"])
+        )
+    conn.commit()
+
+    # Fetch leases (should only return live ones)
+    response = client.get("/api/leases")
+    assert response.status_code == 200
+
+    leases_resp = response.json()
+    assert len(leases_resp) == 2  # Only lease-1 and lease-3 are live
+
+    # Verify all returned leases are live
+    for lease in leases_resp:
+        assert lease["expires_at"] > now
+
+        # Verify remaining_s is correct
+        expected_remaining = max(0, lease["expires_at"] - now)
+        # Allow 1s tolerance for timing
+        assert abs(lease["remaining_s"] - expected_remaining) <= 1
+
+    # Verify against direct sqlite query
+    db_live_leases = conn.execute(
+        """SELECT id, resource_class, ticket_id, host, acquired_at, ttl_s, expires_at
+           FROM leases WHERE expires_at > ?
+           ORDER BY id""",
+        (now,)
+    ).fetchall()
+    conn.close()
+
+    assert len(leases_resp) == len(db_live_leases)
+
+    # Sort both by id for comparison
+    leases_sorted = sorted(leases_resp, key=lambda x: x["id"])
+
+    for lease, db_row in zip(leases_sorted, db_live_leases):
+        assert lease["id"] == db_row[0]
+        assert lease["resource_class"] == db_row[1]
+        assert lease["ticket_id"] == db_row[2]
+        assert lease["host"] == db_row[3]
+        assert lease["acquired_at"] == db_row[4]
+        assert lease["ttl_s"] == db_row[5]
+        assert lease["expires_at"] == db_row[6]
+
+
+def test_leases_endpoint_host_filter(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/leases?host=<id> filters to that host's leases only."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed leases for different hosts
+    leases = [
+        {
+            "id": "lease-h1-1",
+            "run_id": seeded_run,
+            "resource_class": "cpu",
+            "ticket_id": f"{seeded_run}/t-0",
+            "host": "host-1",
+            "acquired_at": now - 300,
+            "ttl_s": 1800,
+            "expires_at": now + 1500
+        },
+        {
+            "id": "lease-h2-1",
+            "run_id": seeded_run,
+            "resource_class": "gpu",
+            "ticket_id": f"{seeded_run}/t-1",
+            "host": "host-2",
+            "acquired_at": now - 200,
+            "ttl_s": 1800,
+            "expires_at": now + 1600
+        },
+        {
+            "id": "lease-h1-2",
+            "run_id": seeded_run,
+            "resource_class": "cpu",
+            "ticket_id": f"{seeded_run}/t-2",
+            "host": "host-1",
+            "acquired_at": now - 100,
+            "ttl_s": 1800,
+            "expires_at": now + 1700
+        }
+    ]
+
+    for lease in leases:
+        conn.execute(
+            """INSERT INTO leases
+               (id, run_id, resource_class, ticket_id, host, acquired_at, ttl_s, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (lease["id"], lease["run_id"], lease["resource_class"],
+             lease["ticket_id"], lease["host"], lease["acquired_at"],
+             lease["ttl_s"], lease["expires_at"])
+        )
+    conn.commit()
+    conn.close()
+
+    # Fetch leases for host-1
+    response = client.get("/api/leases?host=host-1")
+    assert response.status_code == 200
+
+    leases_resp = response.json()
+    assert len(leases_resp) == 2  # lease-h1-1 and lease-h1-2
+
+    # Verify all returned leases are for host-1
+    for lease in leases_resp:
+        assert lease["host"] == "host-1"
+
+    # Verify IDs match
+    lease_ids = {lease["id"] for lease in leases_resp}
+    assert lease_ids == {"lease-h1-1", "lease-h1-2"}
+
+
+def test_leases_endpoint_empty_when_all_expired(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/leases returns empty list when all leases are expired."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed only expired leases
+    conn.execute(
+        """INSERT INTO leases
+           (id, run_id, resource_class, ticket_id, host, acquired_at, ttl_s, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("expired-lease", seeded_run, "cpu", f"{seeded_run}/t-0",
+         "host-1", now - 3600, 1800, now - 1800)
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.get("/api/leases")
+    assert response.status_code == 200
+
+    leases = response.json()
+    assert len(leases) == 0

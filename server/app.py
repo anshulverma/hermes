@@ -349,4 +349,116 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    @app.get("/api/crew")
+    def get_crew() -> list[dict[str, Any]]:
+        """Get all crew members with parsed resources, capabilities, and health.
+
+        Returns crew members from the crew table with:
+        - id, site, state (idle|busy|down|draining)
+        - resources: parsed resources_json
+        - capabilities: parsed capabilities
+        - current_ticket, last_heartbeat
+        - health: parsed health_json (may be null if never set)
+        """
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            rows = conn.execute(
+                """SELECT id, site, state, capabilities, resources_json, health_json,
+                          current_ticket, last_heartbeat
+                   FROM crew
+                   ORDER BY id"""
+            ).fetchall()
+
+            crew = []
+            for row in rows:
+                (
+                    host_id, site, state, capabilities_json, resources_json,
+                    health_json, current_ticket, last_heartbeat
+                ) = row
+
+                # Parse JSON fields
+                capabilities = json.loads(capabilities_json)
+                resources = json.loads(resources_json)
+                health = json.loads(health_json) if health_json else None
+
+                crew.append({
+                    "id": host_id,
+                    "site": site,
+                    "state": state,
+                    "capabilities": capabilities,
+                    "resources": resources,
+                    "health": health,
+                    "current_ticket": current_ticket,
+                    "last_heartbeat": last_heartbeat,
+                })
+
+            return crew
+        finally:
+            conn.close()
+
+    @app.get("/api/leases")
+    def get_leases(host: str | None = None) -> list[dict[str, Any]]:
+        """Get active (live) leases with optional host filter.
+
+        Returns leases from the leases table where expires_at > now.
+        Optional query param:
+        - host: filter by host
+
+        Each lease includes:
+        - id, run_id, resource_class, ticket_id, host
+        - acquired_at, ttl_s, expires_at
+        - remaining_s: max(0, expires_at - now)
+        """
+        import time
+        now = time.time()
+
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Build query: only live leases (expires_at > now)
+            query = """
+                SELECT id, run_id, resource_class, ticket_id, host,
+                       acquired_at, ttl_s, expires_at
+                FROM leases
+                WHERE expires_at > ?
+            """
+            params: list[Any] = [now]
+
+            if host:
+                query += " AND host=?"
+                params.append(host)
+
+            query += " ORDER BY id"
+
+            rows = conn.execute(query, params).fetchall()
+
+            leases = []
+            for row in rows:
+                (
+                    lease_id, run_id, resource_class, ticket_id, lease_host,
+                    acquired_at, ttl_s, expires_at
+                ) = row
+
+                # Compute remaining_s
+                remaining_s = max(0, expires_at - now)
+
+                leases.append({
+                    "id": lease_id,
+                    "run_id": run_id,
+                    "resource_class": resource_class,
+                    "ticket_id": ticket_id,
+                    "host": lease_host,
+                    "acquired_at": acquired_at,
+                    "ttl_s": ttl_s,
+                    "expires_at": expires_at,
+                    "remaining_s": remaining_s,
+                })
+
+            return leases
+        finally:
+            conn.close()
+
     return app

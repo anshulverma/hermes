@@ -129,3 +129,48 @@ export type TicketDetail = {
 export async function fetchTicketDetail(ticketId: string): Promise<TicketDetail> {
   return fetchJSON<TicketDetail>(`/api/tickets/${ticketId}`);
 }
+
+export type HealthReport = {
+  reachable: boolean;
+  agent_ok: boolean;
+  auth_ok: boolean;
+  workspace_ready: boolean;
+  guard_installed: boolean;
+  latency_ms: number;
+};
+
+export type CrewMember = {
+  id: string;
+  site: string;
+  state: string;
+  capabilities: string[];
+  resources: Record<string, number>;
+  health: HealthReport | null;
+  current_ticket: string | null;
+  last_heartbeat: number;
+};
+
+export type Lease = {
+  id: string;
+  run_id: string;
+  resource_class: string;
+  ticket_id: string | null;
+  host: string | null;
+  acquired_at: number;
+  ttl_s: number;
+  expires_at: number;
+  remaining_s: number;
+};
+
+export async function fetchCrew(): Promise<CrewMember[]> {
+  return fetchJSON<CrewMember[]>('/api/crew');
+}
+
+export async function fetchLeases(host?: string): Promise<Lease[]> {
+  const params = new URLSearchParams();
+  if (host) params.append('host', host);
+
+  const queryString = params.toString();
+  const url = `/api/leases${queryString ? '?' + queryString : ''}`;
+  return fetchJSON<Lease[]>(url);
+}
