@@ -1,4 +1,4 @@
-"""Scenario-aware playbook + gpu-limited site for the fleet scenario (spec §5, §8).
+"""Scenario-aware playbook + gpu-limited site for the fleet scenario.
 
 The stock ``EchoPlaybook`` cannot express two hooks the fleet scenario needs to
 PROVE the engine's needs_human routing:
@@ -31,7 +31,7 @@ def _signature(doc: dict) -> str:
 
 
 class FleetPlaybook:
-    """Single-phase playbook that drives the fleet scenario's rich outcomes (§8)."""
+    """Single-phase playbook that drives the fleet scenario's rich outcomes."""
 
     name = "fleet"
     phases = list(PHASES)
@@ -89,7 +89,7 @@ class FleetPlaybook:
         return reductions
 
     def verify(self, run: Run, ticket: Ticket, result: Result, site) -> bool:
-        """True except the re-verify-marked ticket's FIRST execution (§5).
+        """True except the re-verify-marked ticket's FIRST execution.
 
         First execution of the marked ticket -> False (routes to needs_human);
         after an operator requeue, the second execution -> True.
@@ -120,7 +120,7 @@ class FleetPlaybook:
 
 
 class GpuLimitedLocalSite(LocalSite):
-    """A LocalSite serving cpu+gpu with a mutable gpu capacity knob (§8, §9).
+    """A LocalSite serving cpu+gpu with a mutable gpu capacity knob.
 
     Everything (provision, run_worker, no-ship guard, review) is inherited from
     LocalSite; only the resource picture is overridden so a single box can model

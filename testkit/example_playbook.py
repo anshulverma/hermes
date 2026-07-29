@@ -1,6 +1,6 @@
-"""EchoPlaybook — a minimal but multi-ticket-capable example playbook (§8, §12).
+"""EchoPlaybook — a minimal but multi-ticket-capable example playbook.
 
-Registered as "example" (matching acceptance criterion 2's `hermes run example`).
+Registered as "example" (matching acceptance criterion's `hermes run example`).
 Phases: ["work", "reduce"]. `seed` reads a canned issue file (via the site's
 issue_source) and yields one ticket per issue; `reduce` clusters findings by a
 field and, when `run.config` requests it, emits a reduction carrying
@@ -26,7 +26,7 @@ PHASES = ["work", "reduce"]
 
 
 class EchoPlaybook:
-    """Trivial echo playbook for tests/demos (§8, §12)."""
+    """Trivial echo playbook for tests/demos."""
 
     name = "example"
     phases = list(PHASES)

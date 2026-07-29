@@ -1,4 +1,4 @@
-"""Integration tests for the dispatch loops (spec §5, §9, §10, §11).
+"""Integration tests for the dispatch loops.
 
 TDD: written FIRST, watched fail, then engine/dispatch.py + the LocalSite
 no-ship guard implemented.

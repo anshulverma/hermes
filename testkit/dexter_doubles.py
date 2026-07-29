@@ -1,8 +1,8 @@
 """DexterMockAgent + DexterLocalSite — test doubles for dexter integration.
 
-These doubles emit §2.3-shaped payloads (dexter finding docs) for testing the
-full dexter playbook flow without real dexter, SSH, or Meta. They live in
-testkit (not production adapters).
+These doubles emit dexter finding docs for testing the full dexter playbook
+flow without real dexter, SSH, or Meta. They live in testkit (not production
+adapters).
 
 Stdlib-only.
 """
@@ -18,10 +18,10 @@ from sites.local.site import LocalSite
 
 
 class DexterMockAgent:
-    """Dexter-aware mock agent emitting §2.3 docs (dexter finding payloads).
+    """Dexter-aware mock agent emitting dexter finding payloads.
 
     Extends the stock MockAgent pattern with:
-    - parse_result returns a §2.3-shaped payload selected per (ticket_id, attempt)
+    - parse_result returns a dexter finding payload selected per (ticket_id, attempt)
       from a scenario map (not echoing the ticket payload, which is constrained
       by the solve-phase payload_schema).
     - Attempt-keying: (ticket_id, attempt) scenarios drive the fix-does-not-hold
@@ -44,11 +44,11 @@ class DexterMockAgent:
         return ["true"]
 
     def parse_result(self, raw: str, envelope: dict) -> Result:
-        """Return a deterministic §2.3-shaped Result for this envelope.
+        """Return a deterministic dexter finding Result for this envelope.
 
         Integrity first: recompute payload_sha256 over the RECEIVED payload
         and, on mismatch, return driver_failed/contract_fail with no retry.
-        Otherwise emit a dexter finding doc (§2.3) selected per (ticket_id, attempt).
+        Otherwise emit a dexter finding doc selected per (ticket_id, attempt).
         """
         now = time.time()
 
@@ -73,7 +73,7 @@ class DexterMockAgent:
         ticket_id = envelope.get("ticket_id")
         scenario_key = self._scenario_for(envelope)
 
-        # Generate §2.3 payload
+        # Generate dexter finding payload
         payload = self._generate_dexter_payload(scenario_key, envelope)
 
         return Result(
@@ -100,7 +100,7 @@ class DexterMockAgent:
         return (ticket_id, attempt)
 
     def _generate_dexter_payload(self, scenario_key: tuple, envelope: dict) -> dict:
-        """Generate a §2.3-compliant dexter finding doc.
+        """Generate a dexter finding doc.
 
         The scenario_key is (ticket_id, attempt). Uses goal from envelope to
         determine behavior (shared signatures, fix-does-not-hold, etc.).
@@ -139,7 +139,7 @@ class DexterMockAgent:
                 ci_status = "passing"
                 kb_validated = True
 
-        # Build §2.3 doc
+        # Build dexter finding doc
         return {
             "reproduced": reproduced,
             "root_cause": {
@@ -170,10 +170,10 @@ class DexterMockAgent:
 
 
 class DexterLocalSite(LocalSite):
-    """LocalSite subclass adding recheck_fix for dexter verify (D3).
+    """LocalSite subclass adding recheck_fix for dexter verify.
 
     Adds the site extension method recheck_fix(payload) -> bool, which is a
-    PURE FUNCTION of the emitted §2.3 payload (not site instance state). A
+    PURE FUNCTION of the emitted dexter finding payload (not site instance state). A
     "holds" doc => True (-> reducing), "does-not-hold" doc => False (-> needs_human).
 
     The verdict is payload-derived so the attempt-1-fails/attempt-2-passes flip
@@ -183,7 +183,7 @@ class DexterLocalSite(LocalSite):
     name = "dexter_local"
 
     def recheck_fix(self, payload: dict) -> bool:
-        """Independent fix re-check (D3): pure function of the §2.3 payload.
+        """Independent fix re-check: pure function of the dexter finding payload.
 
         Returns:
             True iff payload indicates fix holds (ci_status == "passing").

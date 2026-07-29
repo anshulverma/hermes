@@ -1,6 +1,6 @@
-"""Integration tests for the dexter playbook end-to-end run (Slice 9).
+"""Integration tests for the dexter playbook end-to-end run.
 
-TDD: Integration tests proving ALL §8 acceptance criteria via master_loop on
+TDD: Integration tests proving ALL acceptance criteria via master_loop on
 DexterLocalSite + DexterMockAgent, mirroring test_fleet_scenario.py harness.
 
 Tests cover:
@@ -87,7 +87,7 @@ def dexter_site():
 
 @pytest.fixture
 def dexter_agent():
-    """DexterMockAgent (emits §2.3 payloads)."""
+    """DexterMockAgent (emits dexter finding payloads)."""
     import testkit.dexter_doubles  # noqa: F401 (registration side-effect)
     from engine import agent
 
@@ -154,7 +154,7 @@ def _settle_needs_human(conn, run_id, now):
 def test_dexter_run_fanout_dedup_accept(home, source_repo, conn, dexter_site, dexter_agent, dexter_playbook_with_fake_sink):
     """Full dexter run: fan-out, cross-host dedup, human accept, done.
 
-    Proves §8 acceptance criteria 1-2:
+    Proves acceptance criteria:
     - FAN-OUT: one solve ticket per goal
     - CROSS-HOST DEDUP: two goals with shared signature -> ONE cluster reduction
       (canonical + one duplicate), FakeSink banked EXACTLY ONE learning
@@ -222,7 +222,7 @@ def test_dexter_run_fanout_dedup_accept(home, source_repo, conn, dexter_site, de
         routes_settled |= _settle_needs_human(conn, run_id, now=t)
         t += STEP
 
-    # ==================== ASSERTIONS (§8 acceptance 1-2) =====================
+    # ==================== ASSERTIONS =====================
 
     # 1. Run reached done
     assert _run_state(conn, run_id) == "done"
@@ -293,7 +293,7 @@ def test_dexter_run_fanout_dedup_accept(home, source_repo, conn, dexter_site, de
 def test_dexter_verify_fail_blocks_then_requeue_clears(
     home, source_repo, conn, dexter_site, dexter_agent, dexter_playbook_with_fake_sink
 ):
-    """Verify-fail blocks reduce; requeue clears it (§8 acceptance 3).
+    """Verify-fail blocks reduce; requeue clears it.
 
     A fix-does-not-hold goal (attempt-1 emits ci_status != "passing" =>
     verify False => needs_human) BLOCKS phase reduce: assert concretely ZERO
@@ -438,7 +438,7 @@ def test_dexter_verify_fail_blocks_then_requeue_clears(
 def test_dexter_reduction_reject(
     home, source_repo, conn, dexter_site, dexter_agent, dexter_playbook_with_fake_sink
 ):
-    """Reduction reject -> cluster members failed (§8 acceptance 2 variant)."""
+    """Reduction reject -> cluster members failed."""
     from engine import crew
 
     pb = dexter_playbook_with_fake_sink
@@ -534,7 +534,7 @@ def test_dexter_reduction_reject(
 
 
 def test_dexter_no_ship_runtime_guard(home, source_repo, conn, dexter_site, dexter_agent):
-    """No-ship runtime guard blocks git push (§7, §8 acceptance 4a).
+    """No-ship runtime guard blocks git push.
 
     After provisioning, invoke the installed shim directly from the guard dir
     and assert exit 97 (do NOT rely on the mock agent).
@@ -582,7 +582,7 @@ def test_dexter_no_ship_runtime_guard(home, source_repo, conn, dexter_site, dext
 
 
 def test_dexter_no_ship_dispatch_gate(home, source_repo, conn, dexter_agent, dexter_playbook_with_fake_sink):
-    """No-ship dispatch gate rejects site that can't guarantee no-ship (§7, §8 acceptance 4b).
+    """No-ship dispatch gate rejects site that can't guarantee no-ship.
 
     A throwaway site whose guarantees_no_ship() returns False makes _build_envelope
     raise -> serve routes to fail_contract_violation (terminal failed, contract_fail).
@@ -668,7 +668,7 @@ def test_dexter_no_ship_dispatch_gate(home, source_repo, conn, dexter_agent, dex
 def test_dexter_fold_dedup_two_ok_findings_one_ticket(
     home, source_repo, conn, dexter_site, dexter_playbook_with_fake_sink
 ):
-    """A ticket with TWO ok findings is counted ONCE (fold-latest-per-ticket dedup, §2.6)."""
+    """A ticket with TWO ok findings is counted ONCE (fold-latest-per-ticket dedup)."""
     from playbooks.dexter.playbook import DexterPlaybook
     from playbooks.dexter.sink import FakeSink
     from engine.models import Finding

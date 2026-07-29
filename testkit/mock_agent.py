@@ -1,4 +1,4 @@
-"""MockAgent — a scenario-table fake agent adapter (§8, §12).
+"""MockAgent — a scenario-table fake agent adapter.
 
 Selected via HERMES_AGENT=mock. Ignores the real CLI: build_invocation returns
 a trivial argv and parse_result returns a deterministic Result chosen by the
@@ -25,7 +25,7 @@ SCENARIOS: dict[str, tuple[str, str]] = {
     "timeout": ("driver_failed", "timeout"),
     # transport_error: agent-REPORTED infra path (RETRY with penalty).
     # This is the agent's view of transport failure, NOT the transport layer's
-    # host-lost no-penalty path (which transport/requeue_transport handles in later slices).
+    # host-lost no-penalty path (which transport/requeue_transport handles).
     "infra_failed": ("infra_failed", "transport_error"),
     "transport_error": ("infra_failed", "transport_error"),
 }
@@ -34,10 +34,10 @@ DEFAULT_SCENARIO = "ok"
 
 
 class MockAgent:
-    """Deterministic fake agent driven by a scenario table (§8, §12).
+    """Deterministic fake agent driven by a scenario table.
 
-    Extended in Task 12A to support (ticket_id, attempt) keying so retries can
-    yield different outcomes (e.g., infra_failed on attempt 1, ok on attempt 2).
+    Extended to support (ticket_id, attempt) keying so retries can yield
+    different outcomes (e.g., infra_failed on attempt 1, ok on attempt 2).
     """
 
     name = "mock"
@@ -61,12 +61,12 @@ class MockAgent:
         Uses ``true`` (a coreutils no-op that always exits 0) so
         ``local_transport`` runs cleanly end-to-end without depending on a
         missing ``mock-agent`` binary; ``parse_result`` supplies the actual
-        deterministic ``Result`` from the scenario table (§9, §12).
+        deterministic ``Result`` from the scenario table.
         """
         return ["true"]
 
     def _scenario_for(self, envelope: dict):
-        """Resolve the scenario key from an envelope (§8, §12).
+        """Resolve the scenario key from an envelope.
 
         Derives the 1-based execution ordinal for this ticket by counting real
         parse_result calls (payloads are static across engine retries, so a
@@ -93,7 +93,7 @@ class MockAgent:
         """Return a deterministic Result for this envelope's scenario.
 
         Integrity first: recompute ``payload_sha256`` over the RECEIVED payload
-        (§6) and, on mismatch, return ``driver_failed`` / ``contract_fail`` with
+        and, on mismatch, return ``driver_failed`` / ``contract_fail`` with
         no retry — mirroring what the real ClaudeAgent does when a payload is
         corrupted in transit.
         """

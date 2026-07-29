@@ -1,4 +1,4 @@
-"""testkit.scenarios.fleet — deterministic fake scenario for fleet testing (spec §5).
+"""testkit.scenarios.fleet — deterministic fake scenario for fleet testing.
 
 A scenario generator producing ~40 tickets + a MockAgent result table keyed by
 (ticket_id, attempt), engineered to exercise:

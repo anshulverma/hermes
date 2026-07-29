@@ -1,6 +1,6 @@
-"""Fleet integration harness — Docker/podman convergence test (spec §6, §7).
+"""Fleet integration harness — Docker/podman convergence test.
 
-The flagship distributed-integration slice: it stands up SEVERAL worker nodes as
+The flagship distributed-integration: it stands up SEVERAL worker nodes as
 REAL containers and drives them, over REAL SSH, through one shared run (the
 deterministic ``build_fleet_scenario``) until the fleet converges — proving the
 distributed machinery the single-box tier cannot: the real ``ssh_transport``,
@@ -9,7 +9,7 @@ round-robin, so this proves distribution + no-double-claim, not concurrent claim
 atomicity — that is covered by the queue unit tests), and host-down requeue.
 
 Gated behind ``@pytest.mark.docker`` so ``pytest -m "not docker"`` skips it and
-CI runs it only where Docker/podman is available. Approach (harness §3): host-as-
+CI runs it only where Docker/podman is available. Approach: host-as-
 master with published ports. The TEST PROCESS is the master (queue.db on the
 host); it seeds the scenario, configures an ``SSHSite`` pointing at the worker
 containers (``localhost:220NN``), and drives the serve + reduce/advance loops
@@ -93,7 +93,7 @@ def _state_of(conn, tid):
 
 
 def _settle_needs_human(conn, run_id, now):
-    """Operator settle of needs_human tickets by route (harness §6)."""
+    """Operator settle of needs_human tickets by route."""
     from engine import queue
 
     routes = set()
