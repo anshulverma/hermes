@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 
-from engine.config import resolve_home
+from engine import config
 from engine.db.migrate import connect
 from engine.queue import load_run, phase_ticket_counts, set_run_state
 from engine import log
@@ -41,10 +41,10 @@ def create_app(bind: str | None = None) -> FastAPI:
     log.configure()
 
     if bind is None:
-        bind = os.environ.get("HERMES_BIND", "127.0.0.1")
+        bind = config.bind()
 
     # Load or create the bearer token
-    home = resolve_home()
+    home = config.resolve_home()
     app_token = load_or_create_token(home)
     loopback = is_loopback(bind)
 
@@ -100,7 +100,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
         Returns status, version, and resolved HERMES_HOME.
         """
-        home = resolve_home()
+        home = config.resolve_home()
         return {
             "status": "ok",
             "version": "0.1.0",
@@ -113,7 +113,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
         Returns a list of runs, each with per-state ticket counts.
         """
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -156,7 +156,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         Returns run details including per-state ticket counts and
         per-phase ticket counts (as an array in playbook phase order).
         """
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -236,7 +236,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         Returns tickets with: id, run_id, state, phase, subject, resource_req,
         host, attempts, elapsed_s, priority.
         """
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -323,7 +323,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         - attempt_timeline: all attempts ordered oldest→newest
         - evidence: non-null result_refs as {attempt, ref}
         """
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -438,7 +438,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         - current_ticket, last_heartbeat
         - health: parsed health_json (may be null if never set)
         """
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -492,7 +492,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         import time
         now = time.time()
 
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -558,7 +558,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         """
         from engine import events
 
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -573,7 +573,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
         Returns a sorted list of event kinds (SELECT DISTINCT kind FROM events ORDER BY kind).
         """
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -597,7 +597,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
         Returns 404 if run not found.
         """
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -710,7 +710,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
         Returns 404 if run not found.
         """
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -939,7 +939,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(e))
 
         # Admit the crew member
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -996,7 +996,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         import time
 
         # Get the crew member to determine its site
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -1067,7 +1067,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         """
         from engine import crew
 
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -1099,7 +1099,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         """
         from engine import crew
 
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -1130,7 +1130,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         result_sql: str,
     ) -> dict[str, Any]:
         """Helper for transition endpoints: existence check → 404, ValueError → 409, return new state."""
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
@@ -1293,11 +1293,11 @@ def create_app(bind: str | None = None) -> FastAPI:
             await websocket.close(code=4401)
             return
 
-        # Get poll interval from env (default 1.0s)
-        poll_interval = float(os.environ.get("HERMES_WS_POLL_S", "1.0"))
+        # Get poll interval from config
+        poll_interval = config.ws_poll_s()
 
         # Determine starting cursor: if since is provided use it, else current max event id
-        home = resolve_home()
+        home = config.resolve_home()
         db_path = str(home / "queue.db")
 
         if since is None:
@@ -1349,9 +1349,8 @@ def create_app(bind: str | None = None) -> FastAPI:
 
     # --- SPA Serving + Token Injection (D1a) ---
 
-    # Determine dist dir (default web/dist, or HERMES_WEB_DIST)
-    dist_dir_str = os.environ.get("HERMES_WEB_DIST", "web/dist")
-    dist_dir = Path(dist_dir_str)
+    # Determine dist dir from config
+    dist_dir = Path(config.web_dist())
 
     @app.get("/", response_class=HTMLResponse)
     def serve_spa(_: None = Depends(require_auth_read)) -> str:

@@ -418,8 +418,8 @@ def cmd_serve_api(args):
         rotate_token(home)
         print(f"Token rotated (stored at {home / 'api_token'})")
 
-    # Get bind from args or HERMES_BIND env or default to 127.0.0.1
-    bind = args.host or os.environ.get("HERMES_BIND", "127.0.0.1")
+    # Get bind from args or config.bind()
+    bind = args.host or config.bind()
     port = args.port
 
     # Create the app with bind
@@ -717,9 +717,9 @@ def main(argv=None):
             return cmd_serve_once(args)
     except Exception as e:
         logger = log.get_logger("cli")
-        # Use logger.exception when HERMES_DEBUG is set (includes traceback),
+        # Use logger.exception when config.debug() is set (includes traceback),
         # otherwise logger.error (message only)
-        if os.environ.get("HERMES_DEBUG"):
+        if config.debug():
             logger.exception("Command failed: %s", e)
         else:
             logger.error("Command failed: %s", e)

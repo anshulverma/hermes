@@ -12,9 +12,10 @@ API:
 import contextvars
 import json
 import logging
-import os
 import sys
 from typing import Any
+
+from engine import config
 
 
 _configured = False
@@ -84,23 +85,17 @@ def configure(
 
     _configured = True
 
-    # Resolve level from args -> env -> defaults
+    # Resolve level from args -> config defaults
     if level is None:
-        level = os.environ.get("HERMES_LOG_LEVEL")
-        if level is None:
-            # HERMES_DEBUG=1 -> DEBUG, but explicit HERMES_LOG_LEVEL wins
-            if os.environ.get("HERMES_DEBUG"):
-                level = "DEBUG"
-            else:
-                level = "INFO"
+        level = config.log_level()
 
-    # Resolve format
+    # Resolve format from args -> config defaults
     if fmt is None:
-        fmt = os.environ.get("HERMES_LOG_FORMAT", "text")
+        fmt = config.log_format()
 
-    # Resolve file
+    # Resolve file from args -> config defaults
     if file is None:
-        file = os.environ.get("HERMES_LOG_FILE")
+        file = config.log_file()
 
     # Set level on the logger
     logger.setLevel(getattr(logging, level.upper()))
