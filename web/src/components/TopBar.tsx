@@ -73,7 +73,7 @@ export default function TopBar({ health, view = 'overview', onViewChange }: TopB
     >
       <span style={{ color: 'var(--text-primary)' }}>Hermes</span>
 
-      {/* View nav tabs - only show "Run" for now (Phase B1) */}
+      {/* View nav tabs - Phase B2 adds "Tickets" */}
       <nav style={{ display: 'flex', gap: 4 }}>
         <button
           onClick={() => handleTabClick('overview')}
@@ -89,6 +89,21 @@ export default function TopBar({ health, view = 'overview', onViewChange }: TopB
           }}
         >
           Run
+        </button>
+        <button
+          onClick={() => handleTabClick('board')}
+          style={{
+            padding: '6px 12px',
+            fontSize: 13,
+            color: view === 'board' ? 'var(--text-primary)' : 'var(--text-muted)',
+            background: view === 'board' ? 'var(--wash-subtle)' : 'transparent',
+            border: 'none',
+            borderRadius: 'var(--radius-md)',
+            cursor: 'pointer',
+            transition: 'all 120ms ease-out',
+          }}
+        >
+          Tickets
         </button>
       </nav>
 

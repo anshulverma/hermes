@@ -201,3 +201,170 @@ def test_runs_list_empty(client: TestClient, temp_home: Path):
     response = client.get("/api/runs")
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_tickets_endpoint_returns_tickets(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id}/tickets returns real tickets from queue.db."""
+    response = client.get(f"/api/runs/{seeded_run}/tickets")
+    assert response.status_code == 200
+
+    tickets = response.json()
+    assert isinstance(tickets, list)
+    assert len(tickets) == 3  # EchoPlaybook seeds 3 tickets
+
+    # Each ticket should have the required fields
+    ticket = tickets[0]
+    assert "id" in ticket
+    assert "run_id" in ticket
+    assert ticket["run_id"] == seeded_run
+    assert "state" in ticket
+    assert "phase" in ticket
+    assert "subject" in ticket
+    assert "resource_req" in ticket
+    assert "host" in ticket
+    assert "attempts" in ticket
+    assert "elapsed_s" in ticket
+    assert "priority" in ticket
+
+    # Verify against direct sqlite query
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    db_tickets = conn.execute(
+        """SELECT id, state, phase, resource_req, worker_host, attempts, priority
+           FROM tickets WHERE run_id=? ORDER BY id""",
+        (seeded_run,),
+    ).fetchall()
+    conn.close()
+
+    assert len(tickets) == len(db_tickets)
+    for t, db_row in zip(tickets, db_tickets):
+        assert t["id"] == db_row[0]
+        assert t["state"] == db_row[1]
+        assert t["phase"] == db_row[2]
+        assert t["resource_req"] == db_row[3]
+        assert t["host"] == db_row[4]
+        assert t["attempts"] == db_row[5]
+        assert t["priority"] == db_row[6]
+
+
+def test_tickets_filter_by_state(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id}/tickets?state=queued filters by state."""
+    response = client.get(f"/api/runs/{seeded_run}/tickets?state=queued")
+    assert response.status_code == 200
+
+    tickets = response.json()
+    assert all(t["state"] == "queued" for t in tickets)
+
+    # Verify against sqlite
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    queued_count = conn.execute(
+        """SELECT COUNT(*) FROM tickets WHERE run_id=? AND state='queued'""",
+        (seeded_run,),
+    ).fetchone()[0]
+    conn.close()
+
+    assert len(tickets) == queued_count
+    assert len(tickets) == 3  # All seeded tickets start as queued
+
+
+def test_tickets_filter_by_phase(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id}/tickets?phase=work filters by phase."""
+    response = client.get(f"/api/runs/{seeded_run}/tickets?phase=work")
+    assert response.status_code == 200
+
+    tickets = response.json()
+    assert all(t["phase"] == "work" for t in tickets)
+
+    # Verify against sqlite
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    work_count = conn.execute(
+        """SELECT COUNT(*) FROM tickets WHERE run_id=? AND phase='work'""",
+        (seeded_run,),
+    ).fetchone()[0]
+    conn.close()
+
+    assert len(tickets) == work_count
+
+
+def test_tickets_filter_by_resource(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id}/tickets?resource=cpu filters by resource_req."""
+    response = client.get(f"/api/runs/{seeded_run}/tickets?resource=cpu")
+    assert response.status_code == 200
+
+    tickets = response.json()
+    assert all(t["resource_req"] == "cpu" for t in tickets)
+
+    # Verify against sqlite
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    cpu_count = conn.execute(
+        """SELECT COUNT(*) FROM tickets WHERE run_id=? AND resource_req='cpu'""",
+        (seeded_run,),
+    ).fetchone()[0]
+    conn.close()
+
+    assert len(tickets) == cpu_count
+
+
+def test_tickets_filter_by_host(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id}/tickets?host=localhost filters by worker_host."""
+    # First, update a ticket to have a host
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    # Get first ticket id
+    ticket_id = conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? ORDER BY id LIMIT 1",
+        (seeded_run,),
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE tickets SET worker_host='localhost' WHERE id=?",
+        (ticket_id,),
+    )
+    conn.commit()
+    conn.close()
+
+    response = client.get(f"/api/runs/{seeded_run}/tickets?host=localhost")
+    assert response.status_code == 200
+
+    tickets = response.json()
+    assert all(t["host"] == "localhost" for t in tickets)
+    assert len(tickets) == 1
+
+
+def test_tickets_filter_by_search(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id}/tickets?search=t-0 searches id and subject."""
+    response = client.get(f"/api/runs/{seeded_run}/tickets?search=t-0")
+    assert response.status_code == 200
+
+    tickets = response.json()
+    # Should match ticket id containing 't-0'
+    assert any("t-0" in t["id"] for t in tickets)
+
+
+def test_tickets_multiple_filters(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id}/tickets with multiple filters combines with AND."""
+    response = client.get(f"/api/runs/{seeded_run}/tickets?state=queued&phase=work")
+    assert response.status_code == 200
+
+    tickets = response.json()
+    assert all(t["state"] == "queued" and t["phase"] == "work" for t in tickets)
+
+    # Verify against sqlite
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    count = conn.execute(
+        """SELECT COUNT(*) FROM tickets
+           WHERE run_id=? AND state='queued' AND phase='work'""",
+        (seeded_run,),
+    ).fetchone()[0]
+    conn.close()
+
+    assert len(tickets) == count
+
+
+def test_tickets_unknown_run_404(client: TestClient, temp_home: Path):
+    """GET /api/runs/{unknown}/tickets returns 404."""
+    response = client.get("/api/runs/unknown-run/tickets")
+    assert response.status_code == 404

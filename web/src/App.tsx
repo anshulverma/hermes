@@ -1,11 +1,12 @@
 /**
- * Hermes Control Plane App - Phase B1.
- * Shell wired to real /api/health + /api/runs + RunOverview view.
+ * Hermes Control Plane App - Phase B2.
+ * Shell wired to real /api/health + /api/runs + RunOverview + TicketBoard views.
  */
 
 import { useEffect, useState } from 'react';
 import TopBar from './components/TopBar';
 import RunOverview from './views/RunOverview';
+import TicketBoard from './views/TicketBoard';
 import { useHealth, useRuns } from './hooks/useApi';
 import { EmptyState, CrewBackdrop } from './ds';
 import { fetchRun } from './api/client';
@@ -93,6 +94,10 @@ export default function App() {
 
         {!loading && !error && runDetail && view === 'overview' && (
           <RunOverview run={runDetail} />
+        )}
+
+        {!loading && !error && runDetail && view === 'board' && (
+          <TicketBoard runId={runDetail.id} />
         )}
       </div>
     </div>

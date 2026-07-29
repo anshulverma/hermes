@@ -32,6 +32,27 @@ export type RunDetail = Run & {
   phases: Phase[];
 };
 
+export type Ticket = {
+  id: string;
+  run_id: string;
+  state: string;
+  phase: string;
+  subject: string;
+  resource_req: string;
+  host: string | null;
+  attempts: number;
+  elapsed_s: number;
+  priority: number;
+};
+
+export type TicketFilters = {
+  state?: string;
+  phase?: string;
+  resource?: string;
+  host?: string;
+  search?: string;
+};
+
 async function fetchJSON<T>(url: string): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) {
@@ -50,4 +71,17 @@ export async function fetchRuns(): Promise<Run[]> {
 
 export async function fetchRun(id: string): Promise<RunDetail> {
   return fetchJSON<RunDetail>(`/api/runs/${id}`);
+}
+
+export async function fetchTickets(runId: string, filters?: TicketFilters): Promise<Ticket[]> {
+  const params = new URLSearchParams();
+  if (filters?.state) params.append('state', filters.state);
+  if (filters?.phase) params.append('phase', filters.phase);
+  if (filters?.resource) params.append('resource', filters.resource);
+  if (filters?.host) params.append('host', filters.host);
+  if (filters?.search) params.append('search', filters.search);
+
+  const queryString = params.toString();
+  const url = `/api/runs/${runId}/tickets${queryString ? '?' + queryString : ''}`;
+  return fetchJSON<Ticket[]>(url);
 }
