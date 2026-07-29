@@ -96,14 +96,14 @@ class EchoPlaybook:
         clusters: dict[str, list[str]] = {}
         for f in findings:
             key = f.json.get("cluster", "default")
-            clusters.setdefault(key, []).append(f.json.get("ticket_id"))
+            clusters.setdefault(key, []).append(f.ticket_id)
 
         json_doc: dict = {"phase": phase, "clusters": clusters}
 
         if run.config.get("needs_human"):
             ids = run.config.get("needs_human_ticket_ids")
             if not ids:
-                ids = [f.json.get("ticket_id") for f in findings if f.json.get("ticket_id")]
+                ids = [f.ticket_id for f in findings]
             json_doc["needs_human_ticket_ids"] = ids
 
         return [Reduction(kind="cluster", json=json_doc)]

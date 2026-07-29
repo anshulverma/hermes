@@ -31,17 +31,19 @@ class GoalEnvelope:
     guardrails: dict[str, Any]
 
 
-# §6 Result (outcome + termination_reason + timestamps + refs + error_summary)
+# §6 Result (outcome + termination_reason + timestamps + refs + error_summary + payload + evidence_ref)
 
 @dataclass
 class Result:
-    """Worker result: outcome, termination_reason, timestamps, refs."""
+    """Worker result: outcome, termination_reason, timestamps, refs, payload, evidence."""
     outcome: str  # ok | driver_failed | infra_failed
     termination_reason: str  # goal_met | contract_fail | driver_error | timeout | transport_error
     result_ref: str | None
     error_summary: str | None
     started_at: float
     ended_at: float
+    payload: dict = field(default_factory=dict)
+    evidence_ref: str | None = None
 
 
 # §3 HealthReport + Check
@@ -142,7 +144,9 @@ class Attempt:
 
 @dataclass
 class Finding:
-    """Finding: kind, json."""
+    """Finding: run_id, ticket_id, kind, json (matching §4 findings table DDL)."""
+    run_id: str
+    ticket_id: str
     kind: str
     json: dict[str, Any]
 

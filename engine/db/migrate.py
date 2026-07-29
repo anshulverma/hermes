@@ -6,6 +6,7 @@ File mode enforced to 0600. PRAGMAs from spec §4.
 """
 import os
 import sqlite3
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -90,7 +91,7 @@ def apply_migrations(path: str) -> None:
             cursor.execute("""
                 INSERT INTO schema_migrations (version, applied_at, description)
                 VALUES (1, ?, 'Initial schema from engine-core.md §4')
-            """, (float(os.times().elapsed),))
+            """, (time.time(),))
             conn.commit()
 
     finally:

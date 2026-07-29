@@ -22,6 +22,9 @@ SCENARIOS: dict[str, tuple[str, str]] = {
     "contract_fail": ("driver_failed", "contract_fail"),
     "driver_error": ("driver_failed", "driver_error"),
     "timeout": ("driver_failed", "timeout"),
+    # transport_error: agent-REPORTED infra path (RETRY with penalty).
+    # This is the agent's view of transport failure, NOT the transport layer's
+    # host-lost no-penalty path (which transport/requeue_transport handles in later slices).
     "infra_failed": ("infra_failed", "transport_error"),
     "transport_error": ("infra_failed", "transport_error"),
 }
@@ -58,9 +61,14 @@ class MockAgent:
         if outcome == "ok":
             result_ref = f"result://{envelope.get('ticket_id', 'mock')}"
             error_summary = None
+            # Populate payload from envelope payload (echo it back for testing)
+            payload = envelope.get("payload", {})
+            evidence_ref = f"evidence://{envelope.get('ticket_id', 'mock')}"
         else:
             result_ref = None
             error_summary = f"mock scenario {name!r}: {outcome}/{termination_reason}"
+            payload = {}
+            evidence_ref = None
         return Result(
             outcome=outcome,
             termination_reason=termination_reason,
@@ -68,6 +76,8 @@ class MockAgent:
             error_summary=error_summary,
             started_at=now,
             ended_at=now,
+            payload=payload,
+            evidence_ref=evidence_ref,
         )
 
     def health_checks(self, host: str, site) -> list[Check]:

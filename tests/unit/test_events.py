@@ -53,7 +53,7 @@ def test_event_kinds_exposed():
 
 
 def test_emit_appends_event_with_all_fields(conn):
-    """emit appends one row with all fields set."""
+    """emit appends one row with all fields set (caller owns commit)."""
     from engine.events import emit
 
     # Emit an event with all optional fields populated
@@ -66,6 +66,8 @@ def test_emit_appends_event_with_all_fields(conn):
         message="Claimed for processing",
         data={"priority": 10, "resource": "cpu"},
     )
+    # Caller owns commit (emit does NOT commit)
+    conn.commit()
 
     # Verify row inserted
     cursor = conn.cursor()
@@ -86,10 +88,11 @@ def test_emit_appends_event_with_all_fields(conn):
 
 
 def test_emit_appends_event_with_minimal_fields(conn):
-    """emit appends event with only required fields (kind), rest None."""
+    """emit appends event with only required fields (kind), rest None (caller owns commit)."""
     from engine.events import emit
 
     emit(conn, "run_started")
+    conn.commit()
 
     cursor = conn.cursor()
     cursor.execute("SELECT kind, run_id, ticket_id, host, message, data_json FROM events")
@@ -105,12 +108,13 @@ def test_emit_appends_event_with_minimal_fields(conn):
 
 
 def test_emit_sets_timestamp(conn):
-    """emit sets ts (wall-clock epoch seconds)."""
+    """emit sets ts (wall-clock epoch seconds, caller owns commit)."""
     import time
     from engine.events import emit
 
     before = time.time()
     emit(conn, "attention", message="test")
+    conn.commit()
     after = time.time()
 
     cursor = conn.cursor()
@@ -122,10 +126,11 @@ def test_emit_sets_timestamp(conn):
 
 
 def test_emit_data_defaults_to_empty_dict(conn):
-    """emit with data=None stores '{}' in data_json."""
+    """emit with data=None stores '{}' in data_json (caller owns commit)."""
     from engine.events import emit
 
     emit(conn, "crew_added", data=None)
+    conn.commit()
 
     cursor = conn.cursor()
     cursor.execute("SELECT data_json FROM events")
@@ -144,12 +149,13 @@ def test_emit_validates_kind_against_known_kinds(conn):
 
 
 def test_since_returns_events_after_id_ascending(conn):
-    """since returns events with id > after_id, ordered by id ascending."""
+    """since returns events with id > after_id, ordered by id ascending (caller owns commit)."""
     from engine.events import emit, since
 
     # Insert 5 events
     for i in range(5):
         emit(conn, "run_started", run_id=f"run-{i}", message=f"Event {i}")
+    conn.commit()
 
     # Query events after id=2
     rows = since(conn, after_id=2)
@@ -166,12 +172,13 @@ def test_since_returns_events_after_id_ascending(conn):
 
 
 def test_since_respects_limit(conn):
-    """since respects the limit parameter."""
+    """since respects the limit parameter (caller owns commit)."""
     from engine.events import emit, since
 
     # Insert 10 events
     for i in range(10):
         emit(conn, "run_started", message=f"Event {i}")
+    conn.commit()
 
     # Query with limit=3
     rows = since(conn, after_id=0, limit=3)
@@ -184,12 +191,13 @@ def test_since_respects_limit(conn):
 
 
 def test_since_default_limit_200(conn):
-    """since defaults to limit=200."""
+    """since defaults to limit=200 (caller owns commit)."""
     from engine.events import emit, since
 
     # Insert 250 events
     for i in range(250):
         emit(conn, "attention")
+    conn.commit()
 
     # Query without explicit limit
     rows = since(conn, after_id=0)
@@ -199,11 +207,12 @@ def test_since_default_limit_200(conn):
 
 
 def test_since_returns_rows_with_deserialized_data(conn):
-    """since returns rows with data deserialized from data_json."""
+    """since returns rows with data deserialized from data_json (caller owns commit)."""
     from engine.events import emit, since
 
     emit(conn, "ticket_claimed", data={"priority": 5, "attempts": 1})
     emit(conn, "run_started", data=None)
+    conn.commit()
 
     rows = since(conn, after_id=0)
 
@@ -214,12 +223,13 @@ def test_since_returns_rows_with_deserialized_data(conn):
 
 
 def test_tail_returns_last_n_events(conn):
-    """tail returns the last n events."""
+    """tail returns the last n events (caller owns commit)."""
     from engine.events import emit, tail
 
     # Insert 10 events
     for i in range(10):
         emit(conn, "run_started", message=f"Event {i}")
+    conn.commit()
 
     # Get last 3 events
     rows = tail(conn, n=3)
@@ -232,12 +242,13 @@ def test_tail_returns_last_n_events(conn):
 
 
 def test_tail_handles_n_greater_than_total(conn):
-    """tail handles n greater than total events (returns all)."""
+    """tail handles n greater than total events (returns all, caller owns commit)."""
     from engine.events import emit, tail
 
     # Insert 3 events
     for i in range(3):
         emit(conn, "run_started")
+    conn.commit()
 
     # Request last 10 events
     rows = tail(conn, n=10)
@@ -247,10 +258,11 @@ def test_tail_handles_n_greater_than_total(conn):
 
 
 def test_tail_returns_rows_with_deserialized_data(conn):
-    """tail returns rows with data deserialized from data_json."""
+    """tail returns rows with data deserialized from data_json (caller owns commit)."""
     from engine.events import emit, tail
 
     emit(conn, "ticket_failed", data={"error": "timeout"})
+    conn.commit()
 
     rows = tail(conn, n=1)
 
@@ -259,13 +271,14 @@ def test_tail_returns_rows_with_deserialized_data(conn):
 
 
 def test_events_feed_is_append_only_monotonic(conn):
-    """Events feed is append-only and monotonic by id."""
+    """Events feed is append-only and monotonic by id (caller owns commit)."""
     from engine.events import emit, since
 
     # Insert events
     emit(conn, "run_started")
     emit(conn, "ticket_claimed")
     emit(conn, "ticket_started")
+    conn.commit()
 
     # Verify monotonic ordering
     rows = since(conn, after_id=0)
@@ -277,7 +290,7 @@ def test_events_feed_is_append_only_monotonic(conn):
 
 
 def test_row_object_has_expected_fields(conn):
-    """Rows returned by since/tail have expected fields from schema §4."""
+    """Rows returned by since/tail have expected fields from schema §4 (caller owns commit)."""
     from engine.events import emit, since
 
     emit(
@@ -289,6 +302,7 @@ def test_row_object_has_expected_fields(conn):
         message="Health check",
         data={"ok": True},
     )
+    conn.commit()
 
     rows = since(conn, after_id=0)
     row = rows[0]

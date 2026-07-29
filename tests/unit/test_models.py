@@ -40,7 +40,32 @@ def test_goal_envelope_has_goal_driver_contract_guardrails():
 
 
 def test_result_has_all_fields():
-    """Result has outcome, termination_reason, result_ref, error_summary, timestamps."""
+    """Result has outcome, termination_reason, result_ref, error_summary, timestamps, payload, evidence_ref."""
+    from engine.models import Result
+
+    result = Result(
+        outcome="ok",
+        termination_reason="goal_met",
+        result_ref="ref-123",
+        error_summary=None,
+        started_at=1234567890.0,
+        ended_at=1234567900.0,
+        payload={"result": "success"},
+        evidence_ref="evidence://123",
+    )
+
+    assert result.outcome == "ok"
+    assert result.termination_reason == "goal_met"
+    assert result.result_ref == "ref-123"
+    assert result.error_summary is None
+    assert result.started_at == 1234567890.0
+    assert result.ended_at == 1234567900.0
+    assert result.payload == {"result": "success"}
+    assert result.evidence_ref == "evidence://123"
+
+
+def test_result_payload_defaults_to_empty_dict():
+    """Result payload defaults to empty dict when not provided."""
     from engine.models import Result
 
     result = Result(
@@ -52,12 +77,23 @@ def test_result_has_all_fields():
         ended_at=1234567900.0,
     )
 
-    assert result.outcome == "ok"
-    assert result.termination_reason == "goal_met"
-    assert result.result_ref == "ref-123"
-    assert result.error_summary is None
-    assert result.started_at == 1234567890.0
-    assert result.ended_at == 1234567900.0
+    assert result.payload == {}
+
+
+def test_result_evidence_ref_defaults_to_none():
+    """Result evidence_ref defaults to None when not provided."""
+    from engine.models import Result
+
+    result = Result(
+        outcome="ok",
+        termination_reason="goal_met",
+        result_ref="ref-123",
+        error_summary=None,
+        started_at=1234567890.0,
+        ended_at=1234567900.0,
+    )
+
+    assert result.evidence_ref is None
 
 
 def test_run_snapshot_has_required_fields():
@@ -181,12 +217,19 @@ def test_reduction_has_kind_json():
     assert reduction.json == {"count": 5}
 
 
-def test_finding_has_kind_json():
-    """Finding has kind, json."""
+def test_finding_has_run_id_ticket_id_kind_json():
+    """Finding has run_id, ticket_id, kind, json (matching §4 findings table)."""
     from engine.models import Finding
 
-    finding = Finding(kind="result", json={"answer": 42})
+    finding = Finding(
+        run_id="run-1",
+        ticket_id="run-1/t-0",
+        kind="result",
+        json={"answer": 42}
+    )
 
+    assert finding.run_id == "run-1"
+    assert finding.ticket_id == "run-1/t-0"
     assert finding.kind == "result"
     assert finding.json == {"answer": 42}
 

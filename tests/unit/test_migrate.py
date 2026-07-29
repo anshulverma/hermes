@@ -122,6 +122,27 @@ def test_apply_migrations_records_version(tmp_path):
     assert rows[0][1] is not None, "Description should be present"
 
 
+def test_apply_migrations_applied_at_uses_wall_clock_epoch(tmp_path):
+    """schema_migrations.applied_at uses wall-clock epoch (time.time(), not os.times().elapsed)."""
+    import time
+    from engine.db.migrate import apply_migrations
+
+    db_path = tmp_path / "queue.db"
+    before = time.time()
+    apply_migrations(str(db_path))
+    after = time.time()
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT applied_at FROM schema_migrations WHERE version = 1")
+    applied_at = cursor.fetchone()[0]
+    conn.close()
+
+    # applied_at should be wall-clock epoch seconds, not process elapsed time
+    assert before <= applied_at <= after, \
+        f"applied_at {applied_at} not between {before} and {after} (wall-clock epoch)"
+
+
 def test_connect_sets_file_mode_0600(tmp_path):
     """connect() ensures the db file is mode 0600."""
     from engine.db.migrate import connect

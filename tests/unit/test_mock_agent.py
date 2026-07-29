@@ -108,3 +108,39 @@ def test_every_outcome_reachable():
         for s in ("ok", "contract_fail", "driver_error", "timeout", "transport_error")
     }
     assert outcomes == {"ok", "driver_failed", "infra_failed"}
+
+
+def test_ok_result_serializes_and_validates_against_result_outer():
+    """MockAgent ok Result serializes to dict accepted by contracts.validate_result."""
+    from testkit.mock_agent import MockAgent
+    from engine.contracts import validate_result
+    from dataclasses import asdict
+
+    ag = MockAgent()
+    env = _envelope("ok", ticket_id="run-1/t-0")
+    result = ag.parse_result("", env)
+
+    # Serialize Result dataclass to dict
+    result_dict = asdict(result)
+
+    # Should validate against RESULT_OUTER with a trivial result_schema
+    result_schema = {"type": "object"}
+    validate_result(result_dict, result_schema)  # Should not raise
+
+
+def test_driver_failed_result_serializes_and_validates_without_payload_check():
+    """MockAgent driver_failed Result is accepted by contracts.validate_result (no payload validation)."""
+    from testkit.mock_agent import MockAgent
+    from engine.contracts import validate_result
+    from dataclasses import asdict
+
+    ag = MockAgent()
+    env = _envelope("contract_fail", ticket_id="run-1/t-1")
+    result = ag.parse_result("", env)
+
+    # Serialize Result dataclass to dict
+    result_dict = asdict(result)
+
+    # Should validate against RESULT_OUTER (payload validation skipped for driver_failed)
+    result_schema = {"type": "object", "required": ["foo"]}  # Strict schema
+    validate_result(result_dict, result_schema)  # Should not raise despite missing 'foo'

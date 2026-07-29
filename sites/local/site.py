@@ -58,7 +58,8 @@ class LocalSite:
         """Run transport/workspace/guard/resource checks + merge agent checks."""
         t0 = time.perf_counter()
 
-        reachable = host in (socket.gethostname(), "localhost", "127.0.0.1") or True
+        # Compute reachable correctly (no tautology)
+        reachable = host in (socket.gethostname(), "localhost", "127.0.0.1")
         transport = Check("transport", reachable, "localhost reachable")
 
         workspace_ready = self._workspace(host).exists()

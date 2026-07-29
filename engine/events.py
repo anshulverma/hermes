@@ -33,7 +33,11 @@ def emit(
     data: Optional[dict] = None,
 ) -> None:
     """
-    Append one event to the events table.
+    Append one event to the events table within the caller's transaction.
+
+    The CALLER owns commit. This is critical for atomicity: the queue (Slice 5)
+    runs claim_ticket under BEGIN IMMEDIATE and treats record_result as one
+    atomic unit that emits multiple events. A mid-unit commit breaks atomicity.
 
     Args:
         conn: SQLite connection
@@ -59,7 +63,7 @@ def emit(
         data = {}
     data_json = json.dumps(data, separators=(',', ':'), sort_keys=True)
 
-    # Insert event
+    # Insert event (caller owns commit)
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -68,7 +72,6 @@ def emit(
         """,
         (ts, kind, run_id, ticket_id, host, message, data_json),
     )
-    conn.commit()
 
 
 def since(conn: sqlite3.Connection, after_id: int, limit: int = 200) -> list[dict]:

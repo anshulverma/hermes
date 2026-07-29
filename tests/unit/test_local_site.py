@@ -92,6 +92,18 @@ def test_health_all_pass_after_provision(home, local_site):
     assert report.ok is True
 
 
+def test_health_reachable_true_for_localhost_variants(home, local_site):
+    """health sets reachable=True for localhost variants."""
+    from testkit.mock_agent import MockAgent
+
+    for host in [socket.gethostname(), "localhost", "127.0.0.1"]:
+        report = local_site.health(host, MockAgent())
+        assert report.reachable is True, f"Expected {host} to be reachable"
+        # transport check should pass
+        transport_check = next(c for c in report.checks if c.name == "transport")
+        assert transport_check.ok is True
+
+
 def test_issue_source_reads_canned_file(home, local_site):
     from engine.models import IssueQuery
 

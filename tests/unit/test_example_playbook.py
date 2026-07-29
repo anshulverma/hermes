@@ -112,26 +112,27 @@ def test_reduce_clusters_findings():
     from engine.models import Finding, Reduction
 
     pb = EchoPlaybook()
+    run = _run(phase="reduce")
     findings = [
-        Finding(kind="echo", json={"ticket_id": "t-0", "cluster": "a"}),
-        Finding(kind="echo", json={"ticket_id": "t-1", "cluster": "a"}),
-        Finding(kind="echo", json={"ticket_id": "t-2", "cluster": "b"}),
+        Finding(run_id=run.id, ticket_id=f"{run.id}/t-0", kind="echo", json={"cluster": "a"}),
+        Finding(run_id=run.id, ticket_id=f"{run.id}/t-1", kind="echo", json={"cluster": "a"}),
+        Finding(run_id=run.id, ticket_id=f"{run.id}/t-2", kind="echo", json={"cluster": "b"}),
     ]
-    reductions = pb.reduce(_run(phase="reduce"), "reduce", findings, None)
+    reductions = pb.reduce(run, "reduce", findings, None)
     assert len(reductions) >= 1
     assert all(isinstance(r, Reduction) for r in reductions)
 
 
 def test_reduce_emits_needs_human_when_configured():
     from testkit.example_playbook import EchoPlaybook
-
-    pb = EchoPlaybook()
-    findings_ids = ["t-0", "t-1"]
     from engine.models import Finding
 
-    findings = [Finding(kind="echo", json={"ticket_id": tid, "cluster": "a"})
-                for tid in findings_ids]
+    pb = EchoPlaybook()
     run = _run(phase="reduce", config={"needs_human": True})
+    findings_ids = [f"{run.id}/t-0", f"{run.id}/t-1"]
+
+    findings = [Finding(run_id=run.id, ticket_id=tid, kind="echo", json={"cluster": "a"})
+                for tid in findings_ids]
 
     reductions = pb.reduce(run, "reduce", findings, None)
     # At least one reduction carries needs_human_ticket_ids
