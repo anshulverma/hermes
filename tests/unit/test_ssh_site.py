@@ -273,6 +273,88 @@ def test_run_worker_successful_returns_result(ssh_site, mock_agent, tmp_path):
     assert any("worker-1:" in arg for arg in scp_result_call), "Expected scp from worker-1"
 
 
+def test_discover_hosts_from_config():
+    """An SSHSite built with per-host config discovers those hosts."""
+    from sites.ssh.site import SSHSite
+
+    site = SSHSite(host_config={
+        "w1": {"port": 2201, "user": "root", "identity": "/k/id", "resources": {"cpu": 4}},
+        "w2": {"port": 2202, "user": "root", "identity": "/k/id", "resources": {"cpu": 8, "gpu": 2}},
+    })
+    assert set(site.discover_hosts()) == {"w1", "w2"}
+    assert set(site.resource_classes()) == {"cpu", "gpu"}
+
+
+def test_run_worker_uses_per_host_connection_options(mock_agent, tmp_path):
+    """run_worker builds argv with the per-host identity/port/user + hardened -o opts.
+
+    This is the Part-B2 enhancement: real containers need -i/-p/-o and user@host.
+    """
+    from sites.ssh.site import SSHSite
+
+    site = SSHSite(host_config={
+        "w1": {"port": 2201, "user": "root", "identity": "/k/id", "resources": {"cpu": 4}},
+    }, connect_timeout=9)
+
+    payload = {"scenario": "ok"}
+    import hashlib
+    canon = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    envelope = {
+        "ticket_id": "run-1/t-0", "payload": payload,
+        "payload_sha256": hashlib.sha256(canon.encode()).hexdigest(),
+        "timeout_s": 60,
+        "goal_envelope": {"driver": {"command": None, "args": {}, "loop": None}},
+    }
+
+    calls = []
+
+    def fake_run(argv, *a, **k):
+        calls.append(argv)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    with patch("sites.ssh.site.subprocess.run", side_effect=fake_run), \
+         patch("sites.ssh.site.os.path.exists", return_value=False):
+        site.run_worker("w1", envelope, mock_agent)
+
+    ssh_serve = next(c for c in calls if "ssh" in c and "serve-once" in c)
+    assert "root@w1" in ssh_serve
+    assert "StrictHostKeyChecking=no" in ssh_serve
+    assert "BatchMode=yes" in ssh_serve
+    assert "ConnectTimeout=9" in ssh_serve
+    assert "-i" in ssh_serve and "/k/id" in ssh_serve
+    assert "-p" in ssh_serve and "2201" in ssh_serve
+    # scp calls target root@w1 and use -P for the port.
+    scp_calls = [c for c in calls if c[0] == "scp"]
+    assert scp_calls, "expected scp calls"
+    for c in scp_calls:
+        assert "-P" in c and "2201" in c
+        assert any(str(x).startswith("root@w1:") for x in c)
+
+
+def test_health_uses_connection_options_and_config_resources(mock_agent):
+    """health() ssh's to user@host with the hardened opts and reports config resources."""
+    from sites.ssh.site import SSHSite
+
+    site = SSHSite(host_config={
+        "w1": {"port": 2201, "user": "root", "identity": "/k/id", "resources": {"cpu": 4, "gpu": 1}},
+    })
+
+    calls = []
+
+    def fake_run(argv, *a, **k):
+        calls.append(argv)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    with patch("sites.ssh.site.subprocess.run", side_effect=fake_run):
+        report = site.health("w1", mock_agent)
+
+    assert report.reachable is True
+    assert report.resources == {"cpu": 4, "gpu": 1}
+    ssh_true = next(c for c in calls if "ssh" in c and "true" in c)
+    assert "root@w1" in ssh_true
+    assert "StrictHostKeyChecking=no" in ssh_true
+
+
 def test_resource_classes_returns_classes(ssh_site, monkeypatch):
     """resource_classes returns union of classes from all configured hosts."""
     monkeypatch.setenv("HERMES_SSH_HOSTS", "host1,host2")

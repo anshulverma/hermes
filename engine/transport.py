@@ -109,14 +109,82 @@ def local_transport(envelope: dict, host: str, agent, env: Optional[dict] = None
 
 # --- ssh transport -------------------------------------------------------
 
-def ssh_transport(host: str):
+# Hardened, NON-INTERACTIVE ssh/scp options for automation against real hosts
+# (Slice 12). No host-key prompts, no known_hosts pollution across ephemeral
+# containers, no password fallback, and a bounded connect timeout so a lost host
+# surfaces quickly as a transport failure rather than hanging the serve loop.
+HARDENED_SSH_OPTS: list[str] = [
+    "-o", "StrictHostKeyChecking=no",
+    "-o", "UserKnownHostsFile=/dev/null",
+    "-o", "BatchMode=yes",
+]
+
+
+def build_ssh_opts(
+    *,
+    identity: Optional[str] = None,
+    port: Optional[int] = None,
+    connect_timeout: Optional[int] = None,
+    hardened: bool = True,
+    extra: Optional[list] = None,
+) -> list[str]:
+    """Build the ``ssh`` option list (``-i/-p/-o …``) for a host (§9, Slice 12).
+
+    ``hardened`` prepends the non-interactive automation ``-o`` flags. ``ssh``
+    uses ``-p`` for the port (contrast ``scp``'s ``-P``).
+    """
+    opts = list(HARDENED_SSH_OPTS) if hardened else []
+    if connect_timeout is not None:
+        opts += ["-o", f"ConnectTimeout={int(connect_timeout)}"]
+    if identity:
+        opts += ["-i", str(identity)]
+    if port is not None:
+        opts += ["-p", str(port)]
+    if extra:
+        opts += list(extra)
+    return opts
+
+
+def build_scp_opts(
+    *,
+    identity: Optional[str] = None,
+    port: Optional[int] = None,
+    connect_timeout: Optional[int] = None,
+    hardened: bool = True,
+    extra: Optional[list] = None,
+) -> list[str]:
+    """Build the ``scp`` option list for a host (§9, Slice 12).
+
+    Identical to ``build_ssh_opts`` except ``scp`` spells the port ``-P`` (capital).
+    """
+    opts = list(HARDENED_SSH_OPTS) if hardened else []
+    if connect_timeout is not None:
+        opts += ["-o", f"ConnectTimeout={int(connect_timeout)}"]
+    if identity:
+        opts += ["-i", str(identity)]
+    if port is not None:
+        opts += ["-P", str(port)]
+    if extra:
+        opts += list(extra)
+    return opts
+
+
+def ssh_transport(host: str, ssh_opts=None, scp_opts=None, user=None):
     """Return a callable ``(envelope, agent) -> Result`` that runs over ssh (§9).
 
     The callable scps the envelope up, runs the worker over ssh, scps the result
     back, and parses it. A non-zero ssh exit (host unreachable / worker runner
     failed to start) maps to a ``transport_error`` Result. ``subprocess`` is
     mocked in tests (no real ssh).
+
+    ``ssh_opts``/``scp_opts`` are the per-host connection options (see
+    ``build_ssh_opts``/``build_scp_opts``); ``user`` (when given) targets
+    ``user@host``. All default to none/empty so the mocked unit tests and any
+    localhost caller keep the bare ``ssh <host> …`` form.
     """
+    ssh_opts = list(ssh_opts or [])
+    scp_opts = list(scp_opts or [])
+    dest = f"{user}@{host}" if user else host
 
     def _run(envelope: dict, agent) -> Result:
         ticket_id = envelope.get("ticket_id", "ticket")
@@ -133,7 +201,7 @@ def ssh_transport(host: str):
 
             # 1) scp the envelope up.
             subprocess.run(
-                ["scp", local_env, f"{host}:{remote_env}"],
+                ["scp", *scp_opts, local_env, f"{dest}:{remote_env}"],
                 capture_output=True, text=True,
             )
 
@@ -141,7 +209,7 @@ def ssh_transport(host: str):
             timeout_s = int(envelope.get("timeout_s", 3600))
             ssh_proc = subprocess.run(
                 [
-                    "ssh", host,
+                    "ssh", *ssh_opts, dest,
                     "hermes", "serve-once",
                     "--envelope", remote_env,
                     "--result", remote_result,
@@ -170,7 +238,7 @@ def ssh_transport(host: str):
 
             # 3) scp the result/evidence back and parse it.
             subprocess.run(
-                ["scp", f"{host}:{remote_result}", local_result],
+                ["scp", *scp_opts, f"{dest}:{remote_result}", local_result],
                 capture_output=True, text=True,
             )
             raw = ""

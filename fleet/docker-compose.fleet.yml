@@ -1,0 +1,73 @@
+# Hermes fleet reference topology (docs/specs/fleet-integration-harness.md §2).
+#
+# The REFERENCE multi-node fleet: a master plus cpu- and gpu-class workers on one
+# hermetic network, with a baked throwaway keypair and resource labels. Auth is
+# hermetic — the private key lives on the master, the public key is injected into
+# each worker's authorized_keys via $HERMES_AUTHORIZED_KEY.
+#
+# The automated convergence test (tests/integration/test_fleet_docker.py) uses
+# `podman run` directly with host-as-master + published ports (simpler + more
+# reliable than container-to-container ssh). This compose file documents the
+# production-shaped topology and lets you bring the fleet up by hand:
+#
+#   ssh-keygen -t ed25519 -N '' -f fleet/.fleet_key
+#   export HERMES_AUTHORIZED_KEY="$(cat fleet/.fleet_key.pub)"
+#   podman-compose -f fleet/docker-compose.fleet.yml up --build
+#
+# then drive it from the master (which holds the private key + queue.db + the ssh
+# site config listing the workers as hosts with their resource labels).
+version: "3.8"
+
+x-worker-build: &worker-build
+  context: ..
+  dockerfile: fleet/Dockerfile.worker
+
+networks:
+  fleet:
+    driver: bridge
+
+services:
+  master:
+    build: *worker-build
+    image: hermes-fleet-worker:latest
+    networks: [fleet]
+    environment:
+      HERMES_AGENT: mock
+      # The master holds the private key (mounted) + queue.db; it runs the
+      # master loop and per-host serve loops that ssh into the workers below.
+    volumes:
+      - ./.fleet_key:/root/.ssh/id_ed25519:ro
+    # Override the sshd entrypoint: the master orchestrates rather than serving.
+    entrypoint: ["sleep", "infinity"]
+
+  worker-cpu-1:
+    build: *worker-build
+    image: hermes-fleet-worker:latest
+    networks: [fleet]
+    environment:
+      HERMES_AUTHORIZED_KEY: ${HERMES_AUTHORIZED_KEY}
+      HERMES_SSH_RESOURCES: '{"cpu":4}'
+    labels:
+      hermes.resources: '{"cpu":4}'
+
+  worker-cpu-2:
+    build: *worker-build
+    image: hermes-fleet-worker:latest
+    networks: [fleet]
+    environment:
+      HERMES_AUTHORIZED_KEY: ${HERMES_AUTHORIZED_KEY}
+      HERMES_SSH_RESOURCES: '{"cpu":4}'
+    labels:
+      hermes.resources: '{"cpu":4}'
+
+  worker-gpu-1:
+    build: *worker-build
+    image: hermes-fleet-worker:latest
+    networks: [fleet]
+    environment:
+      HERMES_AUTHORIZED_KEY: ${HERMES_AUTHORIZED_KEY}
+      # gpu count is a FAKE label (no real GPU in CI); the gpu semaphore binds
+      # fleet-wide regardless.
+      HERMES_SSH_RESOURCES: '{"cpu":8,"gpu":2}'
+    labels:
+      hermes.resources: '{"cpu":8,"gpu":2}'

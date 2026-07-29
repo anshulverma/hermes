@@ -215,6 +215,74 @@ def test_ssh_transport_builds_scp_ssh_scp_argv(mock_agent):
     assert result.outcome == "ok"
 
 
+def test_ssh_transport_includes_connection_options(mock_agent):
+    """ssh_transport threads ssh_opts/scp_opts/user into the scp+ssh argv (§9, Slice 12).
+
+    For REAL hosts the transport must carry an identity file, port, user, and the
+    hardened -o options. With opts + user given, the ssh argv targets ``user@host``
+    and carries the options; scp uses ``-P`` for the port.
+    """
+    from engine import transport
+
+    payload = {"scenario": "ok"}
+    env = {
+        "ticket_id": "r1/t-0", "run_id": "r1", "phase": "work",
+        "resource_req": "cpu", "base_ref": "main", "payload": payload,
+        "payload_sha256": _sha(payload), "timeout_s": 60, "site_context": {},
+        "goal_envelope": {
+            "goal": "g",
+            "driver": {"command": None, "args": {}, "loop": None},
+            "done_contract": {"type": "object"},
+            "guardrails": {"no_ship": True},
+        },
+    }
+
+    calls = []
+
+    def fake_run(argv, *a, **k):
+        calls.append(argv)
+        if (argv and argv[0] == "scp"
+                and str(argv[-2]).startswith("root@w1:")
+                and not str(argv[-1]).startswith("root@w1:")):
+            # scp-back: source is remote, dest (last arg) is the local result file.
+            Path(argv[-1]).write_text(json.dumps({"scenario": "ok"}))
+        return subprocess_result(returncode=0, stdout="")
+
+    ssh_opts = transport.build_ssh_opts(identity="/k/id", port=2222, connect_timeout=7)
+    scp_opts = transport.build_scp_opts(identity="/k/id", port=2222, connect_timeout=7)
+
+    with mock.patch("engine.transport.subprocess.run", side_effect=fake_run):
+        run = transport.ssh_transport("w1", ssh_opts=ssh_opts, scp_opts=scp_opts, user="root")
+        result = run(env, mock_agent)
+
+    assert result.outcome == "ok"
+    ssh_call = next(c for c in calls if c[0] == "ssh")
+    # Targets user@host and carries the hardened -o options + identity + port.
+    assert "root@w1" in ssh_call
+    assert "StrictHostKeyChecking=no" in ssh_call
+    assert "BatchMode=yes" in ssh_call
+    assert "UserKnownHostsFile=/dev/null" in ssh_call
+    assert "ConnectTimeout=7" in ssh_call
+    assert "-i" in ssh_call and "/k/id" in ssh_call
+    assert "-p" in ssh_call and "2222" in ssh_call
+    # scp targets user@host and uses -P (capital) for the port.
+    scp_up = calls[0]
+    assert scp_up[0] == "scp"
+    assert "-P" in scp_up and "2222" in scp_up
+    assert any(str(x).startswith("root@w1:") for x in scp_up)
+
+
+def test_build_ssh_opts_hardening_defaults():
+    """build_ssh_opts emits the non-interactive hardening -o flags by default."""
+    from engine import transport
+
+    opts = transport.build_ssh_opts()
+    assert "-o" in opts
+    assert "StrictHostKeyChecking=no" in opts
+    assert "UserKnownHostsFile=/dev/null" in opts
+    assert "BatchMode=yes" in opts
+
+
 def test_ssh_transport_nonzero_ssh_exit_is_transport_error(mock_agent):
     from engine import transport
 
