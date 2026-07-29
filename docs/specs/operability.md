@@ -74,7 +74,7 @@ Hermes already has **one** structured feed, and it is a *domain/audit* feed, not
 operational diagnostics:
 
 - **`events` table** (`engine/events.py`, DDL in engine-core §4; `EVENT_KINDS`
-  frozenset of 23 kinds) — the append-only **domain/audit** record: what happened
+  frozenset of 24 kinds) — the append-only **domain/audit** record: what happened
   to runs/tickets/crew/leases/reductions, consumed by `hermes status`, the API
   (`GET /api/events`), and the websocket feed. **This stays exactly as is.** It is
   the source of truth for *state history* and drives the UI. It is emitted inside
@@ -144,7 +144,7 @@ Two formatters:
 | **sites/transport** (`sites/*/site.py`, `engine/transport.py`) | provision start/done, health verdict (ok + failing check names) | a failing health `Check`, reachability loss, guard-not-installed | ssh/scp non-zero exits mapped to `TransportError` | full ssh/scp argv, connect timeout, per-host cfg *keys* (never identity contents) |
 
 Guidance baked into the spec: **INFO = the normal operational narrative**
-(safe to run at in prod), **WARNING = something an operator should notice but the
+(safe to run in prod), **WARNING = something an operator should notice but the
 system handled**, **ERROR/EXCEPTION = a failure with a stack trace**, **DEBUG =
 verbose developer detail** (argv, digests, cursors).
 
@@ -291,21 +291,40 @@ This turns today's late/opaque failures into one early, actionable error.
 (`cmd_serve_api`) handles its own signals but the engine wraps nothing around it.
 
 Requirements:
-- **Master / serve loops.** Install a SIGTERM (and SIGINT) handler that sets a
-  cooperative stop flag the loop checks **at cycle boundaries**
-  (`dispatch.py:59`, `:174`). On signal: finish the in-flight cycle iteration
-  (do not abandon a claim mid-`record_result`, which is transactional), stop
-  claiming new tickets, run one final lease-renew/heartbeat housekeeping pass so
-  no lease is left dangling, log a graceful-shutdown INFO line, close the DB
-  connection, and exit `0`. A ticket already `dispatched`/`running` on a worker is
-  left for the reclaim path (lease TTL / heartbeat down-requeue, engine-core §9) —
-  **no ticket is lost or double-run**, because the state machine already treats a
-  host lost mid-run as a no-penalty requeue.
+- **Master / serve loops — one shared stop flag.** The `local` topology runs
+  `master_loop` and, in-process (same thread), the per-host `serve_loop`s it calls
+  (`dispatch.py:218`, inside `master_loop`'s `while` at `dispatch.py:196`;
+  `serve_loop`'s own `while True:` is `dispatch.py:81`). A partial fix that stops
+  only one loop would leave the other spinning, so the mechanism is a **single
+  process-global cooperative stop flag** — a `threading.Event` (call it
+  `stop_event`) owned by a new tiny stdlib helper (e.g. `engine/shutdown.py`, or a
+  module-global on `engine/dispatch.py`), created once at process entry. A SIGTERM
+  **and** SIGINT handler is installed on the **loop-driving** entry paths only
+  (`cmd_run`, and the worker `cmd_serve --host`) and calls `stop_event.set()` (the
+  handler does nothing else — no I/O in a signal handler); the `serve --api` path
+  installs no such handler and defers to uvicorn's own signal handling (below), so
+  the two never conflict. Both loops consult the
+  **same** flag object (default-arg to the global; injectable for tests):
+  - `serve_loop` checks `stop_event.is_set()` at the top of its `while True:`
+    (`dispatch.py:81`) and returns the count processed so far.
+  - `master_loop` checks it at the top of its `while` (`dispatch.py:196`) and again
+    after the per-host `serve_loop` fan-out, before `reduce`.
+  Because the flag is process-global (not thread-local) it is visible to both the
+  master loop and the in-process serve loops it drives on `local`.
+- **On signal:** finish the in-flight cycle iteration (do not abandon a claim
+  mid-`record_result`, which is transactional — the check is only at loop tops, not
+  mid-transaction), stop claiming new tickets, run **one final housekeeping pass**
+  (`crew.heartbeat_sweep`, already called at `dispatch.py:202`) so leases are
+  renewed/reclaimed and none is left dangling, log a graceful-shutdown INFO line,
+  close the DB connection, and exit `0`. A ticket already `dispatched`/`running` on
+  a worker is left for the reclaim path (lease TTL / heartbeat down-requeue,
+  engine-core §9) — **no ticket is lost or double-run**, because the state machine
+  already treats a host lost mid-run as a no-penalty requeue.
 - **API server.** `cmd_serve_api` lets uvicorn own SIGTERM (uvicorn drains
   in-flight requests and closes websockets). Hermes adds a startup/shutdown log
   line via FastAPI lifespan hooks; no engine loop runs inside the API process, so
   there is nothing else to drain. Websocket clients already tolerate disconnect
-  (`server/app.py:1322`).
+  (`server/app.py:1321`, `except WebSocketDisconnect`).
 - **Idempotent restart.** Because all state is in `queue.db` and the loops are
   restartable, a killed-then-restarted `serve`/`master` process resumes correctly;
   the spec requires the shutdown path leave the DB in a consistent, restartable
@@ -382,17 +401,42 @@ A new `hermes db {prune|backup|vacuum}` CLI command group:
 
 - **`hermes db prune [--events-older-than DAYS] [--attempts-older-than DAYS]
   [--run R] [--dry-run]`** — delete `events` and/or `attempts` rows older than a
-  cutoff. **HARD SAFETY RULE (§9): never delete live/in-flight state.** Concretely:
-  - Only rows whose owning **run is terminal** (`done`/`failed`/`stopped`) are
-    eligible; rows for a `running`/`paused` run are never pruned.
-  - An `attempts` row is eligible only if its ticket is in a **terminal** state
-    (`done`/`failed`); never for a ticket still `queued`/`dispatched`/`running`/
-    `reducing`/`parked`/`needs_human`.
-  - `events` with a null `run_id` (fleet-wide crew events) are pruned purely by age
-    against the cutoff.
+  cutoff. **HARD SAFETY RULE (§9): never delete live/in-flight state.** The exact
+  eligibility predicate, per row (a row is deletable only if **every** clause below
+  holds), where **terminal run** = state ∈ {`done`,`failed`,`stopped`} and
+  **terminal ticket** = state ∈ {`done`,`failed`} (NOT `queued`/`dispatched`/
+  `running`/`reducing`/`parked`/`needs_human` — `parked`/`needs_human` are *waiting*,
+  not terminal):
+  - **`attempts` row** — eligible iff its ticket is a **terminal ticket** AND that
+    ticket's run is a **terminal run** AND `ended_at < cutoff` (rows with a null
+    `ended_at` are in-flight and never pruned). The run-terminal clause matters
+    because a ticket can be `done` while its run is still `running`; pruning its
+    audit then would drop history for a live run. Predicate sketch:
+    ```sql
+    DELETE FROM attempts WHERE id IN (
+      SELECT a.id FROM attempts a
+      JOIN tickets t ON t.id = a.ticket_id
+      JOIN runs   r ON r.id = t.run_id
+      WHERE t.state IN ('done','failed')
+        AND r.state IN ('done','failed','stopped')
+        AND a.ended_at IS NOT NULL AND a.ended_at < :cutoff);
+    ```
+  - **`events` row with a non-null `ticket_id`** — eligible iff that ticket is a
+    **terminal ticket** AND its run is a **terminal run** AND `ts < cutoff`. (A
+    `stopped` run can still own a `running`/`dispatched` ticket whose reclaim path
+    is in flight — keying events off run-terminal *alone* would delete live audit,
+    so both clauses are required.)
+  - **`events` row with a null `ticket_id` but a non-null `run_id`** (run-scope
+    events, e.g. `run_*`, `attention`) — eligible iff its run is a **terminal run**
+    AND `ts < cutoff`.
+  - **`events` row with a null `run_id`** (fleet-wide crew/lease events) — eligible
+    purely by age (`ts < cutoff`).
+  - `--run R` further restricts every clause to that run only.
   - `--dry-run` reports counts without deleting. Default cutoffs are conservative
     (e.g. 90 days) and configurable per invocation; no automatic/background pruning
     (operator-invoked or cron'd via the runbook).
+  - Runs as one transaction and commits; WAL durability is automatic. Reclaiming
+    the freed pages is the follow-up `db vacuum` (which checkpoints, §5.3 note).
   - Emits nothing to `events` (pruning is maintenance, not a domain event) but logs
     an INFO summary (rows deleted per table).
 - **`hermes db vacuum`** — run SQLite `VACUUM` to reclaim space after a prune
@@ -422,16 +466,58 @@ A new `hermes db {prune|backup|vacuum}` CLI command group:
 
 Off the existing `pyproject.toml` (setuptools ≥61, `build-backend =
 setuptools.build_backend`, console script `hermes=engine.cli:main`):
-- **Build** with `python -m build` → sdist + wheel. Document that the repo is a
-  **flat multi-package layout** (`engine/`, `server/`, `agents/`, `sites/`,
-  `playbooks/`, `testkit/`), so `pyproject.toml` must declare explicit packages
-  (setuptools `find` config) — the current `[project]` has no `[tool.setuptools]`
-  package discovery block, which the worker image sidesteps with `PYTHONPATH`
-  (`Dockerfile.worker:26`). **DELTA D9:** add an explicit
-  `[tool.setuptools.packages.find]` (or `packages`) block so `pip install .`
-  installs all runtime packages (`engine`, `server`, `agents`, `sites`,
-  `playbooks`) — excluding `tests`/`testkit`/`web` from the wheel. Without this the
-  `server` extra and the control-plane image cannot reliably `pip install`.
+- **Build** with `python -m build` → sdist + wheel. The repo is a **flat
+  multi-package layout** and the current `[project]` has **no** `[tool.setuptools]`
+  package-discovery block, which the worker image sidesteps with `PYTHONPATH`
+  (`Dockerfile.worker:26`). Two layout facts make the fix non-trivial and pin its
+  exact shape (**DELTA D9**):
+  1. **`sites/` is a PEP-420 namespace package** — it has **no `__init__.py`**,
+     while every one of its children (`sites/local/`, `sites/ssh/`,
+     `sites/devserver/`) *does*, as do `engine`(+`engine/db`), `server`,
+     `agents`(+`agents/claude`), `playbooks`(+`playbooks/dexter`), `testkit`.
+     Plain `setuptools.find_packages` (the default of
+     `[tool.setuptools.packages.find]`, `namespaces = false`) stops at any dir
+     lacking `__init__.py` and does **not** recurse, so it would **silently miss
+     `sites.local`/`sites.ssh`/`sites.devserver` entirely** — the `local`/`ssh`/
+     `devserver` sites would be absent from the wheel.
+  2. **The run path unconditionally imports `testkit`.**
+     `engine/cli.py::_load_playbook_site_agent` (`cli.py:31-32`) always runs
+     `import testkit.example_playbook` and `import testkit.mock_agent` before
+     dispatch, so a wheel that *excludes* `testkit` breaks **every** `hermes run`
+     (including production `run dexter`), not just the example.
+
+  **Exact fix — pick one (both are specified so the plan can choose):**
+  - **(A, recommended — deterministic, one code line):** add an empty
+    `sites/__init__.py` (making the whole tree regular packages, the only missing
+    one), then declare in `pyproject.toml`:
+    ```toml
+    [tool.setuptools.packages.find]
+    where   = ["."]
+    include = ["engine*", "server*", "agents*", "sites*", "playbooks*"]
+    exclude = ["tests*", "testkit*", "web*", "fleet*", "scripts*",
+               "integrations*", "docs*"]
+    ```
+    With every dir a regular package, plain `find_packages` deterministically
+    discovers `engine`, `engine.db`, `server`, `agents`, `agents.claude`, `sites`,
+    `sites.local`, `sites.ssh`, `sites.devserver`, `playbooks`, `playbooks.dexter`
+    and excludes test/web/infra dirs.
+  - **(B, no code change):** keep `sites/` a namespace package and set
+    `namespaces = true` explicitly (do **not** rely on the default) in the same
+    block; `include` restricts discovery to the five trees so `.venv`/`web`/etc.
+    are not swept in. The wheel then carries `sites` as a namespace package.
+  - **Either way, decouple `testkit` from the run path** so the wheel can legitimately
+    exclude it: make the two `testkit` imports in `_load_playbook_site_agent`
+    **conditional** — import `testkit.example_playbook` only when the requested
+    playbook is `example`, and `testkit.mock_agent` only when the agent is `mock`
+    (the production `dexter`/`claude`/`devserver` imports stay unconditional). Then
+    a testkit-free wheel runs `hermes run dexter`, while `hermes run example`
+    remains a dev-only, source/editable-install path (README quickstart uses
+    `pip install -e '.[dev,server]'`, so `testkit` is on the path there). Note the
+    control plane never hits this path at all (`serve --api` → `cmd_serve_api`, no
+    `_load_playbook_site_agent`).
+
+  Without D9 the `server` extra and the control-plane image cannot reliably
+  `pip install`, and a wheel-installed master cannot run any playbook.
 - **Versioning.** `version = "0.1.0"` in `pyproject.toml` is the single source;
   bump on release, tag `v<version>`.
 - **Publish target.** The runbook documents building a wheel and installing it in
@@ -493,9 +579,14 @@ changes the engine state machine, contracts, or the no-ship guard.
 - **D4 — `config.validate_startup()` (fail-fast).** Called at `main()` and
   `create_app()` entry; raises `ConfigError` on invalid `HERMES_HOME`/log/heartbeat
   settings or missing server extra.
-- **D5 — SIGTERM/SIGINT graceful shutdown.** Cooperative stop flag checked at cycle
-  boundaries in `dispatch.serve_loop`/`master_loop`; final housekeeping pass;
-  FastAPI lifespan log lines. No new dependency.
+- **D5 — SIGTERM/SIGINT graceful shutdown.** One process-global cooperative stop
+  flag (a `threading.Event`, e.g. in `engine/shutdown.py`) set by a signal handler
+  installed on the loop-driving paths (`cmd_run` / worker `cmd_serve --host`; the
+  `serve --api` path defers to uvicorn) and checked at the top of `serve_loop`'s `while`
+  (`dispatch.py:81`) and `master_loop`'s `while` (`dispatch.py:196`) — the *same*
+  object, so the in-process master+serve co-loops on `local` (`dispatch.py:218`)
+  stop together; final `heartbeat_sweep` housekeeping pass; FastAPI lifespan log
+  lines. No new dependency.
 - **D6 — `fleet/Dockerfile.control-plane` + `fleet/docker-compose.control-plane.yml`.**
   Control-plane image (installs `server` extra, runs `hermes serve --api`,
   persistent `HERMES_HOME` volume, migrate-on-start, loopback bind default).
@@ -503,9 +594,14 @@ changes the engine state machine, contracts, or the no-ship guard.
 - **D8 — `hermes db {prune|backup|vacuum}` (CLI + `engine/` helper).**
   Retention-safe prune of terminal `events`/`attempts` (never live/in-flight),
   online-backup-API backup, WAL-aware vacuum. New `cmd_db` + subparser.
-- **D9 — setuptools package discovery in `pyproject.toml`.** Explicit
-  `[tool.setuptools.packages.find]` so `pip install .` installs all runtime
-  packages and excludes tests/testkit/web — a precondition for D6/D10.
+- **D9 — setuptools package discovery in `pyproject.toml`.** Add
+  `[tool.setuptools.packages.find]` handling the flat layout's namespace-package
+  gap (`sites/` has no `__init__.py`; children do) — recommended fix (A): add an
+  empty `sites/__init__.py` + `include`/`exclude` globs (§6.1); alternative (B):
+  `namespaces = true`. **Plus** make the two `testkit` imports in
+  `_load_playbook_site_agent` (`cli.py:31-32`) conditional on `playbook==example`/
+  `agent==mock` so a wheel can exclude `testkit` without breaking `hermes run
+  dexter`. Precondition for D6/D10.
 - **D10 — `constraints.txt` for the `server` extra.** Pinned known-good
   fastapi/uvicorn/starlette/httpx for reproducible control-plane builds.
 - **D11 — refreshed `README.md` + new `docs/RUNBOOK.md`.** De-stale the status,
@@ -538,17 +634,25 @@ Everything is testable on one box with the existing `pytest` dev dep and
   Send an actual `SIGTERM` to a subprocess-launched `serve` loop in one integration
   test and assert exit 0 + a graceful-shutdown log line.
 - **Data lifecycle (D8).** Against a temp `queue.db` seeded with terminal and
-  live runs/tickets: assert `db prune` deletes only terminal-run/terminal-ticket
-  `events`/`attempts` and **never** rows tied to a `running`/`paused` run or a
-  non-terminal ticket (the §9 invariant); `--dry-run` deletes nothing; `db backup`
+  live runs/tickets: assert `db prune` deletes only rows where **both** run and
+  ticket are terminal and past the cutoff, and **never** rows tied to a
+  `running`/`paused` run, a non-terminal (incl. `parked`/`needs_human`) ticket, or
+  an `attempts` row with null `ended_at`. Include the trap case: a **`stopped` run
+  that still owns a `running`/`dispatched` ticket** — its events/attempts must
+  survive (keying off run-terminal alone would wrongly delete them). Assert
+  `--dry-run` deletes nothing; `db backup`
   produces a file that opens, passes `apply_migrations` as a no-op, and contains
   the same row counts (online-backup-API correctness under WAL); `db vacuum` runs
   clean.
 - **Packaging (D9/D10).** A test that builds the wheel (or introspects
-  `setuptools` discovery) and asserts `engine`, `server`, `agents`, `sites`,
-  `playbooks` are included and `tests`/`testkit`/`web` excluded; assert the
-  engine-core import-purity test (engine-core AC5) still passes — `engine/log.py`
-  imports only stdlib.
+  `setuptools` discovery) and asserts the **subpackages** are present —
+  specifically `sites.local`, `sites.ssh`, `sites.devserver` (the namespace-package
+  trap), plus `engine.db`, `agents.claude`, `playbooks.dexter` — and that
+  `tests`/`testkit`/`web` are excluded. Assert `hermes run dexter --dry-run`
+  succeeds against a testkit-free install (proves the conditional-import decoupling)
+  while `hermes run example` needs the dev/editable path. Assert the engine-core
+  import-purity test (engine-core AC5) still passes — `engine/log.py` imports only
+  stdlib.
 - Wire all of the above into `scripts/run_tests.sh` (unit + integration), keeping
   the suite green and infra-free.
 
@@ -573,22 +677,68 @@ Everything is testable on one box with the existing `pytest` dev dep and
   (engine-core AC5) survives. FastAPI/uvicorn stay confined to the `server` extra
   and the control-plane image (D6/D10).
 - **Retention never deletes live/in-flight state (HARD, §5.2).** `hermes db prune`
-  only touches `events`/`attempts` for **terminal** runs and **terminal** tickets;
-  `findings`/`reductions` are retained; `runs`/`tickets`/`crew`/`leases` current
-  state is never pruned. `queue.db` stays local, non-networked (§3.4 guard) and
-  0600 (`migrate.connect`), including backup outputs.
+  deletes an `attempts` row or a ticket-scoped `events` row only when **both** its
+  run is terminal (`done`/`failed`/`stopped`) **and** its ticket is terminal
+  (`done`/`failed`) and the row is past the age cutoff (the exact per-row predicate
+  is pinned in §5.2, incl. the null-`ticket_id`/null-`run_id` cases); `attempts`
+  with a null `ended_at` are never pruned. `findings`/`reductions` are retained;
+  `runs`/`tickets`/`crew`/`leases` current state is never pruned. `queue.db` stays
+  local, non-networked (§3.4 guard) and 0600 (`migrate.connect`), including backup
+  outputs.
 - **Additive, restartable, idempotent.** Migrations stay additive-only
   (`migrate.py`); graceful shutdown leaves a consistent, restartable DB; all
   operability commands are safe to re-run.
 
 ---
 
-## 10. Open items (non-blocking)
+## 10. Acceptance criteria
+
+Each is testable on one box, infra-free (§8), and maps to a DELTA / HARD invariant.
+
+1. **Logging (D1).** `configure()` is idempotent (no duplicate handlers on repeated
+   entry); text and JSON formatters emit the documented shapes (§2.2); `bind()`
+   attaches `run_id`/`ticket_id`/`host` to records; `HERMES_DEBUG=1` raises the
+   level to `DEBUG` but loses to an explicit `HERMES_LOG_LEVEL`.
+2. **No secrets in logs (HARD, §2.5/§9).** A full `LocalSite`+`MockAgent` run plus
+   server startup plus a WS connect with `?token=` produce log output containing
+   **neither** the `api_token` value, the `?token=` value, an SSH identity path's
+   contents, nor `HERMES_AUTHORIZED_KEY` — asserted by grepping captured records.
+3. **Config (D2/D3/D4).** `validate_startup()` rejects a bad log level, a
+   non-numeric/non-positive `HERMES_HEARTBEAT_S`/`HERMES_WS_POLL_S`, and a
+   networked-mount `HERMES_HOME` (via the injectable `is_networked` hook), raising
+   `ConfigError`; `hermes doctor` exits non-zero on a hard problem and prints
+   secrets only as `set`/`unset`.
+4. **Graceful shutdown (D5).** A SIGTERM to a running `serve`/`master` process
+   exits `0` at a loop boundary with a graceful-shutdown log line, no half-written
+   `attempts` row, no lease left dangling past the final housekeeping pass, and no
+   ticket lost (a dispatched ticket remains reclaimable). On `local` the shared flag
+   stops the in-process master + serve loops together.
+5. **Retention safety (D8, HARD, §5.2/§9).** `db prune` deletes an `attempts`/
+   ticket-scoped-`events` row only when its run AND ticket are both terminal and
+   past the cutoff; it never touches a `stopped` run's still-`running` ticket, a
+   non-terminal ticket, or a null-`ended_at` attempt; `--dry-run` deletes nothing.
+6. **WAL-safe backup (D8).** `db backup` (online-backup API) produces a 0600 file
+   that opens, re-`apply_migrations` as a no-op, and has identical row counts to the
+   source while a loop is running; `db vacuum` checkpoints then reclaims.
+7. **Packaging (D9/D10).** `pip install .` (non-editable, testkit excluded) yields a
+   wheel containing `sites.local`/`sites.ssh`/`sites.devserver` (+ `engine.db`,
+   `agents.claude`, `playbooks.dexter`) and excluding `tests`/`testkit`/`web`;
+   `hermes run dexter --dry-run` works against it; the control-plane image resolves
+   `fastapi`/`uvicorn` from the pinned constraints.
+8. **Invariants preserved.** Engine core still imports zero third-party packages at
+   runtime (engine-core AC5; `engine/log.py` is stdlib-only); the no-ship guard and
+   `Playbook.verify` are untouched (§9).
+
+---
+
+## 11. Open items (non-blocking)
 
 - **In-process serve loops on `local`.** `hermes run --site local` runs master +
-  serve loops in one process (`cli.py:159`); SIGTERM (D5) must stop them together —
-  a single stop flag shared by both loops in that process. Spec'd; implementation
-  detail deferred.
+  serve loops in one process/thread (`cli.py:159`, `dispatch.py:218`); SIGTERM (D5)
+  stops them together via the single process-global stop flag checked at both
+  `while` heads (`dispatch.py:81`, `:196`) — mechanism pinned in §4.1; only the
+  file/module home of the flag (`engine/shutdown.py` vs. a `dispatch` module-global)
+  is left to implementation.
 - **The `logs/` dir.** engine-core §3 reserves `$HERMES_HOME/logs/` but nothing
   writes it today. `HERMES_LOG_FILE` (D1) makes it the natural default location if
   an operator opts into file logging; whether `configure()` should default the file
