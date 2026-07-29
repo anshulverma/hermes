@@ -85,3 +85,47 @@ export async function fetchTickets(runId: string, filters?: TicketFilters): Prom
   const url = `/api/runs/${runId}/tickets${queryString ? '?' + queryString : ''}`;
   return fetchJSON<Ticket[]>(url);
 }
+
+export type TicketDetailAttempt = {
+  attempt: number;
+  host: string;
+  outcome: string | null;
+  termination_reason: string | null;
+  started_at: number | null;
+  ended_at: number | null;
+  result_ref: string | null;
+  error_summary: string | null;
+};
+
+export type TicketDetailResult = {
+  outcome: string;
+  termination_reason: string;
+  result_ref: string | null;
+  error_summary: string | null;
+  started_at: number;
+  ended_at: number;
+};
+
+export type TicketDetail = {
+  ticket: {
+    id: string;
+    run_id: string;
+    phase: string;
+    state: string;
+    resource_req: string;
+    priority: number;
+    attempts: number;
+    host: string | null;
+    subject: string;
+    created_at: number;
+    updated_at: number;
+  };
+  payload: Record<string, any>;
+  result: TicketDetailResult | null;
+  attempt_timeline: TicketDetailAttempt[];
+  evidence: Array<{ attempt: number; ref: string }>;
+};
+
+export async function fetchTicketDetail(ticketId: string): Promise<TicketDetail> {
+  return fetchJSON<TicketDetail>(`/api/tickets/${ticketId}`);
+}

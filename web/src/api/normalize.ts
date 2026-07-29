@@ -3,7 +3,7 @@
  * Maps engine values (snake_case, engine semantics) to UI values (kebab-case, prototype shapes).
  */
 
-import type { RunDetail } from './client';
+import type { RunDetail, TicketDetail } from './client';
 
 export type RunContext = {
   label: string;
@@ -94,4 +94,17 @@ export function normalizeTicketState(engineState: string): string {
  */
 export function denormalizeTicketState(uiState: string): string {
   return uiState.replace(/-/g, '_');
+}
+
+/**
+ * Normalize ticket detail: apply state normalization to the detail response.
+ */
+export function normalizeTicketDetail(detail: TicketDetail): TicketDetail {
+  return {
+    ...detail,
+    ticket: {
+      ...detail.ticket,
+      state: normalizeTicketState(detail.ticket.state),
+    },
+  };
 }

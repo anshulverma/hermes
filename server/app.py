@@ -235,4 +235,118 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    @app.get("/api/tickets/{ticket_id:path}")
+    def get_ticket_detail(ticket_id: str) -> dict[str, Any]:
+        """Get full ticket detail.
+
+        Returns:
+        - ticket: all ticket fields including parsed subject
+        - payload: parsed payload_json (GoalEnvelope)
+        - result: strict latest result (max id attempt) or null
+        - attempt_timeline: all attempts ordered oldest→newest
+        - evidence: non-null result_refs as {attempt, ref}
+        """
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Get ticket
+            ticket_row = conn.execute(
+                """SELECT id, run_id, phase, state, resource_req, priority,
+                          attempts, worker_host, payload_json, created_at, updated_at
+                   FROM tickets WHERE id=?""",
+                (ticket_id,),
+            ).fetchone()
+
+            if ticket_row is None:
+                raise HTTPException(status_code=404, detail=f"Ticket {ticket_id!r} not found")
+
+            (
+                tid, run_id, phase, state, resource_req, priority,
+                attempts, worker_host, payload_json, created_at, updated_at
+            ) = ticket_row
+
+            # Parse payload
+            payload = json.loads(payload_json)
+            subject = payload.get("goal") or payload.get("subject") or "—"
+
+            # Build ticket object
+            ticket = {
+                "id": tid,
+                "run_id": run_id,
+                "phase": phase,
+                "state": state,
+                "resource_req": resource_req,
+                "priority": priority,
+                "attempts": attempts,
+                "host": worker_host,
+                "subject": subject,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
+
+            # Get all attempts (ordered by id for timeline)
+            attempt_rows = conn.execute(
+                """SELECT id, attempt, host, outcome, termination_reason,
+                          started_at, ended_at, result_ref, error_summary
+                   FROM attempts WHERE ticket_id=? ORDER BY id""",
+                (ticket_id,),
+            ).fetchall()
+
+            # Build attempt_timeline
+            attempt_timeline = []
+            for row in attempt_rows:
+                (
+                    attempt_id, attempt_num, host, outcome, term_reason,
+                    started_at, ended_at, result_ref, error_summary
+                ) = row
+                attempt_timeline.append({
+                    "attempt": attempt_num,
+                    "host": host,
+                    "outcome": outcome,
+                    "termination_reason": term_reason,
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "result_ref": result_ref,
+                    "error_summary": error_summary,
+                })
+
+            # Derive strict latest result (max id attempt)
+            result = None
+            if attempt_rows:
+                latest = attempt_rows[-1]  # Last in id-ordered list
+                (
+                    _, _, _, outcome, term_reason,
+                    started_at, ended_at, result_ref, error_summary
+                ) = latest
+                result = {
+                    "outcome": outcome,
+                    "termination_reason": term_reason,
+                    "result_ref": result_ref,
+                    "error_summary": error_summary,
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                }
+
+            # Build evidence (non-null result_refs)
+            evidence = []
+            for i, row in enumerate(attempt_rows):
+                result_ref = row[7]  # result_ref column
+                attempt_num = row[1]  # attempt column
+                if result_ref is not None:
+                    evidence.append({
+                        "attempt": attempt_num,
+                        "ref": result_ref,
+                    })
+
+            return {
+                "ticket": ticket,
+                "payload": payload,
+                "result": result,
+                "attempt_timeline": attempt_timeline,
+                "evidence": evidence,
+            }
+        finally:
+            conn.close()
+
     return app

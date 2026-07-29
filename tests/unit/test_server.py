@@ -368,3 +368,161 @@ def test_tickets_unknown_run_404(client: TestClient, temp_home: Path):
     """GET /api/runs/{unknown}/tickets returns 404."""
     response = client.get("/api/runs/unknown-run/tickets")
     assert response.status_code == 404
+
+
+def test_ticket_detail_with_attempts(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/tickets/{id} returns full ticket detail with payload, result, attempts, evidence."""
+    # Get a ticket id from the seeded run
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    ticket_id = conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? ORDER BY id LIMIT 1",
+        (seeded_run,),
+    ).fetchone()[0]
+
+    # Insert multiple attempts for this ticket
+    import time
+    now = time.time()
+
+    # Attempt 1: failed
+    conn.execute(
+        """INSERT INTO attempts
+           (ticket_id, phase, host, attempt, started_at, ended_at, outcome,
+            termination_reason, result_ref, error_summary)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            ticket_id, "work", "worker-1", 1,
+            now - 300, now - 280,
+            "driver_failed", "driver_error",
+            None, "timeout in phase 1"
+        ),
+    )
+
+    # Attempt 2: succeeded (this is the LATEST)
+    conn.execute(
+        """INSERT INTO attempts
+           (ticket_id, phase, host, attempt, started_at, ended_at, outcome,
+            termination_reason, result_ref, error_summary)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            ticket_id, "work", "worker-2", 2,
+            now - 100, now - 50,
+            "ok", "goal_met",
+            "s3://results/ticket-1.json", None
+        ),
+    )
+
+    conn.commit()
+
+    # Fetch the ticket detail
+    response = client.get(f"/api/tickets/{ticket_id}")
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # Should have ticket fields
+    assert "ticket" in data
+    ticket = data["ticket"]
+    assert ticket["id"] == ticket_id
+    assert ticket["run_id"] == seeded_run
+    assert ticket["phase"] == "work"
+    assert ticket["state"] == "queued"
+    assert "resource_req" in ticket
+    assert "priority" in ticket
+    assert "attempts" in ticket
+    assert "host" in ticket
+    assert "subject" in ticket
+    assert "created_at" in ticket
+    assert "updated_at" in ticket
+
+    # Should have parsed payload
+    assert "payload" in data
+    payload = data["payload"]
+    assert isinstance(payload, dict)
+    # Verify it's actually the parsed JSON, not a string (seeded data has issue_id/title)
+    assert len(payload) > 0  # Non-empty dict means it was parsed
+
+    # Should have result (strict latest = max id attempt)
+    assert "result" in data
+    result = data["result"]
+    assert result is not None
+
+    # Result should match attempt 2 (the max id attempt)
+    latest_attempt = conn.execute(
+        """SELECT outcome, termination_reason, result_ref, error_summary,
+                  started_at, ended_at
+           FROM attempts WHERE ticket_id=? ORDER BY id DESC LIMIT 1""",
+        (ticket_id,),
+    ).fetchone()
+
+    assert result["outcome"] == latest_attempt[0]
+    assert result["termination_reason"] == latest_attempt[1]
+    assert result["result_ref"] == latest_attempt[2]
+    assert result["error_summary"] == latest_attempt[3]
+    assert result["started_at"] == latest_attempt[4]
+    assert result["ended_at"] == latest_attempt[5]
+
+    # Should have attempt_timeline (all attempts, ordered)
+    assert "attempt_timeline" in data
+    timeline = data["attempt_timeline"]
+    assert len(timeline) == 2
+
+    # Verify timeline order (oldest first)
+    assert timeline[0]["attempt"] == 1
+    assert timeline[0]["host"] == "worker-1"
+    assert timeline[0]["outcome"] == "driver_failed"
+    assert timeline[0]["termination_reason"] == "driver_error"
+    assert timeline[0]["result_ref"] is None
+    assert timeline[0]["error_summary"] == "timeout in phase 1"
+
+    assert timeline[1]["attempt"] == 2
+    assert timeline[1]["host"] == "worker-2"
+    assert timeline[1]["outcome"] == "ok"
+    assert timeline[1]["termination_reason"] == "goal_met"
+    assert timeline[1]["result_ref"] == "s3://results/ticket-1.json"
+    assert timeline[1]["error_summary"] is None
+
+    # Should have evidence (non-null result_refs)
+    assert "evidence" in data
+    evidence = data["evidence"]
+    assert len(evidence) == 1
+    assert evidence[0]["attempt"] == 2
+    assert evidence[0]["ref"] == "s3://results/ticket-1.json"
+
+    conn.close()
+
+
+def test_ticket_detail_no_attempts(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/tickets/{id} returns null result when no attempts exist."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    ticket_id = conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? ORDER BY id LIMIT 1",
+        (seeded_run,),
+    ).fetchone()[0]
+
+    conn.close()
+
+    # No attempts inserted, so result should be null
+    response = client.get(f"/api/tickets/{ticket_id}")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert "result" in data
+    assert data["result"] is None
+
+    assert "attempt_timeline" in data
+    assert len(data["attempt_timeline"]) == 0
+
+    assert "evidence" in data
+    assert len(data["evidence"]) == 0
+
+
+def test_ticket_detail_not_found(client: TestClient, temp_home: Path):
+    """GET /api/tickets/{unknown} returns 404."""
+    response = client.get("/api/tickets/unknown-ticket-id")
+    assert response.status_code == 404
+    data = response.json()
+    assert "detail" in data
