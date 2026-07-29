@@ -1,0 +1,11 @@
+/* Elevation is communicated by *lighter*, and by translucency for anything that floats. */
+:root {
+  --layer-0: rgb(0, 0, 0);
+  --layer-1: rgb(22, 22, 22);
+  --layer-2: oklab(0 0 0 / 0.85);
+  --shadow-none: none; /* there are no shadows in this system */
+  --blur-overlay: 12px;
+  --motion-fast: 120ms; /* @kind other */
+  --motion-base: 160ms; /* @kind other */
+  --ease-default: ease-out; /* @kind other */
+}

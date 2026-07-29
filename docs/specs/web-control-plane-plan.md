@@ -100,8 +100,9 @@ crew, leases, events, reductions) — the server is a thin read/adapt + auth lay
 The web app needs a **real run to look at**. Engine-core Slices 0–9
 (`engine-core-plan.md`) — through the end-to-end local run producing tickets /
 events / crew / reductions in `queue.db` — are the prerequisite for Phase B onward.
-Phase A (app + DS scaffold) has **no** backend dependency and can proceed in
-parallel with engine-core. Each slice below names its engine-core dependency.
+Phase A can proceed in parallel with engine-core: A0 (app + DS scaffold) has **no**
+backend dependency; A1 needs only engine-core Slice 1 (schema), not a real run.
+Each slice below names its engine-core dependency.
 
 ## 7. Slices (each obeys §2 and the §9 DoD)
 

@@ -1,0 +1,10 @@
+/* The only animations in the system: an alpha pulse for live indicators and a
+   fade for anything entering. No scale, no bounce, no slide-ins. */
+@keyframes fm-pulse {
+  from { opacity: 1; }
+  to { opacity: 0.35; }
+}
+@keyframes fm-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
