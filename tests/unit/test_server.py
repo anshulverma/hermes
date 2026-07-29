@@ -1674,6 +1674,29 @@ def test_run_control_illegal_transition_409(loopback_client: TestClient, seeded_
     assert "detail" in response.json()
 
 
+def test_run_control_404_vs_409_separation(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """Run control correctly distinguishes 404 (unknown run) from 409 (illegal transition)."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    # Test 404: unknown run
+    response = loopback_client.post("/api/runs/nonexistent-run-id/pause", headers=headers)
+    assert response.status_code == 404
+
+    # Test 409: illegal transition (pause an already stopped run)
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE runs SET state='stopped' WHERE id=?", (seeded_run,))
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.post(f"/api/runs/{seeded_run}/pause", headers=headers)
+    assert response.status_code == 409
+
+
 # --- SPA Serving + Token Injection (D1a) ---
 
 

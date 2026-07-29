@@ -7,6 +7,7 @@ GET-gated on non-loopback, SPA serving with token bootstrap injection (loopback 
 import asyncio
 import json
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Annotated
 
@@ -65,7 +66,8 @@ def create_app(bind: str | None = None) -> FastAPI:
         elif token:
             provided_token = token
 
-        if provided_token != app_token:
+        # Constant-time comparison to prevent timing attacks
+        if not secrets.compare_digest(provided_token or "", app_token or ""):
             raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
 
     # Auth dependency for GET endpoints: only gate on non-loopback
@@ -76,8 +78,6 @@ def create_app(bind: str | None = None) -> FastAPI:
         """Validate bearer token for GET endpoints (only on non-loopback)."""
         if not loopback:
             require_auth(credentials, token)
-
-    app = FastAPI(title="Hermes Control Plane", version="0.1.0")
 
     @app.get("/api/health")
     def health(_: None = Depends(require_auth_read)) -> dict[str, Any]:
@@ -671,16 +671,21 @@ def create_app(bind: str | None = None) -> FastAPI:
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
-            set_run_state(conn, run_id, "paused")
+            # Explicit existence check: 404 if run doesn't exist
+            run_exists = conn.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone()
+            if run_exists is None:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+
+            # Attempt state transition: 409 if illegal
+            try:
+                set_run_state(conn, run_id, "paused")
+            except ValueError as e:
+                # Illegal transition (e.g., pause an already stopped run)
+                raise HTTPException(status_code=409, detail=str(e))
+
             # Return the run's new state
             state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
             return {"state": state}
-        except ValueError as e:
-            # set_run_state raises ValueError on unknown run or illegal transition
-            if "unknown run" in str(e):
-                raise HTTPException(status_code=404, detail=str(e))
-            else:
-                raise HTTPException(status_code=409, detail=str(e))
         finally:
             conn.close()
 
@@ -695,15 +700,21 @@ def create_app(bind: str | None = None) -> FastAPI:
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
-            set_run_state(conn, run_id, "running")
+            # Explicit existence check: 404 if run doesn't exist
+            run_exists = conn.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone()
+            if run_exists is None:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+
+            # Attempt state transition: 409 if illegal
+            try:
+                set_run_state(conn, run_id, "running")
+            except ValueError as e:
+                # Illegal transition (e.g., resume a stopped run)
+                raise HTTPException(status_code=409, detail=str(e))
+
             # Return the run's new state
             state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
             return {"state": state}
-        except ValueError as e:
-            if "unknown run" in str(e):
-                raise HTTPException(status_code=404, detail=str(e))
-            else:
-                raise HTTPException(status_code=409, detail=str(e))
         finally:
             conn.close()
 
@@ -718,15 +729,21 @@ def create_app(bind: str | None = None) -> FastAPI:
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
-            set_run_state(conn, run_id, "stopped")
+            # Explicit existence check: 404 if run doesn't exist
+            run_exists = conn.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone()
+            if run_exists is None:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+
+            # Attempt state transition: 409 if illegal
+            try:
+                set_run_state(conn, run_id, "stopped")
+            except ValueError as e:
+                # Illegal transition (e.g., stop an already stopped run)
+                raise HTTPException(status_code=409, detail=str(e))
+
             # Return the run's new state
             state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
             return {"state": state}
-        except ValueError as e:
-            if "unknown run" in str(e):
-                raise HTTPException(status_code=404, detail=str(e))
-            else:
-                raise HTTPException(status_code=409, detail=str(e))
         finally:
             conn.close()
 
@@ -760,7 +777,8 @@ def create_app(bind: str | None = None) -> FastAPI:
             if auth_header and auth_header.startswith("Bearer "):
                 provided_token = auth_header[7:]
 
-        if provided_token != app_token:
+        # Constant-time comparison to prevent timing attacks
+        if not secrets.compare_digest(provided_token or "", app_token or ""):
             # Close with custom code 4401
             await websocket.close(code=4401)
             return
