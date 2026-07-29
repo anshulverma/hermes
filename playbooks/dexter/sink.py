@@ -8,7 +8,10 @@ Stdlib-only.
 """
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+import tempfile
 from typing import Protocol
 
 
@@ -58,8 +61,8 @@ class DexterKbSink:
     """Production sink: shells to dexter plugin kb.py (validate + index).
 
     Expects:
+    - DEXTER_KB_PY env var pointing to kb.py script
     - INVESTIGATIONS_DIR env var pointing to the dexter runtime dir
-    - dexter plugin installed (kb.py on PATH or via ${CLAUDE_PLUGIN_ROOT}/dexter/scripts/kb.py)
 
     This is the single master-side dexter coupling (§5).
     """
@@ -71,20 +74,131 @@ class DexterKbSink:
             cluster: Cluster dict with signature, canonical_ticket_id, etc.
 
         Returns:
-            Learning ref on success, None on failure.
+            Learning ref (e.g. "kb/slug") on success, None on failure/not-configured.
 
-        Raises:
-            subprocess.CalledProcessError: If kb.py fails (caller catches).
+        Best-effort: returns None if not configured or validation/indexing fails.
+        Never raises (honest "not banked" via None return).
         """
-        # For now, this is a stub that would shell to kb.py
-        # Full implementation would:
-        # 1. Generate a knowledge entry from the cluster
-        # 2. Call kb.py validate <entry-file>
-        # 3. Call kb.py index <entry-file>
-        # 4. Return the ref
-        #
-        # Since reduce must never raise and we're in a best-effort context,
-        # the caller will wrap this in try/except.
-        raise NotImplementedError(
-            "DexterKbSink.bank() is a stub; full implementation shells to kb.py"
-        )
+        # Check configuration from env
+        kb_py_path = os.environ.get("DEXTER_KB_PY", "").strip()
+        investigations_dir = os.environ.get("INVESTIGATIONS_DIR", "").strip()
+
+        if not kb_py_path or not investigations_dir:
+            # Not configured → return None (honest "not banked")
+            return None
+
+        try:
+            # Build a knowledge entry document from cluster
+            slug = self._build_slug(cluster)
+            entry_doc = self._build_knowledge_entry(cluster, slug)
+
+            # Write to temp file
+            with tempfile.NamedTemporaryFile(
+                mode='w',
+                suffix='.md',
+                delete=False,
+                encoding='utf-8'
+            ) as f:
+                f.write(entry_doc)
+                entry_path = f.name
+
+            try:
+                # 1. Validate
+                result = subprocess.run(
+                    ["python3", kb_py_path, "validate", entry_path],
+                    env={**os.environ, "INVESTIGATIONS_DIR": investigations_dir},
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode != 0:
+                    # Validation failed → return None
+                    return None
+
+                # 2. Index (validate passed)
+                result = subprocess.run(
+                    ["python3", kb_py_path, "index", entry_path],
+                    env={**os.environ, "INVESTIGATIONS_DIR": investigations_dir},
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode != 0:
+                    # Index failed → return None
+                    return None
+
+                # Success: return a ref
+                return f"kb/{slug}"
+
+            finally:
+                # Clean up temp file
+                try:
+                    os.unlink(entry_path)
+                except Exception:
+                    pass
+
+        except Exception:
+            # Best-effort: any error → return None
+            return None
+
+    def _build_slug(self, cluster: dict) -> str:
+        """Build a slug for the knowledge entry from cluster signature."""
+        sig = cluster.get("signature", "unknown")
+        # Simple slug: lowercase, replace non-alphanum with hyphen
+        import re
+        slug = re.sub(r'[^a-z0-9]+', '-', sig.lower()).strip('-')
+        return slug or "unknown"
+
+    def _build_knowledge_entry(self, cluster: dict, slug: str) -> str:
+        """Build a minimal knowledge entry document from cluster data.
+
+        This is a minimal scaffold; real dexter kb.py validate will likely
+        require more fields. For now, we include what we have from the cluster.
+        """
+        sig = cluster.get("signature", "Unknown")
+        cause_category = cluster.get("cause_category", "unknown")
+        canonical_ticket_id = cluster.get("canonical_ticket_id", "")
+        canonical_diff_ref = cluster.get("canonical_diff_ref", "")
+        member_ticket_ids = cluster.get("member_ticket_ids", [])
+
+        # Build a minimal markdown doc
+        # (Real implementation would need full frontmatter + all required sections)
+        doc = f"""---
+slug: {slug}
+signature: {sig}
+cause_category: {cause_category}
+---
+
+# {sig}
+
+## Root Cause
+
+Category: {cause_category}
+
+## Evidence
+
+Canonical ticket: {canonical_ticket_id}
+Canonical diff: {canonical_diff_ref}
+Member tickets: {', '.join(member_ticket_ids)}
+
+## Fix
+
+See diff: {canonical_diff_ref}
+
+## Impact
+
+TBD
+
+## Mitigation
+
+TBD
+
+## Prevention
+
+TBD
+
+## Related
+
+TBD
+"""
+        return doc

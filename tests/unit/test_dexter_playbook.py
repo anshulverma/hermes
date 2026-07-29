@@ -1111,3 +1111,141 @@ def test_reduce_stale_finding_surfaced_via_needs_human():
     # So a human sees it in review and can REJECT to drop it (not silently banked-and-done).
     # This surfaces the edge for human judgment.
     assert r.json["learning_ref"] == "kb/stale"  # banked (but awaiting human accept/reject)
+
+
+def test_reduce_malformed_finding_missing_signature_no_raise():
+    """reduce() with finding missing root_cause.signature → skips it, does NOT raise."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/test"))
+    run = _run()
+
+    # One good finding, one malformed (missing root_cause entirely)
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {"signature": "GOOD-SIG", "cause_category": "good_cat"},
+                "fix": {"verified": True, "diff_ref": "D1"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "e1",
+            },
+        ),
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-1",
+            kind="result",
+            json={
+                "reproduced": True,
+                # Missing root_cause entirely
+                "fix": {"verified": True},
+                "knowledge_entry": {"validated": False},
+                "evidence_ref": "e2",
+            },
+        ),
+    ]
+
+    # reduce must NOT raise
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    # Only one cluster (the good finding)
+    assert len(reductions) == 1
+    assert reductions[0].json["signature"] == "GOOD-SIG"
+    assert reductions[0].json["member_ticket_ids"] == [f"{run.id}/solve-0"]
+
+
+def test_reduce_malformed_finding_missing_signature_key_no_raise():
+    """reduce() with finding missing root_cause.signature key → skips it, does NOT raise."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/test"))
+    run = _run()
+
+    # One good finding, one malformed (root_cause present but signature key missing)
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {"signature": "GOOD-SIG", "cause_category": "good_cat"},
+                "fix": {"verified": True, "diff_ref": "D1"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "e1",
+            },
+        ),
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-1",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    # signature key missing
+                    "cause_category": "partial_cat",
+                },
+                "fix": {"verified": True},
+                "knowledge_entry": {"validated": False},
+                "evidence_ref": "e2",
+            },
+        ),
+    ]
+
+    # reduce must NOT raise
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    # Only one cluster (the good finding)
+    assert len(reductions) == 1
+    assert reductions[0].json["signature"] == "GOOD-SIG"
+
+
+def test_reduce_all_malformed_findings_empty_clusters():
+    """reduce() with ALL findings malformed → returns empty list, does NOT raise."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/test"))
+    run = _run()
+
+    # All findings malformed
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                # Missing root_cause
+                "fix": {"verified": True},
+                "knowledge_entry": {"validated": False},
+                "evidence_ref": "e1",
+            },
+        ),
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-1",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    # Missing signature
+                    "cause_category": "cat",
+                },
+                "fix": {"verified": True},
+                "knowledge_entry": {"validated": False},
+                "evidence_ref": "e2",
+            },
+        ),
+    ]
+
+    # reduce must NOT raise
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    # Empty cluster list (all malformed)
+    assert reductions == []

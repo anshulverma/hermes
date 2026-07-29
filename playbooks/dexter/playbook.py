@@ -270,9 +270,20 @@ class DexterPlaybook:
         folded = list(latest_by_ticket.values())
 
         # 2. CLUSTER by signature
+        # Guard: skip findings missing root_cause.signature (malformed)
         clusters: dict[str, list[Finding]] = {}
+        skipped_malformed = 0
         for f in folded:
-            sig = f.json["root_cause"]["signature"]
+            try:
+                sig = f.json["root_cause"]["signature"]
+                if not sig:
+                    # Empty signature is unclusterable
+                    skipped_malformed += 1
+                    continue
+            except (KeyError, TypeError):
+                # Missing root_cause or signature key → unclusterable
+                skipped_malformed += 1
+                continue
             clusters.setdefault(sig, []).append(f)
 
         # 3. Build one Reduction per cluster
@@ -291,10 +302,10 @@ class DexterPlaybook:
             canonical = members[0]
             duplicates = members[1:]
 
-            # Extract fields from canonical
-            cause_category = canonical.json["root_cause"]["cause_category"]
+            # Extract fields from canonical (with defensive defaults)
+            cause_category = canonical.json.get("root_cause", {}).get("cause_category", "unknown")
             canonical_ticket_id = canonical.ticket_id
-            canonical_diff_ref = canonical.json["fix"].get("diff_ref")
+            canonical_diff_ref = canonical.json.get("fix", {}).get("diff_ref")
 
             # Build duplicate_diffs list
             duplicate_diffs = [
