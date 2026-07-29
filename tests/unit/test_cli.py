@@ -438,3 +438,125 @@ def test_show_ticket(setup_testkit, capsys):
 # --- serve (out of scope for unit tests, tested via integration) -------
 # The serve command runs a blocking serve_loop; we won't test it in unit tests
 # because it's an integration concern (tested in test_e2e.py).
+
+
+# --- run --hosts parsing ------------------------------------------------
+
+def test_run_hosts_parsed_and_used(setup_testkit, capsys):
+    """run --hosts parses the comma-separated list and passes to master_loop."""
+    with temp_hermes_home() as home:
+        issues_path = home / "issues" / "bug.json"
+        write_canned_issues(issues_path)
+
+        # Two local hosts (both localhost entries, for simplicity)
+        exit_code = main([
+            "run", "example",
+            "--site", "local",
+            "--agent", "mock",
+            "--hosts", "localhost,localhost",
+            "--dry-run",
+        ])
+
+        assert exit_code == 0
+
+        # The --hosts arg should be parsed; in dry-run mode we don't dispatch,
+        # but we can check that the arg is accepted (no argparse error)
+        captured = capsys.readouterr()
+        assert "error" not in captured.out.lower()
+
+
+# --- serve --host -------------------------------------------------------
+
+def test_serve_processes_available_work(setup_testkit, capsys):
+    """serve --host processes the claimable tickets for a run."""
+    with temp_hermes_home() as home:
+        # Seed a run + ticket manually
+        conn = _conn()
+        now = time.time()
+        run_id = f"run-{int(now * 1000)}"
+        conn.execute(
+            """INSERT INTO runs (id, playbook, site, base_ref, config_json, state,
+                                 phase, created_at, updated_at)
+               VALUES (?, 'example', 'local', 'main', '{}', 'running', 'work', ?, ?)""",
+            (run_id, now, now),
+        )
+        # Add a queued ticket
+        conn.execute(
+            """INSERT INTO tickets
+                 (id, run_id, phase, state, resource_req, priority, attempts,
+                  available_at, tried_hosts, payload_json, created_at, updated_at)
+               VALUES ('t1', ?, 'work', 'queued', 'cpu', 0, 0, 0, '[]', '{}', ?, ?)""",
+            (run_id, now, now),
+        )
+        conn.commit()
+        conn.close()
+
+        # Add the host to crew
+        main(["crew", "add", "localhost", "--site", "local", "--agent", "mock"])
+
+        # Now serve for that host + run
+        exit_code = main([
+            "serve",
+            "--host", "localhost",
+            "--site", "local",
+            "--agent", "mock",
+            "--run", run_id,
+        ])
+
+        assert exit_code == 0, "serve should exit 0 on success"
+
+        # Check that the ticket was processed (moved out of queued)
+        conn = _conn()
+        state = conn.execute("SELECT state FROM tickets WHERE id='t1'").fetchone()[0]
+        # It should be in a terminal-ish state (done/failed) or reducing
+        assert state != "queued", f"ticket should have been processed, got {state}"
+
+        # An attempt should exist
+        attempts = conn.execute(
+            "SELECT COUNT(*) FROM attempts WHERE ticket_id='t1'"
+        ).fetchone()[0]
+        assert attempts > 0, "serve should have created at least one attempt"
+
+        conn.close()
+
+
+# --- traceback gating (HERMES_DEBUG) ------------------------------------
+
+def test_error_traceback_gated_by_debug_env(setup_testkit, capsys, monkeypatch):
+    """Top-level exception prints just the message unless HERMES_DEBUG=1."""
+    with temp_hermes_home() as home:
+        monkeypatch.delenv("HERMES_DEBUG", raising=False)
+
+        # Force an exception by corrupting the database file
+        db_path = config.resolve_home() / "queue.db"
+        db_path.write_text("corrupted data")
+
+        # This will trigger a database error that reaches the top-level handler
+        exit_code = main(["status"])
+        assert exit_code != 0
+
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        # Should have "Error:" but NOT a full traceback (no "Traceback")
+        assert "error" in combined.lower()
+        assert "traceback" not in combined.lower(), "should not print traceback without HERMES_DEBUG"
+
+
+def test_error_traceback_shown_with_debug_env(setup_testkit, capsys, monkeypatch):
+    """With HERMES_DEBUG=1, exceptions print a full traceback."""
+    with temp_hermes_home() as home:
+        monkeypatch.setenv("HERMES_DEBUG", "1")
+
+        # Force an exception by corrupting the database file
+        db_path = config.resolve_home() / "queue.db"
+        db_path.write_text("corrupted data")
+
+        # This will trigger a database error that reaches the top-level handler
+        exit_code = main(["status"])
+        assert exit_code != 0
+
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        # Should have both "Error:" and a traceback
+        assert "error" in combined.lower()
+        assert "traceback" in combined.lower(), "should print traceback with HERMES_DEBUG=1"

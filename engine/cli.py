@@ -4,6 +4,7 @@ Thin wrappers over engine modules. Stdlib-only (argparse).
 """
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -106,7 +107,7 @@ def cmd_run(args):
         # Default: for local site, use localhost
         hosts = ['localhost']
     elif isinstance(hosts, str):
-        hosts = hosts.split(',')
+        hosts = [h.strip() for h in hosts.split(',')]
 
     # Add hosts to crew (for local in-process serving)
     for host in hosts:
@@ -353,11 +354,56 @@ def cmd_show(args):
 
 
 def cmd_serve(args):
-    """hermes serve --host <h> --site <site> [--agent <agent>]."""
-    # Out of scope for unit tests (integration concern)
-    # This would run dispatch.serve_loop in a blocking manner
-    print("serve command not yet implemented (integration-only)", file=sys.stderr)
-    return 1
+    """hermes serve --host <h> --site <site> [--agent <agent>] [--run R]."""
+    pb, st, ag = _load_playbook_site_agent(args)
+    host = args.host
+    base_ref = getattr(args, 'base_ref', None) or 'main'
+
+    conn = _connect()
+
+    # Determine which run to serve (explicit --run or the single active/most-recent running run)
+    run_id = getattr(args, 'run', None)
+    if not run_id:
+        # Find the most recent running run
+        row = conn.execute(
+            """SELECT id FROM runs WHERE state='running'
+               ORDER BY created_at DESC LIMIT 1"""
+        ).fetchone()
+        if not row:
+            print("Error: no running run found (specify --run <run_id>)", file=sys.stderr)
+            conn.close()
+            return 1
+        run_id = row[0]
+
+    # Load the run
+    run_row = conn.execute(
+        """SELECT id, playbook, site, base_ref, config_json, phase
+           FROM runs WHERE id=?""",
+        (run_id,),
+    ).fetchone()
+    if not run_row:
+        print(f"Error: run {run_id} not found", file=sys.stderr)
+        conn.close()
+        return 1
+
+    run = Run(
+        id=run_row[0],
+        playbook=run_row[1],
+        site=run_row[2],
+        base_ref=run_row[3],
+        config=json.loads(run_row[4]),
+        phase=run_row[5],
+        reductions=[],
+    )
+
+    # TODO(dexter): --goals FILE seeding
+
+    # Run the serve loop (bounded — serve available work then return)
+    processed = dispatch.serve_loop(conn, st, ag, host, run, pb, base_ref)
+
+    print(f"Host {host}: processed {processed} tickets for run {run_id}")
+    conn.close()
+    return 0
 
 
 def cmd_crew(args):
@@ -402,6 +448,7 @@ def main(argv=None):
     run_parser.add_argument('--site', help='Site name (for run playbook)')
     run_parser.add_argument('--agent', help='Agent name (default: HERMES_AGENT)')
     run_parser.add_argument('--base-ref', help='Base ref (default: main)')
+    run_parser.add_argument('--hosts', help='Comma-separated hosts (default: localhost for local site)')
     run_parser.add_argument('--dry-run', action='store_true', help='Seed only, no dispatch')
 
     # --- reduction ---
@@ -444,6 +491,8 @@ def main(argv=None):
     serve_parser.add_argument('--host', required=True, help='Host to serve')
     serve_parser.add_argument('--site', required=True, help='Site name')
     serve_parser.add_argument('--agent', help='Agent name')
+    serve_parser.add_argument('--run', help='Run ID (default: most recent running run)')
+    serve_parser.add_argument('--base-ref', help='Base ref (default: main)')
 
     # Parse
     args = parser.parse_args(argv)
@@ -486,8 +535,9 @@ def main(argv=None):
             return cmd_serve(args)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
-        import traceback
-        traceback.print_exc()
+        if os.environ.get("HERMES_DEBUG"):
+            import traceback
+            traceback.print_exc()
         return 1
 
     return 0
