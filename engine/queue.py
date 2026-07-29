@@ -348,6 +348,67 @@ def requeue(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
         raise
 
 
+def fail_contract_violation(
+    conn: sqlite3.Connection,
+    ticket: Ticket,
+    host: str,
+    error_summary: str,
+    now=None,
+) -> None:
+    """Terminal ``running → failed`` for deterministic contract violations (§11).
+
+    Used for envelope validation errors (ContractError) and no-ship guard
+    violations. These are DETERMINISTIC failures that will never succeed on retry,
+    so the ticket goes straight to ``failed`` with ``termination_reason =
+    contract_fail``. No ``attempts`` penalty is applied (this is not an infra
+    retry). The lease is released. An ``attempts`` audit row is written.
+    """
+    now = _now(now)
+    try:
+        row = conn.execute(
+            "SELECT run_id, phase, attempts, lease_id FROM tickets WHERE id=?",
+            (ticket.id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown ticket {ticket.id!r}")
+        run_id, phase, attempts, lease_id = row
+
+        # Release the ticket's lease (leaving running) (§9).
+        if lease_id:
+            from engine import leases
+            leases.release(conn, lease_id, now=now)
+
+        # Append the append-only attempts audit row (§4).
+        conn.execute(
+            """INSERT INTO attempts
+                 (ticket_id, phase, host, attempt, started_at, ended_at,
+                  outcome, termination_reason, result_ref, error_summary)
+               VALUES (?, ?, ?, ?, ?, ?, 'driver_failed', 'contract_fail', NULL, ?)""",
+            (ticket.id, phase, host, attempts + 1, now, now, error_summary),
+        )
+
+        # Transition to failed (terminal, no retry).
+        conn.execute(
+            "UPDATE tickets SET state='failed', updated_at=? WHERE id=?",
+            (now, ticket.id),
+        )
+
+        # Emit events.
+        events.emit(
+            conn, "ticket_failed", run_id=run_id, ticket_id=ticket.id, host=host,
+            data={"termination_reason": "contract_fail"},
+        )
+        events.emit(
+            conn, "attention", run_id=run_id, ticket_id=ticket.id,
+            data={"reason": "failed"},
+        )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def requeue_transport(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
     """No-penalty (transport host-lost) ``running → queued`` requeue (§5, §9).
 

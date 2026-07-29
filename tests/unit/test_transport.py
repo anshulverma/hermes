@@ -256,9 +256,15 @@ def test_serve_once_end_to_end_claims_leases_runs_records(
     _mk_ticket(conn, payload={"scenario": "ok"})
     _mk_crew(conn, host="h1", cpu=2)
 
-    result = transport.serve_once_for_host(
-        conn, "h1", local_site, mock_agent, run, playbook, "main", now=1000.0
-    )
+    # Mock subprocess to avoid dependency on timeout binary or mock-agent exec.
+    def fake_run(argv, *a, **k):
+        # Mock agent returns empty stdout; parse_result uses scenario table
+        return subprocess_result(returncode=0, stdout="")
+
+    with mock.patch("engine.transport.subprocess.run", side_effect=fake_run):
+        result = transport.serve_once_for_host(
+            conn, "h1", local_site, mock_agent, run, playbook, "main", now=1000.0
+        )
 
     assert result is not None
     assert result.outcome == "ok"
@@ -300,43 +306,6 @@ def test_serve_once_parks_at_capacity(conn, local_site, mock_agent, playbook):
     assert n_attempts == 0  # never executed
     kinds = [r[0] for r in conn.execute("SELECT kind FROM events").fetchall()]
     assert "ticket_parked" in kinds
-
-
-def test_serve_once_envelope_error_requeues_with_penalty(
-    conn, local_site, mock_agent
-):
-    """A bad envelope (validation error) -> penalty requeue (attempts+1)."""
-    from engine import transport
-
-    run = _mk_run(conn)
-    _mk_ticket(conn, payload={"scenario": "ok"})
-    _mk_crew(conn, host="h1", cpu=2)
-
-    # A playbook whose payload_schema rejects the ticket payload -> ContractError.
-    class BadSchemaPlaybook:
-        name = "bad"
-        phases = ["work"]
-
-        def payload_schema(self, phase):
-            return {"type": "object", "required": ["must_have"]}
-
-        def result_schema(self, phase):
-            return {"type": "object"}
-
-        def driver(self, phase):
-            from engine.models import Driver
-            return Driver(command=None, args={}, loop=None)
-
-    result = transport.serve_once_for_host(
-        conn, "h1", local_site, mock_agent, run, BadSchemaPlaybook(), "main",
-        now=1000.0,
-    )
-
-    assert result is None
-    state, attempts, lease_id = _ticket_state(conn, "r1/t-0")
-    assert state == "queued"
-    assert attempts == 1  # penalty applied
-    assert _live_leases(conn, "r1/t-0") == 0  # lease released on requeue
 
 
 def test_serve_once_transport_error_requeues_without_penalty(
@@ -438,3 +407,122 @@ def test_serve_once_payload_tamper_fails_ticket_no_retry(
     state, attempts, lease_id = _ticket_state(conn, "r1/t-0")
     assert state == "failed"  # driver_failed is terminal, no retry
     assert _live_leases(conn, "r1/t-0") == 0
+
+
+def test_serve_once_envelope_validation_fails_terminally(
+    conn, local_site, mock_agent
+):
+    """Envelope validation error (ContractError) -> terminal failed (contract_fail)."""
+    from engine import transport
+
+    run = _mk_run(conn)
+    _mk_ticket(conn, payload={"scenario": "ok"})
+    _mk_crew(conn, host="h1", cpu=2)
+
+    # A playbook whose payload_schema rejects the ticket payload -> ContractError.
+    class BadSchemaPlaybook:
+        name = "bad"
+        phases = ["work"]
+
+        def payload_schema(self, phase):
+            return {"type": "object", "required": ["must_have"]}
+
+        def result_schema(self, phase):
+            return {"type": "object"}
+
+        def driver(self, phase):
+            from engine.models import Driver
+            return Driver(command=None, args={}, loop=None)
+
+    result = transport.serve_once_for_host(
+        conn, "h1", local_site, mock_agent, run, BadSchemaPlaybook(), "main",
+        now=1000.0,
+    )
+
+    assert result is None  # serve returns None on deterministic failure
+    state, attempts, lease_id = _ticket_state(conn, "r1/t-0")
+    assert state == "failed"  # contract fail is TERMINAL, not requeued
+    assert attempts == 0  # no infra penalty
+    assert _live_leases(conn, "r1/t-0") == 0  # lease released
+    # An attempts audit row exists (terminal failure)
+    n_attempts = conn.execute(
+        "SELECT COUNT(*) FROM attempts WHERE ticket_id='r1/t-0'"
+    ).fetchone()[0]
+    assert n_attempts == 1
+    # Check the termination reason
+    reason = conn.execute(
+        "SELECT termination_reason FROM attempts WHERE ticket_id='r1/t-0'"
+    ).fetchone()[0]
+    assert reason == "contract_fail"
+
+
+def test_serve_once_no_ship_guard_violation_fails_terminally(
+    conn, mock_agent, playbook
+):
+    """no_ship=True + site cannot guarantee no-ship -> terminal failed (contract_fail)."""
+    from engine import transport
+
+    run = _mk_run(conn)
+    _mk_ticket(conn, payload={"scenario": "ok"})
+    _mk_crew(conn, host="h1", cpu=2)
+
+    class NoGuaranteesSite:
+        name = "unsafe"
+
+        def resource_classes(self):
+            return ["cpu"]
+
+        def guarantees_no_ship(self):
+            return False  # Cannot guarantee no-ship
+
+        def run_worker(self, host, envelope, agent):
+            # Should never reach here
+            raise AssertionError("run_worker should not be called")
+
+    result = transport.serve_once_for_host(
+        conn, "h1", NoGuaranteesSite(), mock_agent, run, playbook, "main",
+        now=1000.0,
+    )
+
+    assert result is None
+    state, attempts, lease_id = _ticket_state(conn, "r1/t-0")
+    assert state == "failed"  # guard violation is TERMINAL
+    assert attempts == 0
+    assert _live_leases(conn, "r1/t-0") == 0
+    # Check the termination reason
+    reason = conn.execute(
+        "SELECT termination_reason FROM attempts WHERE ticket_id='r1/t-0'"
+    ).fetchone()[0]
+    assert reason == "contract_fail"
+
+
+def test_serve_once_unexpected_envelope_exception_propagates(
+    conn, local_site, mock_agent, playbook
+):
+    """Unexpected exception during envelope build propagates (not swallowed)."""
+    from engine import transport
+
+    run = _mk_run(conn)
+    _mk_ticket(conn, payload={"scenario": "ok"})
+    _mk_crew(conn, host="h1", cpu=2)
+
+    # A playbook with a buggy driver() that raises AttributeError
+    class BuggyPlaybook:
+        name = "buggy"
+        phases = ["work"]
+
+        def payload_schema(self, phase):
+            return {"type": "object"}
+
+        def result_schema(self, phase):
+            return {"type": "object"}
+
+        def driver(self, phase):
+            raise AttributeError("buggy driver implementation")
+
+    # Unexpected exception should propagate
+    with pytest.raises(AttributeError, match="buggy driver"):
+        transport.serve_once_for_host(
+            conn, "h1", local_site, mock_agent, run, BuggyPlaybook(), "main",
+            now=1000.0,
+        )

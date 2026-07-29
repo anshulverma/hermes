@@ -146,6 +146,9 @@ def ssh_transport(host: str):
                 capture_output=True, text=True,
             )
             if ssh_proc.returncode != 0:
+                # TODO(Slice 12): A real ssh site must signal host-lost by RAISING
+                # TransportError (→ no-penalty requeue_transport), NOT by returning
+                # an infra_failed Result (which record_result would penalize).
                 now = time.time()
                 return Result(
                     outcome="infra_failed",
@@ -226,11 +229,23 @@ def serve_once_for_host(
     try:
         envelope = _build_envelope(ticket, run, playbook, base_ref, site, host)
         contracts.validate_envelope(envelope, playbook.payload_schema(ticket.phase))
-    except Exception:
-        # Envelope / validation error is our fault-ish: penalty requeue (releases
-        # the lease). Attempts += 1 with backoff.
-        queue.requeue(conn, ticket, now=now)
+    except contracts.ContractError as exc:
+        # Deterministic contract failure (envelope validation): TERMINAL.
+        # This will never succeed on retry (bad schema/payload mismatch).
+        queue.fail_contract_violation(
+            conn, ticket, host, f"envelope validation failed: {exc}", now=now
+        )
         return None
+    except ValueError as exc:
+        # Deterministic no-ship guard violation (raised by _build_envelope):
+        # TERMINAL. Site cannot guarantee no-ship but guardrails.no_ship=true.
+        if "cannot guarantee no-ship" in str(exc):
+            queue.fail_contract_violation(
+                conn, ticket, host, f"no-ship guard violation: {exc}", now=now
+            )
+            return None
+        # Other ValueErrors are unexpected bugs -> propagate
+        raise
 
     try:
         result = site.run_worker(host, envelope, agent)
