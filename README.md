@@ -23,14 +23,47 @@ their environment.
 
 ## Status
 
-Design phase. Docs:
+The engine core, dexter playbook, local and devserver sites, and control-plane
+HTTP API are built and operational. The mechanic and rigger playbooks, codex
+agent adapter, and control-plane UI are future work.
+
+Docs:
 
 - `docs/DESIGN.md` — umbrella design (hardened).
-- `docs/specs/engine-core.md` + `engine-core-plan.md` — sub-project 1 (engine core;
-  hardened, converged). **Build target.**
+- `docs/specs/engine-core.md` + `engine-core-plan.md` — engine core sub-project
+  (built).
+- `docs/RUNBOOK.md` — operations runbook (deploy, topology, backup, monitoring).
 - `docs/specs/federation-future.md` — deferred multi-level federation.
 - `web/UI_BRIEF.md` — control-plane UI brief (for Claude Design).
-- `docs/auto-plan/reports/` — the auto-plan hardening reports.
+
+## Quickstart
+
+Create a virtual environment and install Hermes in editable mode with dev and
+server extras:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e '.[dev,server]'
+```
+
+Run the example playbook on the local site:
+
+```bash
+hermes run example --site local
+```
+
+Start the control-plane HTTP API server (queues and crew management):
+
+```bash
+hermes serve --api
+```
+
+Verify configuration and connectivity:
+
+```bash
+hermes doctor
+```
 
 ## Layout
 
