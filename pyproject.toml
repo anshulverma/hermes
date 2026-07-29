@@ -35,3 +35,8 @@ addopts = [
 markers = [
     "docker: marks tests requiring Docker (deselect with '-m \"not docker\"')",
 ]
+filterwarnings = [
+    # Upstream: this Starlette version warns FastAPI's TestClient prefers httpx2.
+    # Not our code; narrow-ignore by message so our own warnings still surface.
+    "ignore:Using .httpx. with .starlette.testclient. is deprecated",
+]
