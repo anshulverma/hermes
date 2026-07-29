@@ -57,9 +57,22 @@ def test_resolve_home_rejects_networked_mount():
             os.environ.pop('HERMES_HOME', None)
 
 
+def test_default_networked_check_no_personal_paths():
+    """Default networked check has no hardcoded personal paths."""
+    from engine.config import _default_networked_check
+    import inspect
+
+    # Read the source code
+    source = inspect.getsource(_default_networked_check)
+
+    # Should NOT contain personal paths
+    assert '/home/anshulverma/' not in source, \
+        "Default networked check should not hardcode personal paths"
+
+
 def test_env_defaults():
     """Config provides correct defaults for all env vars."""
-    from engine import config
+    from engine.config import heartbeat_s, site, agent
 
     # Clear all HERMES_* env vars
     old_vals = {}
@@ -68,9 +81,9 @@ def test_env_defaults():
             old_vals[key] = os.environ.pop(key)
 
     try:
-        assert config.HERMES_HEARTBEAT_S == 30
-        assert config.HERMES_SITE == 'local'
-        assert config.HERMES_AGENT == 'claude'
+        assert heartbeat_s() == 30
+        assert site() == 'local'
+        assert agent() == 'claude'
     finally:
         # Restore
         for key, val in old_vals.items():
@@ -79,23 +92,18 @@ def test_env_defaults():
 
 def test_env_overrides():
     """Config honors environment variable overrides."""
-    from engine import config
-    import importlib
+    from engine.config import heartbeat_s, site, agent
 
     os.environ['HERMES_HEARTBEAT_S'] = '60'
     os.environ['HERMES_SITE'] = 'test-site'
     os.environ['HERMES_AGENT'] = 'test-agent'
 
     try:
-        # Reload to pick up env changes
-        importlib.reload(config)
-
-        assert config.HERMES_HEARTBEAT_S == 60
-        assert config.HERMES_SITE == 'test-site'
-        assert config.HERMES_AGENT == 'test-agent'
+        # Functions read fresh env at call time (no reload needed)
+        assert heartbeat_s() == 60
+        assert site() == 'test-site'
+        assert agent() == 'test-agent'
     finally:
         os.environ.pop('HERMES_HEARTBEAT_S', None)
         os.environ.pop('HERMES_SITE', None)
         os.environ.pop('HERMES_AGENT', None)
-        # Reload to restore defaults
-        importlib.reload(config)

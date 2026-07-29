@@ -15,17 +15,21 @@ def _default_networked_check(path: Path) -> bool:
     """Default check for networked/synced filesystems.
 
     Returns True if path appears to be on a networked mount.
-    This is a heuristic based on common mount points.
+    Checks HERMES_NETWORKED_PREFIXES env var (comma-separated) or common mounts.
     """
     path_str = str(path.resolve())
 
-    # Known networked/synced mount prefixes to avoid
-    networked_prefixes = [
-        '/mnt/fuse',
-        '/mnt/nfs',
-        '/home/anshulverma/fbsource',  # Meta-specific: fbsource is synced
-        '/data/users',  # Meta devserver homes (synced)
-    ]
+    # Read optional env denylist (empty by default)
+    env_prefixes = os.environ.get('HERMES_NETWORKED_PREFIXES', '')
+    networked_prefixes = [p.strip() for p in env_prefixes.split(',') if p.strip()]
+
+    # Fallback: common networked/synced mount prefixes
+    if not networked_prefixes:
+        networked_prefixes = [
+            '/mnt/fuse',
+            '/mnt/nfs',
+            '/data/users',
+        ]
 
     for prefix in networked_prefixes:
         if path_str.startswith(prefix):
@@ -68,7 +72,16 @@ def resolve_home(is_networked=None) -> Path:
     return home
 
 
-# Environment variable defaults
-HERMES_HEARTBEAT_S = int(os.environ.get('HERMES_HEARTBEAT_S', '30'))
-HERMES_SITE = os.environ.get('HERMES_SITE', 'local')
-HERMES_AGENT = os.environ.get('HERMES_AGENT', 'claude')
+def heartbeat_s() -> int:
+    """Return HERMES_HEARTBEAT_S from env (default: 30)."""
+    return int(os.environ.get('HERMES_HEARTBEAT_S', '30'))
+
+
+def site() -> str:
+    """Return HERMES_SITE from env (default: 'local')."""
+    return os.environ.get('HERMES_SITE', 'local')
+
+
+def agent() -> str:
+    """Return HERMES_AGENT from env (default: 'claude')."""
+    return os.environ.get('HERMES_AGENT', 'claude')
