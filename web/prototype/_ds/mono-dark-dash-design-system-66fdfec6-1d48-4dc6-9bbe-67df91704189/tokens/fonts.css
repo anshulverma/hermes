@@ -1,0 +1,18 @@
+/* Inter, declared so the family the tokens name actually resolves. Sourced from
+   the canonical Inter CDN (rsms.me) rather than self-hosted — the source design
+   doc loads no webfont, so nothing is shipped in-repo. Replace the src with a
+   local path if you drop real binaries into assets/fonts/. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("https://rsms.me/inter/font-files/InterVariable.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: italic;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("https://rsms.me/inter/font-files/InterVariable-Italic.woff2") format("woff2");
+}

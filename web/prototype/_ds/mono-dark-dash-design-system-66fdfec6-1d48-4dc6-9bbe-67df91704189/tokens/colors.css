@@ -1,0 +1,35 @@
+/* Two hues: black and white. Everything else is an alpha channel. */
+:root {
+  /* Base */
+  --black: rgb(0, 0, 0);
+  --white: rgb(255, 255, 255);
+
+  /* Surfaces */
+  --color-background-1: rgb(0, 0, 0);
+  --surface-page: rgb(0, 0, 0);
+  --surface-card: rgb(22, 22, 22);
+  --surface-header: oklab(0 0 0 / 0.85);
+  --surface-overlay: oklab(0 0 0 / 0.85);
+
+  /* Text — three opacity levels, no fourth */
+  --fg-1: rgb(255, 255, 255);
+  --fg-2: rgba(255, 255, 255, 0.7);
+  --fg-3: rgba(255, 255, 255, 0.5);
+  --text-primary: var(--fg-1);
+  --text-secondary: var(--fg-2);
+  --text-muted: var(--fg-3);
+  --text-placeholder: var(--fg-3);
+
+  /* Borders */
+  --border-hairline: rgba(255, 255, 255, 0.1);
+  --border-control: rgba(255, 255, 255, 0.5);
+  --border-control-hover: rgb(255, 255, 255);
+
+  /* Interaction washes (alpha only — never a hue) */
+  --wash-hover: rgba(255, 255, 255, 0.06);
+  --wash-active: rgba(255, 255, 255, 0.1);
+  --wash-selected: rgba(255, 255, 255, 0.08);
+
+  /* Focus — browser native, do not restyle */
+  --focus-ring: rgb(0, 95, 204);
+}

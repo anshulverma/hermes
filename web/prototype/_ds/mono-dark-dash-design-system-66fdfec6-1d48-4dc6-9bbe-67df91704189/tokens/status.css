@@ -1,0 +1,22 @@
+/* Status ramp — the one place hue is allowed.
+   Four hues share a lightness/chroma family so they read as one set and never
+   out-shout the monochrome base. Color is always ADDITIVE: every status that
+   carries a hue also carries a marker shape and a literal word. */
+:root {
+  --status-live:      oklch(0.74 0.11 230);  /* in flight, running, busy, streaming */
+  --status-ok:        oklch(0.74 0.11 150);  /* done, healthy, published */
+  --status-attention: oklch(0.80 0.11 85);   /* parked, draining, proposed, warn */
+  --status-danger:    oklch(0.68 0.15 25);   /* failed, needs-human, down, critical */
+
+  /* 14% tints for pill and chip grounds */
+  --status-live-tint:      oklch(0.74 0.11 230 / 0.14);
+  --status-ok-tint:        oklch(0.74 0.11 150 / 0.14);
+  --status-attention-tint: oklch(0.80 0.11 85 / 0.14);
+  --status-danger-tint:    oklch(0.68 0.15 25 / 0.14);
+
+  /* 38% edges */
+  --status-live-edge:      oklch(0.74 0.11 230 / 0.38);
+  --status-ok-edge:        oklch(0.74 0.11 150 / 0.38);
+  --status-attention-edge: oklch(0.80 0.11 85 / 0.38);
+  --status-danger-edge:    oklch(0.68 0.15 25 / 0.38);
+}
