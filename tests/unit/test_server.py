@@ -1780,3 +1780,465 @@ def test_spa_nonloopback_omits_token(nonloopback_client: TestClient, temp_home: 
     assert 'window.__HERMES_BIND__="remote"' in html
     # Should still have the original content
     assert "<title>Hermes</title>" in html
+
+
+# --- Crew Control Endpoints (D2a) ---
+
+
+@pytest.fixture
+def test_site_agent(temp_home: Path):
+    """Register a test-only stub site + agent with controllable health reports."""
+    from engine import site, agent
+    from engine.models import HealthReport, Check
+
+    class TestSite:
+        """Stub site for testing crew endpoints with controllable health."""
+        name = "test-site"
+        _health_report = None
+
+        def provision(self, host: str, base_ref: str) -> None:
+            """No-op provisioning."""
+            pass
+
+        def health(self, host: str, agent_obj) -> HealthReport:
+            """Return the controlled health report."""
+            if self._health_report is None:
+                # Default: all healthy
+                return HealthReport(
+                    reachable=True,
+                    agent_ok=True,
+                    auth_ok=True,
+                    workspace_ready=True,
+                    guard_installed=True,
+                    resources={"cpu": 4},
+                    latency_ms=10,
+                    checks=[
+                        Check(name="reachable", ok=True, detail="ok"),
+                        Check(name="agent_ok", ok=True, detail="ok"),
+                        Check(name="auth_ok", ok=True, detail="ok"),
+                        Check(name="workspace_ready", ok=True, detail="ok"),
+                        Check(name="guard_installed", ok=True, detail="ok"),
+                    ]
+                )
+            return self._health_report
+
+        def set_health(self, report: HealthReport):
+            """Set the health report to return."""
+            self._health_report = report
+
+        def resource_classes(self) -> list[str]:
+            return ["cpu"]
+
+        def guarantees_no_ship(self) -> bool:
+            return True
+
+        def run_worker(self, host: str, envelope: dict, agent_obj) -> None:
+            raise NotImplementedError("Test site does not support running workers")
+
+        def submit_for_review(self, host: str, change: dict) -> str:
+            raise NotImplementedError("Test site does not support reviews")
+
+        def issue_source(self, query) -> list:
+            return []
+
+        def discover_hosts(self) -> list[str]:
+            return []
+
+    class TestAgent:
+        """Stub agent for testing."""
+        name = "test-agent"
+
+        def build_invocation(self, envelope: dict, driver) -> list[str]:
+            raise NotImplementedError("Test agent does not build invocations")
+
+        def parse_result(self, raw: str, envelope: dict):
+            raise NotImplementedError("Test agent does not parse results")
+
+        def health_checks(self, host: str, site_obj) -> list[Check]:
+            return [
+                Check(name="agent_ok", ok=True, detail="ok"),
+                Check(name="auth_ok", ok=True, detail="ok"),
+            ]
+
+    test_site_obj = TestSite()
+    test_agent_obj = TestAgent()
+
+    site.register("test-site", test_site_obj)
+    agent.register("test-agent", test_agent_obj)
+
+    yield test_site_obj, test_agent_obj
+
+    # Cleanup: remove from registries
+    from engine.site import _REGISTRY as site_registry
+    from engine.agent import _REGISTRY as agent_registry
+    site_registry.pop("test-site", None)
+    agent_registry.pop("test-agent", None)
+
+
+def test_crew_probe_healthy_host(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """POST /api/crew/probe with healthy host => 200 + full checklist with ok=true."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+    test_site, _ = test_site_agent
+
+    response = loopback_client.post(
+        "/api/crew/probe",
+        json={"host": "test-host-1", "site": "test-site", "agent": "test-agent"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["host"] == "test-host-1"
+    assert data["ok"] is True
+    assert data["reachable"] is True
+    assert data["agent_ok"] is True
+    assert data["auth_ok"] is True
+    assert data["workspace_ready"] is True
+    assert data["guard_installed"] is True
+    assert data["latency_ms"] == 10
+    assert data["resources"] == {"cpu": 4}
+
+    # Check that all checks are present and passing
+    assert len(data["checks"]) == 5
+    for check in data["checks"]:
+        assert check["ok"] is True
+        assert check["name"] in ["reachable", "agent_ok", "auth_ok", "workspace_ready", "guard_installed"]
+
+
+def test_crew_probe_unhealthy_host(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """POST /api/crew/probe with unhealthy host => 200 + ok=false + failing checks named."""
+    from server.auth import read_token
+    from engine.models import HealthReport, Check
+
+    token = read_token(temp_home)
+    test_site, _ = test_site_agent
+
+    # Set unhealthy report
+    test_site.set_health(HealthReport(
+        reachable=True,
+        agent_ok=False,
+        auth_ok=False,
+        workspace_ready=True,
+        guard_installed=True,
+        resources={},
+        latency_ms=100,
+        checks=[
+            Check(name="reachable", ok=True, detail="ok"),
+            Check(name="agent_ok", ok=False, detail="agent not found"),
+            Check(name="auth_ok", ok=False, detail="auth failed"),
+            Check(name="workspace_ready", ok=True, detail="ok"),
+            Check(name="guard_installed", ok=True, detail="ok"),
+        ]
+    ))
+
+    response = loopback_client.post(
+        "/api/crew/probe",
+        json={"host": "test-host-2", "site": "test-site", "agent": "test-agent"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["ok"] is False
+    assert data["agent_ok"] is False
+    assert data["auth_ok"] is False
+
+    # Check that failing checks are present
+    failing_checks = [c for c in data["checks"] if not c["ok"]]
+    assert len(failing_checks) == 2
+    failing_names = {c["name"] for c in failing_checks}
+    assert failing_names == {"agent_ok", "auth_ok"}
+
+
+def test_crew_probe_unknown_site_404(loopback_client: TestClient, temp_home: Path):
+    """POST /api/crew/probe with unknown site => 400/404."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+
+    response = loopback_client.post(
+        "/api/crew/probe",
+        json={"host": "test-host", "site": "unknown-site"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code in (400, 404)
+    assert "unknown" in response.json()["detail"].lower() or "site" in response.json()["detail"].lower()
+
+
+def test_crew_probe_requires_token(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """POST /api/crew/probe with NO token => 401."""
+    response = loopback_client.post(
+        "/api/crew/probe",
+        json={"host": "test-host", "site": "test-site"}
+    )
+    assert response.status_code == 401
+
+
+def test_crew_add_healthy_host(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """POST /api/crew with healthy host => 201/200 + crew row admitted."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+
+    response = loopback_client.post(
+        "/api/crew",
+        json={"host": "test-host-add", "site": "test-site", "agent": "test-agent", "base_ref": "main"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code in (200, 201)
+
+    data = response.json()
+    assert data["id"] == "test-host-add"
+    assert data["site"] == "test-site"
+    assert data["state"] == "idle"
+    assert data["resources"]["cpu"] == 4
+
+    # Verify crew row exists in database
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT id, site, state FROM crew WHERE id=?", ("test-host-add",)).fetchone()
+    assert row is not None
+    assert row[0] == "test-host-add"
+    assert row[1] == "test-site"
+    assert row[2] == "idle"
+    conn.close()
+
+
+def test_crew_add_unhealthy_host_422_no_row(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """POST /api/crew with unhealthy host => 422 + failing checks detail + NO crew row inserted."""
+    from server.auth import read_token
+    from engine.models import HealthReport, Check
+    import sqlite3
+
+    token = read_token(temp_home)
+    test_site, _ = test_site_agent
+    db_path = str(temp_home / "queue.db")
+
+    # Set unhealthy report
+    test_site.set_health(HealthReport(
+        reachable=False,
+        agent_ok=False,
+        auth_ok=True,
+        workspace_ready=True,
+        guard_installed=False,
+        resources={},
+        latency_ms=1000,
+        checks=[
+            Check(name="reachable", ok=False, detail="host unreachable"),
+            Check(name="agent_ok", ok=False, detail="agent missing"),
+            Check(name="auth_ok", ok=True, detail="ok"),
+            Check(name="workspace_ready", ok=True, detail="ok"),
+            Check(name="guard_installed", ok=False, detail="guard not found"),
+        ]
+    ))
+
+    response = loopback_client.post(
+        "/api/crew",
+        json={"host": "test-host-bad", "site": "test-site", "agent": "test-agent"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 422
+
+    # Should contain failing check names in detail
+    detail = response.json()["detail"]
+    assert "reachable" in detail
+    assert "agent_ok" in detail or "agent" in detail
+    assert "guard_installed" in detail or "guard" in detail
+
+    # Verify NO crew row was inserted
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT id FROM crew WHERE id=?", ("test-host-bad",)).fetchone()
+    assert row is None
+    conn.close()
+
+
+def test_crew_add_requires_token(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """POST /api/crew with NO token => 401."""
+    response = loopback_client.post(
+        "/api/crew",
+        json={"host": "test-host", "site": "test-site"}
+    )
+    assert response.status_code == 401
+
+
+def test_crew_reprobe_updates_health(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """POST /api/crew/{host}/reprobe updates health_json + returns checklist."""
+    from server.auth import read_token
+    from engine.models import HealthReport, Check
+    import sqlite3
+    import json as json_module
+
+    token = read_token(temp_home)
+    test_site, _ = test_site_agent
+    db_path = str(temp_home / "queue.db")
+
+    # First add a crew member
+    response = loopback_client.post(
+        "/api/crew",
+        json={"host": "test-host-reprobe", "site": "test-site", "agent": "test-agent"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code in (200, 201)
+
+    # Get initial health_json
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT health_json, last_heartbeat FROM crew WHERE id=?", ("test-host-reprobe",)).fetchone()
+    initial_health = row[0]
+    initial_heartbeat = row[1]
+    conn.close()
+
+    # Change the health report
+    test_site.set_health(HealthReport(
+        reachable=True,
+        agent_ok=True,
+        auth_ok=True,
+        workspace_ready=True,
+        guard_installed=True,
+        resources={"cpu": 8},  # Changed
+        latency_ms=20,  # Changed
+        checks=[
+            Check(name="reachable", ok=True, detail="ok"),
+            Check(name="agent_ok", ok=True, detail="ok"),
+            Check(name="auth_ok", ok=True, detail="ok"),
+            Check(name="workspace_ready", ok=True, detail="ok"),
+            Check(name="guard_installed", ok=True, detail="ok"),
+        ]
+    ))
+
+    # Reprobe
+    import time
+    time.sleep(0.01)  # Ensure timestamp changes
+    response = loopback_client.post(
+        f"/api/crew/test-host-reprobe/reprobe",
+        json={"agent": "test-agent"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["host"] == "test-host-reprobe"
+    assert data["ok"] is True
+    assert data["latency_ms"] == 20
+
+    # Verify health_json was updated in database
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT health_json, last_heartbeat FROM crew WHERE id=?", ("test-host-reprobe",)).fetchone()
+    new_health = row[0]
+    new_heartbeat = row[1]
+    conn.close()
+
+    assert new_health != initial_health
+    health_obj = json_module.loads(new_health)
+    assert health_obj["latency_ms"] == 20
+    assert new_heartbeat > initial_heartbeat
+
+
+def test_crew_reprobe_unknown_host_404(loopback_client: TestClient, temp_home: Path):
+    """POST /api/crew/{unknown}/reprobe => 404."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+
+    response = loopback_client.post(
+        "/api/crew/unknown-host/reprobe",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 404
+
+
+def test_crew_drain(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """POST /api/crew/{host}/drain => state draining."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+
+    # First add a crew member
+    response = loopback_client.post(
+        "/api/crew",
+        json={"host": "test-host-drain", "site": "test-site", "agent": "test-agent"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code in (200, 201)
+
+    # Drain the host
+    response = loopback_client.post(
+        f"/api/crew/test-host-drain/drain",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["state"] == "draining"
+
+    # Verify state in database
+    conn = sqlite3.connect(db_path)
+    state = conn.execute("SELECT state FROM crew WHERE id=?", ("test-host-drain",)).fetchone()[0]
+    assert state == "draining"
+    conn.close()
+
+
+def test_crew_drain_unknown_host_404(loopback_client: TestClient, temp_home: Path):
+    """POST /api/crew/{unknown}/drain => 404."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+
+    response = loopback_client.post(
+        "/api/crew/unknown-host/drain",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 404
+
+
+def test_crew_remove(loopback_client: TestClient, temp_home: Path, test_site_agent):
+    """DELETE /api/crew/{host} removes the crew member."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+
+    # First add a crew member
+    response = loopback_client.post(
+        "/api/crew",
+        json={"host": "test-host-remove", "site": "test-site", "agent": "test-agent"},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code in (200, 201)
+
+    # Verify it exists
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT id FROM crew WHERE id=?", ("test-host-remove",)).fetchone()
+    assert row is not None
+    conn.close()
+
+    # Remove the host
+    response = loopback_client.delete(
+        f"/api/crew/test-host-remove",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    # Verify it's gone
+    conn = sqlite3.connect(db_path)
+    row = conn.execute("SELECT id FROM crew WHERE id=?", ("test-host-remove",)).fetchone()
+    assert row is None
+    conn.close()
+
+
+def test_crew_remove_unknown_host_404(loopback_client: TestClient, temp_home: Path):
+    """DELETE /api/crew/{unknown} => 404."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+
+    response = loopback_client.delete(
+        "/api/crew/unknown-host",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 404

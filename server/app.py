@@ -658,6 +658,281 @@ def create_app(bind: str | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    # --- Crew Control Endpoints (D2a) ---
+
+    def _serialize_health_checklist(host: str, report) -> dict[str, Any]:
+        """Serialize a HealthReport into the checklist response shape.
+
+        Shared helper for probe + reprobe endpoints.
+        """
+        return {
+            "host": host,
+            "ok": report.ok,
+            "reachable": report.reachable,
+            "agent_ok": report.agent_ok,
+            "auth_ok": report.auth_ok,
+            "workspace_ready": report.workspace_ready,
+            "guard_installed": report.guard_installed,
+            "resources": report.resources,
+            "latency_ms": report.latency_ms,
+            "checks": [
+                {"name": c.name, "ok": c.ok, "detail": c.detail}
+                for c in report.checks
+            ],
+        }
+
+    @app.post("/api/crew/probe")
+    def probe_crew_host(
+        request_body: dict[str, Any],
+        _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Probe a host's health (read-only health check).
+
+        Body: {host, site, agent?}
+        Returns: {host, ok, reachable, agent_ok, auth_ok, workspace_ready,
+                 guard_installed, resources, latency_ms, checks}
+
+        400/404 if site/agent unknown.
+        """
+        from engine import site as site_module, agent as agent_module
+
+        host = request_body.get("host")
+        site_name = request_body.get("site")
+        agent_name = request_body.get("agent", "claude")
+
+        if not host or not site_name:
+            raise HTTPException(status_code=400, detail="Missing required fields: host, site")
+
+        # Load site and agent
+        try:
+            site_obj = site_module.load(site_name)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        try:
+            agent_obj = agent_module.load(agent_name)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        # Run health check (read-only, no provisioning beyond what health needs)
+        report = site_obj.health(host, agent_obj)
+
+        return _serialize_health_checklist(host, report)
+
+    @app.post("/api/crew")
+    def add_crew_member(
+        request_body: dict[str, Any],
+        _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Admit a crew member (provision + health-gate).
+
+        Body: {host, site, agent?, base_ref?}
+        Returns: {id, site, state, resources, health, ...} on success
+        422 with failing-checks detail if unhealthy (no row inserted)
+        400/404 if site/agent unknown.
+        """
+        from engine import site as site_module, agent as agent_module, crew
+
+        host = request_body.get("host")
+        site_name = request_body.get("site")
+        agent_name = request_body.get("agent", "claude")
+        base_ref = request_body.get("base_ref", "main")
+
+        if not host or not site_name:
+            raise HTTPException(status_code=400, detail="Missing required fields: host, site")
+
+        # Load site and agent
+        try:
+            site_obj = site_module.load(site_name)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        try:
+            agent_obj = agent_module.load(agent_name)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        # Admit the crew member
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            crew.add(conn, site_obj, agent_obj, host, base_ref)
+        except ValueError as e:
+            # Unhealthy host - return 422 with failing checks detail
+            raise HTTPException(status_code=422, detail=str(e))
+        finally:
+            conn.close()
+
+        # Fetch and return the admitted crew member
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                """SELECT id, site, state, capabilities, resources_json, health_json,
+                          current_ticket, last_heartbeat
+                   FROM crew WHERE id=?""",
+                (host,)
+            ).fetchone()
+
+            if row is None:
+                raise HTTPException(status_code=500, detail="Crew member admitted but not found")
+
+            capabilities = json.loads(row[3])
+            resources = json.loads(row[4])
+            health = json.loads(row[5]) if row[5] else None
+
+            return {
+                "id": row[0],
+                "site": row[1],
+                "state": row[2],
+                "capabilities": capabilities,
+                "resources": resources,
+                "health": health,
+                "current_ticket": row[6],
+                "last_heartbeat": row[7],
+            }
+        finally:
+            conn.close()
+
+    @app.post("/api/crew/{host}/reprobe")
+    def reprobe_crew_member(
+        host: str,
+        request_body: dict[str, Any] = None,
+        _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Re-probe a crew member's health and update health_json.
+
+        Body: {agent?}
+        Returns: same checklist shape as /probe
+        404 if host not in crew.
+        """
+        from engine import site as site_module, agent as agent_module
+        import time
+
+        # Get the crew member to determine its site
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT site FROM crew WHERE id=?",
+                (host,)
+            ).fetchone()
+
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Crew member {host!r} not found")
+
+            site_name = row[0]
+        finally:
+            conn.close()
+
+        # Determine agent (from body or default)
+        agent_name = "claude"
+        if request_body:
+            agent_name = request_body.get("agent", "claude")
+
+        # Load site and agent
+        try:
+            site_obj = site_module.load(site_name)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        try:
+            agent_obj = agent_module.load(agent_name)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+
+        # Run health check
+        report = site_obj.health(host, agent_obj)
+
+        # Update crew row's health_json and last_heartbeat
+        conn = connect(db_path)
+        try:
+            health_json = json.dumps({
+                "reachable": report.reachable,
+                "agent_ok": report.agent_ok,
+                "auth_ok": report.auth_ok,
+                "workspace_ready": report.workspace_ready,
+                "guard_installed": report.guard_installed,
+                "latency_ms": report.latency_ms,
+            })
+
+            now = time.time()
+            conn.execute(
+                """UPDATE crew SET health_json=?, last_heartbeat=?
+                   WHERE id=?""",
+                (health_json, now, host)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        return _serialize_health_checklist(host, report)
+
+    @app.post("/api/crew/{host}/drain")
+    def drain_crew_member(
+        host: str,
+        _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Drain a crew member (set state to draining).
+
+        Returns: {state: "draining"}
+        404 if host not in crew.
+        """
+        from engine import crew
+
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Check if host exists
+            row = conn.execute(
+                "SELECT id FROM crew WHERE id=?",
+                (host,)
+            ).fetchone()
+
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Crew member {host!r} not found")
+
+            # Drain the host
+            crew.drain(conn, host)
+
+            return {"state": "draining"}
+        finally:
+            conn.close()
+
+    @app.delete("/api/crew/{host}")
+    def remove_crew_member(
+        host: str,
+        _: None = Depends(require_auth)
+    ) -> dict[str, Any]:
+        """Remove a crew member.
+
+        Returns: {status: "removed"}
+        404 if host not in crew.
+        """
+        from engine import crew
+
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Check if host exists
+            row = conn.execute(
+                "SELECT id FROM crew WHERE id=?",
+                (host,)
+            ).fetchone()
+
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Crew member {host!r} not found")
+
+            # Remove the host
+            crew.remove(conn, host)
+
+            return {"status": "removed"}
+        finally:
+            conn.close()
+
     # --- Run Control Endpoints (D1a) ---
 
     @app.post("/api/runs/{run_id}/pause")
