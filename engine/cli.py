@@ -580,6 +580,198 @@ def cmd_serve_once(args):
     return 0 if proc.returncode == 0 else 1
 
 
+def cmd_doctor(args):
+    """hermes doctor / hermes config check: read-only config diagnostics.
+
+    Reports resolved configuration + problems. Exits 0 all-clear, 1 on hard problems.
+    NEVER prints secret values (secrets shown as set/unset).
+    """
+    import stat as stat_module
+
+    problems = []
+
+    # Secret env var keys (never print values, only set/unset)
+    SECRET_KEYS = {
+        'HERMES_SSH_IDENTITY',  # prefix match
+        'HERMES_AUTHORIZED_KEY',
+        'api_token',
+    }
+
+    def is_secret(key):
+        """Check if a key name indicates a secret."""
+        for secret in SECRET_KEYS:
+            if secret in key:
+                return True
+        return False
+
+    def redact_value(key, value):
+        """Redact secret values, return 'set' or 'unset'."""
+        if is_secret(key):
+            return 'set' if value else 'unset'
+        return value if value else 'unset'
+
+    # 1. Resolve HERMES_HOME + networked guard
+    print("=== HERMES_HOME ===")
+    try:
+        home = config.resolve_home()
+        print(f"  Path: {home}")
+        print(f"  Networked FS guard: passed")
+    except config.ConfigError as e:
+        print(f"  ERROR: {e}", file=sys.stderr)
+        problems.append(f"HERMES_HOME: {e}")
+        return 1  # Hard problem, exit immediately
+
+    # 2. queue.db: path, existence, mode, migration version(s)
+    print("\n=== queue.db ===")
+    db_path = home / "queue.db"
+    print(f"  Path: {db_path}")
+
+    if db_path.exists():
+        print(f"  Exists: yes")
+        try:
+            file_stat = db_path.stat()
+            file_mode = stat_module.S_IMODE(file_stat.st_mode)
+            print(f"  Mode: {oct(file_mode)}")
+
+            # Check migration versions
+            conn = migrate.connect(str(db_path))
+            try:
+                versions = conn.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                ).fetchall()
+                if versions:
+                    version_list = [str(v[0]) for v in versions]
+                    print(f"  Migrations applied: {', '.join(version_list)}")
+                else:
+                    print(f"  Migrations applied: none")
+            except Exception as e:
+                print(f"  ERROR reading migrations: {e}", file=sys.stderr)
+                problems.append(f"queue.db: cannot read migrations: {e}")
+            finally:
+                conn.close()
+        except PermissionError as e:
+            print(f"  ERROR: unreadable ({e})", file=sys.stderr)
+            problems.append(f"queue.db: unreadable")
+    else:
+        print(f"  Exists: no (will be created on first use)")
+
+    # 3. api_token: path, mode (NEVER the value)
+    print("\n=== api_token ===")
+    token_path = home / "api_token"
+    print(f"  Path: {token_path}")
+
+    if token_path.exists():
+        print(f"  Exists: yes")
+        try:
+            file_stat = token_path.stat()
+            file_mode = stat_module.S_IMODE(file_stat.st_mode)
+            print(f"  Mode: {oct(file_mode)}")
+            print(f"  Value: set (redacted)")
+        except PermissionError as e:
+            print(f"  ERROR: unreadable ({e})", file=sys.stderr)
+    else:
+        print(f"  Exists: no (will be created on first API access)")
+
+    # 4. Resolved config vars
+    print("\n=== Configuration ===")
+    print(f"  HERMES_SITE: {config.site()}")
+    print(f"  HERMES_AGENT: {config.agent()}")
+    print(f"  HERMES_HEARTBEAT_S: {config.heartbeat_s()}")
+    print(f"  HERMES_BIND: {config.bind()}")
+    print(f"  HERMES_LOG_LEVEL: {config.log_level()}")
+    print(f"  HERMES_LOG_FORMAT: {config.log_format()}")
+    log_file_val = config.log_file()
+    print(f"  HERMES_LOG_FILE: {log_file_val if log_file_val else 'stderr'}")
+
+    # Report all KNOWN_VARS (effective values, secrets redacted)
+    print("\n=== Environment Variables ===")
+    for var_name, var_desc in sorted(config.KNOWN_VARS.items()):
+        # Skip dynamic suffixed vars (they have <...> in the name)
+        if '<' in var_name:
+            continue
+
+        env_value = os.environ.get(var_name)
+        display_value = redact_value(var_name, env_value)
+        print(f"  {var_name}: {display_value}")
+
+    # Check for dynamic SSH identity vars (HERMES_SSH_IDENTITY_<host>)
+    ssh_identity_keys = [k for k in os.environ if k.startswith('HERMES_SSH_IDENTITY_')]
+    if ssh_identity_keys:
+        print("\n=== SSH Identities (per-host) ===")
+        for key in sorted(ssh_identity_keys):
+            print(f"  {key}: set (redacted)")
+
+    # 5. Site/agent adapter load check (if --site/--agent specified)
+    if hasattr(args, 'site') and args.site:
+        print(f"\n=== Site Adapter: {args.site} ===")
+        try:
+            # Import production modules
+            import sites.local.site
+            import sites.devserver.site
+            st = site.load(args.site)
+            print(f"  Loads: yes (name={st.name})")
+        except KeyError as e:
+            print(f"  ERROR: {e}", file=sys.stderr)
+            problems.append(f"Site {args.site}: unresolvable")
+
+    if hasattr(args, 'agent') and args.agent:
+        print(f"\n=== Agent Adapter: {args.agent} ===")
+        try:
+            # Import production modules
+            import agents.claude
+            import testkit.mock_agent
+            ag = agent.load(args.agent)
+            print(f"  Loads: yes (name={ag.name})")
+        except KeyError as e:
+            print(f"  ERROR: {e}", file=sys.stderr)
+            problems.append(f"Agent {args.agent}: unresolvable")
+
+    # If no specific site/agent, check that registered adapters load
+    if not (hasattr(args, 'site') and args.site):
+        print("\n=== Registered Site Adapters ===")
+        try:
+            import sites.local.site
+            import sites.devserver.site
+            # List registered sites
+            from engine.site import _REGISTRY as site_registry
+            for site_name in sorted(site_registry.keys()):
+                print(f"  {site_name}: registered")
+        except Exception as e:
+            print(f"  ERROR loading site modules: {e}", file=sys.stderr)
+
+    if not (hasattr(args, 'agent') and args.agent):
+        print("\n=== Registered Agent Adapters ===")
+        try:
+            import agents.claude
+            import testkit.mock_agent
+            # List registered agents
+            from engine.agent import _REGISTRY as agent_registry
+            for agent_name in sorted(agent_registry.keys()):
+                print(f"  {agent_name}: registered")
+        except Exception as e:
+            print(f"  ERROR loading agent modules: {e}", file=sys.stderr)
+
+    # 6. Server extra check (fastapi/uvicorn)
+    print("\n=== Server Extra ===")
+    try:
+        import fastapi
+        import uvicorn
+        print(f"  fastapi: importable")
+        print(f"  uvicorn: importable")
+    except ImportError as e:
+        print(f"  Server dependencies: not installed (pip install -e '.[server]')")
+
+    # Exit code
+    if problems:
+        print(f"\n=== Problems ({len(problems)}) ===", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        return 1
+
+    print("\n✓ All checks passed")
+    return 0
+
+
 def cmd_crew(args):
     """Dispatch crew subcommands."""
     subcommand = args.crew_action
@@ -689,6 +881,18 @@ def main(argv=None):
     serve_once_parser.add_argument('--result', required=True, help='Path to write result output')
     serve_once_parser.add_argument('--timeout', type=int, required=True, help='Timeout in seconds')
 
+    # --- doctor ---
+    doctor_parser = subparsers.add_parser('doctor', help='Read-only config diagnostics')
+    doctor_parser.add_argument('--site', help='Specific site to check')
+    doctor_parser.add_argument('--agent', help='Specific agent to check')
+
+    # --- config ---
+    config_parser = subparsers.add_parser('config', help='Configuration management')
+    config_subparsers = config_parser.add_subparsers(dest='config_action')
+    config_check = config_subparsers.add_parser('check', help='Read-only config diagnostics (alias for doctor)')
+    config_check.add_argument('--site', help='Specific site to check')
+    config_check.add_argument('--agent', help='Specific agent to check')
+
     # Parse
     args = parser.parse_args(argv)
 
@@ -730,6 +934,11 @@ def main(argv=None):
             return cmd_serve(args)
         elif args.command == 'serve-once':
             return cmd_serve_once(args)
+        elif args.command == 'doctor':
+            return cmd_doctor(args)
+        elif args.command == 'config':
+            if args.config_action == 'check':
+                return cmd_doctor(args)
     except Exception as e:
         logger = log.get_logger("cli")
         # Use logger.exception when config.debug() is set (includes traceback),
