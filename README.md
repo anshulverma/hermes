@@ -68,9 +68,8 @@ hermes doctor
 ## Layout
 
 ```
-engine/  server/  web/  agents/{claude,codex}/  sites/{local,meta}/
-playbooks/{mechanic,rigger,medic}/  integrations/{claude-code,codex}/
-testkit/  tests/  docs/
+engine/  server/  fleet/  agents/claude/  sites/{local,ssh,devserver}/
+playbooks/dexter/  testkit/  tests/  docs/  web/
 ```
 
 Runtime data (queue.db, logs, ticket payloads) lives outside the repo under

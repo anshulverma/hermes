@@ -449,13 +449,6 @@ def cmd_serve(args):
     """hermes serve --host <h> --site <site> [--agent <agent>] [--run R] OR --api [--host H] [--port P]."""
     # API server mode
     if args.api:
-        # Additional validation for API server: require server dependencies
-        try:
-            config.validate_startup(require_server=True)
-        except config.ConfigError as e:
-            logger = log.get_logger("cli")
-            logger.error("Configuration error: %s", e)
-            return 1
         return cmd_serve_api(args)
 
     # Worker mode (original behavior) - install SIGTERM/SIGINT handlers

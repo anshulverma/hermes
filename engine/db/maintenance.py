@@ -3,6 +3,8 @@
 Retention-safe pruning of unbounded-growth tables (events, attempts), WAL-aware
 online backup, and vacuum for space reclamation. Operator-invoked only.
 
+Presupposes an already-initialized DB (connects directly, not via cli._connect/apply_migrations).
+
 Stdlib-only (sqlite3 only). PRUNE-SAFETY is paramount: never delete live/in-flight state.
 
 Terminal ticket states: {done, failed} ONLY.
@@ -10,16 +12,16 @@ Terminal run states: {done, failed, stopped}.
 
 Non-terminal ticket states (survive pruning): parked, needs_human, reducing, running, dispatched, queued.
 """
-import logging
 import os
 import sqlite3
 import sys
 import time
 from typing import Optional
 
+from engine import log
 from engine.db import migrate
 
-logger = logging.getLogger(__name__)
+logger = log.get_logger("db.maintenance")
 
 
 def prune(

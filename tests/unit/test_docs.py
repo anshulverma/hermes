@@ -49,3 +49,19 @@ def test_runbook_covers_all_lifecycle_areas():
 
     for topic in required_topics:
         assert topic in content, f"RUNBOOK missing coverage of: {topic}"
+
+
+def test_runbook_db_flags_match_cli():
+    """RUNBOOK db command examples must use real argparse flags (guard against drift)."""
+    runbook_path = Path(__file__).parent.parent.parent / "docs" / "RUNBOOK.md"
+    content = runbook_path.read_text()
+
+    # Assert the correct flags are present
+    assert "--events-older-than" in content, "RUNBOOK missing --events-older-than flag"
+    assert "--attempts-older-than" in content, "RUNBOOK missing --attempts-older-than flag"
+    assert "--out" in content, "RUNBOOK missing --out flag for backup"
+
+    # Assert the wrong flags are NOT present (guard against stale/incorrect flags)
+    assert "--events-days" not in content, "RUNBOOK has stale flag --events-days (should be --events-older-than)"
+    assert "--attempts-days" not in content, "RUNBOOK has stale flag --attempts-days (should be --attempts-older-than)"
+    assert "db backup --output" not in content, "RUNBOOK has wrong flag --output (should be --out)"

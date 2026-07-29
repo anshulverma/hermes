@@ -81,18 +81,29 @@ until the run reaches a terminal state.
 
 ## Graceful shutdown and restart
 
-All long-running Hermes processes (master loop, worker serve loops) install
-SIGTERM and SIGINT handlers that set a global stop event. When the stop event
-is set, the main loop exits cleanly at the next safe boundary, runs a final
-heartbeat sweep to requeue in-flight work, logs a graceful shutdown message,
-and closes the database.
+Hermes processes handle SIGTERM/SIGINT for graceful shutdown, but the behavior
+differs by mode:
+
+**Control-plane API server (`serve --api`):**
+
+Uvicorn owns SIGTERM handling. On stop, uvicorn drains active HTTP requests and
+WebSocket connections, then triggers FastAPI's lifespan shutdown hook (which logs
+the clean stop). The control-plane does NOT run heartbeat sweeps or requeue logic
+(it's a read-only API layer over the queue database).
+
+**Master and worker serve loops (`run`, `serve --host`):**
+
+These install SIGTERM/SIGINT handlers that set a global stop event. When the stop
+event is set, the main loop exits cleanly at the next safe boundary, runs a final
+heartbeat sweep to requeue in-flight work, logs a graceful shutdown message, and
+closes the database.
 
 **systemd integration:**
 
 The example systemd unit at `fleet/hermes-control-plane.service` sets
-`TimeoutStopSec=90s` to allow the graceful shutdown pass to complete before
-systemd escalates to SIGKILL. This provides ample margin for the final
-housekeeping (heartbeat sweep, database close, log flush).
+`TimeoutStopSec=90s` to allow graceful shutdown to complete before systemd
+escalates to SIGKILL. This provides ample margin for request drain and lifespan
+cleanup (API mode) or heartbeat sweep and database close (worker mode).
 
 **Manual shutdown:**
 
@@ -194,16 +205,16 @@ Hermes does not perform in-process log rotation. Use OS-level log rotation:
 ## Backup and restore
 
 Hermes uses SQLite with WAL mode. Online backups can be taken while the database
-is live using the `VACUUM INTO` command.
+is live using the SQLite backup API.
 
 **Create an online backup:**
 
 ```bash
-hermes db backup --output /path/to/backup.db
+hermes db backup --out /path/to/backup.db
 ```
 
-This creates a copy of `queue.db` at the specified path without locking the
-live database.
+This creates a copy of `queue.db` at the specified path using the SQLite online-backup
+API (WAL-aware) without locking the live database.
 
 **Restore workflow:**
 
@@ -226,7 +237,7 @@ events and attempts periodically to keep the database size manageable.
 **Prune old events and attempts:**
 
 ```bash
-hermes db prune --events-days 90 --attempts-days 90
+hermes db prune --events-older-than 90 --attempts-older-than 90
 ```
 
 This deletes events and attempts older than 90 days, but only for terminal

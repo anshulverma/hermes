@@ -11,12 +11,12 @@
 #   4. systemctl daemon-reload
 #   5. systemctl enable --now hermes-control-plane
 #
-# The TimeoutStopSec is set to allow the graceful shutdown pass to
-# complete. When systemd stops the service, it sends SIGTERM; the
-# Hermes worker exits its main loop, runs a final heartbeat sweep to
-# requeue in-flight work, logs the graceful shutdown, and closes the
-# database. The 90-second timeout provides ample margin for this
-# final housekeeping before systemd escalates to SIGKILL.
+# The TimeoutStopSec is set to allow graceful shutdown. When systemd
+# stops the service, it sends SIGTERM to the API server. Uvicorn handles
+# SIGTERM by draining active HTTP requests and WebSocket connections, then
+# triggering FastAPI's lifespan shutdown hook (which logs the clean stop).
+# The 90-second timeout provides ample margin for request drain and lifespan
+# cleanup before systemd escalates to SIGKILL.
 
 [Unit]
 Description=Hermes Control Plane (Job Queue API)
