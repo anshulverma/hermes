@@ -44,8 +44,8 @@ def test_engine_core_imports_only_stdlib():
     }
 
     # Internal modules (within the workspace) + demo/server-only third-party
-    # (uvicorn is imported conditionally in cli.py serve command; testkit for demo)
-    internal_prefixes = {"engine", "sites", "agents", "server", "testkit", "uvicorn", "playbooks"}
+    # (fastapi/uvicorn imported conditionally for server dependency validation; testkit for demo)
+    internal_prefixes = {"engine", "sites", "agents", "server", "testkit", "fastapi", "uvicorn", "playbooks"}
 
     violations = []
 

@@ -334,3 +334,294 @@ def test_known_vars_all_have_descriptions():
     for var, desc in KNOWN_VARS.items():
         assert isinstance(desc, str), f"{var} description must be a string"
         assert len(desc.strip()) > 0, f"{var} must have a non-empty description"
+
+
+# --- validate_startup tests (Slice 3) ---
+
+def test_validate_startup_accepts_clean_env():
+    """validate_startup() succeeds on a clean environment."""
+    from engine.config import validate_startup
+    import tempfile
+
+    # Clean env with valid HERMES_HOME
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        old_level = os.environ.pop('HERMES_LOG_LEVEL', None)
+        old_format = os.environ.pop('HERMES_LOG_FORMAT', None)
+        old_heartbeat = os.environ.pop('HERMES_HEARTBEAT_S', None)
+        old_ws_poll = os.environ.pop('HERMES_WS_POLL_S', None)
+
+        try:
+            # Should not raise
+            validate_startup()
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            if old_level:
+                os.environ['HERMES_LOG_LEVEL'] = old_level
+            if old_format:
+                os.environ['HERMES_LOG_FORMAT'] = old_format
+            if old_heartbeat:
+                os.environ['HERMES_HEARTBEAT_S'] = old_heartbeat
+            if old_ws_poll:
+                os.environ['HERMES_WS_POLL_S'] = old_ws_poll
+
+
+def test_validate_startup_rejects_invalid_log_level():
+    """validate_startup() rejects invalid HERMES_LOG_LEVEL with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_LOG_LEVEL'] = 'loud'
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup()
+
+            # Should name the offending variable
+            assert 'HERMES_LOG_LEVEL' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_LOG_LEVEL', None)
+
+
+def test_validate_startup_rejects_invalid_log_format():
+    """validate_startup() rejects invalid HERMES_LOG_FORMAT with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_LOG_FORMAT'] = 'xml'
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup()
+
+            # Should name the offending variable
+            assert 'HERMES_LOG_FORMAT' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_LOG_FORMAT', None)
+
+
+def test_validate_startup_rejects_heartbeat_zero():
+    """validate_startup() rejects HERMES_HEARTBEAT_S=0 with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_HEARTBEAT_S'] = '0'
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup()
+
+            assert 'HERMES_HEARTBEAT_S' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_HEARTBEAT_S', None)
+
+
+def test_validate_startup_rejects_heartbeat_negative():
+    """validate_startup() rejects HERMES_HEARTBEAT_S=-1 with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_HEARTBEAT_S'] = '-1'
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup()
+
+            assert 'HERMES_HEARTBEAT_S' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_HEARTBEAT_S', None)
+
+
+def test_validate_startup_rejects_heartbeat_non_numeric():
+    """validate_startup() rejects HERMES_HEARTBEAT_S=abc with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_HEARTBEAT_S'] = 'abc'
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup()
+
+            assert 'HERMES_HEARTBEAT_S' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_HEARTBEAT_S', None)
+
+
+def test_validate_startup_rejects_ws_poll_zero():
+    """validate_startup() rejects HERMES_WS_POLL_S=0 with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_WS_POLL_S'] = '0'
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup()
+
+            assert 'HERMES_WS_POLL_S' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_WS_POLL_S', None)
+
+
+def test_validate_startup_rejects_ws_poll_negative():
+    """validate_startup() rejects HERMES_WS_POLL_S=-1 with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_WS_POLL_S'] = '-1'
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup()
+
+            assert 'HERMES_WS_POLL_S' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_WS_POLL_S', None)
+
+
+def test_validate_startup_rejects_ws_poll_non_numeric():
+    """validate_startup() rejects HERMES_WS_POLL_S=abc with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_WS_POLL_S'] = 'abc'
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup()
+
+            assert 'HERMES_WS_POLL_S' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_WS_POLL_S', None)
+
+
+def test_validate_startup_rejects_networked_mount():
+    """validate_startup() rejects networked-mount HERMES_HOME with named ConfigError."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Fake is_networked probe that says tmpdir is networked
+        def fake_networked(path):
+            return str(path).startswith(tmpdir)
+
+        os.environ['HERMES_HOME'] = tmpdir
+
+        try:
+            with pytest.raises(ConfigError) as exc_info:
+                validate_startup(is_networked=fake_networked)
+
+            # Should mention HERMES_HOME (via resolve_home's error)
+            assert 'HERMES_HOME' in str(exc_info.value)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+
+
+def test_validate_startup_require_server_with_fastapi_installed():
+    """validate_startup(require_server=True) succeeds when fastapi/uvicorn are importable."""
+    from engine.config import validate_startup
+    import tempfile
+
+    # Check if fastapi is installed (skip if not)
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+    except ImportError:
+        pytest.skip("fastapi/uvicorn not installed")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+
+        try:
+            # Should not raise
+            validate_startup(require_server=True)
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+
+
+def test_validate_startup_require_server_missing_server_deps():
+    """validate_startup(require_server=True) raises ConfigError with install hint when fastapi/uvicorn missing."""
+    from engine.config import validate_startup, ConfigError
+    import tempfile
+    import sys
+
+    # Temporarily hide fastapi and uvicorn from import
+    hidden_modules = {}
+    for mod in ['fastapi', 'uvicorn']:
+        if mod in sys.modules:
+            hidden_modules[mod] = sys.modules.pop(mod)
+
+    # Mock the import to fail
+    import builtins
+    real_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name in ['fastapi', 'uvicorn']:
+            raise ImportError(f"No module named '{name}'")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = mock_import
+
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.environ['HERMES_HOME'] = tmpdir
+
+            try:
+                with pytest.raises(ConfigError) as exc_info:
+                    validate_startup(require_server=True)
+
+                # Should have the install hint message
+                assert "pip install -e '.[server]'" in str(exc_info.value)
+            finally:
+                os.environ.pop('HERMES_HOME', None)
+    finally:
+        # Restore import
+        builtins.__import__ = real_import
+        for mod, module in hidden_modules.items():
+            sys.modules[mod] = module
+
+
+def test_validate_startup_main_integration():
+    """main() calls validate_startup on entry and returns clean nonzero on ConfigError."""
+    from engine.cli import main
+    import tempfile
+
+    # Set up invalid config (bad log level)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ['HERMES_HOME'] = tmpdir
+        os.environ['HERMES_LOG_LEVEL'] = 'INVALID'
+
+        try:
+            # main() with no args (prints help, but should fail on validate_startup first)
+            exit_code = main([])
+
+            # Should return nonzero (not raise)
+            assert exit_code != 0
+        finally:
+            os.environ.pop('HERMES_HOME', None)
+            os.environ.pop('HERMES_LOG_LEVEL', None)

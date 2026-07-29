@@ -37,6 +37,9 @@ def create_app(bind: str | None = None) -> FastAPI:
         bind: Bind address (default from HERMES_BIND or 127.0.0.1).
               Used to determine GET-gating and token injection.
     """
+    # Validate startup config (including server dependencies)
+    config.validate_startup(require_server=True)
+
     # Configure logging once at entry
     log.configure()
 

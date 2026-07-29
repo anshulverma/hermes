@@ -136,6 +136,77 @@ def debug() -> bool:
     return val.lower() not in ('0', 'false', 'no', '')
 
 
+def validate_startup(*, is_networked=None, require_server=False) -> None:
+    """Validate startup preconditions.
+
+    Runs the preconditions-to-running subset of checks and raises ConfigError
+    on the first failure, with a message naming the offending variable.
+
+    Args:
+        is_networked: Optional callable (Path -> bool) to check if a path
+                     is on a networked filesystem. Passed to resolve_home().
+        require_server: If True, verify fastapi/uvicorn are importable.
+
+    Raises:
+        ConfigError: If any validation check fails, with a message naming
+                    the offending variable.
+    """
+    # 1. resolve_home() succeeds and passes networked-FS guard
+    resolve_home(is_networked=is_networked)
+
+    # 2. log_level() is valid
+    level = log_level()
+    valid_levels = {'DEBUG', 'INFO', 'WARNING', 'ERROR'}
+    if level not in valid_levels:
+        raise ConfigError(
+            f"HERMES_LOG_LEVEL must be one of {valid_levels}, got: {level!r}"
+        )
+
+    # 3. log_format() is valid
+    format_val = log_format()
+    valid_formats = {'text', 'json'}
+    if format_val not in valid_formats:
+        raise ConfigError(
+            f"HERMES_LOG_FORMAT must be one of {valid_formats}, got: {format_val!r}"
+        )
+
+    # 4. heartbeat_s() parses as positive number
+    heartbeat_raw = os.environ.get('HERMES_HEARTBEAT_S', '30')
+    try:
+        heartbeat_val = int(heartbeat_raw)
+        if heartbeat_val <= 0:
+            raise ConfigError(
+                f"HERMES_HEARTBEAT_S must be a positive integer, got: {heartbeat_raw!r}"
+            )
+    except ValueError:
+        raise ConfigError(
+            f"HERMES_HEARTBEAT_S must be a valid integer, got: {heartbeat_raw!r}"
+        )
+
+    # 5. ws_poll_s() parses as positive number
+    ws_poll_raw = os.environ.get('HERMES_WS_POLL_S', '1.0')
+    try:
+        ws_poll_val = float(ws_poll_raw)
+        if ws_poll_val <= 0:
+            raise ConfigError(
+                f"HERMES_WS_POLL_S must be a positive number, got: {ws_poll_raw!r}"
+            )
+    except ValueError:
+        raise ConfigError(
+            f"HERMES_WS_POLL_S must be a valid number, got: {ws_poll_raw!r}"
+        )
+
+    # 6. When require_server=True: fastapi/uvicorn importable
+    if require_server:
+        try:
+            import fastapi  # noqa: F401
+            import uvicorn  # noqa: F401
+        except ImportError:
+            raise ConfigError(
+                "Error: server dependencies not installed. Run: pip install -e '.[server]'"
+            )
+
+
 KNOWN_VARS: dict[str, str] = {
     'HERMES_HOME': 'Runtime-data root (queue.db, api_token, workspaces, guard shims, logs). Refused on networked/synced mount.',
     'HERMES_NETWORKED_PREFIXES': 'Comma-separated mount-prefix denylist for the networked-FS guard.',

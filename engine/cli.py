@@ -438,6 +438,13 @@ def cmd_serve(args):
     """hermes serve --host <h> --site <site> [--agent <agent>] [--run R] OR --api [--host H] [--port P]."""
     # API server mode
     if args.api:
+        # Additional validation for API server: require server dependencies
+        try:
+            config.validate_startup(require_server=True)
+        except config.ConfigError as e:
+            logger = log.get_logger("cli")
+            logger.error("Configuration error: %s", e)
+            return 1
         return cmd_serve_api(args)
 
     # Worker mode (original behavior)
@@ -598,6 +605,14 @@ def main(argv=None):
     Returns:
         Exit code (0 = success, non-zero = error)
     """
+    # Validate startup config before logging (to catch invalid log config early)
+    try:
+        config.validate_startup()
+    except config.ConfigError as e:
+        # Log to stderr directly since logging not configured yet
+        print(f"Configuration error: {e}", file=sys.stderr)
+        return 1
+
     # Configure logging once at entry
     log.configure()
 
