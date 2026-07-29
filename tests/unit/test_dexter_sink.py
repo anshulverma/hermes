@@ -1,6 +1,6 @@
 """Tests for playbooks.dexter.sink — LearningSink protocol + implementations.
 
-TDD: written first (Slice 4).
+TDD: written first.
 """
 import pytest
 

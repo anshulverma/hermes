@@ -1,4 +1,4 @@
-"""Unit tests for engine.cli (§10).
+"""Unit tests for engine.cli.
 
 Tests CLI subcommands via main([...]) against a temp HERMES_HOME.
 """

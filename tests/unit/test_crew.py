@@ -1,7 +1,7 @@
 """
 tests.unit.test_crew — crew management (add, health-gate, heartbeat_sweep) tests.
 
-From spec §7/§9: `add` admits only healthy hosts (gate on HealthReport.ok), `heartbeat_sweep`
+`add` admits only healthy hosts (gate on HealthReport.ok), `heartbeat_sweep`
 down-requeues (no penalty) in-flight tickets of unreachable/unhealthy hosts, recovers down
 hosts, renews/reclaims leases, and unparks ready classes.
 

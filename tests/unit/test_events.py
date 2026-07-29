@@ -35,10 +35,10 @@ def conn(db_path):
 
 
 def test_event_kinds_exposed():
-    """EVENT_KINDS constant is exposed with the spec §7 event kinds."""
+    """EVENT_KINDS constant is exposed with the defined event kinds."""
     from engine.events import EVENT_KINDS
 
-    # Per spec §7, the engine emits these kinds
+    # The engine emits these kinds
     expected_kinds = {
         "run_started", "run_paused", "run_resumed", "run_stopped", "run_done", "run_failed",
         "ticket_claimed", "ticket_started", "result_recorded", "ticket_requeued",
@@ -290,7 +290,7 @@ def test_events_feed_is_append_only_monotonic(conn):
 
 
 def test_row_object_has_expected_fields(conn):
-    """Rows returned by since/tail have expected fields from schema §4 (caller owns commit)."""
+    """Rows returned by since/tail have expected fields from schema (caller owns commit)."""
     from engine.events import emit, since
 
     emit(
@@ -307,7 +307,7 @@ def test_row_object_has_expected_fields(conn):
     rows = since(conn, after_id=0)
     row = rows[0]
 
-    # Verify all expected fields per schema §4
+    # Verify all expected fields per schema
     assert "id" in row
     assert "ts" in row
     assert "kind" in row

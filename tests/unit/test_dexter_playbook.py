@@ -1,6 +1,6 @@
 """Tests for playbooks.dexter.DexterPlaybook.
 
-TDD: written first (Slice 2).
+TDD: written first.
 """
 import json
 import tempfile
@@ -294,13 +294,13 @@ def test_payload_schema_rejects_missing_goal():
 
 
 def test_result_schema_accepts_valid_result():
-    """result_schema accepts a valid §2.3 dexter finding doc."""
+    """result_schema accepts a valid dexter finding doc."""
     from playbooks.dexter.playbook import DexterPlaybook
 
     pb = DexterPlaybook()
     schema = pb.result_schema("solve")
 
-    # Valid §2.3 payload
+    # Valid payload
     payload = {
         "reproduced": True,
         "root_cause": {
@@ -422,18 +422,18 @@ def test_is_done_returns_true():
     assert pb.is_done(run) is True
 
 
-# --- verify (Slice 3) ---
+# --- verify ---
 
 
 def test_verify_valid_payload_recheck_true():
-    """verify() with valid §2.3 payload + recheck_fix→True ⇒ True."""
+    """verify() with valid payload + recheck_fix→True ⇒ True."""
     from playbooks.dexter.playbook import DexterPlaybook
 
     pb = DexterPlaybook()
     run = _run()
     ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
 
-    # Valid §2.3 payload
+    # Valid payload
     payload = {
         "reproduced": True,
         "root_cause": {
@@ -456,14 +456,14 @@ def test_verify_valid_payload_recheck_true():
 
 
 def test_verify_valid_payload_recheck_false():
-    """verify() with valid §2.3 payload + recheck_fix→False ⇒ False."""
+    """verify() with valid payload + recheck_fix→False ⇒ False."""
     from playbooks.dexter.playbook import DexterPlaybook
 
     pb = DexterPlaybook()
     run = _run()
     ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
 
-    # Valid §2.3 payload
+    # Valid payload
     payload = {
         "reproduced": True,
         "root_cause": {
@@ -519,7 +519,7 @@ def test_verify_no_recheck_fix_fails_safe():
     run = _run()
     ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
 
-    # Valid §2.3 payload
+    # Valid payload
     payload = {
         "reproduced": True,
         "root_cause": {
@@ -548,7 +548,7 @@ def test_verify_no_recheck_fix_optional_admits():
     run = _run(config={"verify_recheck_optional": True})
     ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
 
-    # Valid §2.3 payload
+    # Valid payload
     payload = {
         "reproduced": True,
         "root_cause": {
@@ -601,14 +601,14 @@ def test_verify_ignores_payload_verified_field():
 
 
 def test_verify_recheck_fix_raises_fails_safe():
-    """verify() with recheck_fix raising exception ⇒ False (D3 fail-safe), does not propagate."""
+    """verify() with recheck_fix raising exception ⇒ False (fail-safe), does not propagate."""
     from playbooks.dexter.playbook import DexterPlaybook
 
     pb = DexterPlaybook()
     run = _run()
     ticket = _ticket(f"{run.id}/solve-0", run.id, {"goal": "test"})
 
-    # Valid §2.3 payload
+    # Valid payload
     payload = {
         "reproduced": True,
         "root_cause": {
@@ -631,7 +631,7 @@ def test_verify_recheck_fix_raises_fails_safe():
     assert verified is False
 
 
-# --- reduce (Slice 4) ---
+# --- reduce ---
 
 
 def test_reduce_two_findings_same_signature_one_cluster():
@@ -1073,7 +1073,7 @@ def test_reduce_stale_finding_surfaced_via_needs_human():
     finding. Mitigation: the cluster is routed to needs_human (all members) for human
     review; reject drops it. Never silently banked-and-done.
 
-    This test documents the residual edge behavior per §2.6 / brief.
+    This test documents the residual edge behavior.
     """
     from playbooks.dexter.playbook import DexterPlaybook
     from playbooks.dexter.sink import FakeSink

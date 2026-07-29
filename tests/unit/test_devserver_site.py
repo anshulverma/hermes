@@ -1,4 +1,4 @@
-"""Tests for sites.devserver.DevserverSite (Slice 5).
+"""Tests for sites.devserver.DevserverSite.
 
 TDD: written FIRST. DevserverSite is a distinct site (not inheriting SSHSite):
 real idempotent provisioning + HONEST guard reporting. Commands constructed for
@@ -781,7 +781,7 @@ def test_submit_for_review_error_on_failure(mock_run, devserver_site, monkeypatc
 
 
 # ============================================================================
-# Slice 6: recheck_fix extension method tests (TDD: RED first)
+# recheck_fix extension method tests (TDD: RED first)
 # ============================================================================
 
 
@@ -1089,7 +1089,7 @@ def test_recheck_fix_wiring_to_verify():
         payload={"goal": "test goal", "issue_ref": None, "context": {}},
     )
 
-    # Result with a valid §2.3 payload
+    # Result with a valid payload
     result = Result(
         outcome="ok",
         termination_reason="goal_met",

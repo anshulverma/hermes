@@ -1,6 +1,6 @@
 """Unit tests for DexterMockAgent + DexterLocalSite test doubles.
 
-These doubles emit §2.3-shaped payloads for dexter integration testing,
+These doubles emit structured payloads for dexter integration testing,
 with attempt-aware scenario keying to drive the fix-does-not-hold requeue path.
 """
 import pytest
@@ -10,7 +10,7 @@ from playbooks.dexter.playbook import DexterPlaybook
 
 
 def test_dexter_mock_agent_parse_result_emits_valid_solve_doc():
-    """DexterMockAgent.parse_result yields a valid §2.3 doc per scenario."""
+    """DexterMockAgent.parse_result yields a valid solve doc per scenario."""
     from testkit.dexter_doubles import DexterMockAgent
 
     agent = DexterMockAgent()
@@ -31,7 +31,7 @@ def test_dexter_mock_agent_parse_result_emits_valid_solve_doc():
     assert result.outcome == "ok"
     assert result.termination_reason == "goal_met"
 
-    # Validate §2.3 shape via contracts.validate_result
+    # Validate shape via contracts.validate_result
     result_dict = {
         "outcome": result.outcome,
         "termination_reason": result.termination_reason,
@@ -46,7 +46,7 @@ def test_dexter_mock_agent_parse_result_emits_valid_solve_doc():
     # MUST NOT RAISE
     contracts.validate_result(result_dict, result_schema)
 
-    # Check §2.3 required fields are present
+    # Check required fields are present
     assert "reproduced" in result.payload
     assert "root_cause" in result.payload
     assert "signature" in result.payload["root_cause"]

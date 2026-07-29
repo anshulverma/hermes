@@ -1,4 +1,4 @@
-"""Tests for testkit.scenarios.fleet fake scenario (spec §5).
+"""Tests for testkit.scenarios.fleet fake scenario.
 
 TDD: written FIRST. The deterministic scenario seeds a single-box run (LocalSite
 + MockAgent), drives master_loop to done, and asserts the expected rich outcome:
@@ -148,7 +148,7 @@ def _state_of(conn, ticket_id):
 
 
 def _settle_needs_human(conn, run_id, now):
-    """Operator settle of needs_human tickets, by route (mirrors fleet §6).
+    """Operator settle of needs_human tickets, by route.
 
     A verify-routed ticket (no linked reduction) is operator-requeued; a
     reduce-flagged ticket (linked to a pending reduction) is settled by accepting
@@ -178,7 +178,7 @@ def _settle_needs_human(conn, run_id, now):
 def test_fleet_scenario_single_box_run(home, source_repo, conn):
     """Drive the FULL fleet scenario to ``done`` on ONE box and assert every path.
 
-    Mirrors the fleet harness §6 convergence procedure without Docker: seed the
+    Mirrors the fleet harness convergence procedure without Docker: seed the
     full scenario, register a crew host with ample cpu but zero-then-limited gpu
     (forcing parking), drive ``dispatch.master_loop`` in a bounded controlled
     loop, settle both needs_human routes via the operator paths, and continue to

@@ -1,4 +1,4 @@
-"""Tests for agents.claude.agent.ClaudeAgent (§6, §8).
+"""Tests for agents.claude.agent.ClaudeAgent.
 
 TDD: written FIRST, watched fail, then agents/claude/agent.py implemented.
 

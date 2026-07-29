@@ -1,4 +1,4 @@
-"""Tests for run-level attention event detection (Slice 11, §7).
+"""Tests for run-level attention event detection.
 
 TDD: Written FIRST to drive check_attention implementation.
 """
