@@ -1,7 +1,4 @@
-"""Test/demo fixtures: a temp HERMES_HOME and a canned issue file.
-
-Stdlib-only.
-"""
+"""Test fixtures for temporary HERMES_HOME and canned issue data."""
 from __future__ import annotations
 
 import json

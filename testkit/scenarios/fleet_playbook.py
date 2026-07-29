@@ -1,21 +1,4 @@
-"""Scenario-aware playbook + gpu-limited site for the fleet scenario.
-
-The stock ``EchoPlaybook`` cannot express two hooks the fleet scenario needs to
-PROVE the engine's needs_human routing:
-
-- ``verify`` must fail for exactly ONE ticket (the re-verify-marked ticket) and
-  only on its FIRST execution, so an operator requeue lets attempt 2 pass. Echo's
-  ``verify`` is a single per-run config flag, so it cannot target one ticket.
-- ``reduce`` must cluster findings by ``root_cause.signature`` (one reduction row
-  per distinct signature) and flag ONLY the cluster containing the
-  reduce-review-marked ticket to ``needs_human``.
-
-``GpuLimitedLocalSite`` is a ``LocalSite`` whose gpu capacity is a mutable knob so
-a single-box test can force gpu parking (capacity 0) and later regain it
-(capacity N) to exercise the park -> unpark -> done path deterministically.
-
-Stdlib-only.
-"""
+"""Fleet scenario playbook with per-ticket verify and signature clustering, plus a GPU-limited site for testing resource contention."""
 from __future__ import annotations
 
 from engine.models import Driver, Finding, Reduction, Result, Run, Ticket

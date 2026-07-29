@@ -1,11 +1,4 @@
-"""LearningSink protocol + implementations for dexter playbook.
-
-The LearningSink interface defines bank(cluster) -> str|None. Implementations:
-- FakeSink: test double that records calls and returns a canned ref (or raises)
-- DexterKbSink: shells to dexter plugin kb.py (validate + index)
-
-Stdlib-only.
-"""
+"""Learning sink protocol and implementations for banking dexter findings. Includes test double and production kb.py integration."""
 from __future__ import annotations
 
 import json

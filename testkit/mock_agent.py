@@ -1,13 +1,4 @@
-"""MockAgent — a scenario-table fake agent adapter.
-
-Selected via HERMES_AGENT=mock. Ignores the real CLI: build_invocation returns
-a trivial argv and parse_result returns a deterministic Result chosen by the
-envelope's payload `scenario` field. Every outcome / termination_reason is
-reachable, letting integration tests exercise the full pipeline with no real
-`claude`, no SSH, and no Meta.
-
-Stdlib-only.
-"""
+"""Mock agent adapter driven by scenario tables. Returns deterministic outcomes without running real Claude or SSH."""
 from __future__ import annotations
 
 import time

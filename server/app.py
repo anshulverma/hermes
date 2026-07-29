@@ -1,9 +1,4 @@
-"""
-server.app — FastAPI application.
-
-Control-plane server with auth (Phase D1a). Bearer-token gated mutations + WS,
-GET-gated on non-loopback, SPA serving with token bootstrap injection (loopback only).
-"""
+"""FastAPI control plane server with bearer-token auth, WebSocket live events, and SPA serving with token injection on loopback."""
 import asyncio
 import json
 import math

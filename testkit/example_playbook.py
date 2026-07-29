@@ -1,14 +1,4 @@
-"""EchoPlaybook — a minimal but multi-ticket-capable example playbook.
-
-Registered as "example" (matching acceptance criterion's `hermes run example`).
-Phases: ["work", "reduce"]. `seed` reads a canned issue file (via the site's
-issue_source) and yields one ticket per issue; `reduce` clusters findings by a
-field and, when `run.config` requests it, emits a reduction carrying
-`needs_human_ticket_ids`; `verify` returns True by default and False under a
-config flag.
-
-Stdlib-only.
-"""
+"""Example multi-phase playbook with issue seeding and clustering. Registered as "example" for tests and demos."""
 from __future__ import annotations
 
 from engine import playbook as _playbook

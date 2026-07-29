@@ -1,9 +1,5 @@
 #!/bin/sh
-# Hermes fleet worker entrypoint.
-#
-# Installs the harness-provided throwaway public key into root's authorized_keys
-# (hermetic auth: no baked credentials), then runs sshd in the foreground. The
-# public key is passed at `podman run` time via $HERMES_AUTHORIZED_KEY.
+# Fleet worker container entrypoint. Installs throwaway SSH key from env and runs sshd in foreground.
 set -e
 
 if [ -n "${HERMES_AUTHORIZED_KEY}" ]; then

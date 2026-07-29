@@ -1,12 +1,4 @@
-"""
-server.auth — bearer-token authentication.
-
-Token lifecycle:
-- load_or_create_token: generate a strong random token via secrets.token_urlsafe
-  if absent, write 0600, return it (idempotent).
-- rotate_token: overwrite with a new one.
-- read_token: read current, or None.
-"""
+"""Bearer-token auth helpers. Idempotent token creation with 0600 permissions, rotation, and read."""
 import os
 import secrets
 from pathlib import Path

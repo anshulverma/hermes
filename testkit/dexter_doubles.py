@@ -1,11 +1,4 @@
-"""DexterMockAgent + DexterLocalSite — test doubles for dexter integration.
-
-These doubles emit dexter finding docs for testing the full dexter playbook
-flow without real dexter, SSH, or Meta. They live in testkit (not production
-adapters).
-
-Stdlib-only.
-"""
+"""Test doubles for dexter playbook integration. Emit dexter finding payloads without real dexter, SSH, or Meta."""
 from __future__ import annotations
 
 import time

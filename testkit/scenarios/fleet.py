@@ -1,16 +1,4 @@
-"""testkit.scenarios.fleet — deterministic fake scenario for fleet testing.
-
-A scenario generator producing ~40 tickets + a MockAgent result table keyed by
-(ticket_id, attempt), engineered to exercise:
-- clustering (shared root_cause.signature)
-- failures: driver_failed (terminal), infra_failed on attempt 1 then ok on attempt 2
-- needs_human via both routes: verify=False and reduce flagging
-- contention: more gpu tickets than gpu slots -> parking
-
-The scenario is a single seedable fixture reused by both single-box and fleet tests.
-
-Stdlib-only.
-"""
+"""Fleet integration test scenario generator. Produces 40 tickets exercising clustering, retries, parking, and needs_human routes."""
 from __future__ import annotations
 
 import random
