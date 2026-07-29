@@ -750,3 +750,283 @@ def test_submit_for_review_error_on_failure(mock_run, devserver_site, monkeypatc
     except Exception as e:
         # Raising an exception is acceptable
         assert "submit" in str(e).lower() or "failed" in str(e).lower()
+
+
+# ============================================================================
+# Slice 6: recheck_fix extension method tests (TDD: RED first)
+# ============================================================================
+
+
+@patch("subprocess.run")
+def test_recheck_fix_callable_extension_method(mock_run, devserver_site):
+    """recheck_fix is callable as an extension method (not on core Site Protocol)."""
+    assert hasattr(devserver_site, "recheck_fix"), "DevserverSite must have recheck_fix method"
+    assert callable(getattr(devserver_site, "recheck_fix")), "recheck_fix must be callable"
+
+
+@patch("subprocess.run")
+def test_recheck_fix_ci_green_returns_true(mock_run, devserver_site, monkeypatch):
+    """recheck_fix returns True when CI-signal probe returns 'green' or 'passing'."""
+    # Mock the recheck command to return "green" status
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="Status: green\n", stderr=""
+    )
+
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": "D12345",
+            "ci_status": "green",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    result = devserver_site.recheck_fix(result_payload)
+
+    assert result is True, "Expected True when CI probe returns 'green'"
+
+    # Assert the probe was called with the diff_ref (shlex-quoted)
+    assert mock_run.called, "Expected CI probe to be called"
+    call_args = " ".join(str(a) for a in mock_run.call_args[0][0])
+    assert "D12345" in call_args, "Expected diff_ref in probe command"
+
+
+@patch("subprocess.run")
+def test_recheck_fix_ci_passing_returns_true(mock_run, devserver_site, monkeypatch):
+    """recheck_fix returns True when CI-signal probe returns 'passing'."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="Status: passing\n", stderr=""
+    )
+
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": "D67890",
+            "ci_status": "passing",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    result = devserver_site.recheck_fix(result_payload)
+
+    assert result is True, "Expected True when CI probe returns 'passing'"
+
+
+@patch("subprocess.run")
+def test_recheck_fix_ci_failing_returns_false(mock_run, devserver_site, monkeypatch):
+    """recheck_fix returns False when CI-signal probe returns 'failing'."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="Status: failing\n", stderr=""
+    )
+
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": "D99999",
+            "ci_status": "failing",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    result = devserver_site.recheck_fix(result_payload)
+
+    assert result is False, "Expected False when CI probe returns 'failing'"
+
+
+@patch("subprocess.run")
+def test_recheck_fix_ci_inconclusive_returns_false(mock_run, devserver_site, monkeypatch):
+    """recheck_fix returns False when CI-signal probe returns inconclusive status."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="Status: unknown\n", stderr=""
+    )
+
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": "D11111",
+            "ci_status": "unknown",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    result = devserver_site.recheck_fix(result_payload)
+
+    assert result is False, "Expected False when CI probe returns inconclusive status"
+
+
+@patch("subprocess.run")
+def test_recheck_fix_probe_raises_returns_false(mock_run, devserver_site, monkeypatch):
+    """recheck_fix returns False when CI-signal probe raises an exception (fail-safe)."""
+    mock_run.side_effect = subprocess.CalledProcessError(1, ["ci-check"], stderr="Error")
+
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": "D22222",
+            "ci_status": "green",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    result = devserver_site.recheck_fix(result_payload)
+
+    assert result is False, "Expected False when probe raises (fail-safe)"
+
+
+@patch("subprocess.run")
+def test_recheck_fix_missing_diff_ref_returns_false(mock_run, devserver_site, monkeypatch):
+    """recheck_fix returns False when result_payload['fix']['diff_ref'] is missing/None (no crash)."""
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": None,  # Missing diff_ref
+            "ci_status": "green",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    result = devserver_site.recheck_fix(result_payload)
+
+    assert result is False, "Expected False when diff_ref is None (no crash, fail-safe)"
+
+    # Probe should not be called when diff_ref is None
+    assert not mock_run.called, "Probe should not be called when diff_ref is None"
+
+
+@patch("subprocess.run")
+def test_recheck_fix_shlex_quotes_diff_ref(mock_run, devserver_site, monkeypatch):
+    """recheck_fix must shlex.quote() the diff_ref in the probe command (injection safety)."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="Status: green\n", stderr=""
+    )
+
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    # Malicious diff_ref with shell metacharacters
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": "D123;rm -rf /",  # MALICIOUS
+            "ci_status": "green",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    devserver_site.recheck_fix(result_payload)
+
+    # Assert the probe was called and the diff_ref was quoted
+    assert mock_run.called, "Expected CI probe to be called"
+    call_args = mock_run.call_args[0][0]
+    call_str = " ".join(str(a) for a in call_args)
+
+    # The malicious part should be quoted/escaped, not raw
+    assert ";rm -rf /" not in call_str or "'" in call_str or "\\" in call_str, \
+        f"Expected diff_ref to be shlex-quoted. Got: {call_str}"
+
+
+def test_recheck_fix_wiring_to_verify():
+    """Thin wiring test: verify that dexter playbook's verify calls recheck_fix when present.
+
+    This tests the duck-typing integration: getattr(site, "recheck_fix") is callable
+    and dexter verify invokes it with both present-True and present-False branches reachable.
+    """
+    from playbooks.dexter.playbook import DexterPlaybook
+    from engine.models import Run, Ticket, Result
+    import sites.devserver  # noqa: F401 (registers devserver)
+    from engine import site as site_mod
+
+    devserver_site = site_mod.load("devserver")
+
+    # Verify DevserverSite has recheck_fix
+    assert hasattr(devserver_site, "recheck_fix"), "DevserverSite must have recheck_fix"
+    assert callable(getattr(devserver_site, "recheck_fix")), "recheck_fix must be callable"
+
+    # Create a minimal run, ticket, and result for verify
+    run = Run(
+        id="run-1",
+        playbook="dexter",
+        site="devserver",
+        base_ref="main",
+        config={},
+        phase="solve",
+        reductions=[],
+    )
+
+    ticket = Ticket(
+        id="run-1/solve-0",
+        run_id="run-1",
+        phase="solve",
+        state="running",
+        resource_req="cpu",
+        priority=0.0,
+        attempts=0,
+        payload={"goal": "test goal", "issue_ref": None, "context": {}},
+    )
+
+    # Result with a valid §2.3 payload
+    result = Result(
+        outcome="ok",
+        termination_reason="goal_met",
+        result_ref="result://run-1/solve-0",
+        evidence_ref="evidence-1",
+        started_at=1000.0,
+        ended_at=1001.0,
+        error_summary=None,
+        payload={
+            "reproduced": True,
+            "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+            "fix": {"verified": True, "diff_ref": "D12345", "ci_status": "green"},
+            "knowledge_entry": {"ref": "kb-1", "validated": True},
+            "evidence_ref": "evidence-1",
+        },
+    )
+
+    playbook = DexterPlaybook()
+
+    # Mock the recheck_fix to return True
+    with patch.object(devserver_site, "recheck_fix", return_value=True) as mock_recheck:
+        verdict = playbook.verify(run, ticket, result, devserver_site)
+
+        # verify should have called recheck_fix
+        mock_recheck.assert_called_once_with(result.payload)
+        assert verdict is True, "Expected verify to return True when recheck_fix returns True"
+
+    # Mock the recheck_fix to return False
+    with patch.object(devserver_site, "recheck_fix", return_value=False) as mock_recheck:
+        verdict = playbook.verify(run, ticket, result, devserver_site)
+
+        mock_recheck.assert_called_once_with(result.payload)
+        assert verdict is False, "Expected verify to return False when recheck_fix returns False"

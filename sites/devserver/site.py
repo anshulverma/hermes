@@ -491,6 +491,73 @@ done
         # For now, return empty list (endpoint not configured).
         return []
 
+    # --- extension methods (D3) ------------------------------------------
+
+    def recheck_fix(self, result_payload: dict) -> bool:
+        """Independent fix re-check via CI-signal probe (D3, §2.5/§3).
+
+        Host-agnostic INDEPENDENT re-check: re-query the published diff's CI signal
+        via an internal tool using result_payload["fix"]["diff_ref"], and/or spin
+        the recorded minimal repro on a discover_hosts()-chosen box at the run's
+        base_ref; return whether the fix independently holds.
+
+        The CI-signal lookup / repro command is a DEPLOY-TIME PLUGGABLE HOOK
+        (env-configurable command, e.g. HERMES_DEVSERVER_RECHECK_CMD; shlex-quote
+        the diff_ref in the argv, consistent with Slice 5).
+
+        Return False on ANY inconclusive/failed/missing-diff_ref/raising check
+        (NEVER a false pass — fail safe). Use subprocess (mocked in tests);
+        stdlib-only.
+
+        Args:
+            result_payload: The §2.3 dexter result payload dict.
+
+        Returns:
+            True iff the fix independently holds (CI green/passing).
+            False on any inconclusive/failed/missing check (fail-safe).
+        """
+        # Extract diff_ref from result_payload
+        try:
+            diff_ref = result_payload.get("fix", {}).get("diff_ref")
+        except (AttributeError, TypeError):
+            # Malformed payload
+            return False
+
+        # Fail-safe: missing diff_ref → False (no crash)
+        if not diff_ref:
+            return False
+
+        # Get the recheck command from env (deploy-time pluggable)
+        recheck_cmd = os.environ.get("HERMES_DEVSERVER_RECHECK_CMD", "")
+        if not recheck_cmd:
+            # No recheck command configured → fail-safe
+            return False
+
+        # Build the probe command with shlex-quoted diff_ref (injection safety)
+        # The command is expected to be a single binary/script name; we append the diff_ref
+        try:
+            probe_argv = [recheck_cmd, shlex.quote(diff_ref)]
+            proc = subprocess.run(
+                probe_argv,
+                capture_output=True,
+                text=True,
+                timeout=30,  # Reasonable timeout for CI probe
+                check=False,  # Don't raise on non-zero exit
+            )
+        except (subprocess.TimeoutExpired, OSError, Exception):
+            # Probe raised → fail-safe
+            return False
+
+        # Parse the probe output for green/passing signal
+        output = proc.stdout.lower()
+
+        # Check for passing signals
+        if "green" in output or "passing" in output:
+            return True
+
+        # Everything else (failing, inconclusive, error) → fail-safe
+        return False
+
     # --- helpers ---------------------------------------------------------
 
     def _ssh_opts(self, host: str) -> list[str]:
