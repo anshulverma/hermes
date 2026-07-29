@@ -1,0 +1,11 @@
+{
+  "name": "hermes",
+  "version": "0.1.0",
+  "description": "Hermes multi-agent fleet orchestration. Run distributed work across a crew of AI coding agents.",
+  "commands": [
+    "commands/*.md"
+  ],
+  "skills": [
+    "skills/*"
+  ]
+}
