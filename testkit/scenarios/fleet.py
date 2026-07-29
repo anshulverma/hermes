@@ -88,11 +88,6 @@ def build_fleet_scenario(seed: int = 42) -> tuple[list[Ticket], MockAgent]:
         tickets.append(ticket)
         # Fail on attempt 1, succeed on attempt 2
         scenarios[(ticket.id, 1)] = ("infra_failed", "transport_error")
-        ticket_retry = mk_ticket(
-            resource_req="cpu",
-            payload={"scenario": "infra_then_ok", "attempt": 2},
-        )
-        ticket_retry.id = ticket.id  # Same ticket, different attempt
         scenarios[(ticket.id, 2)] = ("ok", "goal_met")
 
     # 5. needs_human via verify=False route (re-verify override)

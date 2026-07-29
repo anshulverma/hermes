@@ -124,7 +124,10 @@ def test_health_merges_agent_checks(mock_run, ssh_site, mock_agent):
 
 
 def test_run_worker_connection_failure_raises_transport_error(ssh_site, mock_agent):
-    """run_worker raises TransportError on ssh connection failure (exit 255)."""
+    """run_worker raises TransportError on ssh connection failure (exit 255).
+
+    Exit 255 is ssh's own connection-error code (pre-run failure, host unreachable).
+    """
     from engine.transport import TransportError
 
     envelope = {
@@ -145,8 +148,36 @@ def test_run_worker_connection_failure_raises_transport_error(ssh_site, mock_age
             ssh_site.run_worker("worker-1", envelope, mock_agent)
 
 
+def test_run_worker_timeout_raises_transport_error(ssh_site, mock_agent):
+    """run_worker raises TransportError on ssh timeout (host-lost / connection timeout)."""
+    from engine.transport import TransportError
+
+    envelope = {
+        "ticket_id": "run-1/t-0",
+        "timeout_s": 60,
+        "goal_envelope": {
+            "driver": {"command": None, "args": {}, "loop": None}
+        },
+    }
+
+    # Mock subprocess.run to raise TimeoutExpired on the ssh call
+    with patch("sites.ssh.site.subprocess.run") as mock_run:
+        # First two calls (mkdir, scp) succeed, third call (ssh serve-once) times out
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # mkdir
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),  # scp envelope
+            subprocess.TimeoutExpired(cmd=["ssh"], timeout=120),  # ssh serve-once timeout
+        ]
+
+        with pytest.raises(TransportError, match="timed out"):
+            ssh_site.run_worker("worker-1", envelope, mock_agent)
+
+
 def test_run_worker_successful_returns_result(ssh_site, mock_agent, tmp_path):
-    """run_worker with successful ssh execution returns parsed Result."""
+    """run_worker with successful ssh execution returns parsed Result.
+
+    Also asserts the ssh command construction: mkdir/scp-envelope/ssh-serve/scp-result.
+    """
     from engine.models import Result
     import hashlib
 
@@ -197,7 +228,7 @@ def test_run_worker_successful_returns_result(ssh_site, mock_agent, tmp_path):
         # Setup temp directory
         mock_tmpdir.return_value.__enter__.return_value = str(tmp_path)
 
-        # Mock subprocess.run to succeed
+        # Mock subprocess.run to succeed (4 calls: mkdir, scp-envelope, ssh-serve, scp-result)
         mock_run.return_value = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=result_json, stderr=""
         )
@@ -214,6 +245,32 @@ def test_run_worker_successful_returns_result(ssh_site, mock_agent, tmp_path):
 
     assert isinstance(result, Result)
     assert result.outcome == "ok"
+
+    # Assert the expected ssh command sequence was called
+    assert mock_run.call_count == 4, f"Expected 4 subprocess calls, got {mock_run.call_count}"
+
+    # Call 1: mkdir
+    mkdir_call = mock_run.call_args_list[0][0][0]
+    assert "ssh" in mkdir_call
+    assert "worker-1" in mkdir_call
+    assert "mkdir" in mkdir_call
+
+    # Call 2: scp envelope
+    scp_env_call = mock_run.call_args_list[1][0][0]
+    assert "scp" in scp_env_call
+    assert any("worker-1:" in arg for arg in scp_env_call), "Expected scp to worker-1"
+
+    # Call 3: ssh serve-once
+    ssh_serve_call = mock_run.call_args_list[2][0][0]
+    assert "ssh" in ssh_serve_call
+    assert "worker-1" in ssh_serve_call
+    assert "hermes" in ssh_serve_call
+    assert "serve-once" in ssh_serve_call
+
+    # Call 4: scp result back
+    scp_result_call = mock_run.call_args_list[3][0][0]
+    assert "scp" in scp_result_call
+    assert any("worker-1:" in arg for arg in scp_result_call), "Expected scp from worker-1"
 
 
 def test_resource_classes_returns_classes(ssh_site, monkeypatch):

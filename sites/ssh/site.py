@@ -188,19 +188,22 @@ class SSHSite:
                     timeout=timeout_s + 60,  # Extra margin
                 )
             except subprocess.TimeoutExpired as exc:
+                # Connection/host timeout = transport-level failure (host-lost).
                 raise transport.TransportError(
                     f"SSH to {host} timed out: {exc}"
                 ) from exc
 
-            # Connection-level failure detection: ssh exit 255 or other connection errors
+            # PRE-RUN failure detection (scp/connection failures before worker runs):
+            # ssh exit 255 = ssh's own connection-error code (connection refused/unreachable).
+            # This is a transport-level failure → raise TransportError for no-penalty requeue.
             if ssh_proc.returncode == 255:
                 raise transport.TransportError(
                     f"SSH connection to {host} failed (exit 255): {ssh_proc.stderr.strip()}"
                 )
 
-            # Other non-zero exits: the worker ran but failed. This is NOT a
-            # connection failure, so we return the result normally (agent parses it).
-            # Note: For now, we'll try to fetch the result anyway.
+            # Other non-zero exits: the worker RAN but failed (e.g. exit 1).
+            # This is NOT a transport failure — the command executed, so we pass through
+            # the result normally and let the agent parse the worker's outcome.
 
             # 3) scp the result back and parse it.
             try:
