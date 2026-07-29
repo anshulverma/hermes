@@ -4,10 +4,10 @@
  */
 
 import { useState, useEffect } from 'react';
-import { fetchReductions } from '../api/client';
+import { fetchReductions, acceptReduction, rejectReduction } from '../api/client';
 import type { Reduction } from '../api/client';
 import { deriveFindingStatus } from '../api/normalize';
-import { Card, Badge, StatusPill, Divider, EmptyState } from '../ds';
+import { Card, Badge, StatusPill, Divider, EmptyState, Button } from '../ds';
 
 type FindingsProps = {
   runId: string;
@@ -17,15 +17,46 @@ export default function Findings({ runId }: FindingsProps) {
   const [reductions, setReductions] = useState<Reduction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadReductions = () => {
     setLoading(true);
     setError(null);
     fetchReductions(runId)
       .then((data) => setReductions(data))
       .catch((err) => setError(err))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    loadReductions();
   }, [runId]);
+
+  const handleAccept = async (reductionId: number) => {
+    setActionError(null);
+    try {
+      await acceptReduction(reductionId);
+      // Refresh the list
+      loadReductions();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to accept reduction');
+    }
+  };
+
+  const handleReject = async (reductionId: number) => {
+    if (!confirm('Reject this reduction? This will fail the linked member tickets.')) {
+      return;
+    }
+
+    setActionError(null);
+    try {
+      await rejectReduction(reductionId);
+      // Refresh the list
+      loadReductions();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Failed to reject reduction');
+    }
+  };
 
   if (loading) {
     return (
@@ -78,6 +109,21 @@ export default function Findings({ runId }: FindingsProps) {
           {reductions.length} {reductions.length === 1 ? 'reduction' : 'reductions'}
         </span>
       </div>
+
+      {actionError && (
+        <div
+          style={{
+            padding: '12px 16px',
+            background: 'var(--status-danger-tint)',
+            border: '1px solid var(--status-danger-edge)',
+            borderRadius: 'var(--radius-md)',
+            color: 'var(--status-danger)',
+            fontSize: 13,
+          }}
+        >
+          {actionError}
+        </div>
+      )}
 
       {reductions.map((reduction) => {
         const status = deriveFindingStatus(reduction);
@@ -172,6 +218,29 @@ export default function Findings({ runId }: FindingsProps) {
                       </span>
                     </div>
                   ))}
+                </div>
+              </>
+            )}
+
+            {/* Accept/Reject actions (Phase D4) - only for pending reductions */}
+            {reduction.review_state === 'pending' && (
+              <>
+                <Divider style={{ margin: '16px 0 12px' }} />
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() => handleAccept(reduction.id)}
+                  >
+                    Accept
+                  </Button>
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    onClick={() => handleReject(reduction.id)}
+                  >
+                    Reject
+                  </Button>
                 </div>
               </>
             )}

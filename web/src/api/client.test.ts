@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
+import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, acceptReduction, rejectReduction, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
 import { clearToken, setToken } from './auth';
 
 describe('API client', () => {
@@ -574,6 +574,116 @@ describe('API client', () => {
         }) as any;
 
         await expect(requeueTicket('ticket-123')).rejects.toThrow(AuthError);
+      });
+    });
+  });
+
+  describe('Reduction control endpoints (Phase D4)', () => {
+    beforeEach(() => {
+      setToken('test-token');
+    });
+
+    describe('acceptReduction', () => {
+      it('should POST to /api/reductions/{id}/accept with auth header', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ review_state: 'accepted' }),
+        }) as any;
+
+        const result = await acceptReduction(1);
+
+        expect(result).toEqual({ review_state: 'accepted' });
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/reductions/1/accept',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token',
+            }),
+          })
+        );
+      });
+
+      it('should throw 404 if reduction not found', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: "Reduction 999 not found" }),
+        }) as any;
+
+        await expect(acceptReduction(999)).rejects.toThrow("Reduction 999 not found");
+      });
+
+      it('should throw 409 with server detail if reduction already resolved', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "reduction 1 is 'accepted', not 'pending'; already resolved" }),
+        }) as any;
+
+        await expect(acceptReduction(1)).rejects.toThrow("reduction 1 is 'accepted', not 'pending'; already resolved");
+      });
+
+      it('should throw AuthError on 401', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+        }) as any;
+
+        await expect(acceptReduction(1)).rejects.toThrow(AuthError);
+      });
+    });
+
+    describe('rejectReduction', () => {
+      it('should POST to /api/reductions/{id}/reject with auth header', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ review_state: 'rejected' }),
+        }) as any;
+
+        const result = await rejectReduction(2);
+
+        expect(result).toEqual({ review_state: 'rejected' });
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/reductions/2/reject',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token',
+            }),
+          })
+        );
+      });
+
+      it('should throw 404 if reduction not found', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: "Reduction 999 not found" }),
+        }) as any;
+
+        await expect(rejectReduction(999)).rejects.toThrow("Reduction 999 not found");
+      });
+
+      it('should throw 409 with server detail if reduction already resolved', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "reduction 2 is 'rejected', not 'pending'; already resolved" }),
+        }) as any;
+
+        await expect(rejectReduction(2)).rejects.toThrow("reduction 2 is 'rejected', not 'pending'; already resolved");
+      });
+
+      it('should throw AuthError on 401', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+        }) as any;
+
+        await expect(rejectReduction(2)).rejects.toThrow(AuthError);
       });
     });
   });

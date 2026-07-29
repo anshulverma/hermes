@@ -199,4 +199,59 @@ describe('Findings', () => {
       expect((mockFetch as any).mock.calls[0][0]).toBe('/api/runs/test-run-123/reductions');
     });
   });
+
+  // --- Phase D4: Accept/Reject actions ---
+
+  it('should show Accept and Reject buttons only for pending reductions', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => mockReductions,
+    });
+
+    render(<Findings runId="test-run" />);
+
+    await waitFor(() => {
+      // Should show Accept/Reject buttons (only pending reductions have them)
+      const acceptButtons = screen.queryAllByText('Accept');
+      const rejectButtons = screen.queryAllByText('Reject');
+
+      // Only reduction 1 is pending, so should have 1 Accept and 1 Reject button
+      expect(acceptButtons.length).toBe(1);
+      expect(rejectButtons.length).toBe(1);
+    });
+  });
+
+  it('should NOT show Accept/Reject buttons for accepted reductions', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => [mockReductions[1]], // accepted reduction
+    });
+
+    render(<Findings runId="test-run" />);
+
+    await waitFor(() => {
+      // Verify reduction is shown
+      expect(screen.getByText('Timeout in CI')).toBeInTheDocument();
+      // But no action buttons
+      expect(screen.queryByText('Accept')).not.toBeInTheDocument();
+      expect(screen.queryByText('Reject')).not.toBeInTheDocument();
+    });
+  });
+
+  it('should NOT show Accept/Reject buttons for rejected reductions', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => [mockReductions[2]], // rejected reduction
+    });
+
+    render(<Findings runId="test-run" />);
+
+    await waitFor(() => {
+      // Verify reduction is shown
+      expect(screen.getByText('Missing env var')).toBeInTheDocument();
+      // But no action buttons
+      expect(screen.queryByText('Accept')).not.toBeInTheDocument();
+      expect(screen.queryByText('Reject')).not.toBeInTheDocument();
+    });
+  });
 });

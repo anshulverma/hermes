@@ -1056,6 +1056,70 @@ def create_app(bind: str | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    # --- Reduction Control Endpoints (D4) ---
+
+    @app.post("/api/reductions/{reduction_id:int}/accept")
+    def accept_reduction_endpoint(reduction_id: int, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Accept a pending reduction.
+
+        Returns the reduction's new review_state on success.
+        404 if reduction unknown, 409 if not pending.
+        """
+        from engine.queue import accept_reduction
+
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Explicit existence check: 404 if reduction doesn't exist
+            reduction_exists = conn.execute("SELECT 1 FROM reductions WHERE id=?", (reduction_id,)).fetchone()
+            if reduction_exists is None:
+                raise HTTPException(status_code=404, detail=f"Reduction {reduction_id!r} not found")
+
+            # Attempt accept: 409 if not pending
+            try:
+                accept_reduction(conn, reduction_id)
+            except ValueError as e:
+                # Not pending or other error
+                raise HTTPException(status_code=409, detail=str(e))
+
+            # Return the reduction's new review_state
+            review_state = conn.execute("SELECT review_state FROM reductions WHERE id=?", (reduction_id,)).fetchone()[0]
+            return {"review_state": review_state}
+        finally:
+            conn.close()
+
+    @app.post("/api/reductions/{reduction_id:int}/reject")
+    def reject_reduction_endpoint(reduction_id: int, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Reject a pending reduction.
+
+        Returns the reduction's new review_state on success.
+        404 if reduction unknown, 409 if not pending.
+        """
+        from engine.queue import reject_reduction
+
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Explicit existence check: 404 if reduction doesn't exist
+            reduction_exists = conn.execute("SELECT 1 FROM reductions WHERE id=?", (reduction_id,)).fetchone()
+            if reduction_exists is None:
+                raise HTTPException(status_code=404, detail=f"Reduction {reduction_id!r} not found")
+
+            # Attempt reject: 409 if not pending
+            try:
+                reject_reduction(conn, reduction_id)
+            except ValueError as e:
+                # Not pending or other error
+                raise HTTPException(status_code=409, detail=str(e))
+
+            # Return the reduction's new review_state
+            review_state = conn.execute("SELECT review_state FROM reductions WHERE id=?", (reduction_id,)).fetchone()[0]
+            return {"review_state": review_state}
+        finally:
+            conn.close()
+
     @app.websocket("/api/ws")
     async def websocket_endpoint(websocket: WebSocket, since: int = None, token: str = Query(None)):
         """WebSocket endpoint for live event stream (auth required).

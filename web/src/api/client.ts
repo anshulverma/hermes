@@ -404,3 +404,24 @@ export async function requeueTicket(ticketId: string): Promise<TicketControlResp
     method: 'POST',
   });
 }
+
+/**
+ * Reduction control endpoints (Phase D4).
+ * POST /api/reductions/{id}/accept|reject
+ */
+
+export type ReductionControlResponse = {
+  review_state: string;
+};
+
+export async function acceptReduction(reductionId: number): Promise<ReductionControlResponse> {
+  return fetchJSON<ReductionControlResponse>(`/api/reductions/${reductionId}/accept`, {
+    method: 'POST',
+  });
+}
+
+export async function rejectReduction(reductionId: number): Promise<ReductionControlResponse> {
+  return fetchJSON<ReductionControlResponse>(`/api/reductions/${reductionId}/reject`, {
+    method: 'POST',
+  });
+}

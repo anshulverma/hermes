@@ -2431,3 +2431,266 @@ def test_requeue_requires_auth(loopback_client: TestClient, temp_home: Path):
     # Try to requeue without token
     response = loopback_client.post("/api/tickets/ticket-auth/requeue")
     assert response.status_code == 401
+
+
+# --- Reduction Accept/Reject (D4) ---
+
+
+def test_accept_reduction_success(loopback_client: TestClient, temp_home: Path):
+    """POST /api/reductions/{id}/accept on pending reduction => 200, state=accepted, tickets done, event emitted."""
+    import sqlite3
+    from server.auth import read_token
+
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed run
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('run-acc', 'example', 'local', 'running', 'reduce', 'main', '{}', 0, 0)"""
+    )
+
+    # Seed tickets (some needs_human linked to reduction)
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('t-1', 'run-acc', 'reduce', 'needs_human', 'cpu', 100, 1,
+                   NULL, 1, '{"goal":"test-1"}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('t-2', 'run-acc', 'reduce', 'needs_human', 'cpu', 100, 1,
+                   NULL, 1, '{"goal":"test-2"}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('t-3', 'run-acc', 'reduce', 'queued', 'cpu', 100, 0,
+                   NULL, NULL, '{"goal":"test-3"}', 0, 0)"""
+    )
+
+    # Seed pending reduction
+    conn.execute(
+        """INSERT INTO reductions (id, run_id, phase, kind, json, review_state, created_at, updated_at)
+           VALUES (1, 'run-acc', 'reduce', 'hypothesis', '{"title":"Test reduction"}', 'pending', 0, 0)"""
+    )
+
+    conn.commit()
+    conn.close()
+
+    token = read_token(temp_home)
+
+    # Accept reduction
+    response = loopback_client.post(
+        "/api/reductions/1/accept",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["review_state"] == "accepted"
+
+    # Verify via sqlite
+    conn = sqlite3.connect(db_path)
+
+    # Check reduction state
+    row = conn.execute("SELECT review_state FROM reductions WHERE id=1").fetchone()
+    assert row[0] == "accepted"
+
+    # Check linked tickets are done
+    ticket_states = conn.execute(
+        "SELECT id, state FROM tickets WHERE reduction_id=1 ORDER BY id"
+    ).fetchall()
+    assert len(ticket_states) == 2
+    assert ticket_states[0] == ("t-1", "done")
+    assert ticket_states[1] == ("t-2", "done")
+
+    # Check event emitted
+    events = conn.execute(
+        "SELECT kind, run_id FROM events WHERE kind='reduction_accepted' ORDER BY id"
+    ).fetchall()
+    assert len(events) >= 1
+    assert events[-1][0] == "reduction_accepted"
+    assert events[-1][1] == "run-acc"
+
+    conn.close()
+
+
+def test_reject_reduction_success(loopback_client: TestClient, temp_home: Path):
+    """POST /api/reductions/{id}/reject on pending reduction => 200, state=rejected, tickets failed, events emitted."""
+    import sqlite3
+    from server.auth import read_token
+
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed run
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('run-rej', 'example', 'local', 'running', 'reduce', 'main', '{}', 0, 0)"""
+    )
+
+    # Seed tickets (some needs_human linked to reduction)
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('t-4', 'run-rej', 'reduce', 'needs_human', 'cpu', 100, 1,
+                   NULL, 2, '{"goal":"test-4"}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                worker_host, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('t-5', 'run-rej', 'reduce', 'needs_human', 'cpu', 100, 1,
+                   NULL, 2, '{"goal":"test-5"}', 0, 0)"""
+    )
+
+    # Seed pending reduction
+    conn.execute(
+        """INSERT INTO reductions (id, run_id, phase, kind, json, review_state, created_at, updated_at)
+           VALUES (2, 'run-rej', 'reduce', 'hypothesis', '{"title":"Rejected reduction"}', 'pending', 0, 0)"""
+    )
+
+    conn.commit()
+    conn.close()
+
+    token = read_token(temp_home)
+
+    # Reject reduction
+    response = loopback_client.post(
+        "/api/reductions/2/reject",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["review_state"] == "rejected"
+
+    # Verify via sqlite
+    conn = sqlite3.connect(db_path)
+
+    # Check reduction state
+    row = conn.execute("SELECT review_state FROM reductions WHERE id=2").fetchone()
+    assert row[0] == "rejected"
+
+    # Check linked tickets are failed
+    ticket_states = conn.execute(
+        "SELECT id, state FROM tickets WHERE reduction_id=2 ORDER BY id"
+    ).fetchall()
+    assert len(ticket_states) == 2
+    assert ticket_states[0] == ("t-4", "failed")
+    assert ticket_states[1] == ("t-5", "failed")
+
+    # Check reduction_rejected event emitted
+    events = conn.execute(
+        "SELECT kind, run_id FROM events WHERE kind='reduction_rejected' ORDER BY id"
+    ).fetchall()
+    assert len(events) >= 1
+    assert events[-1][0] == "reduction_rejected"
+    assert events[-1][1] == "run-rej"
+
+    # Check ticket_failed events emitted (one per ticket)
+    ticket_failed_events = conn.execute(
+        "SELECT kind, ticket_id FROM events WHERE kind='ticket_failed' ORDER BY id"
+    ).fetchall()
+    assert len(ticket_failed_events) >= 2
+    # Check last 2 events are for our tickets
+    assert ticket_failed_events[-2][1] == "t-4"
+    assert ticket_failed_events[-1][1] == "t-5"
+
+    conn.close()
+
+
+def test_accept_reject_on_already_resolved_409(loopback_client: TestClient, temp_home: Path):
+    """POST /api/reductions/{id}/accept|reject on already-resolved reduction => 409."""
+    import sqlite3
+    from server.auth import read_token
+
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed run
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('run-resolved', 'example', 'local', 'running', 'reduce', 'main', '{}', 0, 0)"""
+    )
+
+    # Seed already-accepted reduction
+    conn.execute(
+        """INSERT INTO reductions (id, run_id, phase, kind, json, review_state, created_at, updated_at)
+           VALUES (3, 'run-resolved', 'reduce', 'hypothesis', '{"title":"Already accepted"}', 'accepted', 0, 0)"""
+    )
+
+    conn.commit()
+    conn.close()
+
+    token = read_token(temp_home)
+
+    # Try to accept again
+    response = loopback_client.post(
+        "/api/reductions/3/accept",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 409
+    data = response.json()
+    assert "detail" in data
+    assert "already resolved" in data["detail"]
+
+    # Try to reject
+    response = loopback_client.post(
+        "/api/reductions/3/reject",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 409
+    data = response.json()
+    assert "detail" in data
+    assert "already resolved" in data["detail"]
+
+
+def test_accept_reject_unknown_reduction_404(loopback_client: TestClient, temp_home: Path):
+    """POST /api/reductions/{unknown}/accept|reject => 404."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+
+    # Try to accept unknown reduction
+    response = loopback_client.post(
+        "/api/reductions/999/accept",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 404
+
+    # Try to reject unknown reduction
+    response = loopback_client.post(
+        "/api/reductions/999/reject",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 404
+
+
+def test_accept_reject_requires_auth(loopback_client: TestClient, temp_home: Path):
+    """POST /api/reductions/{id}/accept|reject without token => 401."""
+    import sqlite3
+
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed run and pending reduction
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('run-auth-red', 'example', 'local', 'running', 'reduce', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO reductions (id, run_id, phase, kind, json, review_state, created_at, updated_at)
+           VALUES (4, 'run-auth-red', 'reduce', 'hypothesis', '{"title":"Auth test"}', 'pending', 0, 0)"""
+    )
+    conn.commit()
+    conn.close()
+
+    # Try to accept without token
+    response = loopback_client.post("/api/reductions/4/accept")
+    assert response.status_code == 401
+
+    # Try to reject without token
+    response = loopback_client.post("/api/reductions/4/reject")
+    assert response.status_code == 401
