@@ -631,15 +631,483 @@ def test_verify_recheck_fix_raises_fails_safe():
     assert verified is False
 
 
-def test_reduce_raises_not_implemented():
-    """reduce() raises NotImplementedError (stub for Slice 4)."""
-    from playbooks.dexter.playbook import DexterPlaybook
+# --- reduce (Slice 4) ---
 
-    pb = DexterPlaybook()
+
+def test_reduce_two_findings_same_signature_one_cluster():
+    """reduce() with two findings sharing a signature → one cluster reduction."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/learned-001"))
     run = _run()
+
+    # Two findings with the SAME signature (from two different tickets)
     findings = [
-        Finding(run_id=run.id, ticket_id=f"{run.id}/solve-0", kind="result", json={}),
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    "signature": "NPE-config-init-001",
+                    "cause_category": "null_pointer",
+                },
+                "fix": {"verified": True, "diff_ref": "D123"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "cases/case-001",
+            },
+        ),
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-1",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    "signature": "NPE-config-init-001",
+                    "cause_category": "null_pointer",
+                },
+                "fix": {"verified": True, "diff_ref": "D124"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "cases/case-002",
+            },
+        ),
     ]
 
-    with pytest.raises(NotImplementedError):
-        pb.reduce(run, "solve", findings, None)
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    # Should get exactly ONE cluster
+    assert len(reductions) == 1
+    r = reductions[0]
+    assert r.kind == "root_cause_cluster"
+
+    # Canonical = lowest numeric id (solve-0 < solve-1)
+    assert r.json["canonical_ticket_id"] == f"{run.id}/solve-0"
+    assert r.json["canonical_diff_ref"] == "D123"
+
+    # Duplicates = [solve-1]
+    assert len(r.json["duplicate_diffs"]) == 1
+    assert r.json["duplicate_diffs"][0]["ticket_id"] == f"{run.id}/solve-1"
+    assert r.json["duplicate_diffs"][0]["diff_ref"] == "D124"
+
+    # Member ticket ids: both
+    assert set(r.json["member_ticket_ids"]) == {
+        f"{run.id}/solve-0",
+        f"{run.id}/solve-1",
+    }
+
+    # needs_human_ticket_ids: both (inside .json)
+    assert set(r.json["needs_human_ticket_ids"]) == {
+        f"{run.id}/solve-0",
+        f"{run.id}/solve-1",
+    }
+
+    # Learning ref from sink
+    assert r.json["learning_ref"] == "kb/learned-001"
+    assert r.json.get("learning_error") is None
+
+    # Signature + cause_category
+    assert r.json["signature"] == "NPE-config-init-001"
+    assert r.json["cause_category"] == "null_pointer"
+
+
+def test_reduce_distinct_signatures_separate_clusters():
+    """reduce() with distinct signatures → separate clusters."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/learned-X"))
+    run = _run()
+
+    # Two findings with DIFFERENT signatures
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    "signature": "NPE-config-init-001",
+                    "cause_category": "null_pointer",
+                },
+                "fix": {"verified": True, "diff_ref": "D123"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "cases/case-001",
+            },
+        ),
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-1",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    "signature": "MEMORY-LEAK-002",
+                    "cause_category": "memory_leak",
+                },
+                "fix": {"verified": True, "diff_ref": "D124"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "cases/case-002",
+            },
+        ),
+    ]
+
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    # Should get TWO clusters
+    assert len(reductions) == 2
+
+    # Sort by signature for deterministic assertions
+    reductions.sort(key=lambda r: r.json["signature"])
+
+    # Cluster 1: MEMORY-LEAK-002
+    assert reductions[0].json["signature"] == "MEMORY-LEAK-002"
+    assert reductions[0].json["canonical_ticket_id"] == f"{run.id}/solve-1"
+    assert len(reductions[0].json["duplicate_diffs"]) == 0
+    assert reductions[0].json["member_ticket_ids"] == [f"{run.id}/solve-1"]
+    assert reductions[0].json["needs_human_ticket_ids"] == [f"{run.id}/solve-1"]
+
+    # Cluster 2: NPE-config-init-001
+    assert reductions[1].json["signature"] == "NPE-config-init-001"
+    assert reductions[1].json["canonical_ticket_id"] == f"{run.id}/solve-0"
+    assert len(reductions[1].json["duplicate_diffs"]) == 0
+    assert reductions[1].json["member_ticket_ids"] == [f"{run.id}/solve-0"]
+    assert reductions[1].json["needs_human_ticket_ids"] == [f"{run.id}/solve-0"]
+
+
+def test_reduce_fold_latest_per_ticket():
+    """reduce() folds to LAST finding per ticket_id (stale then fresh)."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/learned-Y"))
+    run = _run()
+
+    # solve-0 has TWO findings (append-only, ordered by id asc);
+    # LAST one should win
+    findings = [
+        # First finding for solve-0 (stale)
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    "signature": "OLD-SIGNATURE",
+                    "cause_category": "old_category",
+                },
+                "fix": {"verified": True, "diff_ref": "D100"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "old-evidence",
+            },
+        ),
+        # Second finding for solve-0 (fresh — this one should win)
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    "signature": "NEW-SIGNATURE",
+                    "cause_category": "new_category",
+                },
+                "fix": {"verified": True, "diff_ref": "D200"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "new-evidence",
+            },
+        ),
+    ]
+
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    # Should get ONE cluster (only the LAST finding counted)
+    assert len(reductions) == 1
+    r = reductions[0]
+
+    # Should use the NEW signature (last finding)
+    assert r.json["signature"] == "NEW-SIGNATURE"
+    assert r.json["cause_category"] == "new_category"
+    assert r.json["canonical_diff_ref"] == "D200"
+
+
+def test_reduce_canonical_by_numeric_id():
+    """reduce() picks canonical by numeric suffix, not string min (solve-2 < solve-10)."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/learned-Z"))
+    run = _run()
+
+    # Tricky: solve-2, solve-10 — string order would pick solve-10 < solve-2
+    # Numeric order: solve-2 (i=2) < solve-10 (i=10)
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-10",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    "signature": "SHARED-SIG",
+                    "cause_category": "test",
+                },
+                "fix": {"verified": True, "diff_ref": "D10"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "e10",
+            },
+        ),
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-2",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {
+                    "signature": "SHARED-SIG",
+                    "cause_category": "test",
+                },
+                "fix": {"verified": True, "diff_ref": "D2"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "e2",
+            },
+        ),
+    ]
+
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    assert len(reductions) == 1
+    r = reductions[0]
+
+    # Canonical should be solve-2 (numeric 2 < numeric 10)
+    assert r.json["canonical_ticket_id"] == f"{run.id}/solve-2"
+    assert r.json["canonical_diff_ref"] == "D2"
+
+    # solve-10 is the duplicate
+    assert len(r.json["duplicate_diffs"]) == 1
+    assert r.json["duplicate_diffs"][0]["ticket_id"] == f"{run.id}/solve-10"
+
+
+def test_reduce_sink_banks_once_per_cluster():
+    """reduce() calls sink.bank exactly once per cluster."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    fake_sink = FakeSink(ref="kb/banked")
+    pb = DexterPlaybook(sink=fake_sink)
+    run = _run()
+
+    # Two clusters (different signatures)
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {"signature": "SIG-A", "cause_category": "cat_a"},
+                "fix": {"verified": True, "diff_ref": "DA"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "eA",
+            },
+        ),
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-1",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {"signature": "SIG-B", "cause_category": "cat_b"},
+                "fix": {"verified": True, "diff_ref": "DB"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "eB",
+            },
+        ),
+    ]
+
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    # Should have banked exactly twice (once per cluster)
+    assert len(fake_sink.banked_clusters) == 2
+    assert len(reductions) == 2
+
+    # Both reductions should have learning_ref set
+    for r in reductions:
+        assert r.json["learning_ref"] == "kb/banked"
+        assert r.json.get("learning_error") is None
+
+
+def test_reduce_sink_raises_sets_error_no_raise():
+    """reduce() with sink.bank raising ⇒ learning_ref=None + learning_error, reduce returns normally."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    # Sink configured to raise
+    fake_sink = FakeSink(raise_on_bank=RuntimeError("kb.py validation failed"))
+    pb = DexterPlaybook(sink=fake_sink)
+    run = _run()
+
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {"signature": "SIG-X", "cause_category": "cat_x"},
+                "fix": {"verified": True, "diff_ref": "DX"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "eX",
+            },
+        ),
+    ]
+
+    # reduce should NOT raise
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    assert len(reductions) == 1
+    r = reductions[0]
+
+    # learning_ref should be None
+    assert r.json["learning_ref"] is None
+
+    # learning_error should contain the exception message
+    assert r.json["learning_error"] is not None
+    assert "kb.py validation failed" in r.json["learning_error"]
+
+
+def test_reduce_reduction_json_has_all_required_keys():
+    """reduce() returns Reduction.json with ALL required keys."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/test"))
+    run = _run()
+
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {"signature": "TEST-SIG", "cause_category": "test_cat"},
+                "fix": {"verified": True, "diff_ref": "D999"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "e999",
+            },
+        ),
+    ]
+
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    assert len(reductions) == 1
+    r = reductions[0]
+
+    # All required keys MUST be present
+    required_keys = {
+        "signature",
+        "cause_category",
+        "canonical_ticket_id",
+        "canonical_diff_ref",
+        "duplicate_diffs",
+        "member_ticket_ids",
+        "learning_ref",
+        "learning_error",
+        "needs_human_ticket_ids",
+    }
+    assert set(r.json.keys()) == required_keys
+
+    # needs_human_ticket_ids must be INSIDE .json
+    assert isinstance(r.json["needs_human_ticket_ids"], list)
+
+
+def test_reduce_needs_human_ticket_ids_inside_json():
+    """reduce() puts needs_human_ticket_ids INSIDE .json (not top-level)."""
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+    from engine.models import Reduction
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/test"))
+    run = _run()
+
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {"signature": "TEST-SIG", "cause_category": "test_cat"},
+                "fix": {"verified": True, "diff_ref": "D999"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "e999",
+            },
+        ),
+    ]
+
+    reductions = pb.reduce(run, "solve", findings, None)
+    r = reductions[0]
+
+    # Verify it's a Reduction model (not a dict)
+    assert isinstance(r, Reduction)
+
+    # Verify needs_human_ticket_ids is INSIDE .json
+    assert "needs_human_ticket_ids" in r.json
+    assert r.json["needs_human_ticket_ids"] == [f"{run.id}/solve-0"]
+
+    # Verify it's NOT a top-level Reduction field
+    # (Reduction has: kind, json, id, run_id, phase, review_state)
+    assert not hasattr(r, "needs_human_ticket_ids") or r.needs_human_ticket_ids is None
+
+
+def test_reduce_stale_finding_surfaced_via_needs_human():
+    """reduce() with stale finding (ok-then-failed edge) → cluster still created, routed to needs_human.
+
+    Protocol limit: reduce gets no ticket-state access, so a ticket that returned ok
+    (finding written), then later went terminal-failed, still contributes a folded
+    finding. Mitigation: the cluster is routed to needs_human (all members) for human
+    review; reject drops it. Never silently banked-and-done.
+
+    This test documents the residual edge behavior per §2.6 / brief.
+    """
+    from playbooks.dexter.playbook import DexterPlaybook
+    from playbooks.dexter.sink import FakeSink
+
+    pb = DexterPlaybook(sink=FakeSink(ref="kb/stale"))
+    run = _run()
+
+    # One finding (ticket returned ok, finding written).
+    # In reality, this ticket might have later gone terminal-failed, but reduce
+    # has no ticket-state access, so it sees only the finding.
+    findings = [
+        Finding(
+            run_id=run.id,
+            ticket_id=f"{run.id}/solve-0",
+            kind="result",
+            json={
+                "reproduced": True,
+                "root_cause": {"signature": "STALE-SIG", "cause_category": "stale_cat"},
+                "fix": {"verified": True, "diff_ref": "D-stale"},
+                "knowledge_entry": {"validated": True},
+                "evidence_ref": "e-stale",
+            },
+        ),
+    ]
+
+    reductions = pb.reduce(run, "solve", findings, None)
+
+    # Cluster is created (reduce can't tell the ticket is stale)
+    assert len(reductions) == 1
+    r = reductions[0]
+
+    # BUT: it IS routed to needs_human (all members)
+    assert f"{run.id}/solve-0" in r.json["needs_human_ticket_ids"]
+
+    # So a human sees it in review and can REJECT to drop it (not silently banked-and-done).
+    # This surfaces the edge for human judgment.
+    assert r.json["learning_ref"] == "kb/stale"  # banked (but awaiting human accept/reject)

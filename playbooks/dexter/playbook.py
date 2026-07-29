@@ -27,9 +27,12 @@ class DexterPlaybook:
         """Initialize playbook with an optional learning sink.
 
         Args:
-            sink: LearningSink for banking learnings (default deferred to Slice 4).
+            sink: LearningSink for banking learnings (default DexterKbSink).
                   Tests inject a FakeSink.
         """
+        if sink is None:
+            from playbooks.dexter.sink import DexterKbSink
+            sink = DexterKbSink()
         self.sink = sink
 
     # --- seeding (§2.1) -------------------------------------------------
@@ -237,12 +240,108 @@ class DexterPlaybook:
     def reduce(
         self, run: Run, phase: str, findings: list[Finding], site: "Site"
     ) -> list[Reduction]:
-        """Reduce solve findings to clusters (stub for Slice 4).
+        """Reduce solve findings to clusters (§2.6).
 
-        Raises:
-            NotImplementedError: Filled in Slice 4.
+        Behavior:
+        1. FOLD-LATEST: collapse to last finding per ticket_id (append-only, id asc)
+        2. CLUSTER by root_cause.signature
+        3. Per cluster:
+           - canonical = lowest NUMERIC ticket id (parse solve-<i>, not string min)
+           - duplicates = other members
+           - bank ONE learning via self.sink.bank (best-effort try/except)
+        4. Return one light Reduction per cluster (kind="root_cause_cluster")
+
+        MUST NEVER RAISE (best-effort banking; any exception → learning_error).
+
+        Stale-finding note (protocol limit): reduce receives only findings + run + site,
+        no ticket-state access. A ticket that returned ok once (finding written), then
+        later went terminal-failed, still contributes a folded finding to a cluster.
+        Mitigation: every cluster is routed to needs_human for human review; reject
+        drops the cluster. Never silently banked-and-done.
+
+        Returns:
+            List of Reduction with needs_human_ticket_ids inside .json.
         """
-        raise NotImplementedError("reduce() is a stub; filled in Slice 4")
+        # 1. FOLD-LATEST: keep last finding per ticket_id
+        latest_by_ticket: dict[str, Finding] = {}
+        for f in findings:  # findings are ordered by id asc (queue.load_findings)
+            latest_by_ticket[f.ticket_id] = f  # last write wins
+
+        folded = list(latest_by_ticket.values())
+
+        # 2. CLUSTER by signature
+        clusters: dict[str, list[Finding]] = {}
+        for f in folded:
+            sig = f.json["root_cause"]["signature"]
+            clusters.setdefault(sig, []).append(f)
+
+        # 3. Build one Reduction per cluster
+        reductions = []
+        for signature, members in clusters.items():
+            # Pick canonical by NUMERIC id (parse solve-<i>)
+            def _numeric_id(f: Finding) -> int:
+                # f.ticket_id = "run-id/solve-123" -> extract 123
+                suffix = f.ticket_id.split("/solve-")[-1]
+                try:
+                    return int(suffix)
+                except ValueError:
+                    return 0  # fallback (shouldn't happen)
+
+            members.sort(key=_numeric_id)
+            canonical = members[0]
+            duplicates = members[1:]
+
+            # Extract fields from canonical
+            cause_category = canonical.json["root_cause"]["cause_category"]
+            canonical_ticket_id = canonical.ticket_id
+            canonical_diff_ref = canonical.json["fix"].get("diff_ref")
+
+            # Build duplicate_diffs list
+            duplicate_diffs = [
+                {
+                    "ticket_id": d.ticket_id,
+                    "diff_ref": d.json["fix"].get("diff_ref"),
+                }
+                for d in duplicates
+            ]
+
+            # All member ticket ids
+            member_ticket_ids = [m.ticket_id for m in members]
+
+            # BANK learning (best-effort, MUST NOT RAISE)
+            cluster_data = {
+                "signature": signature,
+                "cause_category": cause_category,
+                "canonical_ticket_id": canonical_ticket_id,
+                "canonical_diff_ref": canonical_diff_ref,
+                "member_ticket_ids": member_ticket_ids,
+            }
+
+            learning_ref = None
+            learning_error = None
+            try:
+                learning_ref = self.sink.bank(cluster_data)
+            except Exception as exc:
+                learning_error = str(exc)
+
+            # Build Reduction (light: queue hydrates id/run_id/phase/review_state)
+            reduction = Reduction(
+                kind="root_cause_cluster",
+                json={
+                    "signature": signature,
+                    "cause_category": cause_category,
+                    "canonical_ticket_id": canonical_ticket_id,
+                    "canonical_diff_ref": canonical_diff_ref,
+                    "duplicate_diffs": duplicate_diffs,
+                    "member_ticket_ids": member_ticket_ids,
+                    "learning_ref": learning_ref,
+                    "learning_error": learning_error,
+                    "needs_human_ticket_ids": member_ticket_ids,  # ALL members
+                },
+            )
+            reductions.append(reduction)
+
+        return reductions
 
     # --- advancement / completion (§2.7) --------------------------------
 
