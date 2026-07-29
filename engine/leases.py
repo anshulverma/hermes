@@ -93,6 +93,14 @@ def acquire(
         (lease_id, run_id, resource_class, ticket_id, host, now, ttl_s, expires_at),
     )
 
+    # Emit lease_acquired event (Slice 11)
+    from engine import events
+    events.emit(
+        conn, "lease_acquired", run_id=run_id, ticket_id=ticket_id, host=host,
+        message=f"Lease acquired for {resource_class}",
+        data={"lease_id": lease_id, "resource_class": resource_class}
+    )
+
     return Lease(
         id=lease_id,
         run_id=run_id,
@@ -175,8 +183,26 @@ def reclaim_expired(conn: sqlite3.Connection, now: Optional[float] = None) -> No
     for lease_id, resource_class, ticket_id in expired:
         affected_classes.add(resource_class)
 
+        # Fetch run_id for event emission before deleting
+        lease_run_id = None
+        if ticket_id:
+            row = conn.execute(
+                "SELECT run_id FROM leases WHERE id=?", (lease_id,)
+            ).fetchone()
+            if row:
+                lease_run_id = row[0]
+
         # Delete the lease
         conn.execute("DELETE FROM leases WHERE id=?", (lease_id,))
+
+        # Emit lease_reclaimed event (Slice 11)
+        if lease_run_id:
+            from engine import events
+            events.emit(
+                conn, "lease_reclaimed", run_id=lease_run_id, ticket_id=ticket_id,
+                message=f"Lease reclaimed (expired)",
+                data={"lease_id": lease_id, "resource_class": resource_class}
+            )
 
         if ticket_id:
             # Check ticket state: requeue only if still non-terminal

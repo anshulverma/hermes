@@ -181,14 +181,36 @@ done
         The site owns the transport (here: this box, under a ``timeout`` wrapper);
         the agent owns building the invocation and parsing the result. The worker
         runs with the no-ship guard shim dir prepended to ``PATH`` (§11), so any
-        ``git push``/land it attempts is blocked by construction. A host-lost
+        ``git push``/land it attempted is blocked by construction. A host-lost
         failure surfaces as ``transport.TransportError`` for the serve loop to
         route to a no-penalty requeue.
+
+        Guard self-defense (Slice 11): if the guard dir is absent, install it
+        (preferred) or raise — never run unguarded.
         """
         from engine import transport
 
+        guard_dir_path = self.guard_bin_dir(host)
+
+        # Guard self-defense: ensure guard is installed before running
+        if not self._guard_installed(host):
+            # Attempt to install the guard
+            try:
+                self._install_guard(host)
+            except Exception as e:
+                raise RuntimeError(
+                    f"No-ship guard missing for {host} and auto-install failed: {e}. "
+                    f"Refusing to run unguarded."
+                ) from e
+
+            # Re-check after install
+            if not self._guard_installed(host):
+                raise RuntimeError(
+                    f"No-ship guard missing for {host} after install. Refusing to run unguarded."
+                )
+
         env = dict(os.environ)
-        guard_dir = str(self.guard_bin_dir(host))
+        guard_dir = str(guard_dir_path)
         env["PATH"] = guard_dir + os.pathsep + env.get("PATH", "")
         return transport.local_transport(envelope, host, agent, env=env)
 

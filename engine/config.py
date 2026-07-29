@@ -23,12 +23,11 @@ def _default_networked_check(path: Path) -> bool:
     env_prefixes = os.environ.get('HERMES_NETWORKED_PREFIXES', '')
     networked_prefixes = [p.strip() for p in env_prefixes.split(',') if p.strip()]
 
-    # Fallback: common networked/synced mount prefixes
+    # Fallback: common networked/synced mount prefixes (no domain-specific paths; Slice 11)
     if not networked_prefixes:
         networked_prefixes = [
             '/mnt/fuse',
             '/mnt/nfs',
-            '/data/users',
         ]
 
     for prefix in networked_prefixes:

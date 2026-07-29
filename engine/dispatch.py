@@ -35,7 +35,7 @@ import sqlite3
 import time
 from typing import Optional
 
-from engine import crew, queue, transport
+from engine import config, crew, events, queue, transport
 
 # Ticket states that still count as "actionable" work in a phase: while any of
 # these exist the phase is not settled and must not be reduced/advanced (§5, §9).
@@ -89,6 +89,86 @@ def serve_loop(
     return processed
 
 
+# --- attention detection (run-level) -------------------------------------
+
+def check_attention(conn: sqlite3.Connection, run_id: str, now: Optional[float] = None) -> None:
+    """Detect and emit run-level attention events (§7, Slice 11).
+
+    Checks three conditions and emits an `attention` event (with reason in data)
+    for each currently-true condition, DEDUPED: skip a reason already emitted
+    for this run within the last HERMES_HEARTBEAT_S window.
+
+    Conditions:
+    - parked_ratio_high: >50% of non-terminal tickets are parked
+    - all_crew_down: crew non-empty AND every member state == 'down'
+    - no_progress: no events for this run in >1800s
+
+    Does NOT commit — caller owns the transaction.
+    """
+    t = _now(now)
+    heartbeat_s = config.heartbeat_s()
+    window_start = t - heartbeat_s
+
+    # Fetch already-emitted reasons within the dedup window
+    emitted_reasons = set()
+    rows = conn.execute(
+        """SELECT data_json FROM events
+           WHERE kind='attention' AND run_id=? AND ts > ?
+           ORDER BY id""",
+        (run_id, window_start),
+    ).fetchall()
+    for (data_json,) in rows:
+        import json
+        data = json.loads(data_json) if data_json else {}
+        reason = data.get("reason")
+        if reason:
+            emitted_reasons.add(reason)
+
+    # Check condition 1: parked_ratio > 0.5 (across all phases)
+    rows = conn.execute(
+        """SELECT state, COUNT(*) FROM tickets
+           WHERE run_id=? GROUP BY state""",
+        (run_id,),
+    ).fetchall()
+    counts = {state: count for state, count in rows}
+    non_terminal_states = ("queued", "dispatched", "running", "parked", "reducing")
+    total_non_terminal = sum(counts.get(s, 0) for s in non_terminal_states)
+    parked = counts.get("parked", 0)
+
+    if total_non_terminal > 0 and parked / total_non_terminal > 0.5:
+        if "parked_ratio_high" not in emitted_reasons:
+            events.emit(
+                conn, "attention", run_id=run_id,
+                message="High parked ratio",
+                data={"reason": "parked_ratio_high", "parked": parked, "total": total_non_terminal}
+            )
+
+    # Check condition 2: all_crew_down (global crew, not per-run)
+    crew_rows = conn.execute("SELECT state FROM crew").fetchall()
+    if crew_rows:  # Non-empty crew
+        all_down = all(state == "down" for (state,) in crew_rows)
+        if all_down and "all_crew_down" not in emitted_reasons:
+            events.emit(
+                conn, "attention", run_id=run_id,
+                message="All crew members are down",
+                data={"reason": "all_crew_down"}
+            )
+
+    # Check condition 3: no_progress > 1800s
+    latest_event = conn.execute(
+        "SELECT MAX(ts) FROM events WHERE run_id=?", (run_id,)
+    ).fetchone()
+    if latest_event and latest_event[0] is not None:
+        last_event_ts = latest_event[0]
+        if t - last_event_ts > 1800:
+            if "no_progress" not in emitted_reasons:
+                events.emit(
+                    conn, "attention", run_id=run_id,
+                    message="No progress in >30 minutes",
+                    data={"reason": "no_progress", "last_event_age_s": int(t - last_event_ts)}
+                )
+
+
 # --- master loop ---------------------------------------------------------
 
 def master_loop(
@@ -120,6 +200,9 @@ def master_loop(
         # (a) Housekeeping runs every cycle regardless of run state (§5): health
         # re-probe, down-requeue, lease renew/reclaim, un-park.
         crew.heartbeat_sweep(conn, site, agent, now=t)
+
+        # Check run-level attention conditions (Slice 11)
+        check_attention(conn, run_id, now=t)
 
         state = _run_state(conn, run_id)
         if state is None or state in ("done", "failed", "stopped"):

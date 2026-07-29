@@ -147,53 +147,8 @@ def _type_name(value) -> str:
 
 # Schema definitions per §6
 
-DISPATCH_ENVELOPE = {
-    "type": "object",
-    "required": [
-        "ticket_id", "run_id", "phase", "resource_req", "base_ref",
-        "payload", "payload_sha256", "timeout_s", "site_context",
-        "goal_envelope"
-    ],
-    "properties": {
-        "ticket_id": {"type": "string"},
-        "run_id": {"type": "string"},
-        "phase": {"type": "string"},
-        "resource_req": {"type": "string"},
-        "base_ref": {"type": "string"},
-        "payload": {"type": "object"},
-        "payload_sha256": {"type": "string"},
-        "timeout_s": {"type": "number"},
-        "site_context": {"type": "object"},
-        "goal_envelope": {
-            "type": "object",
-            "required": ["goal", "driver", "done_contract", "guardrails"],
-            "properties": {
-                "goal": {"type": "string"},
-                "driver": {
-                    "type": "object",
-                    "required": ["command", "args", "loop"],
-                    "properties": {
-                        "command": {"type": ["string", "null"]},
-                        "args": {"type": "object"},
-                        "loop": {"type": ["string", "null"]},
-                    },
-                    "additionalProperties": False,
-                },
-                "done_contract": {"type": "object"},
-                "guardrails": {
-                    "type": "object",
-                    "required": ["no_ship"],
-                    "properties": {
-                        "no_ship": {"type": "boolean"},
-                    },
-                },
-            },
-            "additionalProperties": False,
-        },
-    },
-    "additionalProperties": False,
-}
-
+# GOAL_ENVELOPE is the single source of truth for the goal envelope schema.
+# DISPATCH_ENVELOPE references it rather than duplicating (Slice 11 dedup).
 GOAL_ENVELOPE = {
     "type": "object",
     "required": ["goal", "driver", "done_contract", "guardrails"],
@@ -217,6 +172,28 @@ GOAL_ENVELOPE = {
                 "no_ship": {"type": "boolean"},
             },
         },
+    },
+    "additionalProperties": False,
+}
+
+DISPATCH_ENVELOPE = {
+    "type": "object",
+    "required": [
+        "ticket_id", "run_id", "phase", "resource_req", "base_ref",
+        "payload", "payload_sha256", "timeout_s", "site_context",
+        "goal_envelope"
+    ],
+    "properties": {
+        "ticket_id": {"type": "string"},
+        "run_id": {"type": "string"},
+        "phase": {"type": "string"},
+        "resource_req": {"type": "string"},
+        "base_ref": {"type": "string"},
+        "payload": {"type": "object"},
+        "payload_sha256": {"type": "string"},
+        "timeout_s": {"type": "number"},
+        "site_context": {"type": "object"},
+        "goal_envelope": GOAL_ENVELOPE,  # Reference, not inline copy (Slice 11)
     },
     "additionalProperties": False,
 }

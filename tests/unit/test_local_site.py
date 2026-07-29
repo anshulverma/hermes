@@ -167,6 +167,50 @@ def test_submit_for_review_returns_file_ref_and_never_pushes(home, local_site, m
     assert ref.startswith("file://")
 
 
+def test_run_worker_installs_guard_when_missing(home, local_site, monkeypatch):
+    """run_worker auto-installs guard if missing (Slice 11 self-defense)."""
+    from testkit.mock_agent import MockAgent
+
+    host = socket.gethostname()
+    repo = _make_git_repo_and_provision(home, host)
+
+    # Remove guard directory to simulate unguarded state
+    import shutil
+    guard_dir = local_site.guard_bin_dir(host)
+    if guard_dir.exists():
+        shutil.rmtree(guard_dir)
+
+    assert not guard_dir.exists(), "Precondition: guard dir should not exist"
+
+    # Build a minimal envelope
+    envelope = {
+        "ticket_id": "r/t-1",
+        "run_id": "r",
+        "phase": "work",
+        "resource_req": "cpu",
+        "base_ref": "main",
+        "payload": {"scenario": "ok"},
+        "payload_sha256": "abc",
+        "timeout_s": 60,
+        "site_context": {},
+        "goal_envelope": {
+            "goal": "test",
+            "driver": {"command": None, "args": {}, "loop": None},
+            "done_contract": {},
+            "guardrails": {"no_ship": True},
+        },
+    }
+
+    agent = MockAgent()
+
+    # run_worker should auto-install the guard
+    result = local_site.run_worker(host, envelope, agent)
+
+    # Guard should now be installed
+    assert guard_dir.exists(), "Guard should be auto-installed"
+    assert local_site._guard_installed(host), "Guard shims should be present"
+
+
 # --- helpers -------------------------------------------------------------
 
 def _make_git_repo_and_provision(home, host):
