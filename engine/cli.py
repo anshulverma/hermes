@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from engine import config, crew, playbook, site, agent, queue, dispatch, log
+from engine import config, crew, playbook, site, agent, queue, dispatch, log, shutdown
 from engine.db import migrate
 from engine.models import Run
 
@@ -96,6 +96,9 @@ def _create_run(conn, playbook_name, site_name, base_ref, run_config=None):
 
 def cmd_run(args):
     """hermes run <playbook> --site <site> [--agent <agent>] [--dry-run] [--base-ref R] [--goals FILE]."""
+    # Install SIGTERM/SIGINT handlers for graceful shutdown
+    shutdown.install_handlers()
+
     pb, st, ag = _load_playbook_site_agent(args)
 
     conn = _connect()
@@ -174,6 +177,10 @@ def cmd_run(args):
         hosts=hosts,
         max_cycles=1000,  # bounded to avoid infinite loops
     )
+
+    # Log graceful shutdown if the stop flag was set
+    if shutdown.stop_event.is_set():
+        shutdown.log_graceful_shutdown()
 
     # Check final state
     final_state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
@@ -447,7 +454,9 @@ def cmd_serve(args):
             return 1
         return cmd_serve_api(args)
 
-    # Worker mode (original behavior)
+    # Worker mode (original behavior) - install SIGTERM/SIGINT handlers
+    shutdown.install_handlers()
+
     _, st, ag = _load_playbook_site_agent(args)
     host = args.host
     if not host:
@@ -505,6 +514,10 @@ def cmd_serve(args):
 
     # Run the serve loop (bounded — serve available work then return)
     processed = dispatch.serve_loop(conn, st, ag, host, run, pb, base_ref)
+
+    # Log graceful shutdown if the stop flag was set
+    if shutdown.stop_event.is_set():
+        shutdown.log_graceful_shutdown()
 
     print(f"Host {host}: processed {processed} tickets for run {run_id}")
     conn.close()

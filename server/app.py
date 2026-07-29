@@ -4,6 +4,7 @@ import json
 import math
 import os
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Annotated
 
@@ -56,7 +57,14 @@ def create_app(bind: str | None = None) -> FastAPI:
     token_path = home / "api_token"
     logger.info(f"Server starting: bind={bind}, home={home}, token_file={token_path}")
 
-    app = FastAPI(title="Hermes Control Plane", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        """Lifespan context manager for startup/shutdown logging."""
+        logger.info("API server started")
+        yield
+        logger.info("API server stopped")
+
+    app = FastAPI(title="Hermes Control Plane", version="0.1.0", lifespan=lifespan)
 
     # Request logging middleware (strip query strings to avoid logging tokens)
     @app.middleware("http")

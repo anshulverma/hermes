@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from typing import Optional
 
-from engine import config, crew, events, queue, transport
+from engine import config, crew, events, queue, shutdown, transport
 
 # Ticket states that still count as "actionable" work in a phase: while any of
 # these exist the phase is not settled and must not be reduced/advanced.
@@ -42,6 +43,7 @@ def serve_loop(
     playbook,
     base_ref: str,
     now: Optional[float] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> int:
     """Drive ``serve_once_for_host`` for ``host`` until no claimable work.
 
@@ -52,10 +54,20 @@ def serve_loop(
     (a parked/failed/transport-requeued ticket does not re-present as claimable at
     the same ``now``). ``master_loop`` re-drives on the next cycle, so any tickets
     left behind get picked up. Returns how many tickets it processed.
+
+    Checks ``stop_event`` at the TOP of the loop (before claiming the next ticket)
+    for graceful shutdown. Resolves the event at call time (never captures the
+    module global as a def-time default).
     """
+    # Resolve stop_event at call time (test-injected or process-global)
+    ev = stop_event if stop_event is not None else shutdown.stop_event
+
     t = _now(now)
     processed = 0
     while True:
+        # Check stop flag at the top (boundary-only, never mid-transaction)
+        if ev.is_set():
+            break
         if _run_state(conn, run.id) != "running":
             break
         result = transport.serve_once_for_host(
@@ -158,6 +170,7 @@ def master_loop(
     hosts,
     now: Optional[float] = None,
     max_cycles: Optional[int] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> str:
     """Orchestrate a run to a terminal state.
 
@@ -168,7 +181,18 @@ def master_loop(
 
     Bounded by ``max_cycles`` (``None`` = run until the run reaches a terminal
     state). Returns the run's final observed state.
+
+    Checks ``stop_event`` at safe boundaries to enable graceful shutdown:
+    - After heartbeat_sweep (before the progression block): if set, return
+      (the sweep just ran = final housekeeping pass).
+    - After the serve fanout (before reduce/advance): if set, continue (skip
+      reduce/advance so shutdown seeds no new work); next iteration re-runs
+      heartbeat_sweep and exits via the first check.
+    Forwards the resolved event to serve_loop so co-loops share the flag.
     """
+    # Resolve stop_event at call time (test-injected or process-global)
+    ev = stop_event if stop_event is not None else shutdown.stop_event
+
     cycles = 0
     while max_cycles is None or cycles < max_cycles:
         cycles += 1
@@ -181,6 +205,12 @@ def master_loop(
         # Check run-level attention conditions (future extension)
         check_attention(conn, run_id, now=t)
 
+        # Check stop flag AFTER heartbeat_sweep (between sweep and progression).
+        # This is the clean exit: the final sweep just ran, so leases are renewed/
+        # reclaimed and none dangles.
+        if ev.is_set():
+            return _run_state(conn, run_id)
+
         state = _run_state(conn, run_id)
         if state is None or state in ("done", "failed", "stopped"):
             # Terminal (or a stopped run makes no progression): nothing to drive.
@@ -192,7 +222,14 @@ def master_loop(
         # (b) Progression — running only. Drive the serve loops for each host.
         run = queue.load_run(conn, run_id)
         for host in hosts:
-            serve_loop(conn, site, agent, host, run, playbook, base_ref, now=t)
+            serve_loop(conn, site, agent, host, run, playbook, base_ref, now=t, stop_event=ev)
+
+        # Check stop flag AFTER serve fanout, BEFORE reduce/advance. If set,
+        # skip reduce/advance (so shutdown seeds no new work) and continue to
+        # the next cycle, which will run heartbeat_sweep then exit via the
+        # first check (guaranteeing heartbeat_sweep is the final pass).
+        if ev.is_set():
+            continue
 
         # Reduce a fully-settled phase and advance / terminate.
         if _reduce_and_advance(conn, run_id, playbook, site, now=t):

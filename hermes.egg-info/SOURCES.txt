@@ -17,6 +17,7 @@ engine/log.py
 engine/models.py
 engine/playbook.py
 engine/queue.py
+engine/shutdown.py
 engine/site.py
 engine/transport.py
 engine/db/__init__.py
