@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, type HealthResponse, type Run, type Reduction } from './client';
+import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
 import { clearToken, setToken } from './auth';
 
 describe('API client', () => {
@@ -285,6 +285,238 @@ describe('API client', () => {
       }) as any;
 
       await expect(pauseRun('run-001')).rejects.toThrow('HTTP error! status: 409');
+    });
+  });
+
+  describe('Crew control endpoints (Phase D2b)', () => {
+    beforeEach(() => {
+      setToken('test-token');
+    });
+
+    describe('probeCrew', () => {
+      it('should POST to /api/crew/probe with body and auth header', async () => {
+        const mockChecklist: HealthChecklist = {
+          host: 'worker-1',
+          ok: true,
+          reachable: true,
+          agent_ok: true,
+          auth_ok: true,
+          workspace_ready: true,
+          guard_installed: true,
+          resources: { cpu: 8, gpu: 2 },
+          latency_ms: 42,
+          checks: [
+            { name: 'reachable', ok: true, detail: 'ssh ok' },
+            { name: 'agent', ok: true, detail: 'claude v1.2' },
+          ],
+        };
+
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => mockChecklist,
+        }) as any;
+
+        const result = await probeCrew({ host: 'worker-1', site: 'local', agent: 'claude' });
+
+        expect(result).toEqual(mockChecklist);
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/crew/probe',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token',
+              'Content-Type': 'application/json',
+            }),
+            body: JSON.stringify({ host: 'worker-1', site: 'local', agent: 'claude' }),
+          })
+        );
+      });
+
+      it('should handle probe failure with error detail', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 400,
+          json: async () => ({ detail: 'Missing required fields: host, site' }),
+        }) as any;
+
+        await expect(probeCrew({ host: '', site: 'local' })).rejects.toThrow('Missing required fields: host, site');
+      });
+    });
+
+    describe('addCrew', () => {
+      it('should POST to /api/crew with body and auth header', async () => {
+        const mockMember = {
+          id: 'worker-1',
+          site: 'local',
+          state: 'idle',
+          capabilities: [],
+          resources: { cpu: 8 },
+          health: { reachable: true, agent_ok: true, auth_ok: true, workspace_ready: true, guard_installed: true, latency_ms: 42 },
+          current_ticket: null,
+          last_heartbeat: 1234567890,
+        };
+
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => mockMember,
+        }) as any;
+
+        const result = await addCrew({ host: 'worker-1', site: 'local', agent: 'claude', base_ref: 'main' });
+
+        expect(result).toEqual(mockMember);
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/crew',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token',
+              'Content-Type': 'application/json',
+            }),
+            body: JSON.stringify({ host: 'worker-1', site: 'local', agent: 'claude', base_ref: 'main' }),
+          })
+        );
+      });
+
+      it('should surface 422 failing-checks detail', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 422,
+          json: async () => ({ detail: 'Health check failed: auth_ok=false, workspace_ready=false' }),
+        }) as any;
+
+        await expect(addCrew({ host: 'unhealthy', site: 'local' })).rejects.toThrow('Health check failed: auth_ok=false, workspace_ready=false');
+      });
+    });
+
+    describe('reprobeCrew', () => {
+      it('should POST to /api/crew/{host}/reprobe with optional agent', async () => {
+        const mockChecklist: HealthChecklist = {
+          host: 'worker-1',
+          ok: true,
+          reachable: true,
+          agent_ok: true,
+          auth_ok: true,
+          workspace_ready: true,
+          guard_installed: true,
+          resources: { cpu: 8 },
+          latency_ms: 38,
+          checks: [
+            { name: 'reachable', ok: true, detail: 'ssh ok' },
+          ],
+        };
+
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => mockChecklist,
+        }) as any;
+
+        const result = await reprobeCrew('worker-1', 'claude');
+
+        expect(result).toEqual(mockChecklist);
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/crew/worker-1/reprobe',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token',
+              'Content-Type': 'application/json',
+            }),
+            body: JSON.stringify({ agent: 'claude' }),
+          })
+        );
+      });
+
+      it('should handle reprobe without agent', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({
+            host: 'worker-1',
+            ok: true,
+            reachable: true,
+            agent_ok: true,
+            auth_ok: true,
+            workspace_ready: true,
+            guard_installed: true,
+            resources: {},
+            latency_ms: 40,
+            checks: [],
+          }),
+        }) as any;
+
+        await reprobeCrew('worker-1');
+
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/crew/worker-1/reprobe',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({}),
+          })
+        );
+      });
+
+      it('should throw 404 if host not found', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: "Crew member 'unknown-host' not found" }),
+        }) as any;
+
+        await expect(reprobeCrew('unknown-host')).rejects.toThrow("Crew member 'unknown-host' not found");
+      });
+    });
+
+    describe('drainCrew', () => {
+      it('should POST to /api/crew/{host}/drain and return new state', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ state: 'draining' }),
+        }) as any;
+
+        const result = await drainCrew('worker-1');
+
+        expect(result).toEqual({ state: 'draining' });
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/crew/worker-1/drain',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token',
+            }),
+          })
+        );
+      });
+    });
+
+    describe('removeCrew', () => {
+      it('should DELETE /api/crew/{host} with auth header', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ status: 'removed' }),
+        }) as any;
+
+        const result = await removeCrew('worker-1');
+
+        expect(result).toEqual({ status: 'removed' });
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/crew/worker-1',
+          expect.objectContaining({
+            method: 'DELETE',
+            headers: expect.objectContaining({
+              'Authorization': 'Bearer test-token',
+            }),
+          })
+        );
+      });
+
+      it('should throw 404 if host not found', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 404,
+          json: async () => ({ detail: "Crew member 'unknown' not found" }),
+        }) as any;
+
+        await expect(removeCrew('unknown')).rejects.toThrow("Crew member 'unknown' not found");
+      });
     });
   });
 });

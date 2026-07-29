@@ -1,34 +1,37 @@
 /**
  * CrewPanel - crew member list with health badges and host drawer.
  * Phase B4: real crew from GET /api/crew + host drawer with leases.
+ * Phase D2b: add-host button + modal.
  */
 
 import { useState, useEffect } from 'react';
 import { fetchCrew } from '../api/client';
 import type { CrewMember } from '../api/client';
-import { HealthBadge, EmptyState } from '../ds';
+import { HealthBadge, EmptyState, Button } from '../ds';
 import CrewDrawer from '../components/CrewDrawer';
+import AddHostModal from '../components/AddHostModal';
 
 export default function CrewPanel() {
   const [crew, setCrew] = useState<CrewMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedHost, setSelectedHost] = useState<CrewMember | null>(null);
+  const [showAddModal, setShowAddModal] = useState(false);
+
+  const loadCrew = async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const data = await fetchCrew();
+      setCrew(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load crew');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    const loadCrew = async () => {
-      try {
-        setLoading(true);
-        setError(null);
-        const data = await fetchCrew();
-        setCrew(data);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load crew');
-      } finally {
-        setLoading(false);
-      }
-    };
-
     loadCrew();
   }, []);
 
@@ -80,6 +83,11 @@ export default function CrewPanel() {
           <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>
             {crew.length} {crew.length === 1 ? 'host' : 'hosts'}
           </span>
+          <div style={{ marginLeft: 'auto' }}>
+            <Button variant="primary" size="sm" onClick={() => setShowAddModal(true)}>
+              Add Host
+            </Button>
+          </div>
         </div>
 
         <div style={{ borderTop: '1px solid var(--border-hairline)' }}>
@@ -176,6 +184,16 @@ export default function CrewPanel() {
         isOpen={selectedHost !== null}
         host={selectedHost}
         onClose={() => setSelectedHost(null)}
+        onRefresh={loadCrew}
+      />
+
+      <AddHostModal
+        isOpen={showAddModal}
+        onClose={() => setShowAddModal(false)}
+        onAdded={() => {
+          setShowAddModal(false);
+          loadCrew();
+        }}
       />
     </>
   );

@@ -323,3 +323,68 @@ export async function stopRun(runId: string): Promise<RunControlResponse> {
     method: 'POST',
   });
 }
+
+/**
+ * Crew control endpoints (Phase D2b).
+ */
+
+export type HealthCheck = {
+  name: string;
+  ok: boolean;
+  detail: string;
+};
+
+export type HealthChecklist = {
+  host: string;
+  ok: boolean;
+  reachable: boolean;
+  agent_ok: boolean;
+  auth_ok: boolean;
+  workspace_ready: boolean;
+  guard_installed: boolean;
+  resources: Record<string, number>;
+  latency_ms: number;
+  checks: HealthCheck[];
+};
+
+export async function probeCrew(params: {
+  host: string;
+  site: string;
+  agent?: string;
+}): Promise<HealthChecklist> {
+  return fetchJSON<HealthChecklist>('/api/crew/probe', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function addCrew(params: {
+  host: string;
+  site: string;
+  agent?: string;
+  base_ref?: string;
+}): Promise<CrewMember> {
+  return fetchJSON<CrewMember>('/api/crew', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function reprobeCrew(host: string, agent?: string): Promise<HealthChecklist> {
+  return fetchJSON<HealthChecklist>(`/api/crew/${host}/reprobe`, {
+    method: 'POST',
+    body: JSON.stringify(agent ? { agent } : {}),
+  });
+}
+
+export async function drainCrew(host: string): Promise<{ state: string }> {
+  return fetchJSON<{ state: string }>(`/api/crew/${host}/drain`, {
+    method: 'POST',
+  });
+}
+
+export async function removeCrew(host: string): Promise<{ status: string }> {
+  return fetchJSON<{ status: string }>(`/api/crew/${host}`, {
+    method: 'DELETE',
+  });
+}
