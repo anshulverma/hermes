@@ -354,30 +354,39 @@ def cmd_show(args):
 
 
 def cmd_serve_api(args):
-    """hermes serve --api [--host 127.0.0.1] [--port 8080].
+    """hermes serve --api [--host 127.0.0.1] [--port 8080] [--rotate-token].
 
     Run the FastAPI control-plane server. Thin wrapper around uvicorn.
     """
     try:
         import uvicorn
         from server.app import create_app
+        from server.auth import rotate_token
     except ImportError as e:
         print(f"Error: server dependencies not installed. Run: pip install -e '.[server]'", file=sys.stderr)
         print(f"  ({e})", file=sys.stderr)
         return 1
 
-    # Create the app
-    app = create_app()
+    home = config.resolve_home()
 
-    # Defaults
-    host = args.host or "127.0.0.1"
+    # Rotate token if requested
+    if getattr(args, 'rotate_token', False):
+        rotate_token(home)
+        print(f"Token rotated (stored at {home / 'api_token'})")
+
+    # Get bind from args or HERMES_BIND env or default to 127.0.0.1
+    bind = args.host or os.environ.get("HERMES_BIND", "127.0.0.1")
     port = args.port
 
-    print(f"Starting Hermes API server on http://{host}:{port}")
-    print(f"HERMES_HOME: {config.resolve_home()}")
+    # Create the app with bind
+    app = create_app(bind=bind)
 
-    # Run uvicorn
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    print(f"Starting Hermes API server on http://{bind}:{port}")
+    print(f"HERMES_HOME: {home}")
+    print(f"Token location: {home / 'api_token'}")
+
+    # Run uvicorn (host param for uvicorn is where to listen)
+    uvicorn.run(app, host=bind, port=port, log_level="info")
     return 0
 
 
@@ -635,6 +644,7 @@ def main(argv=None):
     serve_parser.add_argument('--api', action='store_true', help='Run the API server')
     serve_parser.add_argument('--host', help='Host to serve (for worker) or bind address (for API)')
     serve_parser.add_argument('--port', type=int, default=8080, help='Port for API server (default: 8080)')
+    serve_parser.add_argument('--rotate-token', action='store_true', help='Rotate API token before starting (API mode only)')
     serve_parser.add_argument('--site', help='Site name (for worker)')
     serve_parser.add_argument('--agent', help='Agent name (for worker)')
     serve_parser.add_argument('--run', help='Run ID (for worker, default: most recent running run)')

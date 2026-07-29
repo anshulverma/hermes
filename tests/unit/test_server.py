@@ -1252,14 +1252,18 @@ def test_reductions_unknown_run_404(client: TestClient, temp_home: Path):
 
 def test_websocket_hello_and_event_push(client: TestClient, seeded_run: str, temp_home: Path, monkeypatch):
     """WS /api/ws sends hello with cursor, then pushes new events inserted into real events table."""
+    from server.auth import read_token
+
     # Set low poll interval so test completes quickly
     monkeypatch.setenv("HERMES_WS_POLL_S", "0.05")
 
     import time
     db_path = str(temp_home / "queue.db")
 
-    # Connect to websocket with since=0 (replay from start)
-    with client.websocket_connect("/api/ws?since=0") as websocket:
+    token = read_token(temp_home)
+
+    # Connect to websocket with since=0 (replay from start) and token
+    with client.websocket_connect(f"/api/ws?since=0&token={token}") as websocket:
         # Should receive hello message with initial cursor
         hello = websocket.receive_json()
         assert hello["type"] == "hello"
@@ -1307,10 +1311,14 @@ def test_websocket_hello_and_event_push(client: TestClient, seeded_run: str, tem
 
 def test_websocket_clean_disconnect(client: TestClient, temp_home: Path, monkeypatch):
     """WS /api/ws handles client disconnect cleanly without crashing the server."""
+    from server.auth import read_token
+
     monkeypatch.setenv("HERMES_WS_POLL_S", "0.1")
 
+    token = read_token(temp_home)
+
     # Connect and immediately disconnect
-    with client.websocket_connect("/api/ws") as websocket:
+    with client.websocket_connect(f"/api/ws?token={token}") as websocket:
         hello = websocket.receive_json()
         assert hello["type"] == "hello"
         websocket.close()
@@ -1318,3 +1326,434 @@ def test_websocket_clean_disconnect(client: TestClient, temp_home: Path, monkeyp
     # Server should still be responsive
     response = client.get("/api/health")
     assert response.status_code == 200
+
+
+# --- Auth (D1a) ---
+
+
+def test_auth_token_load_or_create_generates_token_0600(temp_home: Path):
+    """load_or_create_token generates a strong token with 0600 mode."""
+    from server.auth import load_or_create_token
+    import stat
+
+    token = load_or_create_token(temp_home)
+
+    # Token should be non-empty string
+    assert isinstance(token, str)
+    assert len(token) > 0
+
+    # Token file should exist with mode 0600
+    token_path = temp_home / "api_token"
+    assert token_path.exists()
+
+    # Check file mode
+    mode = token_path.stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
+
+
+def test_auth_token_load_or_create_idempotent(temp_home: Path):
+    """load_or_create_token is idempotent: returns same token if already exists."""
+    from server.auth import load_or_create_token
+
+    token1 = load_or_create_token(temp_home)
+    token2 = load_or_create_token(temp_home)
+
+    assert token1 == token2
+
+
+def test_auth_token_rotate_changes_token(temp_home: Path):
+    """rotate_token generates a new token, different from the old one."""
+    from server.auth import load_or_create_token, rotate_token
+
+    token1 = load_or_create_token(temp_home)
+    token2 = rotate_token(temp_home)
+
+    assert token1 != token2
+    assert len(token2) > 0
+
+
+def test_auth_token_rotate_preserves_0600(temp_home: Path):
+    """rotate_token preserves mode 0600."""
+    from server.auth import rotate_token
+    import stat
+
+    rotate_token(temp_home)
+
+    token_path = temp_home / "api_token"
+    mode = token_path.stat().st_mode
+    assert stat.S_IMODE(mode) == 0o600
+
+
+def test_auth_token_read_returns_token(temp_home: Path):
+    """read_token returns the current token."""
+    from server.auth import load_or_create_token, read_token
+
+    expected = load_or_create_token(temp_home)
+    actual = read_token(temp_home)
+
+    assert actual == expected
+
+
+def test_auth_token_read_returns_none_when_absent(temp_home: Path):
+    """read_token returns None if token file doesn't exist."""
+    from server.auth import read_token
+
+    assert read_token(temp_home) is None
+
+
+@pytest.fixture
+def loopback_client(temp_home: Path):
+    """TestClient for loopback (127.0.0.1) app."""
+    app = create_app(bind="127.0.0.1")
+    return TestClient(app)
+
+
+@pytest.fixture
+def nonloopback_client(temp_home: Path):
+    """TestClient for non-loopback (0.0.0.0) app."""
+    app = create_app(bind="0.0.0.0")
+    return TestClient(app)
+
+
+def test_auth_mutation_requires_token_on_loopback(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """POST /api/runs/{id}/pause with NO token on loopback => 401."""
+    # Get a running run's ID
+    response = loopback_client.post(f"/api/runs/{seeded_run}/pause")
+    assert response.status_code == 401
+
+
+def test_auth_mutation_rejects_wrong_token_on_loopback(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """POST /api/runs/{id}/pause with WRONG token on loopback => 401."""
+    response = loopback_client.post(
+        f"/api/runs/{seeded_run}/pause",
+        headers={"Authorization": "Bearer wrong-token"}
+    )
+    assert response.status_code == 401
+
+
+def test_auth_mutation_accepts_correct_token_on_loopback(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """POST /api/runs/{id}/pause with CORRECT token on loopback => 200."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+    assert token is not None
+
+    response = loopback_client.post(
+        f"/api/runs/{seeded_run}/pause",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+
+def test_auth_get_open_on_loopback_without_token(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs on loopback with NO token => 200 (open)."""
+    response = loopback_client.get("/api/runs")
+    assert response.status_code == 200
+
+
+def test_auth_get_requires_token_on_nonloopback(nonloopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs on non-loopback with NO token => 401."""
+    response = nonloopback_client.get("/api/runs")
+    assert response.status_code == 401
+
+
+def test_auth_get_accepts_token_on_nonloopback(nonloopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs on non-loopback with CORRECT token => 200."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+    assert token is not None
+
+    response = nonloopback_client.get(
+        "/api/runs",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+
+# --- WebSocket Auth (D1a) ---
+
+
+def test_websocket_auth_no_token_closes_4401(loopback_client: TestClient, temp_home: Path):
+    """WS /api/ws with NO token => closed with code 4401."""
+    from starlette.websockets import WebSocketDisconnect
+
+    try:
+        with loopback_client.websocket_connect("/api/ws") as websocket:
+            # Try to receive - should get disconnect
+            websocket.receive_json()
+            pytest.fail("Should have been disconnected")
+    except WebSocketDisconnect as e:
+        assert e.code == 4401
+
+
+def test_websocket_auth_wrong_token_closes_4401(loopback_client: TestClient, temp_home: Path):
+    """WS /api/ws with WRONG token => closed with code 4401."""
+    from starlette.websockets import WebSocketDisconnect
+
+    try:
+        with loopback_client.websocket_connect("/api/ws?token=wrong-token") as websocket:
+            # Try to receive - should get disconnect
+            websocket.receive_json()
+            pytest.fail("Should have been disconnected")
+    except WebSocketDisconnect as e:
+        assert e.code == 4401
+
+
+def test_websocket_auth_correct_token_receives_hello(loopback_client: TestClient, temp_home: Path, monkeypatch):
+    """WS /api/ws with CORRECT token => receives hello (C1 behavior preserved)."""
+    from server.auth import read_token
+
+    monkeypatch.setenv("HERMES_WS_POLL_S", "0.1")
+
+    token = read_token(temp_home)
+    assert token is not None
+
+    with loopback_client.websocket_connect(f"/api/ws?token={token}") as websocket:
+        hello = websocket.receive_json()
+        assert hello["type"] == "hello"
+        assert "last_id" in hello
+
+
+# --- Run Control Endpoints (D1a) ---
+
+
+def test_run_control_pause_running_run(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """POST /api/runs/{id}/pause on running run => 200 + state paused + event."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+
+    # Verify run is running
+    conn = sqlite3.connect(db_path)
+    state = conn.execute("SELECT state FROM runs WHERE id=?", (seeded_run,)).fetchone()[0]
+    assert state == "running"
+    conn.close()
+
+    # Pause the run
+    response = loopback_client.post(
+        f"/api/runs/{seeded_run}/pause",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["state"] == "paused"
+
+    # Verify state in database
+    conn = sqlite3.connect(db_path)
+    new_state = conn.execute("SELECT state FROM runs WHERE id=?", (seeded_run,)).fetchone()[0]
+    assert new_state == "paused"
+
+    # Verify event was emitted
+    event = conn.execute(
+        """SELECT kind, run_id, message FROM events
+           WHERE kind='run_paused' AND run_id=?
+           ORDER BY id DESC LIMIT 1""",
+        (seeded_run,)
+    ).fetchone()
+    assert event is not None
+    assert event[0] == "run_paused"
+    assert event[1] == seeded_run
+
+    conn.close()
+
+
+def test_run_control_resume_paused_run(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """POST /api/runs/{id}/resume on paused run => 200 + state running + event."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+
+    # First pause the run
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE runs SET state='paused' WHERE id=?", (seeded_run,))
+    conn.commit()
+    conn.close()
+
+    # Resume the run
+    response = loopback_client.post(
+        f"/api/runs/{seeded_run}/resume",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["state"] == "running"
+
+    # Verify state in database
+    conn = sqlite3.connect(db_path)
+    new_state = conn.execute("SELECT state FROM runs WHERE id=?", (seeded_run,)).fetchone()[0]
+    assert new_state == "running"
+
+    # Verify event was emitted
+    event = conn.execute(
+        """SELECT kind, run_id FROM events
+           WHERE kind='run_resumed' AND run_id=?
+           ORDER BY id DESC LIMIT 1""",
+        (seeded_run,)
+    ).fetchone()
+    assert event is not None
+    assert event[0] == "run_resumed"
+
+    conn.close()
+
+
+def test_run_control_stop_running_run(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """POST /api/runs/{id}/stop on running run => 200 + state stopped + event."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+
+    # Stop the run
+    response = loopback_client.post(
+        f"/api/runs/{seeded_run}/stop",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["state"] == "stopped"
+
+    # Verify state in database
+    conn = sqlite3.connect(db_path)
+    new_state = conn.execute("SELECT state FROM runs WHERE id=?", (seeded_run,)).fetchone()[0]
+    assert new_state == "stopped"
+
+    # Verify event was emitted
+    event = conn.execute(
+        """SELECT kind, run_id FROM events
+           WHERE kind='run_stopped' AND run_id=?
+           ORDER BY id DESC LIMIT 1""",
+        (seeded_run,)
+    ).fetchone()
+    assert event is not None
+
+    conn.close()
+
+
+def test_run_control_unknown_run_404(loopback_client: TestClient, temp_home: Path):
+    """POST /api/runs/{unknown}/pause => 404."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+
+    response = loopback_client.post(
+        "/api/runs/unknown-run-id/pause",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 404
+
+
+def test_run_control_illegal_transition_409(loopback_client: TestClient, seeded_run: str, temp_home: Path):
+    """POST /api/runs/{id}/resume on stopped run => 409 (illegal transition)."""
+    from server.auth import read_token
+    import sqlite3
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+
+    # First stop the run
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE runs SET state='stopped' WHERE id=?", (seeded_run,))
+    conn.commit()
+    conn.close()
+
+    # Try to resume a stopped run (illegal)
+    response = loopback_client.post(
+        f"/api/runs/{seeded_run}/resume",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 409
+    assert "detail" in response.json()
+
+
+# --- SPA Serving + Token Injection (D1a) ---
+
+
+def test_spa_loopback_injects_token(loopback_client: TestClient, temp_home: Path):
+    """GET / on loopback injects token bootstrap into index.html."""
+    from server.auth import read_token
+
+    # Create fake index.html
+    dist_dir = temp_home / "web_dist"
+    dist_dir.mkdir()
+    index_html = dist_dir / "index.html"
+    index_html.write_text("""<!DOCTYPE html>
+<html>
+<head>
+    <title>Hermes</title>
+</head>
+<body>
+    <div id="app"></div>
+</body>
+</html>""")
+
+    # Point HERMES_WEB_DIST to temp dist dir
+    import os
+    os.environ["HERMES_WEB_DIST"] = str(dist_dir)
+
+    # Create new client with dist dir env set
+    app = create_app(bind="127.0.0.1")
+    client = TestClient(app)
+
+    token = read_token(temp_home)
+    assert token is not None
+
+    response = client.get("/")
+    assert response.status_code == 200
+
+    html = response.text
+    # Should contain injected token bootstrap
+    assert f'window.__HERMES_TOKEN__="{token}"' in html
+    assert 'window.__HERMES_BIND__="loopback"' in html
+    # Should still have the original content
+    assert "<title>Hermes</title>" in html
+
+
+def test_spa_nonloopback_omits_token(nonloopback_client: TestClient, temp_home: Path):
+    """GET / on non-loopback does NOT inject token (only bind marker)."""
+    from server.auth import read_token
+
+    # Create fake index.html
+    dist_dir = temp_home / "web_dist"
+    dist_dir.mkdir()
+    index_html = dist_dir / "index.html"
+    index_html.write_text("""<!DOCTYPE html>
+<html>
+<head>
+    <title>Hermes</title>
+</head>
+<body>
+    <div id="app"></div>
+</body>
+</html>""")
+
+    # Point HERMES_WEB_DIST to temp dist dir
+    import os
+    os.environ["HERMES_WEB_DIST"] = str(dist_dir)
+
+    # Create new client with dist dir env set
+    app = create_app(bind="0.0.0.0")
+    client = TestClient(app)
+
+    token = read_token(temp_home)
+    assert token is not None
+
+    # Non-loopback GETs require auth, so provide token
+    response = client.get("/", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+
+    html = response.text
+    # Should NOT contain token
+    assert "__HERMES_TOKEN__" not in html
+    # Should contain remote bind marker
+    assert 'window.__HERMES_BIND__="remote"' in html
+    # Should still have the original content
+    assert "<title>Hermes</title>" in html

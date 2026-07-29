@@ -1,27 +1,86 @@
 """
 server.app — FastAPI application.
 
-Minimal control-plane server (Phase A1). Read endpoints over the real queue.db.
+Control-plane server with auth (Phase D1a). Bearer-token gated mutations + WS,
+GET-gated on non-loopback, SPA serving with token bootstrap injection (loopback only).
 """
 import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Annotated
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Query
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.staticfiles import StaticFiles
 
 from engine.config import resolve_home
 from engine.db.migrate import connect
-from engine.queue import load_run, phase_ticket_counts
+from engine.queue import load_run, phase_ticket_counts, set_run_state
+from server.auth import load_or_create_token
 
 
-def create_app() -> FastAPI:
-    """Create the FastAPI application."""
+# Security scheme for bearer token
+security = HTTPBearer(auto_error=False)
+
+
+def is_loopback(bind: str | None) -> bool:
+    """Check if bind address is loopback."""
+    if bind is None:
+        return True
+    return bind in ("127.0.0.1", "localhost", "::1")
+
+
+def create_app(bind: str | None = None) -> FastAPI:
+    """Create the FastAPI application.
+
+    Args:
+        bind: Bind address (default from HERMES_BIND or 127.0.0.1).
+              Used to determine GET-gating and token injection.
+    """
+    if bind is None:
+        bind = os.environ.get("HERMES_BIND", "127.0.0.1")
+
+    # Load or create the bearer token
+    home = resolve_home()
+    app_token = load_or_create_token(home)
+    loopback = is_loopback(bind)
+
+    app = FastAPI(title="Hermes Control Plane", version="0.1.0")
+
+    # Auth dependency: validates bearer token from header or query param
+    def require_auth(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
+        token: str | None = Query(None)
+    ) -> None:
+        """Validate bearer token (from Authorization header or ?token= query param).
+
+        Raises 401 if token is missing or invalid.
+        """
+        # Try header first, then query param
+        provided_token = None
+        if credentials:
+            provided_token = credentials.credentials
+        elif token:
+            provided_token = token
+
+        if provided_token != app_token:
+            raise HTTPException(status_code=401, detail="Invalid or missing bearer token")
+
+    # Auth dependency for GET endpoints: only gate on non-loopback
+    def require_auth_read(
+        credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)] = None,
+        token: str | None = Query(None)
+    ) -> None:
+        """Validate bearer token for GET endpoints (only on non-loopback)."""
+        if not loopback:
+            require_auth(credentials, token)
+
     app = FastAPI(title="Hermes Control Plane", version="0.1.0")
 
     @app.get("/api/health")
-    def health() -> dict[str, Any]:
+    def health(_: None = Depends(require_auth_read)) -> dict[str, Any]:
         """Health check endpoint.
 
         Returns status, version, and resolved HERMES_HOME.
@@ -34,7 +93,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/runs")
-    def list_runs() -> list[dict[str, Any]]:
+    def list_runs(_: None = Depends(require_auth_read)) -> list[dict[str, Any]]:
         """List all runs with ticket counts by state.
 
         Returns a list of runs, each with per-state ticket counts.
@@ -76,7 +135,7 @@ def create_app() -> FastAPI:
             conn.close()
 
     @app.get("/api/runs/{run_id}")
-    def get_run(run_id: str) -> dict[str, Any]:
+    def get_run(run_id: str, _: None = Depends(require_auth_read)) -> dict[str, Any]:
         """Get a single run by ID with phase ticket counts.
 
         Returns run details including per-state ticket counts and
@@ -148,6 +207,7 @@ def create_app() -> FastAPI:
         resource: str | None = None,
         host: str | None = None,
         search: str | None = None,
+        _: None = Depends(require_auth_read)
     ) -> list[dict[str, Any]]:
         """Get tickets for a run with optional filters.
 
@@ -238,7 +298,7 @@ def create_app() -> FastAPI:
             conn.close()
 
     @app.get("/api/tickets/{ticket_id:path}")
-    def get_ticket_detail(ticket_id: str) -> dict[str, Any]:
+    def get_ticket_detail(ticket_id: str, _: None = Depends(require_auth_read)) -> dict[str, Any]:
         """Get full ticket detail.
 
         Returns:
@@ -352,7 +412,7 @@ def create_app() -> FastAPI:
             conn.close()
 
     @app.get("/api/crew")
-    def get_crew() -> list[dict[str, Any]]:
+    def get_crew(_: None = Depends(require_auth_read)) -> list[dict[str, Any]]:
         """Get all crew members with parsed resources, capabilities, and health.
 
         Returns crew members from the crew table with:
@@ -401,7 +461,7 @@ def create_app() -> FastAPI:
             conn.close()
 
     @app.get("/api/leases")
-    def get_leases(host: str | None = None) -> list[dict[str, Any]]:
+    def get_leases(host: str | None = None, _: None = Depends(require_auth_read)) -> list[dict[str, Any]]:
         """Get active (live) leases with optional host filter.
 
         Returns leases from the leases table where expires_at > now.
@@ -468,6 +528,7 @@ def create_app() -> FastAPI:
         since: int = 0,
         kind: str | None = None,
         limit: int = 200,
+        _: None = Depends(require_auth_read)
     ) -> list[dict[str, Any]]:
         """Get events from the event feed.
 
@@ -491,7 +552,7 @@ def create_app() -> FastAPI:
             conn.close()
 
     @app.get("/api/events/kinds")
-    def get_event_kinds() -> list[str]:
+    def get_event_kinds(_: None = Depends(require_auth_read)) -> list[str]:
         """Get distinct event kinds present in the database.
 
         Returns a sorted list of event kinds (SELECT DISTINCT kind FROM events ORDER BY kind).
@@ -508,7 +569,7 @@ def create_app() -> FastAPI:
             conn.close()
 
     @app.get("/api/runs/{run_id}/reductions")
-    def get_reductions(run_id: str, phase: str | None = None) -> list[dict[str, Any]]:
+    def get_reductions(run_id: str, phase: str | None = None, _: None = Depends(require_auth_read)) -> list[dict[str, Any]]:
         """Get reductions for a run with optional phase filter.
 
         Returns reductions with parsed json, de-duplicated member_ticket_ids
@@ -597,21 +658,112 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    # --- Run Control Endpoints (D1a) ---
+
+    @app.post("/api/runs/{run_id}/pause")
+    def pause_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Pause a running run.
+
+        Returns the run's new state on success.
+        404 if run unknown, 409 if illegal transition.
+        """
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            set_run_state(conn, run_id, "paused")
+            # Return the run's new state
+            state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
+            return {"state": state}
+        except ValueError as e:
+            # set_run_state raises ValueError on unknown run or illegal transition
+            if "unknown run" in str(e):
+                raise HTTPException(status_code=404, detail=str(e))
+            else:
+                raise HTTPException(status_code=409, detail=str(e))
+        finally:
+            conn.close()
+
+    @app.post("/api/runs/{run_id}/resume")
+    def resume_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Resume a paused run.
+
+        Returns the run's new state on success.
+        404 if run unknown, 409 if illegal transition.
+        """
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            set_run_state(conn, run_id, "running")
+            # Return the run's new state
+            state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
+            return {"state": state}
+        except ValueError as e:
+            if "unknown run" in str(e):
+                raise HTTPException(status_code=404, detail=str(e))
+            else:
+                raise HTTPException(status_code=409, detail=str(e))
+        finally:
+            conn.close()
+
+    @app.post("/api/runs/{run_id}/stop")
+    def stop_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Stop a running or paused run.
+
+        Returns the run's new state on success.
+        404 if run unknown, 409 if illegal transition.
+        """
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            set_run_state(conn, run_id, "stopped")
+            # Return the run's new state
+            state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
+            return {"state": state}
+        except ValueError as e:
+            if "unknown run" in str(e):
+                raise HTTPException(status_code=404, detail=str(e))
+            else:
+                raise HTTPException(status_code=409, detail=str(e))
+        finally:
+            conn.close()
+
     @app.websocket("/api/ws")
-    async def websocket_endpoint(websocket: WebSocket, since: int = None):
-        """WebSocket endpoint for live event stream.
+    async def websocket_endpoint(websocket: WebSocket, since: int = None, token: str = Query(None)):
+        """WebSocket endpoint for live event stream (auth required).
 
         Polls the real events table and pushes new events to connected clients.
 
         Query params:
         - since: Start cursor (event id). Default: current max event id (only new events).
                  Use since=0 to replay from start.
+        - token: Bearer token (required)
 
         Messages:
         - hello: {type: "hello", last_id: <cursor>} on connect
         - event: {type: "event", event: {...}} for each new event
+
+        Auth: Closes with code 4401 if token missing/invalid.
         """
+        # Accept connection first so we can close with a code
         await websocket.accept()
+
+        # Validate token (from query param or potentially from Authorization header)
+        # Note: WebSocket in FastAPI doesn't easily support HTTPBearer, so we rely on ?token=
+        provided_token = token
+
+        # Try to get token from headers if not in query
+        if not provided_token:
+            auth_header = websocket.headers.get("authorization")
+            if auth_header and auth_header.startswith("Bearer "):
+                provided_token = auth_header[7:]
+
+        if provided_token != app_token:
+            # Close with custom code 4401
+            await websocket.close(code=4401)
+            return
 
         # Get poll interval from env (default 1.0s)
         poll_interval = float(os.environ.get("HERMES_WS_POLL_S", "1.0"))
@@ -665,5 +817,55 @@ def create_app() -> FastAPI:
                 await websocket.close()
             except Exception:
                 pass
+
+    # --- SPA Serving + Token Injection (D1a) ---
+
+    # Determine dist dir (default web/dist, or HERMES_WEB_DIST)
+    dist_dir_str = os.environ.get("HERMES_WEB_DIST", "web/dist")
+    dist_dir = Path(dist_dir_str)
+
+    @app.get("/", response_class=HTMLResponse)
+    def serve_spa(_: None = Depends(require_auth_read)) -> str:
+        """Serve the SPA index.html with token bootstrap injection (loopback only).
+
+        On loopback: injects window.__HERMES_TOKEN__ and window.__HERMES_BIND__="loopback"
+        On non-loopback: only injects window.__HERMES_BIND__="remote" (no token)
+        """
+        index_path = dist_dir / "index.html"
+
+        if not index_path.exists():
+            # Return a placeholder if dist dir/index.html is absent
+            return """<!DOCTYPE html>
+<html>
+<head><title>Hermes</title></head>
+<body>
+<p>Hermes control plane (SPA not built)</p>
+</body>
+</html>"""
+
+        # Read index.html
+        html = index_path.read_text()
+
+        # Inject token bootstrap (loopback only) and bind marker
+        if loopback:
+            # Inject token + loopback marker before </head>
+            injection = f'<script>window.__HERMES_TOKEN__="{app_token}";window.__HERMES_BIND__="loopback";</script>'
+        else:
+            # Only inject remote marker (no token)
+            injection = '<script>window.__HERMES_BIND__="remote";</script>'
+
+        # Insert before </head>
+        if "</head>" in html:
+            html = html.replace("</head>", f"{injection}</head>", 1)
+        else:
+            # Fallback: prepend to body
+            html = injection + html
+
+        return html
+
+    # Mount static assets if assets dir exists
+    assets_dir = dist_dir / "assets"
+    if assets_dir.exists() and assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
 
     return app
