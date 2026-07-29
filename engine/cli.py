@@ -547,44 +547,8 @@ def cmd_serve_once(args):
         print(f"Error: failed to launch worker: {exc}", file=sys.stderr)
         return 1
 
-    # 5. Write the raw output to result file (master will parse_result later)
-    # For now, we'll write the agent's parsed result as JSON
-    # Actually, the spec says write the OUTPUT, not the parsed result
-    # The master calls parse_result later. So we need to write the raw stdout.
-    # But we also need to return the Result format. Let me re-read the spec...
-
-    # From the brief: "Write the worker output to --result (the raw the master's
-    # agent.parse_result will consume)."
-    # So we should write proc.stdout to the result file.
-    # But MockAgent.parse_result expects raw string, and returns a Result object.
-    # The master will read this file and call parse_result on it.
-
-    # Actually looking at ssh_transport, it reads the result file and calls parse_result:
-    # raw = ""
-    # if os.path.exists(local_result):
-    #     with open(local_result) as fh:
-    #         raw = fh.read()
-    # return agent.parse_result(raw, envelope)
-
-    # So we should write the stdout to the result file, NOT the parsed Result.
-    # But wait - MockAgent's build_invocation returns ["true"], which produces empty stdout.
-    # And parse_result takes that empty string and returns a Result object.
-
-    # The issue is: the result file needs to be something that parse_result can consume.
-    # For MockAgent, it doesn't matter what's in the file - parse_result ignores it and
-    # looks at the envelope's scenario.
-
-    # Let me check what ssh_transport expects: it writes the envelope, runs serve-once,
-    # then scps back the result.json, reads it, and calls parse_result on the raw content.
-
-    # Actually, I think the intent is: the agent's invocation writes to stdout,
-    # serve-once captures that stdout and writes it to the result file.
-    # Then the master reads the result file and calls agent.parse_result on it.
-
-    # For MockAgent, build_invocation returns ["true"], so stdout is empty.
-    # parse_result takes that empty string and returns a Result based on the scenario.
-
-    # So we should write proc.stdout to the result file.
+    # Write the worker's raw stdout to the result file. The master reads this file
+    # and calls agent.parse_result on the raw content to reconstruct the Result.
     try:
         with open(result_path, "w") as f:
             f.write(proc.stdout or "")
