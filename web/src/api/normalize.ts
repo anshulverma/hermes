@@ -10,6 +10,44 @@ export type RunContext = {
   value: string;
 }[];
 
+export type PlaybookInfo = {
+  name: string;
+  summary: string;
+  context_note: string;
+  stops_at: string;
+};
+
+/**
+ * Playbook descriptive copy (UI content, not run data).
+ * This is the human-readable copy shown in PlaybookDialog.
+ */
+export const PLAYBOOK_CONTENT: Record<string, PlaybookInfo> = {
+  example: {
+    name: 'example',
+    summary: 'Echo playbook for testing and demos',
+    context_note: 'issue_kind determines what issues are fetched',
+    stops_at: 'reduce phase completion',
+  },
+  mechanic: {
+    name: 'mechanic',
+    summary: 'Automated test suite investigation and triage',
+    context_note: 'base is the codebase ref; suite is the test target',
+    stops_at: 'diff published or all tests pass',
+  },
+  rigger: {
+    name: 'rigger',
+    summary: 'Model/metric performance regression investigation',
+    context_note: 'model is the ML model; metric is the performance indicator',
+    stops_at: 'root cause identified with mitigation plan',
+  },
+  medic: {
+    name: 'medic',
+    summary: 'Production incident investigation and remediation',
+    context_note: 'incident is the SEV/alert; service is the affected system',
+    stops_at: 'service restored and root cause documented',
+  },
+};
+
 /**
  * Derive playbook-specific context from run config.
  * mechanic → base + suite
@@ -20,6 +58,10 @@ export function deriveContext(run: RunDetail): RunContext {
   const { playbook, config } = run;
 
   switch (playbook) {
+    case 'example':
+      return [
+        { label: 'issue_kind', value: config.issue_kind || 'bug' },
+      ];
     case 'mechanic':
       return [
         { label: 'base', value: config.base || 'unknown' },

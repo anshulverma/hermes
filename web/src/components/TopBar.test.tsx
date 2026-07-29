@@ -18,11 +18,13 @@ describe('TopBar', () => {
     expect(screen.getByText('offline')).toBeInTheDocument();
   });
 
-  it('should not render view tabs (no views exist yet)', () => {
+  it('should render Run tab (Phase B1)', () => {
     render(<TopBar health={{ status: 'ok', version: '0.1.0', home: '/tmp' }} runs={[]} />);
 
-    // Verify no tabs are present (they will be added in Phase B)
-    expect(screen.queryByText('Run')).not.toBeInTheDocument();
+    // Run tab should be present (Phase B1)
+    expect(screen.getByText('Run')).toBeInTheDocument();
+
+    // Other tabs not yet implemented
     expect(screen.queryByText('Tickets')).not.toBeInTheDocument();
     expect(screen.queryByText('Metrics')).not.toBeInTheDocument();
   });

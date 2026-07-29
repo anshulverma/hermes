@@ -78,7 +78,7 @@ def create_app() -> FastAPI:
         """Get a single run by ID with phase ticket counts.
 
         Returns run details including per-state ticket counts and
-        per-phase ticket counts.
+        per-phase ticket counts (as an array in playbook phase order).
         """
         home = resolve_home()
         db_path = str(home / "queue.db")
@@ -95,7 +95,7 @@ def create_app() -> FastAPI:
             if row is None:
                 raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
 
-            (rid, playbook, site, state, phase, base_ref,
+            (rid, playbook_name, site, state, current_phase, base_ref,
              config_json, created_at, updated_at) = row
 
             # Get ticket counts by state
@@ -106,24 +106,28 @@ def create_app() -> FastAPI:
             ).fetchall()
             tickets = {state: count for state, count in ticket_rows}
 
-            # Get all phases for this run
-            phase_rows = conn.execute(
-                """SELECT DISTINCT phase FROM tickets WHERE run_id=?""",
-                (run_id,),
-            ).fetchall()
+            # Load playbook to get canonical phase order
+            from engine import playbook as playbook_module
+            # Register example playbook
+            import testkit.example_playbook  # noqa: F401
+            playbook_obj = playbook_module.load(playbook_name)
 
-            # Get per-phase ticket counts
-            phases = {}
-            for (phase_name,) in phase_rows:
+            # Build phases array in playbook order
+            phases = []
+            for phase_name in playbook_obj.phases:
                 phase_counts = phase_ticket_counts(conn, run_id, phase_name)
-                phases[phase_name] = phase_counts
+                phases.append({
+                    "name": phase_name,
+                    "counts": phase_counts,
+                    "current": phase_name == current_phase,
+                })
 
             return {
                 "id": rid,
-                "playbook": playbook,
+                "playbook": playbook_name,
                 "site": site,
                 "state": state,
-                "phase": phase,
+                "phase": current_phase,
                 "base_ref": base_ref,
                 "config": json.loads(config_json),
                 "created_at": created_at,

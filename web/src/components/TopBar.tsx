@@ -38,12 +38,22 @@ function LiveDot({ health }: LiveDotProps) {
   );
 }
 
+type View = 'overview' | 'metrics' | 'board' | 'crew' | 'findings' | 'activity';
+
 type TopBarProps = {
   health: HealthResponse | null;
   runs: Run[];
+  view?: View;
+  onViewChange?: (view: View) => void;
 };
 
-export default function TopBar({ health }: TopBarProps) {
+export default function TopBar({ health, view = 'overview', onViewChange }: TopBarProps) {
+  const handleTabClick = (newView: View) => {
+    if (onViewChange) {
+      onViewChange(newView);
+    }
+  };
+
   return (
     <header
       style={{
@@ -63,7 +73,24 @@ export default function TopBar({ health }: TopBarProps) {
     >
       <span style={{ color: 'var(--text-primary)' }}>Hermes</span>
 
-      {/* View nav tabs will be added incrementally in Phase B as each view lands */}
+      {/* View nav tabs - only show "Run" for now (Phase B1) */}
+      <nav style={{ display: 'flex', gap: 4 }}>
+        <button
+          onClick={() => handleTabClick('overview')}
+          style={{
+            padding: '6px 12px',
+            fontSize: 13,
+            color: view === 'overview' ? 'var(--text-primary)' : 'var(--text-muted)',
+            background: view === 'overview' ? 'var(--wash-subtle)' : 'transparent',
+            border: 'none',
+            borderRadius: 'var(--radius-md)',
+            cursor: 'pointer',
+            transition: 'all 120ms ease-out',
+          }}
+        >
+          Run
+        </button>
+      </nav>
 
       <div style={{ flex: 1 }} />
 

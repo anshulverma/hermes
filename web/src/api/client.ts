@@ -20,10 +20,16 @@ export type Run = {
   tickets: Record<string, number>;
 };
 
+export type Phase = {
+  name: string;
+  counts: Record<string, number>;
+  current: boolean;
+};
+
 export type RunDetail = Run & {
   config: Record<string, any>;
   updated_at: string;
-  phases: Record<string, Record<string, number>>;
+  phases: Phase[];
 };
 
 async function fetchJSON<T>(url: string): Promise<T> {

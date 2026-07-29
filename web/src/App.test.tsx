@@ -2,8 +2,39 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import App from './App';
 import * as client from './api/client';
+import type { RunDetail } from './api/client';
 
 vi.mock('./api/client');
+
+const mockRunDetail: RunDetail = {
+  id: 'run-001',
+  playbook: 'example',
+  site: 'local',
+  state: 'running',
+  phase: 'work',
+  base_ref: 'main',
+  created_at: '2026-07-29T10:00:00Z',
+  updated_at: '2026-07-29T10:05:00Z',
+  config: { issue_kind: 'bug' },
+  tickets: {
+    queued: 5,
+    running: 2,
+    done: 10,
+    failed: 1,
+  },
+  phases: [
+    {
+      name: 'work',
+      counts: { queued: 5, running: 2, done: 10, failed: 1 },
+      current: true,
+    },
+    {
+      name: 'reduce',
+      counts: {},
+      current: false,
+    },
+  ],
+};
 
 describe('App', () => {
   beforeEach(() => {
@@ -26,7 +57,7 @@ describe('App', () => {
     });
   });
 
-  it('should render run summary when runs exist', async () => {
+  it('should render RunOverview when runs exist', async () => {
     vi.spyOn(client, 'fetchHealth').mockResolvedValue({
       status: 'ok',
       version: '0.1.0',
@@ -35,31 +66,56 @@ describe('App', () => {
     vi.spyOn(client, 'fetchRuns').mockResolvedValue([
       {
         id: 'run-001',
-        playbook: 'mechanic',
+        playbook: 'example',
         site: 'local',
         state: 'running',
-        phase: 'gather',
+        phase: 'work',
         base_ref: 'main',
         created_at: '2026-07-29T10:00:00Z',
-        tickets: {
-          queued: 5,
-          in_flight: 2,
-          done: 10,
-          failed: 1,
-        },
+        tickets: { queued: 5, running: 2, done: 10, failed: 1 },
       },
     ]);
+    vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
 
     render(<App />);
 
     // Wait for loading to complete and verify run data is displayed
     await waitFor(() => {
-      expect(screen.getByText('run-001')).toBeInTheDocument();
+      expect(screen.getByText(/example run/i)).toBeInTheDocument();
     });
 
-    // Verify ticket counts are displayed
+    // Verify stat tiles show correct counts
+    expect(screen.getByText('18')).toBeInTheDocument(); // total tickets
     expect(screen.getByText('10')).toBeInTheDocument(); // done count
+    expect(screen.getByText('2')).toBeInTheDocument(); // running count
     expect(screen.getByText('5')).toBeInTheDocument(); // queued count
+  });
+
+  it('should show Run tab in TopBar', async () => {
+    vi.spyOn(client, 'fetchHealth').mockResolvedValue({
+      status: 'ok',
+      version: '0.1.0',
+      home: '/tmp/hermes',
+    });
+    vi.spyOn(client, 'fetchRuns').mockResolvedValue([
+      {
+        id: 'run-001',
+        playbook: 'example',
+        site: 'local',
+        state: 'running',
+        phase: 'work',
+        base_ref: 'main',
+        created_at: '2026-07-29T10:00:00Z',
+        tickets: { queued: 5 },
+      },
+    ]);
+    vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Run')).toBeInTheDocument();
+    });
   });
 
   it('should handle API error gracefully', async () => {

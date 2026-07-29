@@ -128,26 +128,57 @@ def test_runs_list(client: TestClient, seeded_run: str, temp_home: Path):
     assert sum(tickets.values()) == 3
 
 
-def test_run_detail(client: TestClient, seeded_run: str, temp_home: Path):
-    """GET /api/runs/{id} returns run detail with phase ticket counts."""
+def test_run_detail_phases_array(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id} returns phases as array in playbook order with real counts."""
     response = client.get(f"/api/runs/{seeded_run}")
     assert response.status_code == 200
 
     data = response.json()
-    assert data["id"] == seeded_run
-    assert data["playbook"] == "example"
-    assert data["state"] == "running"
 
-    # Ticket counts by state
-    assert "tickets" in data
-    assert data["tickets"].get("queued", 0) == 3
-
-    # Phase ticket counts (EchoPlaybook has phase "work")
+    # Phases should be an array from the playbook's ordered phases
     assert "phases" in data
     phases = data["phases"]
-    assert isinstance(phases, dict)
-    assert "work" in phases
-    assert phases["work"]["queued"] == 3
+    assert isinstance(phases, list)
+
+    # EchoPlaybook has phases ["work", "reduce"]
+    assert len(phases) == 2
+    assert phases[0]["name"] == "work"
+    assert phases[1]["name"] == "reduce"
+
+    # Current phase should be marked
+    assert phases[0]["current"] is True  # run.phase == "work"
+    assert phases[1]["current"] is False
+
+    # Counts should match sqlite query
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Work phase has 3 queued tickets
+    work_counts = conn.execute(
+        """SELECT state, COUNT(*) FROM tickets
+           WHERE run_id=? AND phase='work' GROUP BY state""",
+        (seeded_run,),
+    ).fetchall()
+    expected_work = {state: count for state, count in work_counts}
+
+    assert "counts" in phases[0]
+    assert phases[0]["counts"] == expected_work
+    assert phases[0]["counts"]["queued"] == 3
+
+    # Reduce phase has no tickets yet
+    reduce_counts = conn.execute(
+        """SELECT state, COUNT(*) FROM tickets
+           WHERE run_id=? AND phase='reduce' GROUP BY state""",
+        (seeded_run,),
+    ).fetchall()
+    expected_reduce = {state: count for state, count in reduce_counts}
+
+    assert "counts" in phases[1]
+    assert phases[1]["counts"] == expected_reduce
+    # Should be empty since no tickets in reduce phase yet
+    assert len(phases[1]["counts"]) == 0
+
+    conn.close()
 
 
 def test_run_detail_not_found(client: TestClient, temp_home: Path):

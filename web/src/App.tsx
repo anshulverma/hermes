@@ -1,56 +1,24 @@
 /**
- * Hermes Control Plane App - Phase A1.
- * Shell wired to real /api/health + /api/runs.
+ * Hermes Control Plane App - Phase B1.
+ * Shell wired to real /api/health + /api/runs + RunOverview view.
  */
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import TopBar from './components/TopBar';
+import RunOverview from './views/RunOverview';
 import { useHealth, useRuns } from './hooks/useApi';
-import { EmptyState, StatTile, StatusPill, Card, CrewBackdrop } from './ds';
+import { EmptyState, CrewBackdrop } from './ds';
+import { fetchRun } from './api/client';
+import type { RunDetail } from './api/client';
 
-function RunSummary({ run }: { run: any }) {
-  const ticketCounts = run.tickets || {};
-  const total = Object.values(ticketCounts).reduce((sum: number, count: any) => sum + (count as number), 0);
-
-  return (
-    <div style={{ padding: '32px 20px' }}>
-      <Card style={{ padding: 24 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-          <h2 style={{ fontSize: 18, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
-            {run.id}
-          </h2>
-          <StatusPill state={run.state} size="sm" />
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 16 }}>
-          <StatTile label="Total tickets" value={total} />
-          <StatTile label="Queued" value={ticketCounts.queued || 0} />
-          <StatTile label="In flight" value={ticketCounts.in_flight || 0} />
-          <StatTile label="Done" value={ticketCounts.done || 0} />
-          {ticketCounts.failed > 0 && <StatTile label="Failed" value={ticketCounts.failed} />}
-        </div>
-
-        <div style={{ marginTop: 20, color: 'var(--text-secondary)', fontSize: 14 }}>
-          <div style={{ display: 'flex', gap: 24 }}>
-            <span>
-              <span style={{ color: 'var(--text-muted)' }}>Playbook:</span> {run.playbook}
-            </span>
-            <span>
-              <span style={{ color: 'var(--text-muted)' }}>Phase:</span> {run.phase}
-            </span>
-            <span>
-              <span style={{ color: 'var(--text-muted)' }}>Site:</span> {run.site}
-            </span>
-          </div>
-        </div>
-      </Card>
-    </div>
-  );
-}
+type View = 'overview' | 'metrics' | 'board' | 'crew' | 'findings' | 'activity';
 
 export default function App() {
   const { data: health, loading: healthLoading, error: healthError } = useHealth();
   const { data: runs, loading: runsLoading, error: runsError } = useRuns();
+  const [view, setView] = useState<View>('overview');
+  const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
 
   // Initialize lucide icons after mount
   useEffect(() => {
@@ -59,7 +27,18 @@ export default function App() {
     }
   }, []);
 
-  const loading = healthLoading || runsLoading;
+  // Fetch run detail when we have a run
+  useEffect(() => {
+    if (runs && runs.length > 0) {
+      setDetailLoading(true);
+      fetchRun(runs[0].id)
+        .then((detail) => setRunDetail(detail))
+        .catch((err) => console.error('Failed to fetch run detail:', err))
+        .finally(() => setDetailLoading(false));
+    }
+  }, [runs]);
+
+  const loading = healthLoading || runsLoading || detailLoading;
   const error = healthError || runsError;
 
   return (
@@ -74,7 +53,7 @@ export default function App() {
     >
       <CrewBackdrop theme="graph" />
 
-      <TopBar health={health} runs={runs || []} />
+      <TopBar health={health} runs={runs || []} view={view} onViewChange={setView} />
 
       <div
         style={{
@@ -112,7 +91,9 @@ export default function App() {
           </div>
         )}
 
-        {!loading && !error && runs && runs.length > 0 && <RunSummary run={runs[0]} />}
+        {!loading && !error && runDetail && view === 'overview' && (
+          <RunOverview run={runDetail} />
+        )}
       </div>
     </div>
   );
