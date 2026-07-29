@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from engine import config, crew, playbook, site, agent, queue, dispatch, log, shutdown
-from engine.db import migrate
+from engine.db import migrate, maintenance
 from engine.models import Run
 
 
@@ -906,6 +906,21 @@ def main(argv=None):
     config_check.add_argument('--site', help='Specific site to check')
     config_check.add_argument('--agent', help='Specific agent to check')
 
+    # --- db ---
+    db_parser = subparsers.add_parser('db', help='Database maintenance')
+    db_subparsers = db_parser.add_subparsers(dest='db_action')
+
+    db_prune = db_subparsers.add_parser('prune', help='Prune old events and attempts')
+    db_prune.add_argument('--events-older-than', type=int, default=90, help='Delete events older than N days (default: 90)')
+    db_prune.add_argument('--attempts-older-than', type=int, default=90, help='Delete attempts older than N days (default: 90)')
+    db_prune.add_argument('--run', help='Restrict to specific run ID')
+    db_prune.add_argument('--dry-run', action='store_true', help='Report counts without deleting')
+
+    db_backup = db_subparsers.add_parser('backup', help='Create online backup')
+    db_backup.add_argument('--out', required=True, help='Output backup file path')
+
+    db_vacuum = db_subparsers.add_parser('vacuum', help='Vacuum database to reclaim space')
+
     # Parse
     args = parser.parse_args(argv)
 
@@ -952,6 +967,8 @@ def main(argv=None):
         elif args.command == 'config':
             if args.config_action == 'check':
                 return cmd_doctor(args)
+        elif args.command == 'db':
+            return maintenance.cmd_db(args)
     except Exception as e:
         logger = log.get_logger("cli")
         # Use logger.exception when config.debug() is set (includes traceback),
