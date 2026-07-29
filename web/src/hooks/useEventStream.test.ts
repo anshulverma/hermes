@@ -134,4 +134,51 @@ describe('useEventStream', () => {
     // Should have called close on the websocket
     expect(mockWebSocketInstance.close).toHaveBeenCalled();
   });
+
+  it('bounds events buffer to most recent 500 entries', async () => {
+    const { result } = renderHook(() => useEventStream());
+
+    // Simulate connection open
+    const openHandlers = eventListeners.get('open');
+    mockWebSocketInstance.readyState = WebSocket.OPEN;
+    openHandlers![0]({ type: 'open' });
+
+    await waitFor(() => {
+      expect(result.current.connected).toBe(true);
+    });
+
+    const messageHandlers = eventListeners.get('message');
+    expect(messageHandlers).toBeDefined();
+
+    // Push 600 events through the WebSocket
+    for (let i = 0; i < 600; i++) {
+      const eventData = {
+        type: 'event',
+        event: {
+          id: i + 1,
+          ts: 1234567890 + i,
+          kind: 'test_event',
+          run_id: 'test-run',
+          ticket_id: `test-run/t-${i}`,
+          host: 'worker-1',
+          message: `Event ${i}`,
+          data: { index: i },
+        },
+      };
+
+      messageHandlers![0]({ data: JSON.stringify(eventData) });
+    }
+
+    await waitFor(() => {
+      // Buffer should never exceed 500
+      expect(result.current.events.length).toBe(500);
+    });
+
+    // Should retain the MOST RECENT events (events 100-599, zero-indexed)
+    expect(result.current.events[0].id).toBe(101); // First kept event (index 100)
+    expect(result.current.events[499].id).toBe(600); // Last event (index 599)
+
+    // Last event should be the most recent
+    expect(result.current.lastEvent?.id).toBe(600);
+  });
 });

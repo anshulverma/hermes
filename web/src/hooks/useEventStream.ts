@@ -6,6 +6,8 @@
 import { useState, useEffect, useRef } from 'react';
 import type { Event } from '../api/client';
 
+const MAX_EVENTS_BUFFER = 500;
+
 type EventStreamState = {
   connected: boolean;
   events: Event[];
@@ -41,7 +43,7 @@ export function useEventStream(since?: number): EventStreamState {
 
           if (msg.type === 'event' && msg.event) {
             const newEvent = msg.event as Event;
-            setEvents((prev) => [...prev, newEvent]);
+            setEvents((prev) => [...prev, newEvent].slice(-MAX_EVENTS_BUFFER));
             setLastEvent(newEvent);
           }
           // Ignore hello messages (just acknowledges connection)
