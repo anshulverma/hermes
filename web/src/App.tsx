@@ -8,6 +8,7 @@ import TopBar from './components/TopBar';
 import RunOverview from './views/RunOverview';
 import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
+import Findings from './views/Findings';
 import ActivityFeed from './views/ActivityFeed';
 import { useHealth, useRuns } from './hooks/useApi';
 import { EmptyState, CrewBackdrop } from './ds';
@@ -104,6 +105,10 @@ export default function App() {
 
         {!loading && !error && view === 'crew' && (
           <CrewPanel />
+        )}
+
+        {!loading && !error && runDetail && view === 'findings' && (
+          <Findings runId={runDetail.id} />
         )}
 
         {!loading && !error && view === 'activity' && (

@@ -108,3 +108,41 @@ export function normalizeTicketDetail(detail: TicketDetail): TicketDetail {
     },
   };
 }
+
+/**
+ * Derive finding status from REAL fields (no mock fix_state).
+ * Maps review_state + member ticket states to a UI status label.
+ *
+ * Logic:
+ * - review_state accepted → "accepted"
+ * - review_state rejected → "rejected"
+ * - review_state superseded → "superseded"
+ * - review_state pending + any member needs-human → "needs-human"
+ * - review_state pending + all members done (≥1) → "resolved (pending review)"
+ * - review_state pending + members still active → "in progress"
+ * - no members → fall back to review_state label
+ */
+export function deriveFindingStatus(reduction: {
+  review_state: string;
+  member_tickets: Array<{ state: string }>;
+}): string {
+  const { review_state, member_tickets } = reduction;
+
+  // Non-pending states: return as-is
+  if (review_state === 'accepted') return 'accepted';
+  if (review_state === 'rejected') return 'rejected';
+  if (review_state === 'superseded') return 'superseded';
+
+  // Pending + no members: fall back to review_state
+  if (member_tickets.length === 0) return review_state;
+
+  // Check member states
+  const hasNeedsHuman = member_tickets.some(m => m.state === 'needs-human');
+  const allDone = member_tickets.every(m => m.state === 'done');
+
+  if (hasNeedsHuman) return 'needs-human';
+  if (allDone) return 'resolved (pending review)';
+
+  // Otherwise, active work in progress
+  return 'in progress';
+}

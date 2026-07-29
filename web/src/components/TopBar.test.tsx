@@ -18,16 +18,17 @@ describe('TopBar', () => {
     expect(screen.getByText('offline')).toBeInTheDocument();
   });
 
-  it('should render Run, Tickets, and Crew tabs (Phase B4)', () => {
+  it('should render Run, Tickets, Crew, Findings, and Activity tabs (Phase B6)', () => {
     render(<TopBar health={{ status: 'ok', version: '0.1.0', home: '/tmp' }} runs={[]} />);
 
-    // Run, Tickets, and Crew tabs should be present (Phase B4)
+    // All main tabs should be present (Phase B6)
     expect(screen.getByText('Run')).toBeInTheDocument();
     expect(screen.getByText('Tickets')).toBeInTheDocument();
     expect(screen.getByText('Crew')).toBeInTheDocument();
+    expect(screen.getByText('Findings')).toBeInTheDocument();
+    expect(screen.getByText('Activity')).toBeInTheDocument();
 
-    // Other tabs not yet implemented
+    // Metrics not yet implemented
     expect(screen.queryByText('Metrics')).not.toBeInTheDocument();
-    expect(screen.queryByText('Findings')).not.toBeInTheDocument();
   });
 });

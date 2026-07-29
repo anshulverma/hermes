@@ -1073,3 +1073,178 @@ def test_event_kinds_endpoint_returns_distinct_sorted_kinds(client: TestClient, 
     assert "phase_advanced" in kinds
     assert "result_recorded" in kinds
     assert "ticket_claimed" in kinds
+
+
+def test_reductions_endpoint_returns_reductions_with_member_tickets(
+    client: TestClient, seeded_run: str, temp_home: Path
+):
+    """GET /api/runs/{id}/reductions returns reductions with parsed json and member_tickets with real states."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed tickets with different states (for member tickets)
+    ticket_ids = [f"{seeded_run}/t-100", f"{seeded_run}/t-101", f"{seeded_run}/t-102", f"{seeded_run}/t-999"]
+    states = ["done", "needs_human", "failed", "nonexistent-placeholder"]  # t-999 won't exist
+
+    for i, (tid, state) in enumerate(zip(ticket_ids[:3], states[:3])):
+        conn.execute(
+            """INSERT INTO tickets
+               (id, run_id, phase, state, resource_req, priority, created_at, updated_at, payload_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tid, seeded_run, "work", state, "cpu", 0, now, now, '{}'),
+        )
+    conn.commit()
+
+    # Seed reductions with varied review_state and member tickets
+    reductions = [
+        {
+            "run_id": seeded_run,
+            "phase": "work",
+            "kind": "duplicate_root_cause",
+            "review_state": "pending",
+            "json": json.dumps({
+                "title": "Null pointer in module X",
+                "member_ticket_ids": [f"{seeded_run}/t-100"],
+                "needs_human_ticket_ids": [f"{seeded_run}/t-101", f"{seeded_run}/t-100"],  # Duplicate with member_ticket_ids
+            }),
+            "created_at": now - 300,
+            "updated_at": now - 300,
+        },
+        {
+            "run_id": seeded_run,
+            "phase": "reduce",
+            "kind": "test_flake",
+            "review_state": "accepted",
+            "json": json.dumps({
+                "title": "Timeout in CI",
+                "needs_human_ticket_ids": [f"{seeded_run}/t-102"],
+            }),
+            "created_at": now - 200,
+            "updated_at": now - 100,
+        },
+        {
+            "run_id": seeded_run,
+            "phase": "work",
+            "kind": "config_error",
+            "review_state": "rejected",
+            "json": json.dumps({
+                "title": "Missing env var",
+                "member_ticket_ids": [f"{seeded_run}/t-999"],  # Nonexistent ticket id
+            }),
+            "created_at": now - 100,
+            "updated_at": now - 50,
+        },
+    ]
+
+    for r in reductions:
+        conn.execute(
+            """INSERT INTO reductions
+               (run_id, phase, kind, json, review_state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (r["run_id"], r["phase"], r["kind"], r["json"], r["review_state"], r["created_at"], r["updated_at"]),
+        )
+    conn.commit()
+
+    # Fetch reductions
+    response = client.get(f"/api/runs/{seeded_run}/reductions")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) == 3
+
+    # Verify first reduction (pending, de-duped union of member + needs_human)
+    r0 = data[0]
+    assert r0["kind"] == "duplicate_root_cause"
+    assert r0["phase"] == "work"
+    assert r0["review_state"] == "pending"
+    assert isinstance(r0["json"], dict)  # Parsed
+    assert r0["json"]["title"] == "Null pointer in module X"
+
+    # member_ticket_ids should be de-duplicated union of member_ticket_ids + needs_human_ticket_ids
+    assert "member_ticket_ids" in r0
+    assert set(r0["member_ticket_ids"]) == {f"{seeded_run}/t-100", f"{seeded_run}/t-101"}
+    # Order-stable: t-100 first (from member_ticket_ids), then t-101 (from needs_human, not already seen)
+    assert r0["member_ticket_ids"] == [f"{seeded_run}/t-100", f"{seeded_run}/t-101"]
+
+    # member_tickets should have real states from tickets table
+    assert "member_tickets" in r0
+    assert len(r0["member_tickets"]) == 2
+    member_map = {m["id"]: m for m in r0["member_tickets"]}
+    assert member_map[f"{seeded_run}/t-100"]["state"] == "done"
+    assert member_map[f"{seeded_run}/t-100"]["phase"] == "work"
+    assert member_map[f"{seeded_run}/t-101"]["state"] == "needs_human"
+    assert member_map[f"{seeded_run}/t-101"]["phase"] == "work"
+
+    # Verify second reduction (accepted, only needs_human)
+    r1 = data[1]
+    assert r1["kind"] == "test_flake"
+    assert r1["phase"] == "reduce"
+    assert r1["review_state"] == "accepted"
+    assert r1["json"]["title"] == "Timeout in CI"
+    assert r1["member_ticket_ids"] == [f"{seeded_run}/t-102"]
+    assert len(r1["member_tickets"]) == 1
+    assert r1["member_tickets"][0]["id"] == f"{seeded_run}/t-102"
+    assert r1["member_tickets"][0]["state"] == "failed"
+    assert r1["member_tickets"][0]["phase"] == "work"
+
+    # Verify third reduction (rejected, nonexistent member ticket)
+    r2 = data[2]
+    assert r2["kind"] == "config_error"
+    assert r2["review_state"] == "rejected"
+    assert r2["member_ticket_ids"] == [f"{seeded_run}/t-999"]
+    # member_tickets should be empty or represent unknown (implementation detail: can skip or mark unknown)
+    # Per brief: "skip ids not found"
+    assert len(r2["member_tickets"]) == 0
+
+    # Verify order by id
+    db_reductions = conn.execute(
+        """SELECT id FROM reductions WHERE run_id=? ORDER BY id""",
+        (seeded_run,),
+    ).fetchall()
+    assert len(data) == len(db_reductions)
+    for i, db_row in enumerate(db_reductions):
+        assert data[i]["id"] == db_row[0]
+
+    conn.close()
+
+
+def test_reductions_filter_by_phase(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/runs/{id}/reductions?phase=work filters to that phase."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed reductions in different phases
+    for phase in ["work", "reduce"]:
+        conn.execute(
+            """INSERT INTO reductions
+               (run_id, phase, kind, json, review_state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (seeded_run, phase, "test", '{}', "pending", now, now),
+        )
+    conn.commit()
+
+    response = client.get(f"/api/runs/{seeded_run}/reductions?phase=work")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert all(r["phase"] == "work" for r in data)
+
+    # Verify against sqlite
+    work_count = conn.execute(
+        """SELECT COUNT(*) FROM reductions WHERE run_id=? AND phase='work'""",
+        (seeded_run,),
+    ).fetchone()[0]
+    conn.close()
+
+    assert len(data) == work_count
+
+
+def test_reductions_unknown_run_404(client: TestClient, temp_home: Path):
+    """GET /api/runs/{unknown}/reductions returns 404."""
+    response = client.get("/api/runs/unknown-run/reductions")
+    assert response.status_code == 404

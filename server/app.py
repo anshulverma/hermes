@@ -505,4 +505,94 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    @app.get("/api/runs/{run_id}/reductions")
+    def get_reductions(run_id: str, phase: str | None = None) -> list[dict[str, Any]]:
+        """Get reductions for a run with optional phase filter.
+
+        Returns reductions with parsed json, de-duplicated member_ticket_ids
+        (union of json.member_ticket_ids and json.needs_human_ticket_ids),
+        and member_tickets with real states from the tickets table.
+
+        Query params:
+        - phase: filter to specific phase (optional)
+
+        Returns 404 if run not found.
+        """
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Check if run exists
+            run_row = conn.execute(
+                "SELECT id FROM runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+
+            # Build query with optional phase filter
+            query = """
+                SELECT id, run_id, phase, kind, json, review_state
+                FROM reductions
+                WHERE run_id=?
+            """
+            params: list[Any] = [run_id]
+
+            if phase:
+                query += " AND phase=?"
+                params.append(phase)
+
+            query += " ORDER BY id"
+
+            rows = conn.execute(query, params).fetchall()
+
+            reductions = []
+            for row in rows:
+                (rid, r_run_id, r_phase, r_kind, r_json, r_review_state) = row
+
+                # Parse json
+                reduction_json = json.loads(r_json)
+
+                # Compute de-duplicated union of member_ticket_ids
+                member_ids_from_json = reduction_json.get("member_ticket_ids") or []
+                needs_human_ids = reduction_json.get("needs_human_ticket_ids") or []
+
+                # Order-stable de-duplication: preserve first occurrence
+                seen = set()
+                member_ticket_ids = []
+                for mid in member_ids_from_json + needs_human_ids:
+                    if mid not in seen:
+                        seen.add(mid)
+                        member_ticket_ids.append(mid)
+
+                # Fetch member tickets with real states from tickets table
+                member_tickets = []
+                for mid in member_ticket_ids:
+                    ticket_row = conn.execute(
+                        """SELECT id, state, phase
+                           FROM tickets WHERE id=?""",
+                        (mid,),
+                    ).fetchone()
+                    if ticket_row:
+                        member_tickets.append({
+                            "id": ticket_row[0],
+                            "state": ticket_row[1],
+                            "phase": ticket_row[2],
+                        })
+
+                reductions.append({
+                    "id": rid,
+                    "run_id": r_run_id,
+                    "phase": r_phase,
+                    "kind": r_kind,
+                    "json": reduction_json,
+                    "review_state": r_review_state,
+                    "member_ticket_ids": member_ticket_ids,
+                    "member_tickets": member_tickets,
+                })
+
+            return reductions
+        finally:
+            conn.close()
+
     return app

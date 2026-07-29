@@ -206,3 +206,29 @@ export async function fetchEvents(filters?: EventFilters): Promise<Event[]> {
 export async function fetchEventKinds(): Promise<string[]> {
   return fetchJSON<string[]>('/api/events/kinds');
 }
+
+export type MemberTicket = {
+  id: string;
+  state: string;
+  phase: string;
+};
+
+export type Reduction = {
+  id: number;
+  run_id: string;
+  phase: string;
+  kind: string;
+  json: Record<string, any>;
+  review_state: string;
+  member_ticket_ids: string[];
+  member_tickets: MemberTicket[];
+};
+
+export async function fetchReductions(runId: string, phase?: string): Promise<Reduction[]> {
+  const params = new URLSearchParams();
+  if (phase) params.append('phase', phase);
+
+  const queryString = params.toString();
+  const url = `/api/runs/${runId}/reductions${queryString ? '?' + queryString : ''}`;
+  return fetchJSON<Reduction[]>(url);
+}

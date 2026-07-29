@@ -121,6 +121,21 @@ export default function TopBar({ health, view = 'overview', onViewChange }: TopB
           Crew
         </button>
         <button
+          onClick={() => handleTabClick('findings')}
+          style={{
+            padding: '6px 12px',
+            fontSize: 13,
+            color: view === 'findings' ? 'var(--text-primary)' : 'var(--text-muted)',
+            background: view === 'findings' ? 'var(--wash-subtle)' : 'transparent',
+            border: 'none',
+            borderRadius: 'var(--radius-md)',
+            cursor: 'pointer',
+            transition: 'all 120ms ease-out',
+          }}
+        >
+          Findings
+        </button>
+        <button
           onClick={() => handleTabClick('activity')}
           style={{
             padding: '6px 12px',
