@@ -110,6 +110,20 @@ export function normalizeTicketDetail(detail: TicketDetail): TicketDetail {
 }
 
 /**
+ * Normalize reduction: apply state normalization to member tickets.
+ * Engine vocab (needs_human) → UI vocab (needs-human).
+ */
+export function normalizeReduction<T extends { member_tickets: Array<{ state: string }> }>(reduction: T): T {
+  return {
+    ...reduction,
+    member_tickets: reduction.member_tickets.map(t => ({
+      ...t,
+      state: normalizeTicketState(t.state),
+    })),
+  };
+}
+
+/**
  * Derive finding status from REAL fields (no mock fix_state).
  * Maps review_state + member ticket states to a UI status label.
  *

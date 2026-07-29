@@ -4,22 +4,22 @@ import TopBar from './TopBar';
 
 describe('TopBar', () => {
   it('should render Hermes title', () => {
-    render(<TopBar connected={true} runs={[]} />);
+    render(<TopBar connected={true} />);
     expect(screen.getByText('Hermes')).toBeInTheDocument();
   });
 
   it('should show live indicator when connected', () => {
-    render(<TopBar connected={true} runs={[]} />);
+    render(<TopBar connected={true} />);
     expect(screen.getByText('live')).toBeInTheDocument();
   });
 
   it('should show offline when not connected', () => {
-    render(<TopBar connected={false} runs={[]} />);
+    render(<TopBar connected={false} />);
     expect(screen.getByText('offline')).toBeInTheDocument();
   });
 
   it('should render Run, Metrics, Tickets, Crew, Findings, and Activity tabs (Phase E1)', () => {
-    render(<TopBar connected={true} runs={[]} />);
+    render(<TopBar connected={true} />);
 
     // All main tabs should be present (Phase E1 adds Metrics)
     expect(screen.getByText('Run')).toBeInTheDocument();

@@ -129,8 +129,8 @@ describe('API client', () => {
   });
 
   describe('fetchReductions', () => {
-    it('should normalize member ticket states from engine vocab to UI vocab', async () => {
-      // Phase B6 Finding 1: server returns needs_human (engine), must normalize to needs-human (UI)
+    it('should return raw data without normalization', async () => {
+      // fetchReductions now returns raw engine data; normalization happens in view layer
       const mockResponse: Reduction[] = [
         {
           id: 1,
@@ -154,9 +154,9 @@ describe('API client', () => {
 
       const result = await fetchReductions('run-001');
 
-      // Assert that member ticket states are normalized
-      expect(result[0].member_tickets[0].state).toBe('needs-human');  // underscore → hyphen
-      expect(result[0].member_tickets[1].state).toBe('done');  // no change
+      // Assert that raw states are preserved (normalization moved to view layer)
+      expect(result[0].member_tickets[0].state).toBe('needs_human');  // unchanged
+      expect(result[0].member_tickets[1].state).toBe('done');
       expect(fetch).toHaveBeenCalled();
     });
 

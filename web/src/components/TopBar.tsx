@@ -4,14 +4,12 @@
  * Phase C1: LiveDot now reflects WebSocket connection state.
  */
 
-import type { Run } from '../api/client';
 import LiveDot from './LiveDot';
 
 type View = 'overview' | 'metrics' | 'board' | 'crew' | 'findings' | 'activity';
 
 type TopBarProps = {
   connected: boolean;
-  runs: Run[];
   view?: View;
   onViewChange?: (view: View) => void;
 };

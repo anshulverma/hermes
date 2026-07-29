@@ -7,6 +7,7 @@ import './tokens/spacing.css';
 import './tokens/radius.css';
 import './tokens/elevation.css';
 import './tokens/animations.css';
+import './tokens/semantic.css';
 import './tokens/base.css';
 import './styles.css';
 

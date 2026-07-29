@@ -1107,6 +1107,36 @@ def create_app(bind: str | None = None) -> FastAPI:
 
     # --- Run Control Endpoints (D1a) ---
 
+    def _guarded_transition(
+        table: str,
+        id_value: str | int,
+        exists_sql: str,
+        mutate_fn: Any,
+        result_field: str,
+        result_sql: str,
+    ) -> dict[str, Any]:
+        """Helper for transition endpoints: existence check → 404, ValueError → 409, return new state."""
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Explicit existence check: 404 if not found
+            exists = conn.execute(exists_sql, (id_value,)).fetchone()
+            if exists is None:
+                raise HTTPException(status_code=404, detail=f"{table.capitalize()} {id_value!r} not found")
+
+            # Attempt mutation: 409 if ValueError
+            try:
+                mutate_fn(conn, id_value)
+            except ValueError as e:
+                raise HTTPException(status_code=409, detail=str(e))
+
+            # Return the new state field
+            new_value = conn.execute(result_sql, (id_value,)).fetchone()[0]
+            return {result_field: new_value}
+        finally:
+            conn.close()
+
     @app.post("/api/runs/{run_id}/pause")
     def pause_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
         """Pause a running run.
@@ -1114,27 +1144,14 @@ def create_app(bind: str | None = None) -> FastAPI:
         Returns the run's new state on success.
         404 if run unknown, 409 if illegal transition.
         """
-        home = resolve_home()
-        db_path = str(home / "queue.db")
-        conn = connect(db_path)
-        try:
-            # Explicit existence check: 404 if run doesn't exist
-            run_exists = conn.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone()
-            if run_exists is None:
-                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
-
-            # Attempt state transition: 409 if illegal
-            try:
-                set_run_state(conn, run_id, "paused")
-            except ValueError as e:
-                # Illegal transition (e.g., pause an already stopped run)
-                raise HTTPException(status_code=409, detail=str(e))
-
-            # Return the run's new state
-            state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
-            return {"state": state}
-        finally:
-            conn.close()
+        return _guarded_transition(
+            table="run",
+            id_value=run_id,
+            exists_sql="SELECT 1 FROM runs WHERE id=?",
+            mutate_fn=lambda conn, rid: set_run_state(conn, rid, "paused"),
+            result_field="state",
+            result_sql="SELECT state FROM runs WHERE id=?",
+        )
 
     @app.post("/api/runs/{run_id}/resume")
     def resume_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
@@ -1143,27 +1160,14 @@ def create_app(bind: str | None = None) -> FastAPI:
         Returns the run's new state on success.
         404 if run unknown, 409 if illegal transition.
         """
-        home = resolve_home()
-        db_path = str(home / "queue.db")
-        conn = connect(db_path)
-        try:
-            # Explicit existence check: 404 if run doesn't exist
-            run_exists = conn.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone()
-            if run_exists is None:
-                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
-
-            # Attempt state transition: 409 if illegal
-            try:
-                set_run_state(conn, run_id, "running")
-            except ValueError as e:
-                # Illegal transition (e.g., resume a stopped run)
-                raise HTTPException(status_code=409, detail=str(e))
-
-            # Return the run's new state
-            state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
-            return {"state": state}
-        finally:
-            conn.close()
+        return _guarded_transition(
+            table="run",
+            id_value=run_id,
+            exists_sql="SELECT 1 FROM runs WHERE id=?",
+            mutate_fn=lambda conn, rid: set_run_state(conn, rid, "running"),
+            result_field="state",
+            result_sql="SELECT state FROM runs WHERE id=?",
+        )
 
     @app.post("/api/runs/{run_id}/stop")
     def stop_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
@@ -1172,27 +1176,14 @@ def create_app(bind: str | None = None) -> FastAPI:
         Returns the run's new state on success.
         404 if run unknown, 409 if illegal transition.
         """
-        home = resolve_home()
-        db_path = str(home / "queue.db")
-        conn = connect(db_path)
-        try:
-            # Explicit existence check: 404 if run doesn't exist
-            run_exists = conn.execute("SELECT 1 FROM runs WHERE id=?", (run_id,)).fetchone()
-            if run_exists is None:
-                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
-
-            # Attempt state transition: 409 if illegal
-            try:
-                set_run_state(conn, run_id, "stopped")
-            except ValueError as e:
-                # Illegal transition (e.g., stop an already stopped run)
-                raise HTTPException(status_code=409, detail=str(e))
-
-            # Return the run's new state
-            state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
-            return {"state": state}
-        finally:
-            conn.close()
+        return _guarded_transition(
+            table="run",
+            id_value=run_id,
+            exists_sql="SELECT 1 FROM runs WHERE id=?",
+            mutate_fn=lambda conn, rid: set_run_state(conn, rid, "stopped"),
+            result_field="state",
+            result_sql="SELECT state FROM runs WHERE id=?",
+        )
 
     # --- Ticket Control Endpoints (D3) ---
 
@@ -1205,27 +1196,14 @@ def create_app(bind: str | None = None) -> FastAPI:
         """
         from engine.queue import requeue_needs_human
 
-        home = resolve_home()
-        db_path = str(home / "queue.db")
-        conn = connect(db_path)
-        try:
-            # Explicit existence check: 404 if ticket doesn't exist
-            ticket_exists = conn.execute("SELECT 1 FROM tickets WHERE id=?", (ticket_id,)).fetchone()
-            if ticket_exists is None:
-                raise HTTPException(status_code=404, detail=f"Ticket {ticket_id!r} not found")
-
-            # Attempt requeue: 409 if not needs_human
-            try:
-                requeue_needs_human(conn, ticket_id)
-            except ValueError as e:
-                # Not needs_human or other error
-                raise HTTPException(status_code=409, detail=str(e))
-
-            # Return the ticket's new state
-            state = conn.execute("SELECT state FROM tickets WHERE id=?", (ticket_id,)).fetchone()[0]
-            return {"state": state}
-        finally:
-            conn.close()
+        return _guarded_transition(
+            table="ticket",
+            id_value=ticket_id,
+            exists_sql="SELECT 1 FROM tickets WHERE id=?",
+            mutate_fn=requeue_needs_human,
+            result_field="state",
+            result_sql="SELECT state FROM tickets WHERE id=?",
+        )
 
     # --- Reduction Control Endpoints (D4) ---
 
@@ -1238,27 +1216,14 @@ def create_app(bind: str | None = None) -> FastAPI:
         """
         from engine.queue import accept_reduction
 
-        home = resolve_home()
-        db_path = str(home / "queue.db")
-        conn = connect(db_path)
-        try:
-            # Explicit existence check: 404 if reduction doesn't exist
-            reduction_exists = conn.execute("SELECT 1 FROM reductions WHERE id=?", (reduction_id,)).fetchone()
-            if reduction_exists is None:
-                raise HTTPException(status_code=404, detail=f"Reduction {reduction_id!r} not found")
-
-            # Attempt accept: 409 if not pending
-            try:
-                accept_reduction(conn, reduction_id)
-            except ValueError as e:
-                # Not pending or other error
-                raise HTTPException(status_code=409, detail=str(e))
-
-            # Return the reduction's new review_state
-            review_state = conn.execute("SELECT review_state FROM reductions WHERE id=?", (reduction_id,)).fetchone()[0]
-            return {"review_state": review_state}
-        finally:
-            conn.close()
+        return _guarded_transition(
+            table="reduction",
+            id_value=reduction_id,
+            exists_sql="SELECT 1 FROM reductions WHERE id=?",
+            mutate_fn=accept_reduction,
+            result_field="review_state",
+            result_sql="SELECT review_state FROM reductions WHERE id=?",
+        )
 
     @app.post("/api/reductions/{reduction_id:int}/reject")
     def reject_reduction_endpoint(reduction_id: int, _: None = Depends(require_auth)) -> dict[str, Any]:
@@ -1269,27 +1234,14 @@ def create_app(bind: str | None = None) -> FastAPI:
         """
         from engine.queue import reject_reduction
 
-        home = resolve_home()
-        db_path = str(home / "queue.db")
-        conn = connect(db_path)
-        try:
-            # Explicit existence check: 404 if reduction doesn't exist
-            reduction_exists = conn.execute("SELECT 1 FROM reductions WHERE id=?", (reduction_id,)).fetchone()
-            if reduction_exists is None:
-                raise HTTPException(status_code=404, detail=f"Reduction {reduction_id!r} not found")
-
-            # Attempt reject: 409 if not pending
-            try:
-                reject_reduction(conn, reduction_id)
-            except ValueError as e:
-                # Not pending or other error
-                raise HTTPException(status_code=409, detail=str(e))
-
-            # Return the reduction's new review_state
-            review_state = conn.execute("SELECT review_state FROM reductions WHERE id=?", (reduction_id,)).fetchone()[0]
-            return {"review_state": review_state}
-        finally:
-            conn.close()
+        return _guarded_transition(
+            table="reduction",
+            id_value=reduction_id,
+            exists_sql="SELECT 1 FROM reductions WHERE id=?",
+            mutate_fn=reject_reduction,
+            result_field="review_state",
+            result_sql="SELECT review_state FROM reductions WHERE id=?",
+        )
 
     @app.websocket("/api/ws")
     async def websocket_endpoint(websocket: WebSocket, since: int = None, token: str = Query(None)):

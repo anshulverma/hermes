@@ -6,7 +6,7 @@
 import { useState, useEffect } from 'react';
 import { fetchReductions, acceptReduction, rejectReduction } from '../api/client';
 import type { Reduction } from '../api/client';
-import { deriveFindingStatus } from '../api/normalize';
+import { deriveFindingStatus, normalizeReduction } from '../api/normalize';
 import { Card, Badge, StatusPill, Divider, EmptyState, Button } from '../ds';
 
 type FindingsProps = {
@@ -23,7 +23,7 @@ export default function Findings({ runId }: FindingsProps) {
     setLoading(true);
     setError(null);
     fetchReductions(runId)
-      .then((data) => setReductions(data))
+      .then((data) => setReductions(data.map(normalizeReduction)))
       .catch((err) => setError(err))
       .finally(() => setLoading(false));
   };

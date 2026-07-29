@@ -97,7 +97,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
 
         {/* Error state */}
         {error && (
-          <div style={{ color: 'var(--error-text)', fontSize: 14 }}>
+          <div style={{ color: 'var(--status-danger)', fontSize: 14 }}>
             Error: {error}
           </div>
         )}
@@ -113,10 +113,10 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                   disabled={requeueLoading}
                   style={{
                     padding: '8px 16px',
-                    background: 'var(--bg-primary)',
+                    background: 'var(--surface-card)',
                     color: 'var(--text-primary)',
-                    border: '1px solid var(--border-primary)',
-                    borderRadius: 6,
+                    border: '1px solid var(--border-hairline)',
+                    borderRadius: 'var(--radius-sm)',
                     cursor: requeueLoading ? 'not-allowed' : 'pointer',
                     fontSize: 13,
                     fontWeight: 500,
@@ -125,7 +125,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                   {requeueLoading ? 'Requeuing...' : 'Requeue'}
                 </button>
                 {requeueError && (
-                  <div style={{ color: 'var(--error-text)', fontSize: 12 }}>
+                  <div style={{ color: 'var(--status-danger)', fontSize: 12 }}>
                     {requeueError}
                   </div>
                 )}
@@ -147,9 +147,9 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
               </span>
               <pre
                 style={{
-                  background: 'var(--bg-surface)',
-                  border: '1px solid var(--border-primary)',
-                  borderRadius: 6,
+                  background: 'var(--surface-card)',
+                  border: '1px solid var(--border-hairline)',
+                  borderRadius: 'var(--radius-sm)',
                   padding: 12,
                   fontSize: 12,
                   fontFamily: 'var(--font-mono)',
@@ -170,9 +170,9 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
               {detail.result ? (
                 <div
                   style={{
-                    background: 'var(--bg-surface)',
-                    border: '1px solid var(--border-primary)',
-                    borderRadius: 6,
+                    background: 'var(--surface-card)',
+                    border: '1px solid var(--border-hairline)',
+                    borderRadius: 'var(--radius-sm)',
                     padding: 12,
                     display: 'flex',
                     flexDirection: 'column',
@@ -185,7 +185,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                       style={{
                         fontSize: 13,
                         fontFamily: 'var(--font-mono)',
-                        color: detail.result.outcome === 'ok' ? 'var(--ok-text)' : 'var(--error-text)',
+                        color: detail.result.outcome === 'ok' ? 'var(--status-ok)' : 'var(--status-danger)',
                       }}
                     >
                       {detail.result.outcome}
@@ -204,7 +204,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                         style={{
                           fontSize: 12,
                           fontFamily: 'var(--font-mono)',
-                          color: 'var(--link-color)',
+                          color: 'var(--status-live)',
                           wordBreak: 'break-all',
                         }}
                       >
@@ -215,7 +215,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                   {detail.result.error_summary && (
                     <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: 8 }}>
                       <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Error:</span>
-                      <span style={{ fontSize: 12, color: 'var(--error-text)' }}>
+                      <span style={{ fontSize: 12, color: 'var(--status-danger)' }}>
                         {detail.result.error_summary}
                       </span>
                     </div>
@@ -246,9 +246,9 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                     <div
                       key={idx}
                       style={{
-                        background: 'var(--bg-surface)',
-                        border: '1px solid var(--border-primary)',
-                        borderRadius: 6,
+                        background: 'var(--surface-card)',
+                        border: '1px solid var(--border-hairline)',
+                        borderRadius: 'var(--radius-sm)',
                         padding: 10,
                         fontSize: 12,
                       }}
@@ -275,7 +275,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                         </div>
                       )}
                       {att.error_summary && (
-                        <div style={{ color: 'var(--error-text)', fontSize: 11, marginTop: 4 }}>
+                        <div style={{ color: 'var(--status-danger)', fontSize: 11, marginTop: 4 }}>
                           {att.error_summary}
                         </div>
                       )}
@@ -296,9 +296,9 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                     <div
                       key={idx}
                       style={{
-                        background: 'var(--bg-surface)',
-                        border: '1px solid var(--border-primary)',
-                        borderRadius: 6,
+                        background: 'var(--surface-card)',
+                        border: '1px solid var(--border-hairline)',
+                        borderRadius: 'var(--radius-sm)',
                         padding: 10,
                         fontSize: 12,
                         display: 'flex',
@@ -312,7 +312,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                       <a
                         href={ev.ref}
                         style={{
-                          color: 'var(--link-color)',
+                          color: 'var(--status-live)',
                           fontFamily: 'var(--font-mono)',
                           fontSize: 11,
                           wordBreak: 'break-all',

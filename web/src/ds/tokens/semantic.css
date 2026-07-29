@@ -1,0 +1,17 @@
+/* Semantic tokens - application-level aliases to base tokens.
+   These provide domain-specific names that map to the design system primitives. */
+:root {
+  /* Surfaces */
+  --surface-bg: var(--surface-card);
+  --wash-subtle: var(--wash-hover);
+  --wash-danger: var(--status-danger-tint);
+  --wash-attention: var(--status-attention-tint);
+
+  /* Borders */
+  --border-danger: var(--status-danger-edge);
+  --border-attention: var(--status-attention-edge);
+
+  /* Radius - missing from base, adding primitives */
+  --radius-sm: 0.375rem;  /* 6px */
+  --radius-md: 0.5rem;    /* 8px */
+}

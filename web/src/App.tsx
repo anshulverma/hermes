@@ -102,7 +102,7 @@ export default function App() {
     >
       <CrewBackdrop theme="graph" />
 
-      <TopBar connected={connected} runs={runs || []} view={view} onViewChange={setView} />
+      <TopBar connected={connected} view={view} onViewChange={setView} />
 
       <div
         style={{

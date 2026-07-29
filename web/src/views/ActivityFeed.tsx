@@ -23,7 +23,7 @@ function EventRow({ event }: EventRowProps) {
   const kindColor = event.kind.includes('fail') || event.kind.includes('down')
     ? 'var(--status-danger)'
     : event.kind.includes('done') || event.kind.includes('accept')
-    ? 'var(--status-success)'
+    ? 'var(--status-ok)'
     : 'var(--text-secondary)';
 
   return (
