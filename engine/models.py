@@ -66,6 +66,11 @@ class HealthReport:
     latency_ms: int
     checks: list[Check]
 
+    @property
+    def ok(self) -> bool:
+        """True iff every Check passed (§8). Vacuously True with no checks."""
+        return all(c.ok for c in self.checks)
+
 
 # §3 IssueQuery + Issue
 
