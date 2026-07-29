@@ -719,6 +719,15 @@ def test_load_goals_file_all_filtered(tmp_path):
     assert result == []
 
 
+def test_load_goals_file_missing_file(tmp_path):
+    """_load_goals_file with missing file returns empty list."""
+    from engine.cli import _load_goals_file
+
+    missing_file = tmp_path / "nonexistent.txt"
+    result = _load_goals_file(str(missing_file))
+    assert result == []
+
+
 # --- run --goals FILE integration ------------------------------------------
 
 def test_run_with_goals_file_sets_config(setup_testkit, tmp_path):
@@ -808,4 +817,29 @@ def test_run_without_goals_unchanged(setup_testkit):
         config_json = conn.execute("SELECT config_json FROM runs").fetchone()[0]
         config = json.loads(config_json)
         assert config == {}, "Without --goals, config should be empty"
+        conn.close()
+
+
+def test_run_with_goals_missing_file(setup_testkit, tmp_path):
+    """run --goals with missing file sets config['goals'] to []."""
+    with temp_hermes_home() as home:
+        issues_path = home / "issues" / "bug.json"
+        write_canned_issues(issues_path)
+
+        missing_file = tmp_path / "nonexistent.txt"
+
+        exit_code = main([
+            "run", "example",
+            "--site", "local",
+            "--agent", "mock",
+            "--goals", str(missing_file),
+            "--dry-run",
+        ])
+
+        assert exit_code == 0
+
+        conn = _conn()
+        config_json = conn.execute("SELECT config_json FROM runs").fetchone()[0]
+        config = json.loads(config_json)
+        assert config["goals"] == []
         conn.close()

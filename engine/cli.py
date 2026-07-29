@@ -50,19 +50,22 @@ def _load_goals_file(path):
     - Strip surrounding whitespace on each kept line
 
     Returns:
-        list[str]: Parsed goals in order
+        list[str]: Parsed goals in order (empty list if file doesn't exist)
     """
     goals = []
-    with open(path, 'r') as f:
-        for line in f:
-            stripped = line.strip()
-            # Skip blank lines
-            if not stripped:
-                continue
-            # Skip comment lines (first non-space char is '#')
-            if stripped.startswith('#'):
-                continue
-            goals.append(stripped)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            for line in f:
+                stripped = line.strip()
+                # Skip blank lines
+                if not stripped:
+                    continue
+                # Skip comment lines (first non-space char is '#')
+                if stripped.startswith('#'):
+                    continue
+                goals.append(stripped)
+    except FileNotFoundError:
+        return []
     return goals
 
 
