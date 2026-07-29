@@ -243,7 +243,11 @@ def heartbeat_sweep(
                             attempts=ticket_row[6],
                             payload=json.loads(ticket_row[7]),
                         )
-                        queue.requeue_transport(conn, ticket, now=now)
+                        # NO-commit helper: the whole sweep is one transaction
+                        # committed once at the end. Calling the self-committing
+                        # queue.requeue_transport here would flush earlier
+                        # uncommitted sweep writes and break the rollback contract.
+                        queue._requeue_transport_nocommit(conn, ticket, now=now)
 
                     # Mark class affected (for unpark_ready)
                     for res_class in site.resource_classes():

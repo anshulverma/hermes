@@ -482,6 +482,75 @@ def test_heartbeat_sweep_unparks_ready_tickets(conn):
     assert lease_row is None
 
 
+def test_heartbeat_sweep_is_atomic_no_partial_commit(conn):
+    """A site.health raising for a LATER host rolls back the WHOLE sweep.
+
+    Regression for the requeue_transport mid-sweep self-commit: an earlier host
+    going down (marking it down + requeuing its in-flight ticket) must NOT be
+    persisted if a subsequent host's health probe raises. The sweep is one
+    transaction that commits exactly once.
+    """
+    now = 1234567890.0
+    seed_run(conn)
+
+    # h1 (down candidate, with an in-flight ticket) probed first; h2 raises.
+    conn.execute(
+        """INSERT INTO crew (id, site, capabilities, resources_json, state,
+                             health_json, last_heartbeat, registered_at)
+           VALUES ('h1', 'fake', '[]', '{"cpu": 4}', 'busy', '{}', ?, ?)""",
+        (now - 10, now - 100),
+    )
+    conn.execute(
+        """INSERT INTO crew (id, site, capabilities, resources_json, state,
+                             health_json, last_heartbeat, registered_at)
+           VALUES ('h2', 'fake', '[]', '{"cpu": 4}', 'idle', '{}', ?, ?)""",
+        (now - 10, now - 100),
+    )
+    seed_ticket(conn, "test-run/t-1", state="running", worker_host="h1")
+    conn.commit()
+
+    unreachable_report = HealthReport(
+        reachable=False, agent_ok=False, auth_ok=False, workspace_ready=False,
+        guard_installed=False, resources={}, latency_ms=0,
+        checks=[Check(name="reachable", ok=False, detail="timeout")],
+    )
+
+    class RaiseOnSecondSite:
+        """health() returns unreachable for h1, then raises for h2."""
+        name = "fake"
+
+        def __init__(self):
+            self.calls = 0
+
+        def health(self, host, agent):
+            self.calls += 1
+            if host == "h2":
+                raise RuntimeError("probe blew up for h2")
+            return unreachable_report
+
+        def resource_classes(self):
+            return ["cpu"]
+
+    site = RaiseOnSecondSite()
+    agent = FakeAgent()
+
+    with pytest.raises(RuntimeError):
+        crew.heartbeat_sweep(conn, site, agent, now=now)
+
+    # NOTHING from h1's processing is persisted: h1 still busy, ticket still
+    # running (no partial commit from the mid-sweep requeue).
+    assert conn.execute("SELECT state FROM crew WHERE id='h1'").fetchone()[0] == "busy"
+    trow = conn.execute(
+        "SELECT state, worker_host FROM tickets WHERE id='test-run/t-1'"
+    ).fetchone()
+    assert trow[0] == "running"
+    assert trow[1] == "h1"
+    # No crew_down event leaked through a mid-sweep commit.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM events WHERE kind='crew_down'"
+    ).fetchone()[0] == 0
+
+
 # --- Tests: list, drain, remove ----------------------------------------------
 
 def test_list_returns_crew_members(conn):

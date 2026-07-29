@@ -217,6 +217,34 @@ def test_reduction_has_kind_json():
     assert reduction.json == {"count": 5}
 
 
+def test_reduction_carries_persistence_fields():
+    """Reduction carries id, run_id, phase, kind, json, review_state (§4 table)."""
+    from engine.models import Reduction
+
+    # Persistence fields default so playbook-produced Reductions stay light.
+    light = Reduction(kind="cluster", json={"x": 1})
+    assert light.id is None
+    assert light.run_id is None
+    assert light.phase is None
+    assert light.review_state == "pending"
+
+    # A fully-hydrated Reduction (as loaded from the reductions table).
+    full = Reduction(
+        id=7,
+        run_id="run-1",
+        phase="work",
+        kind="cluster",
+        json={"clusters": {}},
+        review_state="accepted",
+    )
+    assert full.id == 7
+    assert full.run_id == "run-1"
+    assert full.phase == "work"
+    assert full.kind == "cluster"
+    assert full.json == {"clusters": {}}
+    assert full.review_state == "accepted"
+
+
 def test_finding_has_run_id_ticket_id_kind_json():
     """Finding has run_id, ticket_id, kind, json (matching §4 findings table)."""
     from engine.models import Finding

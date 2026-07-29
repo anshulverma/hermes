@@ -227,6 +227,76 @@ def test_tickets_table_has_reduction_id_fk(tmp_path):
     conn.close()
 
 
+def test_migration_v2_adds_reductions_phase_column(tmp_path):
+    """Migration v2 adds an additive `phase TEXT` column to reductions (§4)."""
+    from engine.db.migrate import apply_migrations
+
+    db_path = tmp_path / "queue.db"
+    apply_migrations(str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(reductions)")
+    columns = {row[1]: row[2] for row in cursor.fetchall()}  # name: type
+    assert "phase" in columns, "reductions.phase column missing (migration v2)"
+    assert columns["phase"].upper() == "TEXT"
+    conn.close()
+
+
+def test_migration_v2_recorded_and_idempotent(tmp_path):
+    """Both v1 and v2 are recorded; re-applying is a no-op (idempotent)."""
+    from engine.db.migrate import apply_migrations
+
+    db_path = tmp_path / "queue.db"
+    apply_migrations(str(db_path))
+    apply_migrations(str(db_path))  # second run must not error / duplicate
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
+    versions = [row[0] for row in cursor.fetchall()]
+    conn.close()
+
+    assert versions == [1, 2], f"expected [1, 2], got {versions}"
+
+
+def test_migration_v2_applies_on_legacy_v1_db(tmp_path):
+    """A db already at v1 (no phase column) gains phase when v2 is applied."""
+    from engine.db.migrate import apply_migrations, connect
+
+    db_path = tmp_path / "queue.db"
+    # Simulate a legacy db: only v1 present, reductions has no phase column.
+    conn = connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, "
+        "applied_at REAL, description TEXT)"
+    )
+    conn.execute(
+        """CREATE TABLE reductions (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             run_id TEXT NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL,
+             review_state TEXT NOT NULL DEFAULT 'pending',
+             created_at REAL NOT NULL, updated_at REAL NOT NULL)"""
+    )
+    conn.execute(
+        "INSERT INTO schema_migrations (version, applied_at, description) "
+        "VALUES (1, 0, 'legacy')"
+    )
+    conn.commit()
+    conn.close()
+
+    apply_migrations(str(db_path))
+
+    conn = sqlite3.connect(str(db_path))
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(reductions)")
+    columns = {row[1] for row in cursor.fetchall()}
+    assert "phase" in columns
+    cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
+    assert [r[0] for r in cursor.fetchall()] == [1, 2]
+    conn.close()
+
+
 def test_state_check_constraints_enforced(tmp_path):
     """CHECK constraints on state columns reject invalid values."""
     from engine.db.migrate import apply_migrations

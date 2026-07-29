@@ -95,3 +95,13 @@ CREATE INDEX idx_tickets_resource ON tickets(state, resource_req);
 CREATE INDEX idx_attempts_ticket ON attempts(ticket_id);
 CREATE INDEX idx_events_stream ON events(id);
 CREATE INDEX idx_findings_run ON findings(run_id);
+
+-- ==========================================================================
+-- Migration v2 (schema_migrations version 2) — ADDITIVE only.
+-- Every statement below the marker is applied by migration v2, never by v1;
+-- v1 executes only the CREATE statements above (keeping v1 intact). See
+-- migrate.py: v1 runs CREATE statements, v2 runs the ALTER statements here.
+-- --- @migration 2 ---
+-- Phase-scope reductions: master-side reduce/advance stamps the reduced phase
+-- so pause/resume can reload a Run snapshot's prior-phase reductions (§9).
+ALTER TABLE reductions ADD COLUMN phase TEXT;

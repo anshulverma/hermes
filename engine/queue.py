@@ -28,7 +28,7 @@ import time
 from typing import Iterable, Optional
 
 from engine import events
-from engine.models import Result, Run, Ticket
+from engine.models import Finding, Reduction, Result, Run, Ticket
 
 # Backoff: available_at = now + min(BACKOFF_CAP_S, BACKOFF_BASE_S * 2**attempts)
 # where ``attempts`` is the ticket's CURRENT (pre-increment) infra-failure count.
@@ -409,35 +409,51 @@ def fail_contract_violation(
         raise
 
 
+def _requeue_transport_nocommit(
+    conn: sqlite3.Connection, ticket: Ticket, now=None
+) -> None:
+    """No-penalty transport ``running → queued`` requeue WITHOUT committing (§9).
+
+    Shared body of the transport requeue. It performs only row writes + an
+    ``events.emit`` (which also does not commit), so a CALLER that is itself one
+    atomic unit — e.g. ``crew.heartbeat_sweep``, which requeues several down
+    hosts' tickets and must commit exactly once — can invoke it mid-transaction
+    without flushing earlier uncommitted writes. ``requeue_transport`` wraps this
+    for standalone callers (serve loop).
+    """
+    now = _now(now)
+    row = conn.execute(
+        "SELECT run_id, lease_id FROM tickets WHERE id=?", (ticket.id,)
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"unknown ticket {ticket.id!r}")
+    run_id, lease_id = row
+    # Release the ticket's lease here (leaving running) (§9).
+    if lease_id:
+        from engine import leases
+        leases.release(conn, lease_id, now=now)
+    conn.execute(
+        """UPDATE tickets SET state='queued', available_at=?,
+               worker_host=NULL, updated_at=? WHERE id=?""",
+        (now, now, ticket.id),
+    )
+    events.emit(
+        conn, "ticket_requeued", run_id=run_id, ticket_id=ticket.id,
+        message="requeue (transport, no penalty)",
+        data={"no_penalty": True},
+    )
+
+
 def requeue_transport(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
     """No-penalty (transport host-lost) ``running → queued`` requeue (§5, §9).
 
     ``attempts`` is UNCHANGED and the ticket is available immediately. Clears
     ``worker_host`` (the host was lost); ``tried_hosts`` is preserved so a fresh
     claim lands elsewhere. (Marking the host ``down`` is crew's job, Slice 6.)
+    Standalone atomic unit: wraps ``_requeue_transport_nocommit`` + commits.
     """
-    now = _now(now)
     try:
-        row = conn.execute(
-            "SELECT run_id, lease_id FROM tickets WHERE id=?", (ticket.id,)
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"unknown ticket {ticket.id!r}")
-        run_id, lease_id = row
-        # Release the ticket's lease here (leaving running) (§9).
-        if lease_id:
-            from engine import leases
-            leases.release(conn, lease_id, now=now)
-        conn.execute(
-            """UPDATE tickets SET state='queued', available_at=?,
-                   worker_host=NULL, updated_at=? WHERE id=?""",
-            (now, now, ticket.id),
-        )
-        events.emit(
-            conn, "ticket_requeued", run_id=run_id, ticket_id=ticket.id,
-            message="requeue (transport, no penalty)",
-            data={"no_penalty": True},
-        )
+        _requeue_transport_nocommit(conn, ticket, now=now)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -647,13 +663,214 @@ def requeue_needs_human(conn: sqlite3.Connection, ticket_id: str, now=None) -> N
         raise
 
 
+# --- master-side reduce / advance writers (§9) ---------------------------
+#
+# These are the SEAM the master loop (Slice 9's dispatch.py) drives: dispatch.py
+# ORCHESTRATES (calls playbook.reduce / next_phase / is_done and decides what to
+# do), while every ``tickets.state`` / ``runs.phase`` write for the reduce+advance
+# step happens HERE, keeping the queue the sole owner of state transitions. Each
+# callable below is one atomic unit (owns its commit; ``events.emit`` does not).
+
+
+def load_findings(
+    conn: sqlite3.Connection, run_id: str, phase: str
+) -> list[Finding]:
+    """Read the ``findings`` rows for a phase, as ``Finding`` models (§9).
+
+    Scopes by ``tickets.phase`` via a ``findings→tickets`` join on ``ticket_id``
+    (findings carry no phase of their own). Read-only; no commit. Feeds the
+    master loop's ``playbook.reduce(run, phase, findings, site)``.
+    """
+    rows = conn.execute(
+        """SELECT f.run_id, f.ticket_id, f.kind, f.json
+           FROM findings f
+           JOIN tickets t ON t.id = f.ticket_id
+           WHERE f.run_id = ? AND t.phase = ?
+           ORDER BY f.id""",
+        (run_id, phase),
+    ).fetchall()
+    return [
+        Finding(run_id=r[0], ticket_id=r[1], kind=r[2], json=json.loads(r[3]))
+        for r in rows
+    ]
+
+
+def record_reduction(
+    conn: sqlite3.Connection,
+    run_id: str,
+    phase: str,
+    reduction: Reduction,
+    now: Optional[float] = None,
+) -> int:
+    """Persist one ``Reduction`` for a phase and route its flagged tickets (§9).
+
+    INSERTs one ``reductions`` row (run_id, phase, kind, json,
+    review_state='pending'); for every ticket id in the reduction's
+    ``needs_human_ticket_ids`` (carried in ``reduction.json``) that is currently
+    ``reducing``, routes it ``reducing → needs_human`` and stamps
+    ``tickets.reduction_id`` to the new reduction id, emitting ``needs_human`` +
+    ``attention`` per ticket. Emits ``reduction_created`` once. Returns the new
+    reduction id. ONE atomic unit (single commit).
+    """
+    now = _now(now)
+    try:
+        cur = conn.execute(
+            """INSERT INTO reductions
+                 (run_id, phase, kind, json, review_state, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+            (run_id, phase, reduction.kind, json.dumps(reduction.json), now, now),
+        )
+        reduction_id = cur.lastrowid
+
+        # Route the flagged, still-reducing tickets to needs_human (§5/§9).
+        flagged = reduction.json.get("needs_human_ticket_ids") or []
+        for tid in flagged:
+            trow = conn.execute(
+                "SELECT state FROM tickets WHERE id=? AND run_id=?",
+                (tid, run_id),
+            ).fetchone()
+            if trow is None or trow[0] != "reducing":
+                continue  # only reducing tickets are flag-routable
+            conn.execute(
+                """UPDATE tickets SET state='needs_human', reduction_id=?,
+                       updated_at=? WHERE id=?""",
+                (reduction_id, now, tid),
+            )
+            events.emit(conn, "needs_human", run_id=run_id, ticket_id=tid,
+                        message="reduction flagged for human",
+                        data={"reduction_id": reduction_id})
+            events.emit(conn, "attention", run_id=run_id, ticket_id=tid,
+                        data={"reason": "needs_human"})
+
+        events.emit(conn, "reduction_created", run_id=run_id,
+                    message=f"reduction recorded for phase {phase!r}",
+                    data={"reduction_id": reduction_id, "phase": phase,
+                          "kind": reduction.kind})
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return reduction_id
+
+
+def finish_phase_reductions(
+    conn: sqlite3.Connection, run_id: str, phase: str, now: Optional[float] = None
+) -> None:
+    """Settle a phase's remaining ``reducing`` tickets to ``done`` (§9).
+
+    Called by the master loop after every reduction for ``phase`` is recorded:
+    every phase ticket STILL in ``reducing`` (i.e. not flagged to ``needs_human``
+    by ``record_reduction``) transitions ``reducing → done``. A settled ``done``
+    ticket has no §7 per-ticket kind (mirrors ``accept_reduction``); it surfaces
+    via the phase's reduction/advance events. ONE atomic unit (single commit).
+    """
+    now = _now(now)
+    try:
+        conn.execute(
+            """UPDATE tickets SET state='done', updated_at=?
+               WHERE run_id=? AND phase=? AND state='reducing'""",
+            (now, run_id, phase),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def set_run_phase(
+    conn: sqlite3.Connection, run_id: str, phase: str, now: Optional[float] = None
+) -> None:
+    """The SOLE writer of ``runs.phase`` (§9).
+
+    Updates ``runs.phase`` and emits ``phase_advanced``. Raises on an unknown
+    run. ONE atomic unit (single commit).
+    """
+    now = _now(now)
+    try:
+        row = conn.execute(
+            "SELECT phase FROM runs WHERE id=?", (run_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown run {run_id!r}")
+        old_phase = row[0]
+        conn.execute(
+            "UPDATE runs SET phase=?, updated_at=? WHERE id=?",
+            (phase, now, run_id),
+        )
+        events.emit(conn, "phase_advanced", run_id=run_id,
+                    message=f"{old_phase} -> {phase}",
+                    data={"from": old_phase, "to": phase})
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def phase_ticket_counts(
+    conn: sqlite3.Connection, run_id: str, phase: str
+) -> dict[str, int]:
+    """Counts of phase-N tickets by ``state`` (§9).
+
+    Read-only helper for the master loop's advance/stuck decision (only phases
+    whose tickets have all settled out of the active states may advance).
+    """
+    rows = conn.execute(
+        """SELECT state, COUNT(*) FROM tickets
+           WHERE run_id=? AND phase=? GROUP BY state""",
+        (run_id, phase),
+    ).fetchall()
+    return {state: count for state, count in rows}
+
+
 # --- helpers -------------------------------------------------------------
 
-def _load_run(conn: sqlite3.Connection, run_id: str) -> Run:
-    """Load a read-only ``Run`` snapshot for ``playbook.verify`` (§9).
+def _load_prior_reductions(
+    conn: sqlite3.Connection, run_id: str, current_phase
+) -> list[Reduction]:
+    """Load the PRIOR phase's reductions for a ``Run`` snapshot (§8/§9).
 
-    ``reductions`` is empty here (verify does not consume prior reductions; the
-    master loop supplies them to ``seed``/``reduce`` in Slice 7)."""
+    ``seed`` builds phase-N tickets from phase-(N-1) reductions, so the snapshot
+    must carry the immediately-preceding phase's reductions. The playbook's phase
+    ORDER is not stored in the db, so we use creation order instead: reductions
+    are stamped with their phase when recorded (FIX 3) and phases are reduced in
+    order, so the newest reductions whose phase differs from ``current_phase``
+    belong to the immediately-preceding phase. Empty for phase 0.
+    """
+    row = conn.execute(
+        """SELECT phase FROM reductions
+           WHERE run_id=? AND (phase IS NULL OR phase != ?)
+           ORDER BY id DESC LIMIT 1""",
+        (run_id, current_phase),
+    ).fetchone()
+    if row is None:
+        return []
+    prior_phase = row[0]
+    if prior_phase is None:
+        rows = conn.execute(
+            """SELECT id, run_id, phase, kind, json, review_state
+               FROM reductions WHERE run_id=? AND phase IS NULL ORDER BY id""",
+            (run_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id, run_id, phase, kind, json, review_state
+               FROM reductions WHERE run_id=? AND phase=? ORDER BY id""",
+            (run_id, prior_phase),
+        ).fetchall()
+    return [
+        Reduction(id=r[0], run_id=r[1], phase=r[2], kind=r[3],
+                  json=json.loads(r[4]), review_state=r[5])
+        for r in rows
+    ]
+
+
+def _load_run(conn: sqlite3.Connection, run_id: str) -> Run:
+    """Load a read-only ``Run`` snapshot (§9).
+
+    ``reductions`` carries the PRIOR phase's reductions (loaded from the db via
+    ``_load_prior_reductions``), so ``seed``/``reduce`` can build phase-N work
+    from phase-(N-1) output (and a paused run can reload it). ``verify`` ignores
+    them; the master loop consumes them."""
     row = conn.execute(
         """SELECT id, playbook, site, base_ref, config_json, phase
            FROM runs WHERE id=?""",
@@ -664,5 +881,6 @@ def _load_run(conn: sqlite3.Connection, run_id: str) -> Run:
     rid, pb, site, base_ref, config_json, phase = row
     return Run(
         id=rid, playbook=pb, site=site, base_ref=base_ref,
-        config=json.loads(config_json), phase=phase, reductions=[],
+        config=json.loads(config_json), phase=phase,
+        reductions=_load_prior_reductions(conn, run_id, phase),
     )

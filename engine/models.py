@@ -155,9 +155,19 @@ class Finding:
 
 @dataclass
 class Reduction:
-    """Reduction: kind, json."""
+    """Reduction: id, run_id, phase, kind, json, review_state (matching the §4
+    reductions table DDL).
+
+    The persistence fields (``id``, ``run_id``, ``phase``, ``review_state``)
+    default so a playbook's ``reduce`` can return a light ``Reduction(kind=...,
+    json=...)`` while the queue hydrates them fully when loading from / writing to
+    the reductions table (pause/resume reload needs the phase scope, §9)."""
     kind: str
     json: dict[str, Any]
+    id: int | None = None
+    run_id: str | None = None
+    phase: str | None = None
+    review_state: str = "pending"
 
 
 # §4 Lease

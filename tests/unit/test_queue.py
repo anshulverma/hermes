@@ -641,3 +641,182 @@ def test_requeue_needs_human_rejects_non_needs_human(conn):
     _mk_ticket(conn, "r1/t-0", state="reducing")
     with pytest.raises(ValueError):
         queue.requeue_needs_human(conn, "r1/t-0", now=100.0)
+
+
+# --- master-side reduce/advance writers (FIX 1) --------------------------
+
+def _mk_finding(conn, run_id, ticket_id, kind="result", json_doc=None):
+    conn.execute(
+        """INSERT INTO findings (run_id, ticket_id, kind, json, created_at)
+           VALUES (?, ?, ?, ?, 0)""",
+        (run_id, ticket_id, kind, json.dumps(json_doc or {})),
+    )
+    conn.commit()
+
+
+def test_load_findings_scopes_by_phase(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1", phase="work")
+    _mk_ticket(conn, "r1/t-0", phase="work", state="reducing")
+    _mk_ticket(conn, "r1/t-1", phase="work", state="reducing")
+    _mk_ticket(conn, "r1/r-0", phase="reduce", state="reducing")
+    _mk_finding(conn, "r1", "r1/t-0", json_doc={"cluster": "parser"})
+    _mk_finding(conn, "r1", "r1/t-1", json_doc={"cluster": "io"})
+    _mk_finding(conn, "r1", "r1/r-0", json_doc={"cluster": "other"})
+
+    findings = queue.load_findings(conn, "r1", "work")
+
+    assert {f.ticket_id for f in findings} == {"r1/t-0", "r1/t-1"}
+    assert all(f.run_id == "r1" for f in findings)
+    by_id = {f.ticket_id: f.json for f in findings}
+    assert by_id["r1/t-0"] == {"cluster": "parser"}
+
+
+def test_record_reduction_inserts_row_and_routes_needs_human(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1", phase="work")
+    _mk_ticket(conn, "r1/t-0", phase="work", state="reducing")
+    _mk_ticket(conn, "r1/t-1", phase="work", state="reducing")
+    red = Reduction(
+        kind="cluster",
+        json={"clusters": {"parser": ["r1/t-0"]},
+              "needs_human_ticket_ids": ["r1/t-0"]},
+    )
+
+    rid = queue.record_reduction(conn, "r1", "work", red, now=100.0)
+
+    row = conn.execute(
+        "SELECT run_id, phase, kind, review_state FROM reductions WHERE id=?",
+        (rid,),
+    ).fetchone()
+    assert row == ("r1", "work", "cluster", "pending")
+
+    # Flagged ticket routed reducing -> needs_human with reduction_id stamped.
+    t0 = _ticket_row(conn, "r1/t-0")
+    assert t0["state"] == "needs_human"
+    assert t0["reduction_id"] == rid
+    # Un-flagged ticket stays reducing (finish_phase_reductions handles it).
+    assert _ticket_row(conn, "r1/t-1")["state"] == "reducing"
+
+    kinds = _kinds(conn)
+    assert "reduction_created" in kinds
+    assert "needs_human" in kinds
+    assert "attention" in kinds
+
+
+def test_record_reduction_without_flags_only_creates_row(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1", phase="work")
+    _mk_ticket(conn, "r1/t-0", phase="work", state="reducing")
+    red = Reduction(kind="cluster", json={"clusters": {"parser": ["r1/t-0"]}})
+
+    rid = queue.record_reduction(conn, "r1", "work", red, now=100.0)
+
+    assert _ticket_row(conn, "r1/t-0")["state"] == "reducing"
+    kinds = _kinds(conn)
+    assert "reduction_created" in kinds
+    assert "needs_human" not in kinds
+    assert conn.execute(
+        "SELECT phase FROM reductions WHERE id=?", (rid,)
+    ).fetchone()[0] == "work"
+
+
+def test_finish_phase_reductions_settles_remaining_reducing_to_done(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1", phase="work")
+    _mk_ticket(conn, "r1/t-0", phase="work", state="needs_human")  # flagged earlier
+    _mk_ticket(conn, "r1/t-1", phase="work", state="reducing")
+    _mk_ticket(conn, "r1/t-2", phase="work", state="reducing")
+    _mk_ticket(conn, "r1/r-0", phase="reduce", state="reducing")  # other phase
+
+    queue.finish_phase_reductions(conn, "r1", "work", now=100.0)
+
+    assert _ticket_row(conn, "r1/t-0")["state"] == "needs_human"  # untouched
+    assert _ticket_row(conn, "r1/t-1")["state"] == "done"
+    assert _ticket_row(conn, "r1/t-2")["state"] == "done"
+    assert _ticket_row(conn, "r1/r-0")["state"] == "reducing"  # other phase untouched
+
+
+def test_set_run_phase_is_sole_phase_writer_and_emits(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1", phase="work")
+
+    queue.set_run_phase(conn, "r1", "reduce", now=100.0)
+
+    assert conn.execute(
+        "SELECT phase FROM runs WHERE id=?", ("r1",)
+    ).fetchone()[0] == "reduce"
+    assert "phase_advanced" in _kinds(conn)
+
+
+def test_phase_ticket_counts_by_state(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1", phase="work")
+    _mk_ticket(conn, "r1/t-0", phase="work", state="reducing")
+    _mk_ticket(conn, "r1/t-1", phase="work", state="reducing")
+    _mk_ticket(conn, "r1/t-2", phase="work", state="done")
+    _mk_ticket(conn, "r1/t-3", phase="work", state="failed")
+    _mk_ticket(conn, "r1/r-0", phase="reduce", state="queued")  # other phase
+
+    counts = queue.phase_ticket_counts(conn, "r1", "work")
+
+    assert counts == {"reducing": 2, "done": 1, "failed": 1}
+
+
+def test_record_reduction_producer_for_accept_reduction(conn):
+    """End-to-end: record_reduction produces a pending reduction linked to a
+    needs_human ticket that accept_reduction then settles to done (accept/reject
+    are no longer dead code)."""
+    from engine import queue
+
+    _mk_run(conn, "r1", phase="work")
+    _mk_ticket(conn, "r1/t-0", phase="work", state="reducing")
+    red = Reduction(
+        kind="cluster",
+        json={"needs_human_ticket_ids": ["r1/t-0"]},
+    )
+
+    rid = queue.record_reduction(conn, "r1", "work", red, now=100.0)
+    assert _ticket_row(conn, "r1/t-0")["state"] == "needs_human"
+    assert _ticket_row(conn, "r1/t-0")["reduction_id"] == rid
+
+    queue.accept_reduction(conn, rid, now=200.0)
+
+    assert _ticket_row(conn, "r1/t-0")["state"] == "done"
+    assert conn.execute(
+        "SELECT review_state FROM reductions WHERE id=?", (rid,)
+    ).fetchone()[0] == "accepted"
+
+
+def test_load_run_loads_prior_phase_reductions(conn):
+    from engine import queue
+
+    # Run currently on the 'reduce' phase; prior phase is 'work'.
+    _mk_run(conn, "r1", phase="reduce")
+    # Prior-phase (work) reductions -> should be loaded into the snapshot.
+    conn.execute(
+        """INSERT INTO reductions (run_id, phase, kind, json, review_state,
+                                   created_at, updated_at)
+           VALUES ('r1', 'work', 'cluster', ?, 'pending', 0, 0)""",
+        (json.dumps({"clusters": {"parser": []}}),),
+    )
+    # A current-phase (reduce) reduction -> must NOT be in the snapshot.
+    conn.execute(
+        """INSERT INTO reductions (run_id, phase, kind, json, review_state,
+                                   created_at, updated_at)
+           VALUES ('r1', 'reduce', 'summary', '{}', 'pending', 0, 0)""",
+    )
+    conn.commit()
+
+    run = queue._load_run(conn, "r1")
+
+    assert len(run.reductions) == 1
+    assert run.reductions[0].phase == "work"
+    assert run.reductions[0].kind == "cluster"
+    assert run.reductions[0].json == {"clusters": {"parser": []}}

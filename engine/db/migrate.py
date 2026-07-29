@@ -85,12 +85,21 @@ def apply_migrations(path: str) -> None:
         cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
         applied_versions = {row[0] for row in cursor.fetchall()}
 
-        # Migration 1: initial schema from spec §4
+        # Migration 1: initial schema from spec §4 (CREATE statements).
         if 1 not in applied_versions:
             _apply_migration_1(conn)
             cursor.execute("""
                 INSERT INTO schema_migrations (version, applied_at, description)
                 VALUES (1, ?, 'Initial schema from engine-core.md §4')
+            """, (time.time(),))
+            conn.commit()
+
+        # Migration 2: additive phase column on reductions (ALTER statements).
+        if 2 not in applied_versions:
+            _apply_migration_2(conn)
+            cursor.execute("""
+                INSERT INTO schema_migrations (version, applied_at, description)
+                VALUES (2, ?, 'Add reductions.phase (phase-scope reductions)')
             """, (time.time(),))
             conn.commit()
 
@@ -101,43 +110,67 @@ def apply_migrations(path: str) -> None:
     os.chmod(path, 0o600)
 
 
-def _apply_migration_1(conn: sqlite3.Connection) -> None:
-    """
-    Apply migration 1: full initial schema from spec §4.
+def _parse_schema_by_version() -> dict[int, list[str]]:
+    """Parse schema.sql into {version: [statements]}.
 
-    Reads schema.sql and executes it. The file includes all tables,
-    CHECK constraints, FKs, and indexes.
+    Statements belong to migration version 1 by default; a comment line of the
+    form ``-- --- @migration N ---`` switches subsequent statements to version N.
+    This keeps schema.sql the single file-of-record: v1 owns the CREATE
+    statements, v2+ own the additive ALTERs below their marker.
     """
-    # Load schema.sql relative to this module
     schema_path = Path(__file__).parent / "schema.sql"
     schema_sql = schema_path.read_text()
 
-    cursor = conn.cursor()
-
-    # Split by semicolons and execute each statement
-    # (executescript doesn't work well with our setup, so we parse manually)
-    statements = []
-    current = []
+    by_version: dict[int, list[str]] = {}
+    current_version = 1
+    current: list[str] = []
     for line in schema_sql.splitlines():
         stripped = line.strip()
 
-        # Skip comments and empty lines
+        # Comment lines: watch for a migration-version marker, else skip.
         if not stripped or stripped.startswith('--'):
+            if '@migration' in stripped:
+                # e.g. "-- --- @migration 2 ---"
+                for tok in stripped.replace('-', ' ').split():
+                    if tok.isdigit():
+                        current_version = int(tok)
+                        break
             continue
 
         current.append(line)
 
-        # Statement ends with semicolon
+        # Statement ends with semicolon.
         if stripped.endswith(';'):
             stmt = '\n'.join(current)
-            statements.append(stmt)
+            by_version.setdefault(current_version, []).append(stmt)
             current = []
 
-    # Execute all statements
-    for stmt in statements:
-        # Skip schema_migrations table creation (we already created it)
+    return by_version
+
+
+def _apply_migration_1(conn: sqlite3.Connection) -> None:
+    """
+    Apply migration 1: full initial schema from spec §4.
+
+    Executes the CREATE statements from schema.sql (everything above the first
+    ``@migration`` marker). The file includes all tables, CHECK constraints, FKs,
+    and indexes.
+    """
+    cursor = conn.cursor()
+    for stmt in _parse_schema_by_version().get(1, []):
+        # Skip schema_migrations table creation (we already created it).
         if 'CREATE TABLE schema_migrations' in stmt:
             continue
         cursor.execute(stmt)
+    conn.commit()
 
+
+def _apply_migration_2(conn: sqlite3.Connection) -> None:
+    """
+    Apply migration 2: additive ALTERs marked ``@migration 2`` in schema.sql
+    (adds ``reductions.phase`` for phase-scope reductions, §9).
+    """
+    cursor = conn.cursor()
+    for stmt in _parse_schema_by_version().get(2, []):
+        cursor.execute(stmt)
     conn.commit()
