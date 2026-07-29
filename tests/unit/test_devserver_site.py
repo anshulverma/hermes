@@ -202,6 +202,34 @@ def test_health_workspace_ready_checks_checkout(mock_run, devserver_site, mock_a
     assert isinstance(report.workspace_ready, bool)
 
 
+@patch("subprocess.run")
+def test_health_workspace_ready_false_when_checkout_missing(mock_run, devserver_site, mock_agent):
+    """CRITICAL: workspace_ready must be HONEST (probe actual checkout, not assume reachable=provisioned).
+
+    A failed provision (swallowed checkout error) must report workspace_ready=False.
+    """
+    def mock_ssh_commands(argv, *args, **kwargs):
+        # ssh true -> reachable
+        if "true" in str(argv):
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+        # test -d /tmp/hermes-workspace -> workspace missing (provision failed)
+        if "test -d" in str(argv):
+            return subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr="")
+        # nproc -> cpu count
+        if "nproc" in str(argv):
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="4\n", stderr="")
+        # guard check -> missing (for simplicity)
+        return subprocess.CompletedProcess(args=argv, returncode=1, stdout="", stderr="")
+
+    mock_run.side_effect = mock_ssh_commands
+
+    report = devserver_site.health("dev1.example", mock_agent)
+
+    # CRITICAL: workspace_ready must be False (honest probe), not True (dishonest assume-provisioned)
+    assert report.workspace_ready is False, "workspace_ready must be honest (probe actual checkout)"
+    assert report.reachable is True, "reachable should still be True"
+
+
 def test_run_worker_connection_failure_raises_transport_error(devserver_site, mock_agent):
     """run_worker raises TransportError on ssh exit 255 (connection failure).
 
@@ -849,6 +877,61 @@ def test_recheck_fix_ci_failing_returns_false(mock_run, devserver_site, monkeypa
 
 
 @patch("subprocess.run")
+def test_recheck_fix_false_pass_protection(mock_run, devserver_site, monkeypatch):
+    """CRITICAL: recheck_fix must NOT false-pass on '0 passing, 3 failing'.
+
+    Substring match would wrongly return True; must use exact token match.
+    """
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="0 passing, 3 failing\n", stderr=""
+    )
+
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": "D88888",
+            "ci_status": "failing",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    result = devserver_site.recheck_fix(result_payload)
+
+    assert result is False, "Expected False (not false-pass) on '0 passing, 3 failing'"
+
+
+@patch("subprocess.run")
+def test_recheck_fix_nonzero_exit_returns_false(mock_run, devserver_site, monkeypatch):
+    """recheck_fix returns False when probe exits nonzero (fail-safe on exit code)."""
+    mock_run.return_value = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout="green\n", stderr=""
+    )
+
+    monkeypatch.setenv("HERMES_DEVSERVER_RECHECK_CMD", "ci-check")
+
+    result_payload = {
+        "reproduced": True,
+        "root_cause": {"signature": "sig-1", "cause_category": "bug"},
+        "fix": {
+            "verified": True,
+            "diff_ref": "D77777",
+            "ci_status": "green",
+        },
+        "knowledge_entry": {"ref": "kb-1", "validated": True},
+        "evidence_ref": "evidence-1",
+    }
+
+    result = devserver_site.recheck_fix(result_payload)
+
+    assert result is False, "Expected False when exit code is nonzero (even if stdout says 'green')"
+
+
+@patch("subprocess.run")
 def test_recheck_fix_ci_inconclusive_returns_false(mock_run, devserver_site, monkeypatch):
     """recheck_fix returns False when CI-signal probe returns inconclusive status."""
     mock_run.return_value = subprocess.CompletedProcess(
@@ -924,8 +1007,13 @@ def test_recheck_fix_missing_diff_ref_returns_false(mock_run, devserver_site, mo
 
 
 @patch("subprocess.run")
-def test_recheck_fix_shlex_quotes_diff_ref(mock_run, devserver_site, monkeypatch):
-    """recheck_fix must shlex.quote() the diff_ref in the probe command (injection safety)."""
+def test_recheck_fix_argv_list_safe(mock_run, devserver_site, monkeypatch):
+    """recheck_fix passes diff_ref safely via subprocess argv list (no shell injection).
+
+    CRITICAL: subprocess.run with argv list (no shell=True) is safe by design - Python
+    passes args to execve without shell interpretation. The diff_ref is passed as a
+    separate argv item (not shlex.quote'd, which would be wrong in a list context).
+    """
     mock_run.return_value = subprocess.CompletedProcess(
         args=[], returncode=0, stdout="Status: green\n", stderr=""
     )
@@ -947,14 +1035,19 @@ def test_recheck_fix_shlex_quotes_diff_ref(mock_run, devserver_site, monkeypatch
 
     devserver_site.recheck_fix(result_payload)
 
-    # Assert the probe was called and the diff_ref was quoted
+    # Assert the probe was called with argv list (safe by design)
     assert mock_run.called, "Expected CI probe to be called"
     call_args = mock_run.call_args[0][0]
-    call_str = " ".join(str(a) for a in call_args)
 
-    # The malicious part should be quoted/escaped, not raw
-    assert ";rm -rf /" not in call_str or "'" in call_str or "\\" in call_str, \
-        f"Expected diff_ref to be shlex-quoted. Got: {call_str}"
+    # CRITICAL: argv list must be a list (not shell string), and diff_ref as separate item
+    assert isinstance(call_args, list), "Expected argv as list for injection safety"
+    assert len(call_args) == 2, "Expected [cmd, diff_ref]"
+    assert call_args[0] == "ci-check", "Expected ci-check as command"
+    assert call_args[1] == "D123;rm -rf /", "Expected raw diff_ref as argv item (subprocess.run handles safety)"
+
+    # Verify NO shell=True (which would be unsafe)
+    call_kwargs = mock_run.call_args[1]
+    assert call_kwargs.get("shell") is not True, "Must NOT use shell=True (injection risk)"
 
 
 def test_recheck_fix_wiring_to_verify():

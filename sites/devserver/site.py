@@ -20,19 +20,9 @@ import time
 
 from engine import site as _site
 from engine import transport
+from engine.guard import GUARD_SHIMS, GUARD_BLOCK_EXIT, render_shim_script
 from engine.models import Check, HealthReport, Issue, IssueQuery, Result
 
-# Same guard shims as sites/local (§3): block git push, sl push|land, hg push,
-# jf land, arc land → exit 97.
-GUARD_SHIMS: dict[str, tuple[str, ...]] = {
-    "git": ("push",),
-    "sl": ("push", "land"),
-    "hg": ("push",),
-    "jf": ("land",),
-    "arc": ("land",),
-}
-
-_GUARD_BLOCK_EXIT = 97
 _DEFAULT_CONNECT_TIMEOUT = 10
 
 
@@ -100,7 +90,7 @@ class DevserverSite:
                      f"git clone {repo_url_quoted} {workspace_dir_quoted}"],
                     capture_output=True,
                     text=True,
-                    check=False,  # May fail if git not available
+                    check=True,  # Let clone failure raise for honest workspace_ready
                 )
 
         # Ensure we're at the correct ref (idempotent: re-verify on 2nd call)
@@ -109,7 +99,7 @@ class DevserverSite:
              f"cd {workspace_dir_quoted} && git checkout {base_ref_quoted}"],
             capture_output=True,
             text=True,
-            check=False,  # May fail if workspace doesn't exist or not git repo
+            check=True,  # Let checkout failure raise for honest workspace_ready
         )
 
         # 3. Ensure claude + dexter installed (deployment-specific hook)
@@ -172,30 +162,14 @@ class DevserverSite:
             text=True,
         )
 
-        cases = "|".join(blocked)
-
         if proc.returncode == 0 and proc.stdout.strip():
             # Real binary found: use its absolute path
             real_path = proc.stdout.strip()
-            passthrough = f'exec "{real_path}" "$@"'
         else:
             # Real binary absent: fail closed (exit 127), never recurse
-            passthrough = (
-                f'echo "[hermes-no-ship-guard] real {name!r} not found" >&2; exit 127'
-            )
+            real_path = None
 
-        script = f"""#!/bin/sh
-# hermes no-ship guard shim for {name!r}: blocks {cases}
-for _arg in "$@"; do
-  case "$_arg" in
-    {cases})
-      echo "[hermes-no-ship-guard] blocked '{name} $_arg' (no-land/no-push invariant)" >&2
-      exit {_GUARD_BLOCK_EXIT}
-      ;;
-  esac
-done
-{passthrough}
-"""
+        script = render_shim_script(name, blocked, real_path)
         shim_path = f"{guard_dir}/{name}"
         shim_path_quoted = shlex.quote(shim_path)
 
@@ -262,9 +236,22 @@ done
             "ssh reachable" if reachable else "ssh unreachable",
         )
 
-        # Workspace ready: check if checkout exists at base_ref (deployment-specific)
-        # For now, assume provisioned if reachable
-        workspace_ready = reachable
+        # Workspace ready: HONEST probe (check if checkout actually exists)
+        workspace_ready = False
+        if reachable:
+            workspace_dir = "/tmp/hermes-workspace"
+            workspace_dir_quoted = shlex.quote(workspace_dir)
+            try:
+                proc = subprocess.run(
+                    ["ssh", *self._ssh_opts(host), host, f"test -d {workspace_dir_quoted}"],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.connect_timeout + 5,
+                )
+                workspace_ready = proc.returncode == 0
+            except (subprocess.TimeoutExpired, OSError):
+                workspace_ready = False
+
         workspace_check = Check(
             "workspace",
             workspace_ready,
@@ -533,10 +520,10 @@ done
             # No recheck command configured → fail-safe
             return False
 
-        # Build the probe command with shlex-quoted diff_ref (injection safety)
+        # Build the probe command with diff_ref (no shlex.quote in argv - subprocess.run handles it)
         # The command is expected to be a single binary/script name; we append the diff_ref
         try:
-            probe_argv = [recheck_cmd, shlex.quote(diff_ref)]
+            probe_argv = [recheck_cmd, diff_ref]
             proc = subprocess.run(
                 probe_argv,
                 capture_output=True,
@@ -544,18 +531,32 @@ done
                 timeout=30,  # Reasonable timeout for CI probe
                 check=False,  # Don't raise on non-zero exit
             )
-        except (subprocess.TimeoutExpired, OSError, Exception):
+        except Exception:
             # Probe raised → fail-safe
             return False
 
-        # Parse the probe output for green/passing signal
-        output = proc.stdout.lower()
+        # CRITICAL: Use exit code as primary signal (fail-safe: nonzero → False)
+        # Only returncode==0 can be a pass; stdout is secondary confirmation
+        if proc.returncode != 0:
+            return False
 
-        # Check for passing signals
-        if "green" in output or "passing" in output:
+        # Parse the probe output for pass signal (word boundary match to avoid false-pass)
+        # "Status: green" → True, but "0 passing, 3 failing" → False
+        output_lower = proc.stdout.lower()
+
+        # Check for "green" or "passing" as standalone words (not part of "0 passing")
+        # Simple heuristic: split on whitespace/punctuation and check if word is in set
+        import re
+        words = set(re.findall(r'\b\w+\b', output_lower))
+
+        # "green" or "passing" must be present as a word
+        if "green" in words or "passing" in words:
+            # But reject if "failing" is also present (ambiguous/mixed signal)
+            if "failing" in words:
+                return False
             return True
 
-        # Everything else (failing, inconclusive, error) → fail-safe
+        # Everything else (failing, inconclusive, error, ambiguous) → fail-safe
         return False
 
     # --- helpers ---------------------------------------------------------

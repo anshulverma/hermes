@@ -47,6 +47,8 @@ class DexterPlaybook:
         Returns:
             List of Ticket with exact fields per §2.1.
         """
+        from engine.cli import _load_goals_file
+
         goals_data = []
 
         # Source 1: explicit goals (list or file path)
@@ -58,7 +60,7 @@ class DexterPlaybook:
                               for g in goals_raw]
             else:
                 # File path: read with §2.1a filtering
-                goals_list = self._load_goals_file(goals_raw)
+                goals_list = _load_goals_file(goals_raw)
                 goals_data = [{"goal": g, "issue_ref": None, "priority": 0.0}
                               for g in goals_list]
 
@@ -95,33 +97,6 @@ class DexterPlaybook:
             tickets.append(ticket)
 
         return tickets
-
-    @staticmethod
-    def _load_goals_file(path: str) -> list[str]:
-        """Load goals from file (§2.1a format).
-
-        Format:
-        - One goal per line
-        - Skip blank lines
-        - Skip lines whose first non-space char is '#'
-        - Strip surrounding whitespace on each kept line
-
-        Returns:
-            list[str]: Parsed goals in order (empty list if file doesn't exist)
-        """
-        goals = []
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    if stripped[0] == '#':
-                        continue
-                    goals.append(stripped)
-        except FileNotFoundError:
-            pass
-        return goals
 
     # --- schemas (§2.2, §2.3) -------------------------------------------
 

@@ -15,21 +15,8 @@ import time
 from pathlib import Path
 
 from engine import config, site as _site
+from engine.guard import GUARD_SHIMS, GUARD_BLOCK_EXIT, render_shim_script
 from engine.models import Check, HealthReport, Issue, IssueQuery, Result
-
-# No-ship guard shims (§11): each shim shadows a real binary and refuses the
-# land/push subcommands (log + non-zero exit), passing everything else through to
-# the real binary. Maps shim name -> the subcommands it BLOCKS.
-GUARD_SHIMS: dict[str, tuple[str, ...]] = {
-    "git": ("push",),
-    "sl": ("push", "land"),
-    "hg": ("push",),
-    "jf": ("land",),
-    "arc": ("land",),
-}
-
-# Non-zero exit code a guard shim uses when it blocks a land/push (§11).
-_GUARD_BLOCK_EXIT = 97
 
 
 class LocalSite:
@@ -90,26 +77,7 @@ class LocalSite:
         """Write one executable POSIX-sh guard shim."""
         import stat
 
-        cases = "|".join(blocked)
-        if real:
-            passthrough = f'exec "{real}" "$@"'
-        else:
-            # Real binary absent: never recurse back into the shim; fail closed.
-            passthrough = (
-                f'echo "[hermes-no-ship-guard] real {name!r} not found" >&2; exit 127'
-            )
-        script = f"""#!/bin/sh
-# hermes no-ship guard shim for {name!r} (§11): blocks {cases}
-for _arg in "$@"; do
-  case "$_arg" in
-    {cases})
-      echo "[hermes-no-ship-guard] blocked '{name} $_arg' (no-land/no-push invariant)" >&2
-      exit {_GUARD_BLOCK_EXIT}
-      ;;
-  esac
-done
-{passthrough}
-"""
+        script = render_shim_script(name, blocked, real)
         path.write_text(script)
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
