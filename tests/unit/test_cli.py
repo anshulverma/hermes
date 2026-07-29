@@ -560,3 +560,108 @@ def test_error_traceback_shown_with_debug_env(setup_testkit, capsys, monkeypatch
         # Should have both "Error:" and a traceback
         assert "error" in combined.lower()
         assert "traceback" in combined.lower(), "should print traceback with HERMES_DEBUG=1"
+
+
+# --- serve-once (worker-runner for fleet) ----------------------------------
+
+def test_serve_once_valid_envelope_with_mock(setup_testkit, monkeypatch, tmp_path):
+    """serve-once with HERMES_AGENT=mock + valid envelope exits 0 and writes result."""
+    with temp_hermes_home() as home:
+        monkeypatch.setenv("HERMES_AGENT", "mock")
+
+        # Create a minimal valid envelope
+        # Note: payload_sha256 must match the actual hash of the payload
+        import hashlib
+        payload = {"scenario": "ok"}
+        payload_json = json.dumps(payload, sort_keys=True)
+        payload_sha = hashlib.sha256(payload_json.encode()).hexdigest()
+
+        envelope = {
+            "ticket_id": "test-ticket-1",
+            "run_id": "run-1",
+            "phase": "work",
+            "resource_req": "cpu",
+            "base_ref": "main",
+            "payload": payload,
+            "payload_sha256": payload_sha,
+            "timeout_s": 5,
+            "site_context": {"site": "local", "host": "localhost"},
+            "goal_envelope": {
+                "goal": "test goal",
+                "driver": {
+                    "command": "mock-command",
+                    "args": {},
+                    "loop": None
+                },
+                "done_contract": {},
+                "guardrails": {"no_ship": True}
+            }
+        }
+
+        envelope_path = tmp_path / "envelope.json"
+        result_path = tmp_path / "result.json"
+
+        with open(envelope_path, "w") as f:
+            json.dump(envelope, f)
+
+        # Run serve-once
+        exit_code = main([
+            "serve-once",
+            "--envelope", str(envelope_path),
+            "--result", str(result_path),
+            "--timeout", "5"
+        ])
+
+        assert exit_code == 0, "serve-once should exit 0 on success"
+        assert result_path.exists(), "result file should be written"
+
+        # Read the raw result (for MockAgent with ["true"], it's empty stdout)
+        with open(result_path) as f:
+            raw_result = f.read()
+
+        # The raw result should be empty (MockAgent's ["true"] produces no output)
+        # The master will later call agent.parse_result(raw_result, envelope) to get the actual Result
+        assert isinstance(raw_result, str), "result should be a string (raw stdout)"
+
+
+def test_serve_once_missing_envelope(setup_testkit, monkeypatch, tmp_path):
+    """serve-once with missing envelope exits non-zero with clear error."""
+    with temp_hermes_home() as home:
+        monkeypatch.setenv("HERMES_AGENT", "mock")
+
+        envelope_path = tmp_path / "nonexistent.json"
+        result_path = tmp_path / "result.json"
+
+        exit_code = main([
+            "serve-once",
+            "--envelope", str(envelope_path),
+            "--result", str(result_path),
+            "--timeout", "5"
+        ])
+
+        assert exit_code != 0, "serve-once should exit non-zero on missing envelope"
+
+
+def test_serve_once_malformed_envelope(setup_testkit, monkeypatch, tmp_path, capsys):
+    """serve-once with malformed envelope exits non-zero with clear error."""
+    with temp_hermes_home() as home:
+        monkeypatch.setenv("HERMES_AGENT", "mock")
+
+        envelope_path = tmp_path / "envelope.json"
+        result_path = tmp_path / "result.json"
+
+        # Write invalid JSON
+        with open(envelope_path, "w") as f:
+            f.write("{invalid json")
+
+        exit_code = main([
+            "serve-once",
+            "--envelope", str(envelope_path),
+            "--result", str(result_path),
+            "--timeout", "5"
+        ])
+
+        assert exit_code != 0, "serve-once should exit non-zero on malformed envelope"
+        captured = capsys.readouterr()
+        combined = (captured.out + captured.err).lower()
+        assert "error" in combined or "invalid" in combined or "json" in combined

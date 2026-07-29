@@ -445,6 +445,108 @@ def cmd_serve(args):
     return 0
 
 
+def cmd_serve_once(args):
+    """hermes serve-once --envelope PATH --result PATH --timeout N.
+
+    Worker-runner: reads envelope, loads agent, builds invocation, runs under timeout,
+    writes result. Agent-agnostic. Used by ssh_transport on fleet workers.
+    """
+    import subprocess
+    import shutil
+
+    # Import modules that register agents
+    import testkit.mock_agent
+    # TODO: import agents.claude when it exists
+
+    envelope_path = args.envelope
+    result_path = args.result
+    timeout_s = args.timeout
+
+    # 1. Read + parse the envelope
+    try:
+        with open(envelope_path) as f:
+            envelope = json.load(f)
+    except FileNotFoundError:
+        print(f"Error: envelope file not found: {envelope_path}", file=sys.stderr)
+        return 1
+    except json.JSONDecodeError as e:
+        print(f"Error: invalid JSON in envelope: {e}", file=sys.stderr)
+        return 1
+
+    # 2. Load the agent via HERMES_AGENT (default claude)
+    agent_name = config.agent()  # reads HERMES_AGENT, defaults to "claude"
+    try:
+        ag = agent.load(agent_name)
+    except KeyError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    # 3. Reconstruct the Driver from envelope["goal_envelope"]["driver"]
+    from engine.models import Driver
+    d = envelope["goal_envelope"]["driver"]
+    driver = Driver(command=d.get("command"), args=d.get("args", {}), loop=d.get("loop"))
+
+    # 4. Build invocation and run under timeout wrapper
+    argv = ag.build_invocation(envelope, driver)
+
+    timeout_bin = shutil.which("timeout")
+    wrapped = [timeout_bin, str(timeout_s), *argv] if timeout_bin else list(argv)
+
+    try:
+        proc = subprocess.run(wrapped, capture_output=True, text=True)
+    except OSError as exc:
+        print(f"Error: failed to launch worker: {exc}", file=sys.stderr)
+        return 1
+
+    # 5. Write the raw output to result file (master will parse_result later)
+    # For now, we'll write the agent's parsed result as JSON
+    # Actually, the spec says write the OUTPUT, not the parsed result
+    # The master calls parse_result later. So we need to write the raw stdout.
+    # But we also need to return the Result format. Let me re-read the spec...
+
+    # From the brief: "Write the worker output to --result (the raw the master's
+    # agent.parse_result will consume)."
+    # So we should write proc.stdout to the result file.
+    # But MockAgent.parse_result expects raw string, and returns a Result object.
+    # The master will read this file and call parse_result on it.
+
+    # Actually looking at ssh_transport, it reads the result file and calls parse_result:
+    # raw = ""
+    # if os.path.exists(local_result):
+    #     with open(local_result) as fh:
+    #         raw = fh.read()
+    # return agent.parse_result(raw, envelope)
+
+    # So we should write the stdout to the result file, NOT the parsed Result.
+    # But wait - MockAgent's build_invocation returns ["true"], which produces empty stdout.
+    # And parse_result takes that empty string and returns a Result object.
+
+    # The issue is: the result file needs to be something that parse_result can consume.
+    # For MockAgent, it doesn't matter what's in the file - parse_result ignores it and
+    # looks at the envelope's scenario.
+
+    # Let me check what ssh_transport expects: it writes the envelope, runs serve-once,
+    # then scps back the result.json, reads it, and calls parse_result on the raw content.
+
+    # Actually, I think the intent is: the agent's invocation writes to stdout,
+    # serve-once captures that stdout and writes it to the result file.
+    # Then the master reads the result file and calls agent.parse_result on it.
+
+    # For MockAgent, build_invocation returns ["true"], so stdout is empty.
+    # parse_result takes that empty string and returns a Result based on the scenario.
+
+    # So we should write proc.stdout to the result file.
+    try:
+        with open(result_path, "w") as f:
+            f.write(proc.stdout or "")
+    except OSError as exc:
+        print(f"Error: failed to write result file: {exc}", file=sys.stderr)
+        return 1
+
+    # Exit with the subprocess's exit code
+    return 0 if proc.returncode == 0 else 1
+
+
 def cmd_crew(args):
     """Dispatch crew subcommands."""
     subcommand = args.crew_action
@@ -535,6 +637,12 @@ def main(argv=None):
     serve_parser.add_argument('--run', help='Run ID (for worker, default: most recent running run)')
     serve_parser.add_argument('--base-ref', help='Base ref (for worker, default: main)')
 
+    # --- serve-once ---
+    serve_once_parser = subparsers.add_parser('serve-once', help='Worker-runner: run one agent invocation (used by fleet)')
+    serve_once_parser.add_argument('--envelope', required=True, help='Path to envelope.json')
+    serve_once_parser.add_argument('--result', required=True, help='Path to write result output')
+    serve_once_parser.add_argument('--timeout', type=int, required=True, help='Timeout in seconds')
+
     # Parse
     args = parser.parse_args(argv)
 
@@ -574,6 +682,8 @@ def main(argv=None):
             return cmd_show(args)
         elif args.command == 'serve':
             return cmd_serve(args)
+        elif args.command == 'serve-once':
+            return cmd_serve_once(args)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         if os.environ.get("HERMES_DEBUG"):
