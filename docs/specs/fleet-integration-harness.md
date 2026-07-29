@@ -78,7 +78,9 @@ foundation the future `meta`/`devserver` sites extend:
 ## 5. The fake scenario (`testkit/scenarios/`)
 
 A deterministic generator producing one run's worth of work **plus** the `MockAgent`
-result table keyed by ticket, engineered to exercise every path so the fleet has a
+result table keyed by `(ticket, attempt)` (so a ticket's retry can yield a different
+outcome — enabling the infra retry-then-succeed and re-verify requeue-then-pass paths
+below), engineered to exercise every path so the fleet has a
 real "shared goal" with a rich, checkable outcome:
 
 - **Volume + spread:** ~40 tickets across `cpu` and `gpu` resource reqs so work
