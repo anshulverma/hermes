@@ -11,15 +11,19 @@ import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
 import Findings from './views/Findings';
 import ActivityFeed from './views/ActivityFeed';
+import TokenLogin from './components/TokenLogin';
 import { useHealth, useRuns } from './hooks/useApi';
 import { useEventStream } from './hooks/useEventStream';
 import { EmptyState, CrewBackdrop } from './ds';
 import { fetchRun } from './api/client';
 import type { RunDetail } from './api/client';
+import { hasToken, isRemote } from './api/auth';
 
 type View = 'overview' | 'metrics' | 'board' | 'crew' | 'findings' | 'activity';
 
 export default function App() {
+  const [authenticated, setAuthenticated] = useState(hasToken() || !isRemote());
+
   const { loading: healthLoading, error: healthError } = useHealth();
   const { data: runs, loading: runsLoading, error: runsError } = useRuns();
   const [view, setView] = useState<View>('overview');
@@ -79,6 +83,11 @@ export default function App() {
   const loading = healthLoading || runsLoading || detailLoading;
   const error = healthError || runsError;
 
+  // Show token login if remote and not authenticated
+  if (!authenticated) {
+    return <TokenLogin onAuthenticated={() => setAuthenticated(true)} />;
+  }
+
   return (
     <div
       style={{
@@ -130,7 +139,7 @@ export default function App() {
         )}
 
         {!loading && !error && runDetail && view === 'overview' && (
-          <RunOverview run={runDetail} />
+          <RunOverview run={runDetail} onRunUpdate={() => refreshRunDetail(runDetail.id)} />
         )}
 
         {!loading && !error && runDetail && view === 'board' && (

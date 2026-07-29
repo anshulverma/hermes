@@ -101,7 +101,7 @@ describe('TicketBoard', () => {
     });
 
     // Initial fetch should have been called
-    expect(mockFetch).toHaveBeenCalledWith('/api/runs/test-run/tickets');
+    expect((mockFetch as any).mock.calls[0][0]).toBe('/api/runs/test-run/tickets');
   });
 
   it('should refetch with search query', async () => {
@@ -122,7 +122,7 @@ describe('TicketBoard', () => {
 
     await waitFor(() => {
       // Should have called fetch with search param
-      expect(mockFetch).toHaveBeenCalledWith('/api/runs/test-run/tickets?search=issue');
+      expect((mockFetch as any).mock.calls[0][0]).toBe('/api/runs/test-run/tickets?search=issue');
     });
   });
 
@@ -145,7 +145,7 @@ describe('TicketBoard', () => {
     fireEvent.change(resourceSelect, { target: { value: 'gpu' } });
 
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/runs/test-run/tickets?resource=gpu');
+      expect((mockFetch as any).mock.calls[0][0]).toBe('/api/runs/test-run/tickets?resource=gpu');
     });
   });
 

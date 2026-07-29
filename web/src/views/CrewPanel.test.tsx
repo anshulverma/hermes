@@ -83,7 +83,7 @@ describe('CrewPanel', () => {
 
     // Wait for the fetch to complete
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/crew');
+      expect((mockFetch as any).mock.calls[0][0]).toBe('/api/crew');
     });
 
     // Should show all three hosts
@@ -146,7 +146,10 @@ describe('CrewPanel', () => {
 
     // Should fetch leases for host-2
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/leases?host=host-2');
+      const calls = (mockFetch as any).mock.calls;
+      const leasesCalls = calls.filter((call: any) => call[0].startsWith('/api/leases'));
+      expect(leasesCalls.length).toBeGreaterThan(0);
+      expect(leasesCalls[0][0]).toBe('/api/leases?host=host-2');
     });
 
     // Drawer should show the lease info (multiple matches, just verify one exists)
@@ -192,7 +195,10 @@ describe('CrewPanel', () => {
 
     // Should fetch leases for host-1
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/leases?host=host-1');
+      const calls = (mockFetch as any).mock.calls;
+      const leasesCalls = calls.filter((call: any) => call[0].startsWith('/api/leases'));
+      expect(leasesCalls.length).toBeGreaterThan(0);
+      expect(leasesCalls[0][0]).toBe('/api/leases?host=host-1');
     });
 
     // Should show empty state

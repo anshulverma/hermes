@@ -102,7 +102,7 @@ describe('TicketDrawer', () => {
     render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/tickets/test-run/t-0');
+      expect((mockFetch as any).mock.calls[0][0]).toBe('/api/tickets/test-run/t-0');
     });
   });
 

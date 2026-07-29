@@ -73,7 +73,10 @@ describe('ActivityFeed', () => {
     render(<ActivityFeed />);
 
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/events');
+      // First call is /api/events/kinds, second is /api/events
+      const calls = (mockFetch as any).mock.calls;
+      const eventsCalls = calls.filter((call: any) => call[0] === '/api/events');
+      expect(eventsCalls.length).toBeGreaterThan(0);
     });
   });
 
@@ -97,7 +100,7 @@ describe('ActivityFeed', () => {
     fireEvent.change(select, { target: { value: 'ticket_claimed' } });
 
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/events?kind=ticket_claimed');
+      expect((mockFetch as any).mock.calls[0][0]).toBe('/api/events?kind=ticket_claimed');
     });
   });
 
@@ -119,7 +122,7 @@ describe('ActivityFeed', () => {
     fireEvent.change(select, { target: { value: 'ticket_claimed' } });
 
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/events?kind=ticket_claimed');
+      expect((mockFetch as any).mock.calls[0][0]).toBe('/api/events?kind=ticket_claimed');
     });
 
     // Now clear back to "all"
@@ -133,7 +136,7 @@ describe('ActivityFeed', () => {
 
     await waitFor(() => {
       // Should fetch without kind param
-      expect(mockFetch).toHaveBeenCalledWith('/api/events');
+      expect((mockFetch as any).mock.calls[0][0]).toBe('/api/events');
     });
   });
 

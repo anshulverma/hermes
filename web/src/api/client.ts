@@ -1,7 +1,20 @@
 /**
  * API client for Hermes control plane.
  * Typed fetch wrappers for /api endpoints.
+ * Phase D1b: Auth integration (Authorization header, AuthError).
  */
+
+import { getToken, isRemote } from './auth';
+
+/**
+ * AuthError - thrown on 401 responses.
+ */
+export class AuthError extends Error {
+  constructor(message: string = 'Unauthorized') {
+    super(message);
+    this.name = 'AuthError';
+  }
+}
 
 export type HealthResponse = {
   status: string;
@@ -53,11 +66,41 @@ export type TicketFilters = {
   search?: string;
 };
 
-async function fetchJSON<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
+  // Build headers with auth if token is available
+  const headers: Record<string, string> = {
+    ...(options?.headers as Record<string, string> || {}),
+  };
+
+  const token = getToken();
+
+  // Add Authorization header if:
+  // - Token is present AND
+  // - (Request is a mutation OR we're in remote mode)
+  const isMutation = options?.method && options.method !== 'GET';
+  if (token && (isMutation || isRemote())) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  // If we're sending JSON, add Content-Type
+  if (options?.body && typeof options.body === 'string') {
+    headers['Content-Type'] = 'application/json';
+  }
+
+  const response = await fetch(url, {
+    ...options,
+    headers,
+  });
+
   if (!response.ok) {
+    // Throw AuthError on 401
+    if (response.status === 401) {
+      throw new AuthError(response.statusText || 'Unauthorized');
+    }
+
     throw new Error(`HTTP error! status: ${response.status}`);
   }
+
   return response.json();
 }
 
@@ -241,4 +284,31 @@ export async function fetchReductions(runId: string, phase?: string): Promise<Re
       state: t.state.replace(/_/g, '-'),
     })),
   }));
+}
+
+/**
+ * Run control endpoints (Phase D1b).
+ * POST /api/runs/{id}/pause|resume|stop
+ */
+
+export type RunControlResponse = {
+  state: string;
+};
+
+export async function pauseRun(runId: string): Promise<RunControlResponse> {
+  return fetchJSON<RunControlResponse>(`/api/runs/${runId}/pause`, {
+    method: 'POST',
+  });
+}
+
+export async function resumeRun(runId: string): Promise<RunControlResponse> {
+  return fetchJSON<RunControlResponse>(`/api/runs/${runId}/resume`, {
+    method: 'POST',
+  });
+}
+
+export async function stopRun(runId: string): Promise<RunControlResponse> {
+  return fetchJSON<RunControlResponse>(`/api/runs/${runId}/stop`, {
+    method: 'POST',
+  });
 }

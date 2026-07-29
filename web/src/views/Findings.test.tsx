@@ -196,7 +196,7 @@ describe('Findings', () => {
     render(<Findings runId="test-run-123" />);
 
     await waitFor(() => {
-      expect(mockFetch).toHaveBeenCalledWith('/api/runs/test-run-123/reductions');
+      expect((mockFetch as any).mock.calls[0][0]).toBe('/api/runs/test-run-123/reductions');
     });
   });
 });

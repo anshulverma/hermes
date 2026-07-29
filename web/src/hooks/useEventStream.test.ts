@@ -6,13 +6,21 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { useEventStream } from './useEventStream';
+import { clearToken, setToken } from '../api/auth';
 
 describe('useEventStream', () => {
   let mockWebSocketInstance: any;
   let eventListeners: Map<string, Function[]>;
+  let capturedUrl: string | null = null;
 
   beforeEach(() => {
+    // Reset auth state
+    clearToken();
+    delete (window as any).__HERMES_TOKEN__;
+    delete (window as any).__HERMES_BIND__;
+
     eventListeners = new Map();
+    capturedUrl = null;
 
     // Mock global WebSocket constructor
     mockWebSocketInstance = {
@@ -31,7 +39,8 @@ describe('useEventStream', () => {
     // Replace global WebSocket
     // @ts-ignore - test mock
     globalThis.WebSocket = class MockWebSocket {
-      constructor(_url: string) {
+      constructor(url: string) {
+        capturedUrl = url;
         return mockWebSocketInstance;
       }
     };
@@ -180,5 +189,83 @@ describe('useEventStream', () => {
 
     // Last event should be the most recent
     expect(result.current.lastEvent?.id).toBe(600);
+  });
+
+  describe('Auth integration (Phase D1b)', () => {
+    it('includes token in WebSocket URL query string', () => {
+      setToken('ws-token-123');
+
+      renderHook(() => useEventStream());
+
+      // Check that WebSocket was constructed with token in URL
+      expect(capturedUrl).toContain('?token=ws-token-123');
+    });
+
+    it('includes token along with since param when both present', () => {
+      setToken('ws-token-456');
+
+      renderHook(() => useEventStream(1234567890));
+
+      // Both params should be present
+      expect(capturedUrl).toContain('token=ws-token-456');
+      expect(capturedUrl).toContain('since=1234567890');
+    });
+
+    it('does NOT infinite-reconnect on 4401 close (auth failure)', async () => {
+      setToken('invalid-ws-token');
+
+      const { result } = renderHook(() => useEventStream());
+
+      // Simulate connection open
+      const openHandlers = eventListeners.get('open');
+      mockWebSocketInstance.readyState = WebSocket.OPEN;
+      openHandlers![0]({ type: 'open' });
+
+      await waitFor(() => {
+        expect(result.current.connected).toBe(true);
+      });
+
+      // Simulate close with code 4401 (auth failure)
+      const closeHandlers = eventListeners.get('close');
+      expect(closeHandlers).toBeDefined();
+
+      mockWebSocketInstance.readyState = WebSocket.CLOSED;
+      closeHandlers![0]({ type: 'close', code: 4401 });
+
+      await waitFor(() => {
+        expect(result.current.connected).toBe(false);
+      });
+
+      // Should expose auth error state (not attempt reconnect)
+      expect(result.current.authError).toBe(true);
+    });
+
+    it('DOES reconnect on non-auth close codes (transient failure)', async () => {
+      setToken('valid-token');
+
+      const { result } = renderHook(() => useEventStream());
+
+      // Simulate connection open
+      const openHandlers = eventListeners.get('open');
+      mockWebSocketInstance.readyState = WebSocket.OPEN;
+      openHandlers![0]({ type: 'open' });
+
+      await waitFor(() => {
+        expect(result.current.connected).toBe(true);
+      });
+
+      // Simulate close with normal code (1000 = normal closure)
+      const closeHandlers = eventListeners.get('close');
+
+      mockWebSocketInstance.readyState = WebSocket.CLOSED;
+      closeHandlers![0]({ type: 'close', code: 1000 });
+
+      await waitFor(() => {
+        expect(result.current.connected).toBe(false);
+      });
+
+      // Should NOT set auth error (transient, will reconnect)
+      expect(result.current.authError).toBeFalsy();
+    });
   });
 });
