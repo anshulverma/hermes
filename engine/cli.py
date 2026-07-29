@@ -408,6 +408,7 @@ def cmd_serve_api(args):
     """hermes serve --api [--host 127.0.0.1] [--port 8080] [--rotate-token].
 
     Run the FastAPI control-plane server. Thin wrapper around uvicorn.
+    Applies migrations on start via _connect().
     """
     try:
         import uvicorn
@@ -417,6 +418,9 @@ def cmd_serve_api(args):
         print(f"Error: server dependencies not installed. Run: pip install -e '.[server]'", file=sys.stderr)
         print(f"  ({e})", file=sys.stderr)
         return 1
+
+    # Connect to the database (applies migrations)
+    _connect().close()
 
     home = config.resolve_home()
 

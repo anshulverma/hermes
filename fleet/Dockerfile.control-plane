@@ -1,0 +1,46 @@
+# Hermes control plane image.
+#
+# Runs the FastAPI control-plane server (`hermes serve --api`). Unlike the
+# worker image (which uses PYTHONPATH + wrapper to dodge flat-layout), the
+# control plane pip installs the package with the server extra so
+# FastAPI/uvicorn resolve. Migrations apply on start (every process entry
+# calls apply_migrations via cli._connect). HERMES_HOME is a persistent
+# volume (queue.db + api_token persist on local, non-networked storage).
+#
+# Build with host networking so pip reaches the mirrors behind the proxy:
+#   podman build --network=host -f fleet/Dockerfile.control-plane -t hermes-control-plane .
+FROM docker.io/library/python:3.12-slim
+
+# Install build dependencies
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       build-essential \
+       sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/hermes
+
+# Copy the entire repo (needed for pip install)
+COPY . /opt/hermes/
+
+# Install the package with the server extra (FastAPI + uvicorn)
+# This resolves the server dependencies properly
+RUN pip install --no-cache-dir -e '.[server]'
+
+# Create HERMES_HOME directory (will be bind-mounted in production)
+RUN mkdir -p /hermes-home
+
+# Expose the API port (default 8080)
+EXPOSE 8080
+
+# Set default environment variables
+ENV HERMES_HOME=/hermes-home
+# Bind to 0.0.0.0 inside the container so it's accessible via port mapping
+# The compose file should bind the host side to 127.0.0.1 for loopback-only access
+ENV HERMES_BIND=0.0.0.0
+ENV HERMES_LOG_FORMAT=json
+
+# Run the control plane API server
+# Migrations apply on start via cli._connect() called by cmd_serve_api
+# The bind address comes from HERMES_BIND env var (default 127.0.0.1)
+CMD ["hermes", "serve", "--api"]

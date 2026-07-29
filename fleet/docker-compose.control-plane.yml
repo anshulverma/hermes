@@ -1,0 +1,53 @@
+# Hermes control plane compose configuration.
+#
+# Brings the control plane up bound to 127.0.0.1 by default (loopback-only
+# access). Sets HERMES_LOG_FORMAT=json and mounts a persistent named
+# HERMES_HOME volume (queue.db + api_token persist).
+#
+# For non-loopback (0.0.0.0 behind a trusted proxy), uncomment the
+# alternative service config below. NEVER bind 0.0.0.0 without a trusted
+# proxy that supplies auth — the loopback path bootstraps the token and
+# gates GET endpoints only; non-loopback requires external auth.
+version: "3.8"
+
+volumes:
+  hermes-home:
+    driver: local
+
+services:
+  control-plane:
+    build:
+      context: ..
+      dockerfile: fleet/Dockerfile.control-plane
+    image: hermes-control-plane:latest
+    ports:
+      # Loopback bind (default): API accessible only from localhost on host
+      # The server inside the container binds to 0.0.0.0 (so it's accessible via port mapping)
+      # but the host-side port is bound to 127.0.0.1 for loopback-only access
+      - "127.0.0.1:8080:8080"
+    environment:
+      HERMES_HOME: /hermes-home
+      HERMES_BIND: 0.0.0.0  # Bind to all interfaces inside container
+      HERMES_LOG_FORMAT: json
+    volumes:
+      # Named volume for persistent HERMES_HOME (queue.db + api_token)
+      - hermes-home:/hermes-home
+
+  # --- Non-loopback configuration (commented) ---
+  # Uncomment ONLY when deploying behind a trusted proxy that provides auth.
+  # The loopback token-bootstrap + GET-gating model does NOT apply here.
+  #
+  # control-plane-remote:
+  #   build:
+  #     context: ..
+  #     dockerfile: fleet/Dockerfile.control-plane
+  #   image: hermes-control-plane:latest
+  #   ports:
+  #     # Bind to all interfaces (0.0.0.0) on HOST — ONLY behind a trusted proxy
+  #     - "8080:8080"
+  #   environment:
+  #     HERMES_HOME: /hermes-home
+  #     HERMES_BIND: 0.0.0.0  # Server inside container binds to 0.0.0.0
+  #     HERMES_LOG_FORMAT: json
+  #   volumes:
+  #     - hermes-home:/hermes-home
