@@ -40,6 +40,32 @@ def _load_playbook_site_agent(args):
     return pb, st, ag
 
 
+def _load_goals_file(path):
+    """Load goals from a file.
+
+    Format per §2.1a:
+    - One goal per line
+    - Skip blank lines
+    - Skip lines whose first non-space char is '#'
+    - Strip surrounding whitespace on each kept line
+
+    Returns:
+        list[str]: Parsed goals in order
+    """
+    goals = []
+    with open(path, 'r') as f:
+        for line in f:
+            stripped = line.strip()
+            # Skip blank lines
+            if not stripped:
+                continue
+            # Skip comment lines (first non-space char is '#')
+            if stripped.startswith('#'):
+                continue
+            goals.append(stripped)
+    return goals
+
+
 def _create_run(conn, playbook_name, site_name, base_ref, run_config=None):
     """Create a new run row and return its ID."""
     run_id = f"run-{int(time.time() * 1000)}"
@@ -56,12 +82,17 @@ def _create_run(conn, playbook_name, site_name, base_ref, run_config=None):
 
 
 def cmd_run(args):
-    """hermes run <playbook> --site <site> [--agent <agent>] [--dry-run] [--base-ref R]."""
+    """hermes run <playbook> --site <site> [--agent <agent>] [--dry-run] [--base-ref R] [--goals FILE]."""
     pb, st, ag = _load_playbook_site_agent(args)
 
     conn = _connect()
     base_ref = getattr(args, 'base_ref', None) or 'main'
+
+    # Build run_config from --goals if provided
     run_config = {}
+    if hasattr(args, 'goals') and args.goals:
+        goals = _load_goals_file(args.goals)
+        run_config = {"goals": goals}
 
     # Create run
     run_id = _create_run(conn, pb.name, st.name, base_ref, run_config)
@@ -602,6 +633,7 @@ def main(argv=None):
     run_parser.add_argument('--agent', help='Agent name (default: HERMES_AGENT)')
     run_parser.add_argument('--base-ref', help='Base ref (default: main)')
     run_parser.add_argument('--hosts', help='Comma-separated hosts (default: localhost for local site)')
+    run_parser.add_argument('--goals', help='Path to goals file (one goal per line, # for comments)')
     run_parser.add_argument('--dry-run', action='store_true', help='Seed only, no dispatch')
 
     # --- reduction ---

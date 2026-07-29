@@ -665,3 +665,147 @@ def test_serve_once_malformed_envelope(setup_testkit, monkeypatch, tmp_path, cap
         captured = capsys.readouterr()
         combined = (captured.out + captured.err).lower()
         assert "error" in combined or "invalid" in combined or "json" in combined
+
+
+# --- _load_goals_file helper -----------------------------------------------
+
+def test_load_goals_file_parses_correctly(tmp_path):
+    """_load_goals_file parses goals: keeps goals, drops blank/comment lines, strips whitespace."""
+    from engine.cli import _load_goals_file
+
+    goals_file = tmp_path / "goals.txt"
+    goals_file.write_text("""
+# This is a comment
+Goal 1 with spaces
+
+# Another comment
+  Goal 2 with leading spaces
+Goal 3 no spaces
+
+   # Comment with leading spaces
+Goal 4
+""")
+
+    result = _load_goals_file(str(goals_file))
+
+    # Should keep exactly 4 goals, in order, stripped
+    assert result == ["Goal 1 with spaces", "Goal 2 with leading spaces", "Goal 3 no spaces", "Goal 4"]
+
+
+def test_load_goals_file_empty_file(tmp_path):
+    """_load_goals_file with empty file returns empty list."""
+    from engine.cli import _load_goals_file
+
+    goals_file = tmp_path / "goals.txt"
+    goals_file.write_text("")
+
+    result = _load_goals_file(str(goals_file))
+    assert result == []
+
+
+def test_load_goals_file_all_filtered(tmp_path):
+    """_load_goals_file with only comments and blanks returns empty list."""
+    from engine.cli import _load_goals_file
+
+    goals_file = tmp_path / "goals.txt"
+    goals_file.write_text("""
+# Comment 1
+
+# Comment 2
+
+""")
+
+    result = _load_goals_file(str(goals_file))
+    assert result == []
+
+
+# --- run --goals FILE integration ------------------------------------------
+
+def test_run_with_goals_file_sets_config(setup_testkit, tmp_path):
+    """run --goals FILE puts parsed goals into run.config."""
+    with temp_hermes_home() as home:
+        # Set up canned issues (for the example playbook's seeding to work)
+        issues_path = home / "issues" / "bug.json"
+        write_canned_issues(issues_path)
+
+        # Create a goals file
+        goals_file = tmp_path / "goals.txt"
+        goals_file.write_text("""
+# Comment line
+Fix bug in auth
+Improve performance
+# Another comment
+
+Add new feature
+""")
+
+        # Run with --goals
+        exit_code = main([
+            "run", "example",
+            "--site", "local",
+            "--agent", "mock",
+            "--goals", str(goals_file),
+            "--dry-run",
+        ])
+
+        assert exit_code == 0
+
+        # Check that run.config has the goals
+        conn = _conn()
+        runs = conn.execute("SELECT id, config_json FROM runs").fetchall()
+        assert len(runs) == 1
+        run_id, config_json = runs[0]
+        config = json.loads(config_json)
+
+        assert "goals" in config
+        assert config["goals"] == ["Fix bug in auth", "Improve performance", "Add new feature"]
+        conn.close()
+
+
+def test_run_with_goals_empty_file(setup_testkit, tmp_path):
+    """run --goals with empty file sets config['goals'] to []."""
+    with temp_hermes_home() as home:
+        # Set up canned issues (for the example playbook's seeding to work)
+        issues_path = home / "issues" / "bug.json"
+        write_canned_issues(issues_path)
+
+        goals_file = tmp_path / "goals.txt"
+        goals_file.write_text("")
+
+        exit_code = main([
+            "run", "example",
+            "--site", "local",
+            "--agent", "mock",
+            "--goals", str(goals_file),
+            "--dry-run",
+        ])
+
+        assert exit_code == 0
+
+        conn = _conn()
+        config_json = conn.execute("SELECT config_json FROM runs").fetchone()[0]
+        config = json.loads(config_json)
+        assert config["goals"] == []
+        conn.close()
+
+
+def test_run_without_goals_unchanged(setup_testkit):
+    """run without --goals keeps config={} (regression test)."""
+    with temp_hermes_home() as home:
+        issues_path = home / "issues" / "bug.json"
+        write_canned_issues(issues_path)
+
+        exit_code = main([
+            "run", "example",
+            "--site", "local",
+            "--agent", "mock",
+            "--dry-run",
+        ])
+
+        assert exit_code == 0
+
+        conn = _conn()
+        config_json = conn.execute("SELECT config_json FROM runs").fetchone()[0]
+        config = json.loads(config_json)
+        assert config == {}, "Without --goals, config should be empty"
+        conn.close()
