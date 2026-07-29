@@ -2,7 +2,7 @@
 
 Status: **draft**. Date: 2026-07-28. Parent: `docs/DESIGN.md` §10.
 Depends on: engine-core (`docs/specs/engine-core.md`) + the FastAPI server (DESIGN
-sub-project 3). North-star reference: `web/prototype/` (the Claude Design import).
+sub-project 4). North-star reference: `web/prototype/` (the Claude Design import).
 
 ## 1. North star
 
@@ -68,7 +68,7 @@ web/                      # Vite + React + TS SPA (this plan)
     components/           # app-level composites (TopBar, drawers, dialogs)
     App.tsx  main.tsx
   prototype/              # the Claude Design import (reference only, not built)
-server/                   # FastAPI JSON API + websocket (DESIGN §10, sub-project 3)
+server/                   # FastAPI JSON API + websocket (DESIGN §10, sub-project 4)
 engine/                   # data source (queue.db) — sub-project 1
 ```
 
@@ -87,7 +87,7 @@ result, attempts, evidence); `GET /api/crew` (members + `HealthReport`);
 Live (Phase C): `WS /api/ws` — event stream + counter deltas.
 Mutate (Phase D, token-gated): `POST /api/runs/{id}/{pause|resume|stop}`;
 `POST /api/crew` (add), `POST /api/crew/{host}/{drain|reprobe}`,
-`DELETE /api/crew/{host}`; `POST /api/tickets/{id}/{requeue|reprioritize|park}`;
+`DELETE /api/crew/{host}`; `POST /api/tickets/{id}/{requeue|park}`;
 `POST /api/reductions/{id}/{accept|reject}`.
 Metrics (Phase E, gated): `GET /api/runs/{id}/metrics` (+ `resources`, `agent`
 sub-objects only when instrumented).
@@ -123,13 +123,22 @@ parallel with engine-core. Each slice below names its engine-core dependency.
   Slice 9. DoD: numbers equal a `sqlite` query on the real run.
 - **B2. Ticket board.** `GET /api/runs/{id}/tickets`; `KanbanColumn`/`TicketCard`;
   search + state/resource/host filters wired to real query params; row → drawer.
+  Dep: engine-core Slice 9.
 - **B3. Ticket drawer.** `GET /api/tickets/{id}`; payload, strict result, attempt
-  timeline, evidence links (read-only).
-- **B4. Crew panel.** `GET /api/crew`; `CrewRow` + `HealthBadge` from real
-  `HealthReport`; host drawer (read-only).
-- **B5. Activity feed.** `GET /api/events?since=`; `EventRow` list + kind filter.
+  timeline, evidence links (read-only). Dep: engine-core Slice 9.
+- **B4. Crew panel.** `GET /api/crew` + `GET /api/leases`; `CrewRow` +
+  `HealthBadge` from real `HealthReport`; host drawer (read-only) also renders the
+  host's active lease (ticket id + remaining lease TTL) from `GET /api/leases`, or a
+  truthful empty state when the host holds none. This is the sole consumer of
+  `GET /api/leases` and the view backing §10's fleet-wide-leases e2e assertion. Dep:
+  engine-core Slice 8 (crew + health) — implies Slice 6 (leases).
+- **B5. Activity feed.** `GET /api/events?since=`; `EventRow` list + kind filter. Dep: engine-core Slice 9.
 - **B6. Findings.** `GET /api/runs/{id}/reductions`; finding cards with member
-  tickets + `fix_state` (read-only).
+  tickets + the reduction's real `review_state` (pending/accepted/rejected/
+  superseded). Any playbook-specific fix status (e.g. mechanic's diff-published/
+  proposed) is derived from the reduction `json` + member-ticket states via the
+  normalization layer — never the prototype's mock `fix_state` field (read-only).
+  Dep: engine-core Slice 9.
 
 **Phase C — live.**
 - **C1. Websocket.** `WS /api/ws` backed by the `events` table; `LiveDot` + feed +
@@ -141,8 +150,9 @@ parallel with engine-core. Each slice below names its engine-core dependency.
   (`queue.set_run_state`). Dep: engine-core Slice 5.
 - **D2. Crew control.** Add-host modal with a **live health-check checklist** →
   `crew.add`; drain/remove/re-probe. Dep: engine-core Slice 8.
-- **D3. Ticket control.** requeue / reprioritize / park from the drawer. Dep:
-  engine-core Slice 5/6.
+- **D3. Ticket control.** requeue / park from the drawer (requeue →
+  `queue.requeue_needs_human`, park → `queue.park_ticket`). Dep: engine-core
+  Slice 5.
 - **D4. Findings review.** accept/reject a reduction → `POST /api/reductions/{id}/…`
   (members settle per engine semantics). Dep: engine-core Slice 5.
 - Auth is added with the first mutation (D1): loopback bind + bearer token, 401/4401
@@ -152,7 +162,8 @@ parallel with engine-core. Each slice below names its engine-core dependency.
 its data is real).**
 - **E1. Run metrics.** Server aggregates time-buckets from `events`/`attempts`
   (throughput, done/failed cumulative, error rate, crew online) →
-  `GET /api/runs/{id}/metrics`; `MetricsView` core.
+  `GET /api/runs/{id}/metrics`; `MetricsView` core. Dep: engine-core Slice 9
+  (events/attempts populated by a real run).
 - **E2. Resources.** Requires periodic host-resource sampling
   (`HealthReport.resources` over time); `ResourcesSection` (CPU/GPU/mem series).
   Not shipped until sampling exists.
@@ -203,6 +214,6 @@ its data is real).**
   needed.
 - Token/cost telemetry shape from the `claude` agent adapter (drives E3) — define
   when Phase E starts.
-- Whether the server (sub-project 3) gets its own spec doc or is specified inline
+- Whether the server (sub-project 4) gets its own spec doc or is specified inline
   here; lean: fold the server's read/mutate/ws contract into this plan and keep
   DESIGN §10 as the authority for auth/binding.

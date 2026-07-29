@@ -16,8 +16,9 @@ exercises the distributed machinery. The Docker fleet does, with **zero Meta / n
 real agent / no cloud**:
 
 - the **real `ssh_transport`** (ship envelope, run worker over SSH, pull result),
-- **multi-host claim atomicity** (N nodes claiming from one `queue.db` yield
-  disjoint tickets),
+- **multi-host claim atomicity** (the master's per-host serve loops claiming
+  concurrently from the one `queue.db` dispatch disjoint tickets to distinct real
+  hosts — no double-claim),
 - **crew provisioning, health probes, and the heartbeat sweep** across real hosts,
 - **leases across hosts** (a scarce class's semaphore is honored fleet-wide),
 - **host-down requeue** (kill a container mid-run → its in-flight tickets requeue
@@ -41,7 +42,7 @@ docker-compose.fleet.yml
   `authorized_keys`. No external credentials, no `/design-login`, no proxy.
 - **Master** holds `HERMES_HOME` (the real `queue.db`), the `ssh` site config
   listing the worker containers as hosts (with their resource labels), and the
-  fake scenario. It runs `hermes run <scenario> --site ssh --agent mock`.
+  fake scenario. It runs `HERMES_AGENT=mock hermes run <scenario> --site ssh`.
 - **Workers** run only `sshd` + the hermes worker runner + the `MockAgent` + the
   no-ship guard shims (all baked into the image). They are stateless, reached only
   via master-initiated SSH — exactly the production model.
@@ -86,9 +87,12 @@ real "shared goal" with a rich, checkable outcome:
   produces a known number of clusters (canonical + duplicates) — verifies
   cross-host dedup.
 - **Failures:** a few `driver_failed` (terminal) and a few `infra_failed`
-  (retry-then-succeed) → verifies the retry cap + backoff.
-- **needs_human:** a couple with `verify=False` → routed to `needs_human` →
-  verifies the re-verify override and reduction review path.
+  (retry-then-succeed) → verifies the retry cap (infra retry max 3).
+- **needs_human:** tickets routed to `needs_human` by **both** engine routes — one
+  via a `verify=False` re-verify contradiction (the re-verify override, resolved by
+  operator requeue) and one via a `reduce` that flags `needs_human_ticket_ids` (the
+  reduction-review path, resolved by accept/reject) → verifies both routes and their
+  distinct resolution paths.
 - **Contention:** more gpu tickets than gpu slots → some `parked` then un-parked as
   leases free → verifies the parked lifecycle + semaphore.
 - The scenario is a single seedable fixture reused by BOTH the single-box tier and
@@ -96,10 +100,24 @@ real "shared goal" with a rich, checkable outcome:
 
 ## 6. The shared goal & convergence assertions
 
-The master runs one run; all worker containers pull from its queue and drive it to
-terminal. The integration test asserts the fleet **converged correctly**:
+The master runs one run; its per-host serve loops claim from the single `queue.db`
+and dispatch each ticket to a worker container over `ssh_transport`, driving it to
+terminal. Because the scenario deliberately routes tickets to `needs_human`,
+`master_loop` cannot reach `done` on its own — `is_done(run)` never holds while a
+ticket sits in `needs_human`, so the run would stay `running`. The harness's
+convergence procedure therefore includes an **automated review step**: once dispatch
+quiesces and the only non-terminal tickets are `needs_human`, it settles each via
+the operator resolution paths — `hermes reduction accept|reject` for the
+reduce-routed ones (`needs_human → done`/`failed`) and `hermes ticket requeue` for
+the re-verify-routed one (`needs_human → queued`, whose retry then passes `verify`)
+— mirroring the single-box tier's engine-core Slice 9 end-to-end test, which calls
+`accept_reduction`/`reject_reduction`/`requeue_needs_human` for the same purpose.
+Only then does the run reach `done`. The integration test asserts the fleet
+**converged correctly**:
 
-1. **Run → `done`**; every ticket terminal (`done`/`failed`/`needs_human` resolved).
+1. **Run → `done`**: after the automated review step above settles every
+   `needs_human` ticket, `master_loop` reaches `done` via `is_done(run)` and every
+   ticket is terminal (`done`/`failed`).
 2. **Distribution:** the `attempts` audit shows work ran on **multiple distinct
    hosts**, and no ticket was double-claimed.
 3. **Reduce:** exactly the scenario's expected clusters/reductions were produced and
