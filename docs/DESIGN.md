@@ -600,14 +600,22 @@ to `needs_human` (§3). `site.submit_for_review` returns a review URL and can ne
   envelope construction); each playbook's pure logic (seed/reduce/done); each
   site adapter (command construction + health parsing, subprocess mocked).
   Python: `pytest`; frontend: `vitest` + React Testing Library.
-- **Integration** — the **full pipeline on the `local` site with a mock agent
-  runner** (a fake `claude` that reads a payload and writes a canned result):
-  seed → dispatch → run → reduce → done, asserting terminal states, contract
-  enforcement, the event stream, and that the **no-ship guard actually blocks**.
-  Plus control-plane API tests (spin the server, hit endpoints + websocket).
-- **E2E** — Playwright drives the web UI against a seeded local run.
-- A top-level `run_tests.sh` runs all suites; each plugin owns its `tests/`.
-  Everything runs with **no Meta dependency** thanks to the `local` site.
+- **Integration (single-box)** — the **full pipeline on the `local` site with a
+  mock agent runner** (a fake `claude` that reads a payload and writes a canned
+  result): seed → dispatch → run → reduce → done, asserting terminal states,
+  contract enforcement, the event stream, and that the **no-ship guard actually
+  blocks**. Plus control-plane API tests (spin the server, hit endpoints +
+  websocket). Always-on, fast, no Docker.
+- **Integration (fleet, multi-node)** — a **Docker fleet** of worker containers
+  driven over real SSH through one shared run, exercising the distributed path the
+  single-box tier can't (real `ssh_transport`, multi-host claim atomicity, crew
+  health/heartbeat, fleet-wide leases, host-down requeue, cross-host reduce). Runs
+  the same deterministic fake scenario; gated behind `@pytest.mark.docker`. Full
+  spec: `docs/specs/fleet-integration-harness.md`.
+- **E2E** — Playwright drives the web UI against a seeded local run (or the Docker
+  fleet for a realistic multi-host run to render).
+- A top-level `run_tests.sh` runs all suites. Everything runs with **no Meta
+  dependency** thanks to the `local` site + Docker fleet + `MockAgent`.
 
 ---
 

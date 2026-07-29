@@ -271,15 +271,43 @@ routes to `needs_human` end-to-end.
 
 ---
 
+## Slice 12 — Fleet integration harness (Docker, multi-node)
+
+Realistic multi-node integration beyond the single-box `local` tier. Full spec:
+`fleet-integration-harness.md`.
+
+**Deliverables** — `sites/ssh/` (generic SSH `Site`: discover/provision-verify/
+health/`ssh_transport` run_worker/resource_classes/guarantees_no_ship); a Docker
+harness (`Dockerfile.worker`, `docker-compose.fleet.yml` with a `master` +
+cpu/gpu-labeled worker nodes, hermetic baked SSH keypair, guard baked in image);
+the reusable **fake scenario** in `testkit/scenarios/` (a deterministic ~40-ticket
+run whose `MockAgent` results exercise clustering, driver/infra failures,
+needs_human, and gpu contention/parking).
+
+**Tests** — unit: `ssh` site command construction + health parsing (subprocess
+mocked, no Docker). Fleet integration (`@pytest.mark.docker`): bring up the fleet,
+run the scenario to convergence, and assert — run→`done`, work ran on multiple
+distinct hosts with no double-claim, the expected clusters/reductions were banked,
+the gpu semaphore was never over-issued (parked tickets un-parked), infra-failed
+retried while driver-failed went terminal, and killing a worker mid-run requeues
+its ticket to a survivor and the run still converges.
+
+**Acceptance** — `pytest -m docker` green + hermetic (no Meta/cloud/real-agent);
+skips cleanly where Docker is absent; the `ssh` site's unit tests pass without Docker.
+
+---
+
 ## Dependency graph
 
 ```
 0 ─▶ 1 ─▶ 2 ─▶ 3
           └─▶ 4 ─▶ 5 ─▶ 6 ─▶ 7 ─▶ 8 ─▶ 9 ─▶ 10 ─▶ 11
+                                    └─▶ 12 (fleet: needs 7 ssh_transport, 8 crew, 9 dispatch)
 ```
 
 Slices 2 and 3 depend only on 1; 4 depends on 2; the main chain 4→11 is linear.
-2 and 3 may be built in parallel after 1.
+2 and 3 may be built in parallel after 1. Slice 12 (fleet) needs 7/8/9 and is the
+realistic multi-node tier above the single-box `local` integration tests.
 
 ## Test tooling
 

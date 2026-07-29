@@ -189,9 +189,11 @@ its data is real).**
 - **Backend:** `pytest` against a temp `HERMES_HOME` with a seeded local run.
 - **Frontend unit:** `vitest` + RTL; the typed API client mocked at the fetch
   boundary for unit tests only (never in shipped code).
-- **E2E:** `Playwright` against the real `hermes serve --api` + a real local run
-  (local site + `MockAgent`, no Meta/SSH). This is where "everything works" is
-  proven per slice.
+- **E2E:** `Playwright` against the real `hermes serve --api` + a real run. Two
+  backends: (a) a single-box local run (`local` site + `MockAgent`) for fast
+  per-slice checks, and (b) the **Docker fleet** (`fleet-integration-harness.md`)
+  for a realistic multi-host run — proving the SPA renders real distributed data
+  (multiple crew nodes, host-down, fleet-wide leases), not just single-box.
 - All runnable with no Meta dependency.
 
 ## 11. Open items
