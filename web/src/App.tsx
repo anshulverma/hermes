@@ -7,6 +7,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import TopBar from './components/TopBar';
 import RunOverview from './views/RunOverview';
+import MetricsView from './views/MetricsView';
 import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
 import Findings from './views/Findings';
@@ -176,6 +177,10 @@ export default function App() {
 
         {!loading && !error && runDetail && view === 'overview' && (
           <RunOverview run={runDetail} onRunUpdate={() => refreshRunDetail(runDetail.id)} />
+        )}
+
+        {!loading && !error && runDetail && view === 'metrics' && (
+          <MetricsView runId={runDetail.id} />
         )}
 
         {!loading && !error && runDetail && view === 'board' && (

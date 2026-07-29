@@ -425,3 +425,31 @@ export async function rejectReduction(reductionId: number): Promise<ReductionCon
     method: 'POST',
   });
 }
+
+/**
+ * Metrics endpoints (Phase E1).
+ */
+
+export type MetricsBucket = {
+  t_start: number;
+  throughput: number;
+  done_cumulative: number;
+  failed_cumulative: number;
+  error_rate: number;
+  crew_online: number;
+};
+
+export type RunMetrics = {
+  run_id: string;
+  bucket_s: number;
+  buckets: MetricsBucket[];
+};
+
+export async function fetchRunMetrics(runId: string, bucketS?: number): Promise<RunMetrics> {
+  const params = new URLSearchParams();
+  if (bucketS !== undefined) params.append('bucket_s', bucketS.toString());
+
+  const queryString = params.toString();
+  const url = `/api/runs/${runId}/metrics${queryString ? '?' + queryString : ''}`;
+  return fetchJSON<RunMetrics>(url);
+}

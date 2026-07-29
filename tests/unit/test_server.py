@@ -2694,3 +2694,153 @@ def test_accept_reject_requires_auth(loopback_client: TestClient, temp_home: Pat
     # Try to reject without token
     response = loopback_client.post("/api/reductions/4/reject")
     assert response.status_code == 401
+
+
+def test_run_metrics_endpoint_deterministic_buckets(loopback_client: TestClient, temp_home: Path):
+    """GET /api/runs/{id}/metrics aggregates REAL time-bucketed metrics with deterministic range.
+
+    Throughput = attempts ended in bucket; done/failed cumulative from terminal outcomes;
+    error_rate = failed/total per bucket; crew_online tracks crew events.
+    Buckets span from run.created_at to latest event/attempt ts (deterministic, no wall-clock).
+    """
+    import sqlite3
+    import time
+
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Create run at t=1000
+    run_created = 1000.0
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('metrics-run', 'example', 'local', 'running', 'work', 'main', '{}', ?, ?)""",
+        (run_created, run_created)
+    )
+
+    # Create 2 tickets for the run
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts, payload_json, created_at, updated_at)
+           VALUES ('metrics-run/t-1', 'metrics-run', 'work', 'done', 'cpu', 0, 1, '{}', ?, ?)""",
+        (run_created, run_created)
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts, payload_json, created_at, updated_at)
+           VALUES ('metrics-run/t-2', 'metrics-run', 'work', 'failed', 'cpu', 0, 1, '{}', ?, ?)""",
+        (run_created, run_created)
+    )
+
+    # Bucket width = 300s (5 minutes)
+    # Create attempts in 3 buckets: [1000, 1300), [1300, 1600), [1600, 1900)
+
+    # Bucket 0 [1000, 1300): 2 attempts ended (1 ok, 1 driver_failed)
+    conn.execute(
+        """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome, termination_reason)
+           VALUES ('metrics-run/t-1', 'work', 'h1', 1, ?, ?, 'ok', 'goal_met')""",
+        (1100.0, 1200.0)
+    )
+    conn.execute(
+        """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome, termination_reason)
+           VALUES ('metrics-run/t-2', 'work', 'h1', 1, ?, ?, 'driver_failed', 'contract_fail')""",
+        (1150.0, 1250.0)
+    )
+
+    # Bucket 1 [1300, 1600): 1 attempt ended (ok)
+    conn.execute(
+        """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome, termination_reason)
+           VALUES ('metrics-run/t-1', 'work', 'h2', 2, ?, ?, 'ok', 'goal_met')""",
+        (1400.0, 1500.0)
+    )
+
+    # Bucket 2 [1600, 1900): 1 attempt ended (driver_failed)
+    conn.execute(
+        """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome, termination_reason)
+           VALUES ('metrics-run/t-2', 'work', 'h2', 2, ?, ?, 'driver_failed', 'driver_error')""",
+        (1700.0, 1800.0)
+    )
+
+    # Crew events: crew_added at t=1100 (online), crew_down at t=1500 (offline)
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, host, message, data_json)
+           VALUES (?, 'crew_added', 'metrics-run', 'h1', 'Crew h1 added', '{}')""",
+        (1100.0,)
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, host, message, data_json)
+           VALUES (?, 'crew_added', 'metrics-run', 'h2', 'Crew h2 added', '{}')""",
+        (1200.0,)
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, host, message, data_json)
+           VALUES (?, 'crew_down', 'metrics-run', 'h1', 'Crew h1 down', '{}')""",
+        (1500.0,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    # Request metrics (bucket_s defaults to 300)
+    response = loopback_client.get("/api/runs/metrics-run/metrics?bucket_s=300")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["run_id"] == "metrics-run"
+    assert data["bucket_s"] == 300
+
+    buckets = data["buckets"]
+    # Latest event/attempt ts = 1800, so range [1000, 1900) = 3 buckets
+    assert len(buckets) == 3
+
+    # Bucket 0 [1000, 1300): throughput=2, done_cum=1, failed_cum=1, error_rate=0.5 (1/2), crew_online=2
+    b0 = buckets[0]
+    assert b0["t_start"] == 1000.0
+    assert b0["throughput"] == 2  # 2 attempts ended
+    assert b0["done_cumulative"] == 1  # 1 ok
+    assert b0["failed_cumulative"] == 1  # 1 failed
+    assert abs(b0["error_rate"] - 0.5) < 0.01  # 1/2
+    assert b0["crew_online"] == 2  # h1+h2 online by end of bucket
+
+    # Bucket 1 [1300, 1600): throughput=1, done_cum=2, failed_cum=1, error_rate=0 (1 ok), crew_online=1 (h1 down at 1500)
+    b1 = buckets[1]
+    assert b1["t_start"] == 1300.0
+    assert b1["throughput"] == 1
+    assert b1["done_cumulative"] == 2  # cumulative: 1+1
+    assert b1["failed_cumulative"] == 1  # cumulative: still 1
+    assert abs(b1["error_rate"] - 0.0) < 0.01  # 0/1
+    assert b1["crew_online"] == 1  # only h2 by end of bucket
+
+    # Bucket 2 [1600, 1900): throughput=1, done_cum=2, failed_cum=2, error_rate=1.0 (1 failed), crew_online=1
+    b2 = buckets[2]
+    assert b2["t_start"] == 1600.0
+    assert b2["throughput"] == 1
+    assert b2["done_cumulative"] == 2  # cumulative: still 2
+    assert b2["failed_cumulative"] == 2  # cumulative: 1+1
+    assert abs(b2["error_rate"] - 1.0) < 0.01  # 1/1
+    assert b2["crew_online"] == 1
+
+
+def test_run_metrics_empty_run(loopback_client: TestClient, temp_home: Path):
+    """GET /api/runs/{id}/metrics for a run with no events/attempts => empty buckets."""
+    import sqlite3
+
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('empty-run', 'example', 'local', 'running', 'work', 'main', '{}', 1000, 1000)"""
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.get("/api/runs/empty-run/metrics")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["run_id"] == "empty-run"
+    assert data["buckets"] == []  # Truthful empty
+
+
+def test_run_metrics_unknown_run_404(loopback_client: TestClient, temp_home: Path):
+    """GET /api/runs/{unknown}/metrics => 404."""
+    response = loopback_client.get("/api/runs/unknown/metrics")
+    assert response.status_code == 404

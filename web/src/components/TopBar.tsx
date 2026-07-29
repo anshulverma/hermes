@@ -42,7 +42,7 @@ export default function TopBar({ connected, view = 'overview', onViewChange }: T
     >
       <span style={{ color: 'var(--text-primary)' }}>Hermes</span>
 
-      {/* View nav tabs - Phase B5 adds "Activity" */}
+      {/* View nav tabs - Phase E1 adds "Metrics" */}
       <nav style={{ display: 'flex', gap: 4 }}>
         <button
           onClick={() => handleTabClick('overview')}
@@ -58,6 +58,21 @@ export default function TopBar({ connected, view = 'overview', onViewChange }: T
           }}
         >
           Run
+        </button>
+        <button
+          onClick={() => handleTabClick('metrics')}
+          style={{
+            padding: '6px 12px',
+            fontSize: 13,
+            color: view === 'metrics' ? 'var(--text-primary)' : 'var(--text-muted)',
+            background: view === 'metrics' ? 'var(--wash-subtle)' : 'transparent',
+            border: 'none',
+            borderRadius: 'var(--radius-md)',
+            cursor: 'pointer',
+            transition: 'all 120ms ease-out',
+          }}
+        >
+          Metrics
         </button>
         <button
           onClick={() => handleTabClick('board')}

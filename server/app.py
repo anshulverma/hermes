@@ -659,6 +659,173 @@ def create_app(bind: str | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    @app.get("/api/runs/{run_id}/metrics")
+    def get_run_metrics(
+        run_id: str,
+        bucket_s: int = 300,
+        _: None = Depends(require_auth_read)
+    ) -> dict[str, Any]:
+        """Get time-bucketed metrics for a run.
+
+        Aggregates REAL metrics from events/attempts tables with deterministic time range.
+
+        Args:
+            run_id: Run ID
+            bucket_s: Bucket width in seconds (default 300 = 5 minutes)
+
+        Returns:
+            {
+                run_id: str,
+                bucket_s: int,
+                buckets: [
+                    {
+                        t_start: float,
+                        throughput: int,  # attempts ended in bucket
+                        done_cumulative: int,  # cumulative done outcomes
+                        failed_cumulative: int,  # cumulative failed outcomes
+                        error_rate: float,  # failed/total per bucket
+                        crew_online: int  # hosts online as of bucket end
+                    }
+                ]
+            }
+
+        Buckets span from run.created_at to latest event/attempt timestamp (deterministic).
+        Done/failed cumulative derived from attempts.outcome (ok vs driver_failed/infra_failed).
+        Crew online tracks crew_added/crew_health (online) vs crew_down/crew_drained (offline).
+
+        Returns 404 if run not found.
+        """
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Check if run exists and get created_at
+            run_row = conn.execute(
+                "SELECT id, created_at FROM runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            if run_row is None:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+
+            run_created_at = run_row[1]
+
+            # Find latest timestamp across events and attempts for this run
+            # Events: scope by run_id (crew events may have null run_id - include all for global crew tracking)
+            # Attempts: scope via tickets join
+
+            # Latest event ts (all events, including crew events)
+            event_ts_row = conn.execute(
+                "SELECT MAX(ts) FROM events WHERE run_id=? OR kind IN ('crew_added', 'crew_health', 'crew_down', 'crew_drained')",
+                (run_id,)
+            ).fetchone()
+            max_event_ts = event_ts_row[0] if event_ts_row and event_ts_row[0] else None
+
+            # Latest attempt ts (ended_at) for this run's tickets
+            attempt_ts_row = conn.execute(
+                """SELECT MAX(a.ended_at)
+                   FROM attempts a
+                   JOIN tickets t ON a.ticket_id = t.id
+                   WHERE t.run_id=?""",
+                (run_id,)
+            ).fetchone()
+            max_attempt_ts = attempt_ts_row[0] if attempt_ts_row and attempt_ts_row[0] else None
+
+            # Determine range end (latest of event/attempt)
+            range_end = run_created_at  # Default to run start
+            if max_event_ts:
+                range_end = max(range_end, max_event_ts)
+            if max_attempt_ts:
+                range_end = max(range_end, max_attempt_ts)
+
+            # If no events/attempts beyond run start, return empty buckets
+            if range_end == run_created_at and max_event_ts is None and max_attempt_ts is None:
+                return {
+                    "run_id": run_id,
+                    "bucket_s": bucket_s,
+                    "buckets": []
+                }
+
+            # Generate buckets from run_created_at to range_end
+            import math
+            num_buckets = math.ceil((range_end - run_created_at) / bucket_s)
+            if num_buckets == 0:
+                num_buckets = 1  # At least one bucket if there's any data
+
+            # Fetch all attempts for this run (with ended_at and outcome)
+            attempts = conn.execute(
+                """SELECT a.ended_at, a.outcome
+                   FROM attempts a
+                   JOIN tickets t ON a.ticket_id = t.id
+                   WHERE t.run_id=? AND a.ended_at IS NOT NULL
+                   ORDER BY a.ended_at""",
+                (run_id,)
+            ).fetchall()
+
+            # Fetch all crew events (global, not run-scoped - crew is fleet-wide)
+            # But for deterministic test behavior, scope to this run's events or use all
+            # CHOICE: Include all crew events (global crew tracking)
+            crew_events = conn.execute(
+                """SELECT ts, kind, host
+                   FROM events
+                   WHERE kind IN ('crew_added', 'crew_health', 'crew_down', 'crew_drained')
+                   ORDER BY ts"""
+            ).fetchall()
+
+            buckets = []
+            done_cumulative = 0
+            failed_cumulative = 0
+
+            # Track crew state: dict of host -> online/offline
+            crew_state: dict[str, bool] = {}
+
+            for i in range(num_buckets):
+                bucket_start = run_created_at + i * bucket_s
+                bucket_end = bucket_start + bucket_s
+
+                # Throughput: attempts ended in [bucket_start, bucket_end)
+                bucket_ended = [a for a in attempts if bucket_start <= a[0] < bucket_end]
+                throughput = len(bucket_ended)
+
+                # Per-bucket failed/done counts (for error_rate)
+                bucket_done = sum(1 for a in bucket_ended if a[1] == 'ok')
+                bucket_failed = sum(1 for a in bucket_ended if a[1] in ('driver_failed', 'infra_failed'))
+
+                # Error rate for this bucket
+                error_rate = (bucket_failed / len(bucket_ended)) if bucket_ended else 0.0
+
+                # Update cumulative done/failed (all attempts up to bucket_end)
+                done_cumulative += bucket_done
+                failed_cumulative += bucket_failed
+
+                # Update crew state up to bucket_end
+                for event_ts, event_kind, event_host in crew_events:
+                    if event_ts >= bucket_end:
+                        break
+                    if event_kind in ('crew_added', 'crew_health'):
+                        crew_state[event_host] = True
+                    elif event_kind in ('crew_down', 'crew_drained'):
+                        crew_state[event_host] = False
+
+                # Crew online count at bucket end
+                crew_online = sum(1 for online in crew_state.values() if online)
+
+                buckets.append({
+                    "t_start": bucket_start,
+                    "throughput": throughput,
+                    "done_cumulative": done_cumulative,
+                    "failed_cumulative": failed_cumulative,
+                    "error_rate": error_rate,
+                    "crew_online": crew_online,
+                })
+
+            return {
+                "run_id": run_id,
+                "bucket_s": bucket_s,
+                "buckets": buckets,
+            }
+        finally:
+            conn.close()
+
     # --- Crew Control Endpoints (D2a) ---
 
     def _serialize_health_checklist(host: str, report) -> dict[str, Any]:
