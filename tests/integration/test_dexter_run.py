@@ -249,6 +249,16 @@ def test_dexter_run_fanout_dedup_accept(home, source_repo, conn, dexter_site, de
     assert len(reduction_data["member_ticket_ids"]) == 2
     assert len(reduction_data["duplicate_diffs"]) == 1  # one duplicate
 
+    # Verify duplicate_diffs structure: well-formed and corresponds to non-canonical member
+    dup_entry = reduction_data["duplicate_diffs"][0]
+    assert "ticket_id" in dup_entry, "duplicate entry must have ticket_id"
+    assert "diff_ref" in dup_entry, "duplicate entry must have diff_ref"
+    # The duplicate's ticket_id must be in the cluster but NOT be the canonical
+    assert dup_entry["ticket_id"] in reduction_data["member_ticket_ids"], \
+        "duplicate ticket_id must be a cluster member"
+    assert dup_entry["ticket_id"] != reduction_data["canonical_ticket_id"], \
+        "duplicate ticket_id must NOT be the canonical member"
+
     # 5. FakeSink banked EXACTLY ONE learning
     assert len(sink.banked_clusters) == 1
     assert sink.banked_clusters[0]["signature"] == "sig-shared-timeout"
@@ -257,20 +267,27 @@ def test_dexter_run_fanout_dedup_accept(home, source_repo, conn, dexter_site, de
     assert reduction_data["needs_human_ticket_ids"] == reduction_data["member_ticket_ids"]
     assert "reduce" in routes_settled
 
-    # 7. EVENT STREAM: assert ordered kinds
+    # 7. EVENT STREAM: assert ordered kinds AND counts
     event_kinds = [
         r[0] for r in conn.execute(
             "SELECT kind FROM events WHERE run_id=? ORDER BY id", (run_id,)
         ).fetchall()
     ]
-    # Expected: ticket_claimed (x2), result_recorded (x2), needs_human (x2),
-    # reduction_created, reduction_accepted, run_done
-    assert "ticket_claimed" in event_kinds
-    assert "result_recorded" in event_kinds
-    assert "needs_human" in event_kinds
-    assert "reduction_created" in event_kinds
-    assert "reduction_accepted" in event_kinds
-    assert "run_done" in event_kinds
+    # Expected counts (derived from two goals seeded):
+    # ticket_claimed x2, result_recorded x2, needs_human x2,
+    # reduction_created 1, reduction_accepted 1, run_done 1
+    assert event_kinds.count("ticket_claimed") == 2, "two tickets claimed"
+    assert event_kinds.count("result_recorded") == 2, "two results recorded"
+    assert event_kinds.count("needs_human") == 2, "two tickets flagged needs_human"
+    assert event_kinds.count("reduction_created") == 1, "one cluster reduction created"
+    assert event_kinds.count("reduction_accepted") == 1, "one reduction accepted"
+    assert event_kinds.count("run_done") == 1, "run done emitted once"
+    # Ordering sanity: run_done is last
+    assert event_kinds[-1] == "run_done", "run_done should be the final event"
+    # result_recorded precedes reduction_created (results must exist before reducing)
+    first_result_idx = event_kinds.index("result_recorded")
+    reduction_created_idx = event_kinds.index("reduction_created")
+    assert first_result_idx < reduction_created_idx, "result_recorded before reduction_created"
 
 
 def test_dexter_verify_fail_blocks_then_requeue_clears(
