@@ -42,7 +42,13 @@ docker-compose.fleet.yml
   `authorized_keys`. No external credentials, no `/design-login`, no proxy.
 - **Master** holds `HERMES_HOME` (the real `queue.db`), the `ssh` site config
   listing the worker containers as hosts (with their resource labels), and the
-  fake scenario. It runs `HERMES_AGENT=mock hermes run <scenario> --site ssh`.
+  fake scenario. It runs `HERMES_AGENT=mock hermes run <scenario> --site ssh`
+  (which starts the master loop) plus one `HERMES_AGENT=mock hermes serve --host
+  <h> --site ssh` per worker host — the per-host serve loops that claim from
+  `queue.db` and dispatch over `ssh_transport`. (`hermes run` co-launches
+  in-process serve loops only for the `local` site's single box; a distributed
+  `ssh` run must launch them explicitly, and they live on the master since
+  `ssh_transport` reaches out to the stateless workers.)
 - **Workers** run only `sshd` + the hermes worker runner + the `MockAgent` + the
   no-ship guard shims (all baked into the image). They are stateless, reached only
   via master-initiated SSH — exactly the production model.

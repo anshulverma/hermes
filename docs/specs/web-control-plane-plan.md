@@ -87,7 +87,7 @@ result, attempts, evidence); `GET /api/crew` (members + `HealthReport`);
 Live (Phase C): `WS /api/ws` — event stream + counter deltas.
 Mutate (Phase D, token-gated): `POST /api/runs/{id}/{pause|resume|stop}`;
 `POST /api/crew` (add), `POST /api/crew/{host}/{drain|reprobe}`,
-`DELETE /api/crew/{host}`; `POST /api/tickets/{id}/{requeue|park}`;
+`DELETE /api/crew/{host}`; `POST /api/tickets/{id}/requeue`;
 `POST /api/reductions/{id}/{accept|reject}`.
 Metrics (Phase E, gated): `GET /api/runs/{id}/metrics` (+ `resources`, `agent`
 sub-objects only when instrumented).
@@ -151,9 +151,10 @@ Each slice below names its engine-core dependency.
   (`queue.set_run_state`). Dep: engine-core Slice 5.
 - **D2. Crew control.** Add-host modal with a **live health-check checklist** →
   `crew.add`; drain/remove/re-probe. Dep: engine-core Slice 8.
-- **D3. Ticket control.** requeue / park from the drawer (requeue →
-  `queue.requeue_needs_human`, park → `queue.park_ticket`). Dep: engine-core
-  Slice 5.
+- **D3. Ticket control.** requeue from the drawer, shown only for a `needs_human`
+  ticket routed by the re-verify/guard path (requeue → `queue.requeue_needs_human`,
+  `needs_human → queued`). Parking is an internal dispatcher overflow transition
+  (`queue.park_ticket`), never an operator control. Dep: engine-core Slice 5.
 - **D4. Findings review.** accept/reject a reduction → `POST /api/reductions/{id}/…`
   (members settle per engine semantics). Dep: engine-core Slice 5.
 - Auth is added with the first mutation (D1): loopback bind + bearer token, 401/4401
