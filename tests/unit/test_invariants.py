@@ -34,11 +34,11 @@ def test_engine_core_imports_only_stdlib():
     # Stdlib modules we allow (non-exhaustive whitelist of common ones)
     stdlib_modules = {
         "__future__", "abc", "argparse", "ast", "asyncio", "base64", "collections",
-        "contextlib", "copy", "csv", "dataclasses", "datetime", "decimal",
+        "contextlib", "contextvars", "copy", "csv", "dataclasses", "datetime", "decimal",
         "email", "enum", "functools", "hashlib", "http", "io", "itertools",
         "json", "logging", "math", "os", "pathlib", "pickle", "platform",
-        "pprint", "queue", "random", "re", "shutil", "socket", "sqlite3",
-        "stat", "string", "subprocess", "sys", "tempfile", "textwrap",
+        "pprint", "queue", "random", "re", "shutil", "signal", "socket", "sqlite3",
+        "stat", "string", "subprocess", "sys", "tempfile", "textwrap", "threading",
         "time", "traceback", "typing", "unittest", "urllib", "uuid", "warnings",
         "weakref", "xml", "zipfile",
     }

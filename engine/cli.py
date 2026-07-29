@@ -4,12 +4,13 @@ Thin wrappers over engine modules. Stdlib-only (argparse).
 """
 import argparse
 import json
+import logging
 import os
 import sys
 import time
 from pathlib import Path
 
-from engine import config, crew, playbook, site, agent, queue, dispatch
+from engine import config, crew, playbook, site, agent, queue, dispatch, log
 from engine.db import migrate
 from engine.models import Run
 
@@ -597,6 +598,9 @@ def main(argv=None):
     Returns:
         Exit code (0 = success, non-zero = error)
     """
+    # Configure logging once at entry
+    log.configure()
+
     parser = argparse.ArgumentParser(
         prog='hermes',
         description='Hermes engine CLI'
@@ -712,7 +716,9 @@ def main(argv=None):
         elif args.command == 'serve-once':
             return cmd_serve_once(args)
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger = log.get_logger("cli")
+        logger.error(f"Command failed: {e}")
+        # Print traceback to stderr if HERMES_DEBUG is set (for compatibility with tests)
         if os.environ.get("HERMES_DEBUG"):
             import traceback
             traceback.print_exc()

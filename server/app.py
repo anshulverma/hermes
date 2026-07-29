@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from engine.config import resolve_home
 from engine.db.migrate import connect
 from engine.queue import load_run, phase_ticket_counts, set_run_state
+from engine import log
 from server.auth import load_or_create_token
 
 
@@ -41,6 +42,9 @@ def create_app(bind: str | None = None) -> FastAPI:
         bind: Bind address (default from HERMES_BIND or 127.0.0.1).
               Used to determine GET-gating and token injection.
     """
+    # Configure logging once at entry
+    log.configure()
+
     if bind is None:
         bind = os.environ.get("HERMES_BIND", "127.0.0.1")
 
@@ -49,7 +53,22 @@ def create_app(bind: str | None = None) -> FastAPI:
     app_token = load_or_create_token(home)
     loopback = is_loopback(bind)
 
+    # Log startup info (token location, never the value)
+    logger = log.get_logger("server")
+    token_path = home / "api_token"
+    logger.info(f"Server starting: bind={bind}, home={home}, token_file={token_path}")
+
     app = FastAPI(title="Hermes Control Plane", version="0.1.0")
+
+    # Request logging middleware (strip query strings to avoid logging tokens)
+    @app.middleware("http")
+    async def log_requests(request, call_next):
+        """Log requests with query strings stripped."""
+        req_logger = log.get_logger("server.request")
+        # Log method and path only (no query string)
+        req_logger.debug(f"{request.method} {request.url.path}")
+        response = await call_next(request)
+        return response
 
     # Auth dependency: validates bearer token from header or query param
     def require_auth(
@@ -1324,7 +1343,8 @@ def create_app(bind: str | None = None) -> FastAPI:
             pass
         except Exception as e:
             # Log unexpected errors but don't crash the server
-            print(f"WebSocket error: {e}")
+            logger = log.get_logger("server.websocket")
+            logger.exception("WebSocket error")
         finally:
             # Ensure connection is closed
             try:
