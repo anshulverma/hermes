@@ -159,7 +159,7 @@ def test_local_transport_wraps_with_timeout(local_site, mock_agent):
 
     assert os.path.basename(captured["argv"][0]) == "timeout"
     assert captured["argv"][1] == "1234"
-    assert "mock-agent" in captured["argv"]
+    assert "true" in captured["argv"]  # mock agent's no-op invocation
     # mock agent recomputes sha (matches) and returns the "ok" scenario result
     assert result.outcome == "ok"
 

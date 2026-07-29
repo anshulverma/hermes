@@ -66,7 +66,7 @@ def _driver_from_envelope(envelope: dict):
 
 # --- local transport -----------------------------------------------------
 
-def local_transport(envelope: dict, host: str, agent) -> Result:
+def local_transport(envelope: dict, host: str, agent, env: Optional[dict] = None) -> Result:
     """Run the worker on this box under a ``timeout`` wrapper (§9).
 
     Builds ``agent.build_invocation(envelope, driver)``, wraps it with
@@ -74,6 +74,10 @@ def local_transport(envelope: dict, host: str, agent) -> Result:
     returns ``agent.parse_result(stdout, envelope)``. A ``timeout``-killed run
     (exit 124) short-circuits to a ``driver_failed`` / ``timeout`` Result. A
     failure to launch the process at all raises ``TransportError`` (host lost).
+
+    ``env`` (when given) is the child process environment — the site passes one
+    with its no-ship guard shim dir prepended to ``PATH`` so the worker cannot
+    ``git push``/land (§11). ``None`` inherits the parent environment.
     """
     driver = _driver_from_envelope(envelope)
     argv = agent.build_invocation(envelope, driver)
@@ -83,7 +87,7 @@ def local_transport(envelope: dict, host: str, agent) -> Result:
     wrapped = [timeout_bin, str(timeout_s), *argv] if timeout_bin else list(argv)
 
     try:
-        proc = subprocess.run(wrapped, capture_output=True, text=True)
+        proc = subprocess.run(wrapped, capture_output=True, text=True, env=env)
     except OSError as exc:  # could not even launch -> treat as host lost
         raise TransportError(f"failed to launch worker on {host}: {exc}") from exc
 

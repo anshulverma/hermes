@@ -45,8 +45,14 @@ class MockAgent:
             self.scenarios.update(scenarios)
 
     def build_invocation(self, envelope: dict, driver: Driver) -> list[str]:
-        """Return a trivial argv (real work is mocked)."""
-        return ["mock-agent", envelope.get("ticket_id", "")]
+        """Return a trivial SUCCESSFUL no-op argv (real work is mocked).
+
+        Uses ``true`` (a coreutils no-op that always exits 0) so
+        ``local_transport`` runs cleanly end-to-end without depending on a
+        missing ``mock-agent`` binary; ``parse_result`` supplies the actual
+        deterministic ``Result`` from the scenario table (§9, §12).
+        """
+        return ["true"]
 
     def _scenario_for(self, envelope: dict) -> str:
         payload = envelope.get("payload") or {}
