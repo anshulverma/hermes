@@ -3,6 +3,20 @@
 Supports type, required, properties, additionalProperties:false, enum, items.
 Raises ContractError on first violation with a JSON path.
 """
+import hashlib
+import json
+
+
+def payload_sha256(payload) -> str:
+    """SHA-256 hex digest of a payload's canonical JSON encoding (§6).
+
+    Canonical = sorted keys, no whitespace (``separators=(",", ":")``). This is
+    the single source of truth used by the transport (which STAMPS the digest
+    into the envelope) and the agent adapters (which RECOMPUTE it over the
+    received payload and flag ``contract_fail`` on mismatch).
+    """
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 class ContractError(Exception):

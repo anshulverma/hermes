@@ -13,6 +13,7 @@ from __future__ import annotations
 import time
 
 from engine import agent as _agent
+from engine import contracts
 from engine.models import Check, Driver, Result
 
 # scenario name -> (outcome, termination_reason)
@@ -52,12 +53,34 @@ class MockAgent:
         return payload.get("scenario", DEFAULT_SCENARIO)
 
     def parse_result(self, raw: str, envelope: dict) -> Result:
-        """Return a deterministic Result for this envelope's scenario."""
+        """Return a deterministic Result for this envelope's scenario.
+
+        Integrity first: recompute ``payload_sha256`` over the RECEIVED payload
+        (§6) and, on mismatch, return ``driver_failed`` / ``contract_fail`` with
+        no retry — mirroring what the real ClaudeAgent does when a payload is
+        corrupted in transit.
+        """
+        now = time.time()
+        expected = envelope.get("payload_sha256")
+        actual = contracts.payload_sha256(envelope.get("payload") or {})
+        if expected is not None and expected != actual:
+            return Result(
+                outcome="driver_failed",
+                termination_reason="contract_fail",
+                result_ref=None,
+                error_summary=(
+                    f"payload_sha256 mismatch: expected {expected}, got {actual}"
+                ),
+                started_at=now,
+                ended_at=now,
+                payload={},
+                evidence_ref=None,
+            )
+
         name = self._scenario_for(envelope)
         outcome, termination_reason = self.scenarios.get(
             name, self.scenarios[DEFAULT_SCENARIO]
         )
-        now = time.time()
         if outcome == "ok":
             result_ref = f"result://{envelope.get('ticket_id', 'mock')}"
             error_summary = None

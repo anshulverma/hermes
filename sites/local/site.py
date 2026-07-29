@@ -100,8 +100,16 @@ class LocalSite:
     # --- execution ------------------------------------------------------
 
     def run_worker(self, host: str, envelope: dict, agent) -> Result:
-        """Deferred: real worker execution lands in Slice 7."""
-        raise NotImplementedError("run_worker lands in Slice 7")
+        """Execute the configured agent on localhost via local_transport (§8, §9).
+
+        The site owns the transport (here: this box, under a ``timeout`` wrapper);
+        the agent owns building the invocation and parsing the result. A host-lost
+        failure surfaces as ``transport.TransportError`` for the serve loop to
+        route to a no-penalty requeue.
+        """
+        from engine import transport
+
+        return transport.local_transport(envelope, host, agent)
 
     # --- capabilities ---------------------------------------------------
 

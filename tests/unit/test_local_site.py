@@ -35,11 +35,30 @@ def test_discover_hosts_returns_local_host(local_site):
     assert hosts == [socket.gethostname()]
 
 
-def test_run_worker_is_deferred(local_site):
+def test_run_worker_executes_agent_over_local_transport(local_site):
+    """run_worker delegates to local_transport, returning the agent's Result."""
+    import hashlib
+    import json as _json
+
     from testkit.mock_agent import MockAgent
 
-    with pytest.raises(NotImplementedError, match="Slice 7"):
-        local_site.run_worker("localhost", {}, MockAgent())
+    payload = {"scenario": "ok"}
+    canon = _json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    envelope = {
+        "ticket_id": "run-1/t-0", "run_id": "run-1", "phase": "work",
+        "resource_req": "cpu", "base_ref": "main", "payload": payload,
+        "payload_sha256": hashlib.sha256(canon.encode()).hexdigest(),
+        "timeout_s": 60, "site_context": {},
+        "goal_envelope": {
+            "goal": "g",
+            "driver": {"command": "/echo-work", "args": {}, "loop": None},
+            "done_contract": {"type": "object"},
+            "guardrails": {"no_ship": True},
+        },
+    }
+    result = local_site.run_worker("localhost", envelope, MockAgent())
+    assert result.outcome == "ok"
+    assert result.termination_reason == "goal_met"
 
 
 def test_health_reports_each_failing_check_and_merges_agent(home, local_site):
