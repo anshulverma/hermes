@@ -1,8 +1,8 @@
 """DexterPlaybook — forensic investigation methodology over goals.
 
-Implements the engine-core Playbook protocol (§2.1–2.7). Single worker phase
-('solve') fans out /dexter:solve across hosts, then reduces (clusters by
-root_cause.signature, banks learnings, flags duplicates for human review).
+Implements the engine-core Playbook protocol. Single worker phase ('solve')
+fans out /dexter:solve across hosts, then reduces (clusters by root_cause.signature,
+banks learnings, flags duplicates for human review).
 
 Stdlib-only.
 """
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 class DexterPlaybook:
-    """The dexter forensic investigator playbook (§2)."""
+    """The dexter forensic investigator playbook."""
 
     name = "dexter"
     phases = ["solve"]
@@ -35,17 +35,17 @@ class DexterPlaybook:
             sink = DexterKbSink()
         self.sink = sink
 
-    # --- seeding (§2.1) -------------------------------------------------
+    # --- seeding --------------------------------------------------------
 
     def seed(self, run: Run, site: "Site") -> list[Ticket]:
-        """Yield one ticket per goal (§2.1).
+        """Yield one ticket per goal.
 
         Goals from either:
-        - run.config["goals"]: list[str] (direct) or str path (read with §2.1a filter)
+        - run.config["goals"]: list[str] (direct) or str path (read with filtering)
         - run.config["issue_query"]: call site.issue_source(IssueQuery(**...))
 
         Returns:
-            List of Ticket with exact fields per §2.1.
+            List of Ticket with exact fields.
         """
         from engine.cli import _load_goals_file
 
@@ -59,7 +59,7 @@ class DexterPlaybook:
                 goals_data = [{"goal": g, "issue_ref": None, "priority": 0.0}
                               for g in goals_raw]
             else:
-                # File path: read with §2.1a filtering
+                # File path: read with filtering
                 goals_list = _load_goals_file(goals_raw)
                 goals_data = [{"goal": g, "issue_ref": None, "priority": 0.0}
                               for g in goals_list]
@@ -98,10 +98,10 @@ class DexterPlaybook:
 
         return tickets
 
-    # --- schemas (§2.2, §2.3) -------------------------------------------
+    # --- schemas --------------------------------------------------------
 
     def payload_schema(self, phase: str) -> dict:
-        """Return the solve-phase payload schema (§2.2).
+        """Return the solve-phase payload schema.
 
         Required: ["goal"]
         Properties: goal (string), issue_ref (string|null), context (object)
@@ -119,7 +119,7 @@ class DexterPlaybook:
         }
 
     def result_schema(self, phase: str) -> dict:
-        """Return the solve-phase result schema (§2.3 dexter finding doc)."""
+        """Return the solve-phase result schema (dexter finding doc)."""
         return {
             "type": "object",
             "required": ["reproduced", "root_cause", "fix", "knowledge_entry", "evidence_ref"],
@@ -157,20 +157,20 @@ class DexterPlaybook:
             },
         }
 
-    # --- driver (§2.4) --------------------------------------------------
+    # --- driver ---------------------------------------------------------
 
     def driver(self, phase: str) -> Driver:
-        """Return the solve-phase driver (§2.4).
+        """Return the solve-phase driver.
 
         Driver("/dexter:solve", {}, None)
         args={} is deliberate: the goal reaches the worker via /goal, not args.
         """
         return Driver(command="/dexter:solve", args={}, loop=None)
 
-    # --- verify / reduce (stubs for Slices 3-4) -------------------------
+    # --- verify / reduce ------------------------------------------------
 
     def verify(self, run: Run, ticket: Ticket, result: Result, site: "Site") -> bool:
-        """Verify a solve result (§2.5: shape gate + D3 duck-type, fail-safe).
+        """Verify a solve result (shape gate + duck-typed re-check, fail-safe).
 
         Returns:
             True iff shape gate passes AND independent fix re-check confirms.
@@ -196,14 +196,14 @@ class DexterPlaybook:
             # Shape gate failed
             return False
 
-        # 2. INDEPENDENT FIX RE-CHECK (D3, duck-typed)
+        # 2. INDEPENDENT FIX RE-CHECK (duck-typed)
         fn = getattr(site, "recheck_fix", None)
         if callable(fn):
             # Site provides recheck_fix: use it
             try:
                 return bool(fn(result.payload))
             except Exception:
-                return False  # D3 fail-safe: re-check could not run → do not admit
+                return False  # fail-safe: re-check could not run → do not admit
         else:
             # Site does NOT provide recheck_fix: fail safe
             # UNLESS verify_recheck_optional is set (test hook)
@@ -215,7 +215,7 @@ class DexterPlaybook:
     def reduce(
         self, run: Run, phase: str, findings: list[Finding], site: "Site"
     ) -> list[Reduction]:
-        """Reduce solve findings to clusters (§2.6).
+        """Reduce solve findings to clusters.
 
         Behavior:
         1. FOLD-LATEST: collapse to last finding per ticket_id (append-only, id asc)
@@ -329,10 +329,10 @@ class DexterPlaybook:
 
         return reductions
 
-    # --- advancement / completion (§2.7) --------------------------------
+    # --- advancement / completion ---------------------------------------
 
     def next_phase(self, run: Run) -> str | None:
-        """Return the next phase after the current phase (§2.7).
+        """Return the next phase after the current phase.
 
         Returns:
             None: Single phase; no next phase.
@@ -340,7 +340,7 @@ class DexterPlaybook:
         return None
 
     def is_done(self, run: Run) -> bool:
-        """Return whether the run is done (§2.7).
+        """Return whether the run is done.
 
         Returns:
             True iff run.phase == "solve" (the only phase).

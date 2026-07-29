@@ -1,4 +1,4 @@
-"""DevserverSite — internal devserver adapter (Slice 5, spec §3).
+"""DevserverSite — internal devserver adapter.
 
 Runs investigations on internal devservers with native buck2/sl/test tooling.
 A DISTINCT site (not inheriting SSHSite): real idempotent provisioning + HONEST
@@ -27,7 +27,7 @@ _DEFAULT_CONNECT_TIMEOUT = 10
 
 
 class DevserverSite:
-    """Internal devserver site adapter (§3, Slice 5)."""
+    """Internal devserver site adapter."""
 
     name = "devserver"
 
@@ -481,7 +481,7 @@ class DevserverSite:
     # --- extension methods (D3) ------------------------------------------
 
     def recheck_fix(self, result_payload: dict) -> bool:
-        """Independent fix re-check via CI-signal probe (D3, §2.5/§3).
+        """Independent fix re-check via CI-signal probe.
 
         Host-agnostic INDEPENDENT re-check: re-query the published diff's CI signal
         via an internal tool using result_payload["fix"]["diff_ref"], and/or spin
@@ -490,14 +490,14 @@ class DevserverSite:
 
         The CI-signal lookup / repro command is a DEPLOY-TIME PLUGGABLE HOOK
         (env-configurable command, e.g. HERMES_DEVSERVER_RECHECK_CMD; shlex-quote
-        the diff_ref in the argv, consistent with Slice 5).
+        the diff_ref in the argv).
 
         Return False on ANY inconclusive/failed/missing-diff_ref/raising check
         (NEVER a false pass — fail safe). Use subprocess (mocked in tests);
         stdlib-only.
 
         Args:
-            result_payload: The §2.3 dexter result payload dict.
+            result_payload: The dexter result payload dict.
 
         Returns:
             True iff the fix independently holds (CI green/passing).

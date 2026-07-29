@@ -1,10 +1,10 @@
-"""SSHSite — generic SSH site adapter (spec §4, §8; Slice 12 real-host support).
+"""SSHSite — generic SSH site adapter with real-host support.
 
 Reaches worker hosts over SSH. Workers are stateless nodes running sshd + the
 hermes worker runner + the configured agent + no-ship guard shims (all baked).
 Resource classes + counts come from per-host config.
 
-Per-host connection config (Slice 12) — ``host -> {port, user, identity,
+Per-host connection config — ``host -> {port, user, identity,
 resources}`` — is supplied either programmatically via ``SSHSite(host_config=…)``
 (used by the in-process fleet master) or from env vars for the registry singleton:
 
@@ -38,7 +38,7 @@ _DEFAULT_CONNECT_TIMEOUT = 10
 
 
 class SSHSite:
-    """Generic SSH site adapter (§4, §8; Slice 12 real-host connection options)."""
+    """Generic SSH site adapter with real-host connection options."""
 
     name = "ssh"
 

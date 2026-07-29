@@ -1,5 +1,5 @@
 #!/bin/sh
-# Hermes fleet worker entrypoint (fleet-integration-harness.md §2, §3).
+# Hermes fleet worker entrypoint.
 #
 # Installs the harness-provided throwaway public key into root's authorized_keys
 # (hermetic auth: no baked credentials), then runs sshd in the foreground. The

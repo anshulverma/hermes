@@ -1,4 +1,4 @@
-# Hermes fleet reference topology (docs/specs/fleet-integration-harness.md §2).
+# Hermes fleet reference topology.
 #
 # The REFERENCE multi-node fleet: a master plus cpu- and gpu-class workers on one
 # hermetic network, with a baked throwaway keypair and resource labels. Auth is

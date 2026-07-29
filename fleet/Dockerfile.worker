@@ -1,4 +1,4 @@
-# Hermes fleet worker image (docs/specs/fleet-integration-harness.md §3).
+# Hermes fleet worker image.
 #
 # A stateless worker node: sshd + the hermes worker-runner + the MockAgent + the
 # no-ship guard shims, all baked. Reached only via master-initiated SSH. The
@@ -36,7 +36,7 @@ COPY pyproject.toml README.md /opt/hermes/
 RUN printf '#!/bin/sh\nexec python3 -m engine.cli "$@"\n' > /usr/local/bin/hermes \
     && chmod +x /usr/local/bin/hermes
 
-# No-ship guard shims (§11): shadow git/sl/hg/jf/arc and refuse push/land. Baked
+# No-ship guard shims: shadow git/sl/hg/jf/arc and refuse push/land. Baked
 # early on PATH so any land/push a worker attempts is blocked by construction.
 RUN mkdir -p /opt/hermes-guard/bin \
     && for pair in "git:push" "sl:push land" "hg:push" "jf:land" "arc:land"; do \

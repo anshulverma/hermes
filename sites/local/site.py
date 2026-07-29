@@ -1,8 +1,7 @@
-"""LocalSite — the reference site that runs everything on localhost (§8).
+"""LocalSite — the reference site that runs everything on localhost.
 
-Everything is real except `run_worker`, which is deferred to Slice 7. The site
-owns transport/provisioning/health/review/issue-sourcing; the paired Agent owns
-how to run the AI. LocalSite guarantees no-ship by construction.
+The site owns transport/provisioning/health/review/issue-sourcing; the paired
+Agent owns how to run the AI. LocalSite guarantees no-ship by construction.
 
 Stdlib-only: subprocess/os for git, socket for the host id.
 """
@@ -20,7 +19,7 @@ from engine.models import Check, HealthReport, Issue, IssueQuery, Result
 
 
 class LocalSite:
-    """Localhost + git + shell reference site (§8)."""
+    """Localhost + git + shell reference site."""
 
     name = "local"
 
@@ -34,7 +33,7 @@ class LocalSite:
         return config.resolve_home() / "workspaces" / host
 
     def guard_bin_dir(self, host: str) -> Path:
-        """The per-host directory holding the no-ship guard shims (§11)."""
+        """The per-host directory holding the no-ship guard shims."""
         return config.resolve_home() / "guard" / host / "bin"
 
     def _source_repo(self) -> str:
@@ -45,7 +44,7 @@ class LocalSite:
         """Ensure a git worktree for `host` at `base_ref` + install guard shims.
 
         Idempotent: skips an existing worktree but always (re)installs the no-ship
-        guard shims (§11), so a host provisioned by an older build gains them.
+        guard shims, so a host provisioned by an older build gains them.
         """
         import subprocess
 
@@ -61,10 +60,10 @@ class LocalSite:
             )
         self._install_guard(host)
 
-    # --- no-ship guard (§11) --------------------------------------------
+    # --- no-ship guard --------------------------------------------------
 
     def _install_guard(self, host: str) -> None:
-        """Write the PATH guard shims that block `git push` / land (§11)."""
+        """Write the PATH guard shims that block `git push` / land."""
         import shutil
 
         gdir = self.guard_bin_dir(host)
@@ -82,7 +81,7 @@ class LocalSite:
         path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     def _guard_installed(self, host: str) -> bool:
-        """True iff every guard shim exists and is executable (§11)."""
+        """True iff every guard shim exists and is executable."""
         gdir = self.guard_bin_dir(host)
         for name in GUARD_SHIMS:
             shim = gdir / name
@@ -108,7 +107,7 @@ class LocalSite:
             else "workspace not provisioned (run provision)",
         )
 
-        # no-ship guard: reflect whether the PATH shims are ACTUALLY present (§11),
+        # no-ship guard: reflect whether the PATH shims are ACTUALLY present,
         # not a hardcoded True — health must not lie about the guard.
         guard_installed = self._guard_installed(host)
         guard = Check(
@@ -144,17 +143,17 @@ class LocalSite:
     # --- execution ------------------------------------------------------
 
     def run_worker(self, host: str, envelope: dict, agent) -> Result:
-        """Execute the configured agent on localhost via local_transport (§8, §9).
+        """Execute the configured agent on localhost via local_transport.
 
         The site owns the transport (here: this box, under a ``timeout`` wrapper);
         the agent owns building the invocation and parsing the result. The worker
-        runs with the no-ship guard shim dir prepended to ``PATH`` (§11), so any
+        runs with the no-ship guard shim dir prepended to ``PATH``, so any
         ``git push``/land it attempted is blocked by construction. A host-lost
         failure surfaces as ``transport.TransportError`` for the serve loop to
         route to a no-penalty requeue.
 
-        Guard self-defense (Slice 11): if the guard dir is absent, install it
-        (preferred) or raise — never run unguarded.
+        Guard self-defense: if the guard dir is absent, install it (preferred)
+        or raise — never run unguarded.
         """
         from engine import transport
 
@@ -230,7 +229,7 @@ class LocalSite:
             issues.append(
                 Issue(
                     id=entry["id"],
-                    kind=query.kind,  # echoes the query's kind (§8)
+                    kind=query.kind,  # echoes the query's kind
                     title=entry.get("title", ""),
                     ref=entry.get("ref", str(path)),
                     data=entry.get("data", {}),

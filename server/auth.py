@@ -1,5 +1,5 @@
 """
-server.auth — bearer-token authentication (DESIGN §10).
+server.auth — bearer-token authentication.
 
 Token lifecycle:
 - load_or_create_token: generate a strong random token via secrets.token_urlsafe

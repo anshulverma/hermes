@@ -1,4 +1,4 @@
-"""sites.ssh — generic SSH site adapter (spec §4, §8).
+"""sites.ssh — generic SSH site adapter.
 
 A Site implementation that reaches worker hosts over SSH (agent-agnostic). This
 is the foundation the future `meta`/`devserver` sites extend. Workers run only

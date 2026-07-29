@@ -1,4 +1,4 @@
-"""LearningSink protocol + implementations for dexter playbook (Slice 4).
+"""LearningSink protocol + implementations for dexter playbook.
 
 The LearningSink interface defines bank(cluster) -> str|None. Implementations:
 - FakeSink: test double that records calls and returns a canned ref (or raises)
@@ -16,7 +16,7 @@ from typing import Protocol
 
 
 class LearningSink(Protocol):
-    """Protocol for banking a learning from a cluster (§5)."""
+    """Protocol for banking a learning from a cluster."""
 
     def bank(self, cluster: dict) -> str | None:
         """Bank a learning for a cluster.
@@ -64,7 +64,7 @@ class DexterKbSink:
     - DEXTER_KB_PY env var pointing to kb.py script
     - INVESTIGATIONS_DIR env var pointing to the dexter runtime dir
 
-    This is the single master-side dexter coupling (§5).
+    This is the single master-side dexter coupling.
     """
 
     def bank(self, cluster: dict) -> str | None:

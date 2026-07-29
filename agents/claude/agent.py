@@ -1,12 +1,12 @@
-"""ClaudeAgent — the reference agent adapter (§6, §8).
+"""ClaudeAgent — the reference agent adapter.
 
 Renders a Driver + GoalEnvelope into a headless ``claude -p`` invocation and
 parses the worker's emitted result doc / stdout back into a ``Result``. There is
 no turn cap (no ``--max-turns``): the wall-clock budget is enforced by the
-transport's ``timeout`` wrapper over ``envelope["timeout_s"]`` (§6, §9).
+transport's ``timeout`` wrapper over ``envelope["timeout_s"]``.
 
 Integrity: on parse, the agent RECOMPUTES ``payload_sha256`` over the received
-payload (§6) and, on mismatch, returns ``driver_failed`` / ``contract_fail`` with
+payload and, on mismatch, returns ``driver_failed`` / ``contract_fail`` with
 no retry.
 
 Selected via ``HERMES_AGENT=claude`` (the default). Stdlib-only (json, shutil,
@@ -29,14 +29,14 @@ if TYPE_CHECKING:  # avoid import cycle
 
 
 class ClaudeAgent:
-    """Claude Code agent adapter: ``claude -p "/goal …"`` (§8)."""
+    """Claude Code agent adapter: ``claude -p "/goal …"``."""
 
     name = "claude"
 
     # --- invocation -----------------------------------------------------
 
     def build_invocation(self, envelope: dict, driver: Driver) -> list[str]:
-        """Build the headless ``claude`` argv (§8).
+        """Build the headless ``claude`` argv.
 
         Prompt = ``/goal <goal>`` plus the methodology ``driver.command`` (with
         its args) when present, omitted when null. No ``--max-turns``: the
@@ -62,7 +62,7 @@ class ClaudeAgent:
     # --- result parsing -------------------------------------------------
 
     def parse_result(self, raw: str, envelope: dict) -> Result:
-        """Map the worker's emitted result doc / stdout to a ``Result`` (§6).
+        """Map the worker's emitted result doc / stdout to a ``Result``.
 
         Integrity check first: recompute ``payload_sha256`` over the received
         payload and, on mismatch, return ``driver_failed`` / ``contract_fail``
@@ -129,7 +129,7 @@ class ClaudeAgent:
     # --- health ---------------------------------------------------------
 
     def health_checks(self, host: str, site: "Site") -> list[Check]:
-        """Return the agent_ok + auth_ok checks (§8).
+        """Return the agent_ok + auth_ok checks.
 
         ``agent`` = the ``claude`` binary is on PATH; ``auth`` = an Anthropic
         credential is present (``ANTHROPIC_API_KEY`` env or a ``~/.claude``
