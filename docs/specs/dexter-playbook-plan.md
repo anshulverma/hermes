@@ -20,8 +20,13 @@ Commit after each slice. Section references (`§2.3`, `D1`…) point at the spec
 - **Stdlib-only engine.** No third-party runtime import anywhere the engine loads
   (`engine/*`, `playbooks/*`, `sites/*`, `agents/*`). The devserver site may use
   `subprocess`/`shutil`/`os`/`json`/`tempfile` only (mirrors `sites/ssh`). The
-  existing `tests/unit/test_invariants.py` import-scan must keep passing; extend it
-  to cover `playbooks.dexter` and `sites.devserver.site`.
+  existing `tests/unit/test_invariants.py::test_engine_core_imports_only_stdlib`
+  AST-scans **`engine/` only** and keeps passing unchanged (this sub-project adds no
+  `engine/` third-party import). Extend that module **additively** with a new
+  import-scan sub-test that either AST-scans `playbooks/dexter/*.py` +
+  `sites/devserver/*.py` for third-party imports (the devserver `subprocess` etc. are
+  stdlib, so allowed) **or** imports `playbooks.dexter` / `sites.devserver.site` in a
+  subprocess and asserts no third-party module entered `sys.modules`.
 - **Match the engine's real protocol signatures — do not re-invent them.** The
   playbook implements `engine/playbook.py`'s `Playbook` Protocol exactly
   (`seed(run, site)`, `payload_schema(phase)`, `result_schema(phase)`,
@@ -121,8 +126,12 @@ hardcoded `run_config = {}` at `engine/cli.py:64`). Goals-file format per §2.1a
 - `_load_goals_file` parses a temp file: keeps 3 goals, drops blank lines, drops
   `#`-comment lines (incl. leading-space `   # x`), strips whitespace, preserves
   order.
-- `cmd_run --goals FILE --dry-run` (with a stub playbook) puts the parsed list into
-  `runs.config_json` → `run.config["goals"]` (assert via the created run row).
+- `cmd_run --goals FILE --dry-run` puts the parsed list into `runs.config_json` →
+  `run.config["goals"]` (assert via the created run row). Use the **`example`**
+  playbook here (dexter is not registered until Slice 2; `_load_playbook_site_agent`
+  resolves only real registered playbooks) — reuse the existing dry-run harness
+  (`temp_hermes_home` + `write_canned_issues` so EchoPlaybook's `seed`/`issue_source`
+  still succeeds); goals ride in `run.config` and do not affect example's seeding.
 - Missing/empty file ⇒ `run.config["goals"] == []`.
 - No `--goals` ⇒ `run.config == {}` (regression: existing runs unaffected).
 
@@ -245,8 +254,12 @@ No engine change.
   `findings.id` asc (`queue.load_findings`); collapse to the **last** finding per
   `ticket_id` before clustering (a ticket with two `ok` findings counts once).
 - **Cluster** folded findings by `finding.json["root_cause"]["signature"]`.
-- Per cluster: **canonical** `ticket_id` = deterministic **lowest ticket id**;
-  duplicates = other members (each with its `fix.diff_ref`).
+- Per cluster: **canonical** `ticket_id` = deterministic **lowest ticket id**.
+  Pin the ordering: ids are `f"{run.id}/solve-{i}"`, so pick canonical by the
+  **numeric `i`** (parse the `solve-<i>` suffix), not a raw string `min()` — string
+  order would rank `solve-10 < solve-2`. (Any deterministic rule satisfies §2.6;
+  numeric keeps tests intuitive.) Duplicates = other members (each with its
+  `fix.diff_ref`).
 - **Bank one learning per cluster** via `self.sink.bank(cluster) -> str | None`.
   Best-effort: wrap in try/except — any exception ⇒ `learning_ref=None` +
   `learning_error="<msg>"`; `reduce` must **never raise** (an uncaught exception
@@ -320,8 +333,12 @@ recipe, dashboard endpoint), not hardcoded.
 - `run_worker(host, envelope, agent) -> Result` — SSH transport that (a) scp's the
   envelope up, (b) runs `hermes serve-once --envelope … --result … --timeout …`
   over SSH **with the guard dir prepended to the remote `PATH`** (the ssh command
-  exports `PATH=<guarddir>:$PATH` before `serve-once` — the generic
-  `ssh_transport` does NOT set PATH, which is why devserver needs its own), (c)
+  exports `PATH=<remote-guarddir>:$PATH` before `serve-once` — the generic
+  `ssh_transport` / `SSHSite.run_worker` do NOT set PATH, which is why devserver
+  needs its own). NB: `SSHSite.run_worker` passes the remote command as **separate
+  argv items** (`"hermes","serve-once",…`), where a `$PATH` token would not expand;
+  devserver must instead pass the remote command as a **single shell string** (or
+  `sh -c "…"`) so the remote shell expands `$PATH`. (c)
   scp's `result.json` + evidence back and returns `agent.parse_result(raw,
   envelope)`. **Connection-level** failure (ssh exit 255, refused/timeout, failed
   scp) **raises** `transport.TransportError` (→ no-penalty `requeue_transport`); a
@@ -428,22 +445,39 @@ import side-effect so `HERMES_AGENT` can select it.
   selected per ticket/goal from a scenario map (decoupled from the
   schema-constrained ticket payload — the stock `MockAgent` only echoes the payload
   and cannot emit an arbitrary §2.3 doc). Honors `payload_sha256` integrity like
-  the other agents. `health_checks` pass.
-- `DexterLocalSite(LocalSite)` — subclass adding `recheck_fix(payload) -> bool`
-  returning a per-scenario verdict (so a "fix holds" goal reaches `reducing` and a
-  "fix does not hold" goal routes to `needs_human`) — all on localhost, reusing
-  LocalSite's real git worktree + guard. Register under `dexter_local`.
+  the other agents (recompute over the RECEIVED `envelope["payload"]`;
+  `contract_fail` on mismatch). `health_checks` pass.
+- **Attempt-awareness (load-bearing for the requeue→settle path).** The scenario
+  map is keyed by **`(ticket_id, attempt)`** with a per-ticket execution counter,
+  **mirroring the stock `MockAgent._scenario_for` / `_attempt_counts`** (and the
+  `FleetPlaybook._reverify_failed_once` precedent). This is required because the
+  engine reuses the SAME ticket payload across a requeue, so a "fix-does-not-hold"
+  goal must emit a *does-not-hold* §2.3 doc on **attempt 1** and a *holds* doc on
+  **attempt 2** (after `hermes ticket requeue`), letting attempt 2 re-verify and the
+  phase settle. Fallback to a plain per-goal scenario when no `(ticket_id, attempt)`
+  entry matches.
+- `DexterLocalSite(LocalSite)` — subclass adding `recheck_fix(payload) -> bool` that
+  is a **pure function of the emitted §2.3 payload** (e.g. reads a deterministic
+  marker such as `payload["fix"]["ci_status"] == "passing"` / a `root_cause`
+  scenario tag) — so a *holds* doc ⇒ `True` (→ `reducing`) and a *does-not-hold* doc
+  ⇒ `False` (→ `needs_human`). Keeping the verdict payload-derived (not site
+  instance-state) is what makes the attempt-1-fails / attempt-2-passes flip come
+  purely from the agent's attempt-keyed doc. All on localhost, reusing LocalSite's
+  real git worktree + guard. Register under `dexter_local`.
 
 **Tests first (RED)** — `tests/unit/test_dexter_doubles.py`:
 - `DexterMockAgent.parse_result` yields a **valid §2.3 doc** per scenario (assert
   via `contracts.validate_result` against `result_schema("solve")`), incl. two
   goals sharing a `root_cause.signature` and one "fix-does-not-hold" scenario.
-- `DexterLocalSite.recheck_fix` returns the scenario verdict; when composed with
-  the dexter `verify`, a "holds" payload ⇒ True, a "does-not-hold" ⇒ False.
+- **Attempt-keying**: for the "fix-does-not-hold" ticket, attempt 1's doc yields
+  `recheck_fix` False and attempt 2's doc (same envelope, next execution) yields
+  True — asserted by two successive `parse_result` calls with the same envelope.
+- `DexterLocalSite.recheck_fix` returns the payload-derived verdict; when composed
+  with the dexter `verify`, a "holds" payload ⇒ True, a "does-not-hold" ⇒ False.
 - Doubles register and resolve via the agent/site registries.
 
-**DoD.** The doubles emit real §2.3 data and drive both `verify` branches on
-localhost; no real `claude`/SSH/Meta.
+**DoD.** The doubles emit real §2.3 data, are attempt-aware, and drive both `verify`
+branches on localhost; no real `claude`/SSH/Meta.
 
 ---
 
@@ -456,6 +490,16 @@ against a temp `HERMES_HOME`. This is the acceptance slice (spec §8).
 **Files.** `tests/integration/test_dexter_run.py`. No production code (all prior
 slices supply it); may add a `FakeSink`-injected playbook registration helper in
 the test.
+
+**Test harness (pin — else provisioning fails).** `DexterLocalSite` inherits
+`LocalSite.provision`, which `crew.add` calls before health-gating a host and which
+runs `git worktree add --detach <workspace> <base_ref>` from `HERMES_REPO`
+(defaults to cwd) and installs the guard shims. So the integration test MUST set up
+a **real one-commit git repo as `HERMES_REPO`** (plus a temp `HERMES_HOME`),
+exactly like `test_fleet_scenario.py`'s `source_repo` + `home` fixtures. Reuse that
+fixture pattern; drive `dispatch.master_loop` in a bounded controlled loop, settling
+`needs_human` via the operator paths between cycles (mirror
+`test_fleet_scenario_single_box_run`).
 
 **Behavior to pin / assert (§4, §6, §8).**
 - **Fan-out.** `seed` one `solve` ticket per goal; each host runs
@@ -471,17 +515,28 @@ the test.
 - **Human resolution.** `queue.accept_reduction` (or `hermes reduction accept`) →
   members `done`; a separate reject run → members `failed`.
 - **verify-fail blocks + requeue clears (blocked-run top-risk).** A
-  "fix-does-not-hold" goal (verify False via `DexterLocalSite.recheck_fix`) lands
-  in `needs_human` and **blocks phase reduce** (asserted: `reduce` does not run
-  while `nh>0`); `hermes ticket requeue` (`queue.requeue_needs_human`) returns it to
-  `queued`; a subsequent re-run that re-verifies lets the phase settle. Also assert
-  there is **no** terminal-abandon path (documented accepted limitation).
+  "fix-does-not-hold" goal (attempt-1 §2.3 doc ⇒ `recheck_fix` False ⇒ verify False)
+  lands in `needs_human` and **blocks phase reduce** — assert concretely that while
+  that ticket is `needs_human` the phase has **zero `reductions` rows** (the engine's
+  `_reduce_and_advance` returns early on `nh>0`, so `_do_reduce`/`playbook.reduce`
+  never runs). Then `hermes ticket requeue` (`queue.requeue_needs_human`) returns it
+  to `queued` with attempts unchanged; the attempt-2 doc (§ Slice 8 attempt-keying)
+  ⇒ `recheck_fix` True ⇒ verify True ⇒ `reducing`, letting the phase settle and the
+  run reach `done`. Also assert there is **no** terminal-abandon path: with the
+  ticket left in `needs_human` and never requeued, the run never leaves `running`
+  (documented accepted limitation, §9) — `requeue_needs_human` is the only exit.
 - **Run reaches done.** After every cluster is accepted, the phase settles
   (done/failed only), `is_done` → True, run `running → done`; learnings already
   banked in `reduce`.
-- **No-ship invariant (§7).** A worker `git push`/land attempt is blocked by the
-  guard shim (exit `97`); and a site with `guarantees_no_ship()==False` is rejected
-  at dispatch (`contract_fail`) — assert both.
+- **No-ship invariant (§7).** Assert both layers concretely:
+  (a) **runtime guard** — after a host is provisioned, invoke the installed shim
+  directly from the guard dir (`DexterLocalSite.guard_bin_dir(host)/git`,
+  `subprocess.run([...,"push"], env with guard dir on PATH)`) and assert exit `97`
+  (do **not** rely on the mock agent to attempt a push — `DexterMockAgent`
+  short-circuits to `["true"]`); (b) **dispatch gate** — a throwaway site variant
+  whose `guarantees_no_ship()` returns `False` (e.g. a one-off `LocalSite` subclass)
+  makes `_build_envelope` raise and `serve_once_for_host` route the ticket to
+  `fail_contract_violation` (terminal `failed`, `termination_reason` `contract_fail`).
 - **Event stream.** Assert ordered kinds appear: `ticket_claimed`,
   `result_recorded`, `needs_human`, `reduction_created`,
   `reduction_accepted`/`ticket_failed`, `run_done`.
