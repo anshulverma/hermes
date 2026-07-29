@@ -137,4 +137,32 @@ describe('App', () => {
 
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
   });
+
+  it('should show Activity tab in TopBar', async () => {
+    vi.spyOn(client, 'fetchHealth').mockResolvedValue({
+      status: 'ok',
+      version: '0.1.0',
+      home: '/tmp/hermes',
+    });
+    vi.spyOn(client, 'fetchRuns').mockResolvedValue([
+      {
+        id: 'run-001',
+        playbook: 'example',
+        site: 'local',
+        state: 'running',
+        phase: 'work',
+        base_ref: 'main',
+        created_at: '2026-07-29T10:00:00Z',
+        tickets: { queued: 5 },
+      },
+    ]);
+    vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+
+    render(<App />);
+
+    await waitFor(() => {
+      // Activity tab should be present
+      expect(screen.getByText('Activity')).toBeInTheDocument();
+    });
+  });
 });

@@ -461,4 +461,31 @@ def create_app() -> FastAPI:
         finally:
             conn.close()
 
+    @app.get("/api/events")
+    def get_events(
+        since: int = 0,
+        kind: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Get events from the event feed.
+
+        Query params (all optional):
+        - since: Return events with id > since (default 0)
+        - kind: Filter to specific event kind (default None = all kinds)
+        - limit: Max number of events to return (default 200)
+
+        Returns events ordered by id ascending with fields:
+        id, ts, kind, run_id, ticket_id, host, message, data (parsed).
+        """
+        from engine import events
+
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            # Reuse events.since with optional kind filter
+            return events.since(conn, after_id=since, limit=limit, kind=kind)
+        finally:
+            conn.close()
+
     return app

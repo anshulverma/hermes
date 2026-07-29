@@ -174,3 +174,31 @@ export async function fetchLeases(host?: string): Promise<Lease[]> {
   const url = `/api/leases${queryString ? '?' + queryString : ''}`;
   return fetchJSON<Lease[]>(url);
 }
+
+export type Event = {
+  id: number;
+  ts: number;
+  kind: string;
+  run_id: string | null;
+  ticket_id: string | null;
+  host: string | null;
+  message: string | null;
+  data: Record<string, any>;
+};
+
+export type EventFilters = {
+  since?: number;
+  kind?: string;
+  limit?: number;
+};
+
+export async function fetchEvents(filters?: EventFilters): Promise<Event[]> {
+  const params = new URLSearchParams();
+  if (filters?.since !== undefined) params.append('since', filters.since.toString());
+  if (filters?.kind) params.append('kind', filters.kind);
+  if (filters?.limit !== undefined) params.append('limit', filters.limit.toString());
+
+  const queryString = params.toString();
+  const url = `/api/events${queryString ? '?' + queryString : ''}`;
+  return fetchJSON<Event[]>(url);
+}

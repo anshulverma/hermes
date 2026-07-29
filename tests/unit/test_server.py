@@ -370,6 +370,201 @@ def test_tickets_unknown_run_404(client: TestClient, temp_home: Path):
     assert response.status_code == 404
 
 
+def test_events_endpoint_returns_events_ascending(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/events returns events with id > since, ordered by id ascending with all fields."""
+    # Seed some events directly in sqlite
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    import time
+    now = time.time()
+
+    # Insert events of different kinds
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, ticket_id, host, message, data_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (now - 10, "ticket_claimed", seeded_run, f"{seeded_run}/t-0", "worker-1", "Claimed ticket", '{"priority": 10}'),
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, ticket_id, host, message, data_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (now - 5, "result_recorded", seeded_run, f"{seeded_run}/t-0", "worker-1", "Recorded result", '{"outcome": "done"}'),
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, ticket_id, host, message, data_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (now, "phase_advanced", seeded_run, None, None, "Advanced to reduce", '{"from": "work", "to": "reduce"}'),
+    )
+    conn.commit()
+
+    # Get all events (since=0)
+    response = client.get("/api/events")
+    assert response.status_code == 200
+
+    events = response.json()
+    assert isinstance(events, list)
+    assert len(events) >= 3  # At least our 3 events
+
+    # Find our events
+    claimed = next((e for e in events if e["kind"] == "ticket_claimed"), None)
+    result = next((e for e in events if e["kind"] == "result_recorded"), None)
+    phase = next((e for e in events if e["kind"] == "phase_advanced"), None)
+
+    assert claimed is not None
+    assert result is not None
+    assert phase is not None
+
+    # Verify all fields present
+    assert "id" in claimed
+    assert "ts" in claimed
+    assert claimed["kind"] == "ticket_claimed"
+    assert claimed["run_id"] == seeded_run
+    assert claimed["ticket_id"] == f"{seeded_run}/t-0"
+    assert claimed["host"] == "worker-1"
+    assert claimed["message"] == "Claimed ticket"
+    assert claimed["data"] == {"priority": 10}  # data should be parsed
+
+    # Verify ascending id order
+    ids = [e["id"] for e in events]
+    assert ids == sorted(ids)
+
+    conn.close()
+
+
+def test_events_since_parameter(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/events?since=N returns only events with id > N."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    import time
+    now = time.time()
+
+    # Insert 5 events
+    for i in range(5):
+        conn.execute(
+            """INSERT INTO events (ts, kind, run_id, message, data_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (now + i, "attention", seeded_run, f"Event {i}", '{}'),
+        )
+    conn.commit()
+
+    # Get event IDs
+    event_ids = [row[0] for row in conn.execute("SELECT id FROM events ORDER BY id").fetchall()]
+
+    conn.close()
+
+    # Query events after the 2nd event
+    response = client.get(f"/api/events?since={event_ids[1]}")
+    assert response.status_code == 200
+
+    events = response.json()
+    # Should return events with id > event_ids[1]
+    returned_ids = [e["id"] for e in events]
+
+    # All returned ids should be greater than since
+    assert all(eid > event_ids[1] for eid in returned_ids)
+
+
+def test_events_kind_filter(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/events?kind=X filters to that kind only."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    import time
+    now = time.time()
+
+    # Insert events of different kinds
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, message, data_json)
+           VALUES (?, ?, ?, ?, ?)""",
+        (now, "ticket_claimed", seeded_run, "Claimed", '{}'),
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, message, data_json)
+           VALUES (?, ?, ?, ?, ?)""",
+        (now + 1, "result_recorded", seeded_run, "Recorded", '{}'),
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, message, data_json)
+           VALUES (?, ?, ?, ?, ?)""",
+        (now + 2, "ticket_claimed", seeded_run, "Claimed 2", '{}'),
+    )
+    conn.commit()
+    conn.close()
+
+    # Filter to ticket_claimed only
+    response = client.get("/api/events?kind=ticket_claimed")
+    assert response.status_code == 200
+
+    events = response.json()
+    # Should only return ticket_claimed events
+    assert all(e["kind"] == "ticket_claimed" for e in events)
+
+    # Should have at least our 2 ticket_claimed events
+    claimed_events = [e for e in events if e["message"] in ["Claimed", "Claimed 2"]]
+    assert len(claimed_events) == 2
+
+
+def test_events_limit_parameter(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/events?limit=N bounds the result count."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    import time
+    now = time.time()
+
+    # Insert 10 events
+    for i in range(10):
+        conn.execute(
+            """INSERT INTO events (ts, kind, run_id, message, data_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (now + i, "attention", seeded_run, f"Event {i}", '{}'),
+        )
+    conn.commit()
+    conn.close()
+
+    # Query with limit=3
+    response = client.get("/api/events?limit=3")
+    assert response.status_code == 200
+
+    events = response.json()
+    # Should return at most 3 events
+    assert len(events) <= 3
+
+
+def test_events_kind_and_limit_together(client: TestClient, seeded_run: str, temp_home: Path):
+    """GET /api/events?kind=X&limit=N: limit should bound matched rows."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    import time
+    now = time.time()
+
+    # Insert 10 events: 5 ticket_claimed, 5 result_recorded
+    for i in range(5):
+        conn.execute(
+            """INSERT INTO events (ts, kind, run_id, message, data_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (now + i, "ticket_claimed", seeded_run, f"Claimed {i}", '{}'),
+        )
+        conn.execute(
+            """INSERT INTO events (ts, kind, run_id, message, data_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (now + i + 0.5, "result_recorded", seeded_run, f"Recorded {i}", '{}'),
+        )
+    conn.commit()
+    conn.close()
+
+    # Query with kind=ticket_claimed and limit=2
+    response = client.get("/api/events?kind=ticket_claimed&limit=2")
+    assert response.status_code == 200
+
+    events = response.json()
+    # Should return at most 2 ticket_claimed events
+    assert len(events) <= 2
+    assert all(e["kind"] == "ticket_claimed" for e in events)
+
+
 def test_ticket_detail_with_attempts(client: TestClient, seeded_run: str, temp_home: Path):
     """GET /api/tickets/{id} returns full ticket detail with payload, result, attempts, evidence."""
     # Get a ticket id from the seeded run

@@ -8,6 +8,7 @@ import TopBar from './components/TopBar';
 import RunOverview from './views/RunOverview';
 import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
+import ActivityFeed from './views/ActivityFeed';
 import { useHealth, useRuns } from './hooks/useApi';
 import { EmptyState, CrewBackdrop } from './ds';
 import { fetchRun } from './api/client';
@@ -103,6 +104,10 @@ export default function App() {
 
         {!loading && !error && view === 'crew' && (
           <CrewPanel />
+        )}
+
+        {!loading && !error && view === 'activity' && (
+          <ActivityFeed />
         )}
       </div>
     </div>

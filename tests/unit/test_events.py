@@ -324,3 +324,61 @@ def test_row_object_has_expected_fields(conn):
     assert row["host"] == "worker-1"
     assert row["message"] == "Health check"
     assert row["data"] == {"ok": True}
+
+
+def test_since_with_kind_filter(conn):
+    """since with kind parameter filters to that kind (caller owns commit)."""
+    from engine.events import emit, since
+
+    # Insert events of different kinds
+    emit(conn, "ticket_claimed", run_id="run-1", message="Event 1")
+    emit(conn, "result_recorded", run_id="run-1", message="Event 2")
+    emit(conn, "ticket_claimed", run_id="run-1", message="Event 3")
+    emit(conn, "phase_advanced", run_id="run-1", message="Event 4")
+    emit(conn, "ticket_claimed", run_id="run-1", message="Event 5")
+    conn.commit()
+
+    # Query with kind filter
+    rows = since(conn, after_id=0, kind="ticket_claimed")
+
+    # Should only return ticket_claimed events
+    assert len(rows) == 3
+    assert all(r["kind"] == "ticket_claimed" for r in rows)
+    assert rows[0]["message"] == "Event 1"
+    assert rows[1]["message"] == "Event 3"
+    assert rows[2]["message"] == "Event 5"
+
+
+def test_since_kind_none_returns_all_kinds(conn):
+    """since with kind=None returns all kinds (default behavior, caller owns commit)."""
+    from engine.events import emit, since
+
+    # Insert events of different kinds
+    emit(conn, "ticket_claimed", message="Event 1")
+    emit(conn, "result_recorded", message="Event 2")
+    emit(conn, "phase_advanced", message="Event 3")
+    conn.commit()
+
+    # Query without kind filter (default None)
+    rows = since(conn, after_id=0, kind=None)
+
+    # Should return all events
+    assert len(rows) == 3
+
+
+def test_since_kind_with_limit(conn):
+    """since with kind + limit bounds matched rows only (caller owns commit)."""
+    from engine.events import emit, since
+
+    # Insert 10 events: 5 ticket_claimed, 5 result_recorded (interleaved)
+    for i in range(5):
+        emit(conn, "ticket_claimed", message=f"Claimed {i}")
+        emit(conn, "result_recorded", message=f"Recorded {i}")
+    conn.commit()
+
+    # Query with kind filter and limit
+    rows = since(conn, after_id=0, kind="ticket_claimed", limit=2)
+
+    # Should return at most 2 ticket_claimed events
+    assert len(rows) == 2
+    assert all(r["kind"] == "ticket_claimed" for r in rows)

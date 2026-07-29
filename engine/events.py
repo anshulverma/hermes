@@ -74,7 +74,7 @@ def emit(
     )
 
 
-def since(conn: sqlite3.Connection, after_id: int, limit: int = 200) -> list[dict]:
+def since(conn: sqlite3.Connection, after_id: int, limit: int = 200, kind: Optional[str] = None) -> list[dict]:
     """
     Return events with id > after_id, ordered by id ascending.
 
@@ -84,22 +84,37 @@ def since(conn: sqlite3.Connection, after_id: int, limit: int = 200) -> list[dic
         conn: SQLite connection
         after_id: Return only events with id > after_id
         limit: Max number of rows to return (default 200)
+        kind: Optional event kind filter (default None = all kinds)
 
     Returns:
         List of event dicts with data deserialized from data_json.
         Each dict has keys: id, ts, kind, run_id, ticket_id, host, message, data.
     """
     cursor = conn.cursor()
-    cursor.execute(
-        """
-        SELECT id, ts, kind, run_id, ticket_id, host, message, data_json
-        FROM events
-        WHERE id > ?
-        ORDER BY id ASC
-        LIMIT ?
-        """,
-        (after_id, limit),
-    )
+
+    # Build parametrized query with optional kind filter
+    if kind is None:
+        cursor.execute(
+            """
+            SELECT id, ts, kind, run_id, ticket_id, host, message, data_json
+            FROM events
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (after_id, limit),
+        )
+    else:
+        cursor.execute(
+            """
+            SELECT id, ts, kind, run_id, ticket_id, host, message, data_json
+            FROM events
+            WHERE id > ? AND kind = ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (after_id, kind, limit),
+        )
 
     rows = []
     for row in cursor.fetchall():
