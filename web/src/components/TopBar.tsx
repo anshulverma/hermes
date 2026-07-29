@@ -1,53 +1,22 @@
 /**
  * TopBar component - app header with live indicator.
  * Phase A1: minimal shell (no view nav tabs yet - those are added incrementally in Phase B).
+ * Phase C1: LiveDot now reflects WebSocket connection state.
  */
 
-import type { HealthResponse, Run } from '../api/client';
-
-type LiveDotProps = {
-  health: HealthResponse | null;
-};
-
-function LiveDot({ health }: LiveDotProps) {
-  const isLive = health?.status === 'ok';
-  const label = isLive ? 'live' : 'offline';
-
-  return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 6,
-        color: 'var(--text-muted)',
-        fontSize: 12,
-      }}
-    >
-      <span
-        aria-hidden="true"
-        style={{
-          width: 6,
-          height: 6,
-          borderRadius: 'var(--radius-full)',
-          background: isLive ? 'var(--status-live)' : 'var(--status-danger)',
-          animation: isLive ? 'fm-pulse 1.6s ease-out infinite' : 'none',
-        }}
-      />
-      {label}
-    </span>
-  );
-}
+import type { Run } from '../api/client';
+import LiveDot from './LiveDot';
 
 type View = 'overview' | 'metrics' | 'board' | 'crew' | 'findings' | 'activity';
 
 type TopBarProps = {
-  health: HealthResponse | null;
+  connected: boolean;
   runs: Run[];
   view?: View;
   onViewChange?: (view: View) => void;
 };
 
-export default function TopBar({ health, view = 'overview', onViewChange }: TopBarProps) {
+export default function TopBar({ connected, view = 'overview', onViewChange }: TopBarProps) {
   const handleTabClick = (newView: View) => {
     if (onViewChange) {
       onViewChange(newView);
@@ -154,7 +123,7 @@ export default function TopBar({ health, view = 'overview', onViewChange }: TopB
 
       <div style={{ flex: 1 }} />
 
-      <LiveDot health={health} />
+      <LiveDot connected={connected} />
     </header>
   );
 }

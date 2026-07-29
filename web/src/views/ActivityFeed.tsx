@@ -1,12 +1,14 @@
 /**
  * ActivityFeed - event stream view with real events from API.
  * Phase B5: event rows, kind filter.
+ * Phase C1: live event stream via WebSocket.
  * Ported from web/prototype/app/ActivityFeed.jsx with REAL data.
  */
 
 import { useState, useEffect } from 'react';
 import { fetchEvents, fetchEventKinds } from '../api/client';
 import type { Event } from '../api/client';
+import { useEventStream } from '../hooks/useEventStream';
 import { EmptyState } from '../ds';
 
 type EventRowProps = {
@@ -53,6 +55,9 @@ export default function ActivityFeed() {
   const [kindFilter, setKindFilter] = useState<string>('all');
   const [availableKinds, setAvailableKinds] = useState<string[]>([]);
 
+  // Live event stream
+  const { lastEvent } = useEventStream();
+
   // Fetch available kinds on mount
   useEffect(() => {
     fetchEventKinds()
@@ -64,7 +69,7 @@ export default function ActivityFeed() {
       });
   }, []);
 
-  // Fetch events
+  // Initial fetch (preserves existing polling path)
   useEffect(() => {
     setLoading(true);
     setError(null);
@@ -81,6 +86,22 @@ export default function ActivityFeed() {
         setLoading(false);
       });
   }, [kindFilter]);
+
+  // Live append: when a new event arrives via WebSocket, append if it matches the filter
+  useEffect(() => {
+    if (!lastEvent) return;
+
+    // Only append if it matches the current kind filter (or filter is "all")
+    if (kindFilter === 'all' || lastEvent.kind === kindFilter) {
+      setEvents((prev) => {
+        // Avoid duplicates: only append if this event id isn't already present
+        if (prev.some((e) => e.id === lastEvent.id)) {
+          return prev;
+        }
+        return [...prev, lastEvent];
+      });
+    }
+  }, [lastEvent, kindFilter]);
 
   if (loading && events.length === 0) {
     return (

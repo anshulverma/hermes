@@ -3,11 +3,13 @@ server.app — FastAPI application.
 
 Minimal control-plane server (Phase A1). Read endpoints over the real queue.db.
 """
+import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 
 from engine.config import resolve_home
 from engine.db.migrate import connect
@@ -594,5 +596,74 @@ def create_app() -> FastAPI:
             return reductions
         finally:
             conn.close()
+
+    @app.websocket("/api/ws")
+    async def websocket_endpoint(websocket: WebSocket, since: int = None):
+        """WebSocket endpoint for live event stream.
+
+        Polls the real events table and pushes new events to connected clients.
+
+        Query params:
+        - since: Start cursor (event id). Default: current max event id (only new events).
+                 Use since=0 to replay from start.
+
+        Messages:
+        - hello: {type: "hello", last_id: <cursor>} on connect
+        - event: {type: "event", event: {...}} for each new event
+        """
+        await websocket.accept()
+
+        # Get poll interval from env (default 1.0s)
+        poll_interval = float(os.environ.get("HERMES_WS_POLL_S", "1.0"))
+
+        # Determine starting cursor: if since is provided use it, else current max event id
+        home = resolve_home()
+        db_path = str(home / "queue.db")
+
+        if since is None:
+            # Default: get current max event id (only new events)
+            conn = connect(db_path)
+            try:
+                max_id_row = conn.execute("SELECT MAX(id) FROM events").fetchone()
+                last_id = max_id_row[0] if max_id_row[0] is not None else 0
+            finally:
+                conn.close()
+        else:
+            last_id = since
+
+        # Send hello message with initial cursor
+        await websocket.send_json({"type": "hello", "last_id": last_id})
+
+        # Poll loop
+        try:
+            while True:
+                # Poll for new events (fresh connection per poll)
+                conn = connect(db_path)
+                try:
+                    from engine import events
+                    new_events = events.since(conn, after_id=last_id, limit=200)
+                finally:
+                    conn.close()
+
+                # Send each new event
+                for event in new_events:
+                    await websocket.send_json({"type": "event", "event": event})
+                    last_id = event["id"]
+
+                # Wait before next poll
+                await asyncio.sleep(poll_interval)
+
+        except WebSocketDisconnect:
+            # Clean disconnect - just break the loop
+            pass
+        except Exception as e:
+            # Log unexpected errors but don't crash the server
+            print(f"WebSocket error: {e}")
+        finally:
+            # Ensure connection is closed
+            try:
+                await websocket.close()
+            except Exception:
+                pass
 
     return app

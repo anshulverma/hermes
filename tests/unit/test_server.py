@@ -1248,3 +1248,73 @@ def test_reductions_unknown_run_404(client: TestClient, temp_home: Path):
     """GET /api/runs/{unknown}/reductions returns 404."""
     response = client.get("/api/runs/unknown-run/reductions")
     assert response.status_code == 404
+
+
+def test_websocket_hello_and_event_push(client: TestClient, seeded_run: str, temp_home: Path, monkeypatch):
+    """WS /api/ws sends hello with cursor, then pushes new events inserted into real events table."""
+    # Set low poll interval so test completes quickly
+    monkeypatch.setenv("HERMES_WS_POLL_S", "0.05")
+
+    import time
+    db_path = str(temp_home / "queue.db")
+
+    # Connect to websocket with since=0 (replay from start)
+    with client.websocket_connect("/api/ws?since=0") as websocket:
+        # Should receive hello message with initial cursor
+        hello = websocket.receive_json()
+        assert hello["type"] == "hello"
+        assert "last_id" in hello
+        initial_cursor = hello["last_id"]
+
+        # Insert a NEW event into the real events table
+        conn = connect(db_path)
+        from engine import events
+        events.emit(
+            conn,
+            "ticket_claimed",
+            run_id=seeded_run,
+            ticket_id=f"{seeded_run}/new-ticket",
+            host="test-worker",
+            message="Live event test",
+            data={"test": True}
+        )
+        conn.commit()
+
+        # Get the event ID we just inserted
+        new_event_id = conn.execute("SELECT MAX(id) FROM events").fetchone()[0]
+        conn.close()
+
+        # Should receive event message within bounded wait (poll is 0.05s, allow up to 1s)
+        # TestClient's receive_json doesn't support timeout, so we'll use receive_json directly
+        # (it will block until a message arrives; the poll loop should send within ~0.05s)
+        event_msg = websocket.receive_json()
+        assert event_msg["type"] == "event"
+        assert "event" in event_msg
+
+        # Verify the event fields match what we inserted
+        event = event_msg["event"]
+        assert event["id"] == new_event_id
+        assert event["kind"] == "ticket_claimed"
+        assert event["run_id"] == seeded_run
+        assert event["ticket_id"] == f"{seeded_run}/new-ticket"
+        assert event["host"] == "test-worker"
+        assert event["message"] == "Live event test"
+        assert event["data"]["test"] is True
+
+        # Clean disconnect should not raise
+        websocket.close()
+
+
+def test_websocket_clean_disconnect(client: TestClient, temp_home: Path, monkeypatch):
+    """WS /api/ws handles client disconnect cleanly without crashing the server."""
+    monkeypatch.setenv("HERMES_WS_POLL_S", "0.1")
+
+    # Connect and immediately disconnect
+    with client.websocket_connect("/api/ws") as websocket:
+        hello = websocket.receive_json()
+        assert hello["type"] == "hello"
+        websocket.close()
+
+    # Server should still be responsive
+    response = client.get("/api/health")
+    assert response.status_code == 200

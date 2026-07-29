@@ -4,22 +4,22 @@ import TopBar from './TopBar';
 
 describe('TopBar', () => {
   it('should render Hermes title', () => {
-    render(<TopBar health={{ status: 'ok', version: '0.1.0', home: '/tmp' }} runs={[]} />);
+    render(<TopBar connected={true} runs={[]} />);
     expect(screen.getByText('Hermes')).toBeInTheDocument();
   });
 
-  it('should show live indicator when health is ok', () => {
-    render(<TopBar health={{ status: 'ok', version: '0.1.0', home: '/tmp' }} runs={[]} />);
+  it('should show live indicator when connected', () => {
+    render(<TopBar connected={true} runs={[]} />);
     expect(screen.getByText('live')).toBeInTheDocument();
   });
 
-  it('should show degraded state when health is error', () => {
-    render(<TopBar health={null} runs={[]} />);
+  it('should show offline when not connected', () => {
+    render(<TopBar connected={false} runs={[]} />);
     expect(screen.getByText('offline')).toBeInTheDocument();
   });
 
   it('should render Run, Tickets, Crew, Findings, and Activity tabs (Phase B6)', () => {
-    render(<TopBar health={{ status: 'ok', version: '0.1.0', home: '/tmp' }} runs={[]} />);
+    render(<TopBar connected={true} runs={[]} />);
 
     // All main tabs should be present (Phase B6)
     expect(screen.getByText('Run')).toBeInTheDocument();

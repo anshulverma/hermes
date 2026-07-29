@@ -1,9 +1,10 @@
 /**
  * Hermes Control Plane App - Phase B4.
  * Shell wired to real /api/health + /api/runs + RunOverview + TicketBoard + CrewPanel views.
+ * Phase C1: WebSocket live updates.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import TopBar from './components/TopBar';
 import RunOverview from './views/RunOverview';
 import TicketBoard from './views/TicketBoard';
@@ -11,6 +12,7 @@ import CrewPanel from './views/CrewPanel';
 import Findings from './views/Findings';
 import ActivityFeed from './views/ActivityFeed';
 import { useHealth, useRuns } from './hooks/useApi';
+import { useEventStream } from './hooks/useEventStream';
 import { EmptyState, CrewBackdrop } from './ds';
 import { fetchRun } from './api/client';
 import type { RunDetail } from './api/client';
@@ -18,11 +20,14 @@ import type { RunDetail } from './api/client';
 type View = 'overview' | 'metrics' | 'board' | 'crew' | 'findings' | 'activity';
 
 export default function App() {
-  const { data: health, loading: healthLoading, error: healthError } = useHealth();
+  const { loading: healthLoading, error: healthError } = useHealth();
   const { data: runs, loading: runsLoading, error: runsError } = useRuns();
   const [view, setView] = useState<View>('overview');
   const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  // WebSocket live event stream
+  const { connected, lastEvent } = useEventStream();
 
   // Initialize lucide icons after mount
   useEffect(() => {
@@ -31,16 +36,45 @@ export default function App() {
     }
   }, []);
 
-  // Fetch run detail when we have a run
+  // Fetch run detail function (used both in initial load and live refresh)
+  const refreshRunDetail = useCallback((runId: string) => {
+    setDetailLoading(true);
+    fetchRun(runId)
+      .then((detail) => setRunDetail(detail))
+      .catch((err) => console.error('Failed to fetch run detail:', err))
+      .finally(() => setDetailLoading(false));
+  }, []);
+
+  // Fetch run detail when we have a run (initial load)
   useEffect(() => {
     if (runs && runs.length > 0) {
-      setDetailLoading(true);
-      fetchRun(runs[0].id)
-        .then((detail) => setRunDetail(detail))
-        .catch((err) => console.error('Failed to fetch run detail:', err))
-        .finally(() => setDetailLoading(false));
+      refreshRunDetail(runs[0].id);
     }
-  }, [runs]);
+  }, [runs, refreshRunDetail]);
+
+  // Live refresh: when state-changing events arrive, re-fetch run detail
+  useEffect(() => {
+    if (!lastEvent || !runDetail) return;
+
+    // State-changing event kinds that should trigger a run detail refresh
+    const stateChangingKinds = new Set([
+      'ticket_claimed',
+      'result_recorded',
+      'phase_advanced',
+      'needs_human',
+      'reduction_created',
+      'ticket_requeued',
+      'ticket_parked',
+      'ticket_failed',
+    ]);
+
+    if (stateChangingKinds.has(lastEvent.kind)) {
+      // Only refresh if the event is for the current run
+      if (lastEvent.run_id === runDetail.id) {
+        refreshRunDetail(runDetail.id);
+      }
+    }
+  }, [lastEvent, runDetail, refreshRunDetail]);
 
   const loading = healthLoading || runsLoading || detailLoading;
   const error = healthError || runsError;
@@ -57,7 +91,7 @@ export default function App() {
     >
       <CrewBackdrop theme="graph" />
 
-      <TopBar health={health} runs={runs || []} view={view} onViewChange={setView} />
+      <TopBar connected={connected} runs={runs || []} view={view} onViewChange={setView} />
 
       <div
         style={{
