@@ -14,12 +14,34 @@ import json
 import logging
 import os
 import secrets as stdlib_secrets
+import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from engine.db.migrate import apply_migrations, connect
+
+
+@pytest.fixture
+def source_repo(tmp_path, monkeypatch):
+    """A real git repo with one commit, wired up as HERMES_REPO."""
+    repo = tmp_path / "src"
+    repo.mkdir(parents=True, exist_ok=True)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    (repo / "README").write_text("hi\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=env)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=repo, check=True, env=env)
+    monkeypatch.setenv("HERMES_REPO", str(repo))
+    return repo
 
 
 @pytest.fixture(autouse=True)
@@ -266,27 +288,28 @@ def test_redact_masks_secrets_keeps_others():
     assert data["api_token"] == "s3cr3t"
 
 
-def test_no_secrets_in_logs(tmp_path, monkeypatch):
-    """HARD: full run + server startup must log no secrets.
+def test_no_secrets_in_logs(tmp_path, source_repo, monkeypatch):
+    """HARD: full LocalSite+MockAgent run + server WS connect must log NO secrets.
 
-    Simplified: just test that when we log config/env info, secrets are redacted.
-    Full integration with master_loop and server is tested elsewhere.
+    REAL integration test the brief mandates:
+    - Drives dispatch.master_loop against a real temp git repo + temp HERMES_HOME
+    - Creates FastAPI app + TestClient + WebSocket connection with real api_token
+    - Asserts NO secrets appear in captured logs (both getMessage() AND formatted output)
+    - Includes positive control: asserts capture DID record some hermes.* logs
     """
+    import subprocess
+
     # Set up HERMES_HOME
     hermes_home = tmp_path / "hermes-home"
     hermes_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
 
     # Set secrets in env
-    ssh_identity_path = "/tmp/secret_id_rsa"
-    authorized_key_value = "ssh-rsa AAAAB3Nza...SECRET_PUBKEY"
-    api_token_value = "super_secret_token_12345"
+    ssh_identity_path = "/tmp/secret_ssh_id_rsa_sentinel_12345"
+    authorized_key_value = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC_SECRET_SENTINEL_KEY_67890"
 
-    monkeypatch.setenv("HERMES_SSH_IDENTITY_h1", ssh_identity_path)
+    monkeypatch.setenv("HERMES_SSH_IDENTITY_testhost", ssh_identity_path)
     monkeypatch.setenv("HERMES_AUTHORIZED_KEY", authorized_key_value)
-
-    # Create api_token file
-    (hermes_home / "api_token").write_text(api_token_value)
 
     # Configure logging with capture (use JSON format to see extra fields)
     monkeypatch.setenv("HERMES_LOG_LEVEL", "DEBUG")
@@ -294,9 +317,13 @@ def test_no_secrets_in_logs(tmp_path, monkeypatch):
     monkeypatch.delenv("HERMES_LOG_FILE", raising=False)
 
     from engine import log
+    from engine.db.migrate import apply_migrations, connect
+    from engine.models import Run
+    from engine import queue, dispatch, playbook, site, agent
 
     hermes_logger = logging.getLogger("hermes")
 
+    # Install capture handler on root hermes logger (captures ALL hermes.* logs)
     capture = CaptureHandler()
     log.configure()
     orig_handler = hermes_logger.handlers[0]
@@ -306,45 +333,100 @@ def test_no_secrets_in_logs(tmp_path, monkeypatch):
     hermes_logger.addHandler(capture)
     hermes_logger.setLevel(logging.DEBUG)
 
-    # Test logging with structured data that could contain secrets
-    logger = log.get_logger("test")
+    # (i) Drive a full LocalSite + MockAgent run via dispatch.master_loop
+    # Import to register
+    import sites.local.site
+    import testkit.mock_agent
 
-    # Simulate logging config data (should be redacted)
-    config_data = {
-        "api_token": api_token_value,
-        "token": "bearer_token_123",
-        "authorized_key": authorized_key_value,
-        "identity": ssh_identity_path,
-        "host_config": "h1",  # Rename to avoid collision with bound 'host'
-    }
+    pb = playbook.load("example")
+    st = site.load("local")
+    ag = agent.load("mock")
 
-    # Log with redacted extra
-    logger.info("Config loaded", extra=log.redact(config_data))
+    # Set up DB
+    db_path = str(hermes_home / "queue.db")
+    apply_migrations(db_path)
+    conn = connect(db_path)
 
-    # Collect all log output
-    all_messages = capture.get_messages()
-    all_text = "\n".join(all_messages)
+    # Create run
+    run_id = "test-run-1"
+    now = time.time()
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, base_ref, config_json, state,
+                             phase, created_at, updated_at)
+           VALUES (?, 'example', 'local', 'main', '{}', 'running', 'work', ?, ?)""",
+        (run_id, now, now),
+    )
+    conn.commit()
 
-    # Assert NO secrets appear in logs (they should be ***)
+    # Seed one ticket (minimal work to trigger logging)
+    ticket_id = f"{run_id}/t-0"
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority,
+                               attempts, available_at, payload_json, created_at, updated_at)
+           VALUES (?, ?, 'work', 'queued', 'cpu', 100, 0, 0.0, '{}', ?, ?)""",
+        (ticket_id, run_id, now, now),
+    )
+    conn.commit()
+
+    # Drive master_loop (bounded, 1 cycle enough to trigger logging)
+    dispatch.master_loop(
+        conn=conn,
+        run_id=run_id,
+        playbook=pb,
+        site=st,
+        agent=ag,
+        base_ref="main",
+        hosts=["localhost"],
+        now=now,
+        max_cycles=1,
+    )
+    conn.close()
+
+    # (ii) create_app() + TestClient; read the REAL api_token; WS connect
+    from server.app import create_app
+    from server.auth import read_token
+
+    app = create_app(bind="127.0.0.1")
+    real_token = read_token(hermes_home)
+    assert real_token is not None, "api_token should have been created"
+
+    # Use FastAPI TestClient to hit endpoints + WebSocket
+    from fastapi.testclient import TestClient
+    client = TestClient(app)
+
+    # Hit a GET endpoint (should log request)
+    response = client.get("/api/health")
+    assert response.status_code == 200
+
+    # WebSocket connect with token in query string
+    with client.websocket_connect(f"/api/ws?token={real_token}") as websocket:
+        data = websocket.receive_json()
+        assert data["type"] == "hello"
+
+    # Close client
+    # (FastAPI TestClient auto-closes)
+
+    # Collect all log output (both getMessage() and formatted output)
+    all_records = capture.get_records()
+    all_messages_raw = [rec.getMessage() for rec in all_records]
+    all_messages_formatted = capture.get_messages()
+
+    all_text_raw = "\n".join(all_messages_raw)
+    all_text_formatted = "\n".join(all_messages_formatted)
+    all_text = all_text_raw + "\n" + all_text_formatted
+
+    # Assert NO secrets appear in logs
     secrets_to_check = [
-        (api_token_value, "api_token file value"),
-        ("bearer_token_123", "bearer token value"),
+        (real_token, "api_token value"),
+        (f"token={real_token}", "?token= querystring"),
+        (ssh_identity_path, "HERMES_SSH_IDENTITY path"),
         (authorized_key_value, "HERMES_AUTHORIZED_KEY value"),
     ]
 
     for secret, description in secrets_to_check:
         assert secret not in all_text, f"SECRET LEAKED: {description} found in logs"
 
-    # Verify *** appears in JSON output (redaction is working)
-    import json as json_lib
-    for msg in all_messages:
-        obj = json_lib.loads(msg)
-        if obj.get("api_token"):
-            assert obj["api_token"] == "***", "api_token should be redacted"
-        if obj.get("token"):
-            assert obj["token"] == "***", "token should be redacted"
-        if obj.get("authorized_key"):
-            assert obj["authorized_key"] == "***", "authorized_key should be redacted"
-
-    # Verify non-secrets still appear
-    assert "h1" in all_text, "Non-secret host_config should appear"
+    # Positive control: assert capture DID record some hermes.* logs
+    assert len(all_records) > 0, "No logs captured (test has no teeth)"
+    hermes_logs = [r for r in all_records if r.name.startswith("hermes.")]
+    assert len(hermes_logs) > 0, "No hermes.* logs captured (test has no teeth)"

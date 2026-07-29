@@ -1,0 +1,57 @@
+Metadata-Version: 2.4
+Name: hermes
+Version: 0.1.0
+Summary: A standalone engine for running multi-agent work across a fleet
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Requires-Dist: pytest>=9.0.0; extra == "dev"
+Requires-Dist: httpx>=0.27.0; extra == "dev"
+Provides-Extra: server
+Requires-Dist: fastapi>=0.115.0; extra == "server"
+Requires-Dist: uvicorn[standard]>=0.32.0; extra == "server"
+
+# Hermes
+
+A standalone engine for running **multi-agent work across a fleet of remote
+hosts**, where each "worker" is a headless AI coding agent (Claude Code today;
+Codex and others via an agent adapter). Hermes dispatches a **crew** of hosts,
+hands out **tickets**, and drives them to a verified result — nothing ships
+automatically.
+
+Hermes is **not** a Claude Code plugin. It *uses* an agent runtime to run workers
+and *exposes* thin host integrations (a Claude Code plugin under
+`integrations/claude-code/`, a Codex launcher later) so a human can start it from
+their environment.
+
+## Four extension axes
+
+- **Playbook** — the job (test-fix `mechanic`, training-efficiency `rigger`,
+  SEV-RCA `medic`).
+- **Site** — the environment/tools (`local` = localhost+git+shell; `meta` =
+  devserver with SSH/buck2/sl/testinfra/GPU).
+- **Agent** — the worker runtime (`claude`, `codex`, …).
+- **Engine** — the generic core that fans work across the crew (queue, dispatch,
+  transport, crew+health, leases, contracts, events, control-plane API, CLI).
+
+## Status
+
+Design phase. Docs:
+
+- `docs/DESIGN.md` — umbrella design (hardened).
+- `docs/specs/engine-core.md` + `engine-core-plan.md` — sub-project 1 (engine core;
+  hardened, converged). **Build target.**
+- `docs/specs/federation-future.md` — deferred multi-level federation.
+- `web/UI_BRIEF.md` — control-plane UI brief (for Claude Design).
+- `docs/auto-plan/reports/` — the auto-plan hardening reports.
+
+## Layout
+
+```
+engine/  server/  web/  agents/{claude,codex}/  sites/{local,meta}/
+playbooks/{mechanic,rigger,medic}/  integrations/{claude-code,codex}/
+testkit/  tests/  docs/
+```
+
+Runtime data (queue.db, logs, ticket payloads) lives outside the repo under
+`HERMES_HOME` (default `~/.hermes`).

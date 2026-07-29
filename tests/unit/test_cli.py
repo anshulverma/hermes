@@ -522,8 +522,8 @@ def test_serve_processes_available_work(setup_testkit, capsys):
 
 # --- traceback gating (HERMES_DEBUG) ------------------------------------
 
-def test_error_traceback_gated_by_debug_env(setup_testkit, capsys, monkeypatch):
-    """Top-level exception prints just the message unless HERMES_DEBUG=1."""
+def test_error_traceback_gated_by_debug_env(setup_testkit, capsys, caplog, monkeypatch):
+    """Top-level exception logs just the message unless HERMES_DEBUG=1."""
     with temp_hermes_home() as home:
         monkeypatch.delenv("HERMES_DEBUG", raising=False)
 
@@ -537,13 +537,13 @@ def test_error_traceback_gated_by_debug_env(setup_testkit, capsys, monkeypatch):
 
         captured = capsys.readouterr()
         combined = captured.out + captured.err
-        # Should have "Error:" but NOT a full traceback (no "Traceback")
-        assert "error" in combined.lower()
+        # Should have error message in logs but NOT a full traceback (no "Traceback")
+        assert "Command failed" in combined or any("Command failed" in rec.message for rec in caplog.records)
         assert "traceback" not in combined.lower(), "should not print traceback without HERMES_DEBUG"
 
 
-def test_error_traceback_shown_with_debug_env(setup_testkit, capsys, monkeypatch):
-    """With HERMES_DEBUG=1, exceptions print a full traceback."""
+def test_error_traceback_shown_with_debug_env(setup_testkit, capsys, caplog, monkeypatch):
+    """With HERMES_DEBUG=1, exceptions log with a full traceback via logger.exception."""
     with temp_hermes_home() as home:
         monkeypatch.setenv("HERMES_DEBUG", "1")
 
@@ -557,8 +557,8 @@ def test_error_traceback_shown_with_debug_env(setup_testkit, capsys, monkeypatch
 
         captured = capsys.readouterr()
         combined = captured.out + captured.err
-        # Should have both "Error:" and a traceback
-        assert "error" in combined.lower()
+        # Should have both error message and a traceback (logged via logger.exception)
+        assert "Command failed" in combined or any("Command failed" in rec.message for rec in caplog.records)
         assert "traceback" in combined.lower(), "should print traceback with HERMES_DEBUG=1"
 
 
