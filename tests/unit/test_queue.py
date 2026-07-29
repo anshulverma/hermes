@@ -814,7 +814,7 @@ def test_load_run_loads_prior_phase_reductions(conn):
     )
     conn.commit()
 
-    run = queue._load_run(conn, "r1")
+    run = queue.load_run(conn, "r1")
 
     assert len(run.reductions) == 1
     assert run.reductions[0].phase == "work"

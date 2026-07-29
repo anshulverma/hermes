@@ -353,10 +353,49 @@ def cmd_show(args):
     return 0
 
 
+def cmd_serve_api(args):
+    """hermes serve --api [--host 127.0.0.1] [--port 8080].
+
+    Run the FastAPI control-plane server. Thin wrapper around uvicorn.
+    """
+    try:
+        import uvicorn
+        from server.app import create_app
+    except ImportError as e:
+        print(f"Error: server dependencies not installed. Run: pip install -e '.[server]'", file=sys.stderr)
+        print(f"  ({e})", file=sys.stderr)
+        return 1
+
+    # Create the app
+    app = create_app()
+
+    # Defaults
+    host = args.host or "127.0.0.1"
+    port = args.port
+
+    print(f"Starting Hermes API server on http://{host}:{port}")
+    print(f"HERMES_HOME: {config.resolve_home()}")
+
+    # Run uvicorn
+    uvicorn.run(app, host=host, port=port, log_level="info")
+    return 0
+
+
 def cmd_serve(args):
-    """hermes serve --host <h> --site <site> [--agent <agent>] [--run R]."""
+    """hermes serve --host <h> --site <site> [--agent <agent>] [--run R] OR --api [--host H] [--port P]."""
+    # API server mode
+    if args.api:
+        return cmd_serve_api(args)
+
+    # Worker mode (original behavior)
     pb, st, ag = _load_playbook_site_agent(args)
     host = args.host
+    if not host:
+        print("Error: --host is required for worker mode", file=sys.stderr)
+        return 1
+    if not args.site:
+        print("Error: --site is required for worker mode", file=sys.stderr)
+        return 1
     base_ref = getattr(args, 'base_ref', None) or 'main'
 
     conn = _connect()
@@ -487,12 +526,14 @@ def main(argv=None):
     show_parser.add_argument('ticket_id', help='Ticket ID')
 
     # --- serve ---
-    serve_parser = subparsers.add_parser('serve', help='Run serve loop for a host')
-    serve_parser.add_argument('--host', required=True, help='Host to serve')
-    serve_parser.add_argument('--site', required=True, help='Site name')
-    serve_parser.add_argument('--agent', help='Agent name')
-    serve_parser.add_argument('--run', help='Run ID (default: most recent running run)')
-    serve_parser.add_argument('--base-ref', help='Base ref (default: main)')
+    serve_parser = subparsers.add_parser('serve', help='Run serve loop for a host or API server')
+    serve_parser.add_argument('--api', action='store_true', help='Run the API server')
+    serve_parser.add_argument('--host', help='Host to serve (for worker) or bind address (for API)')
+    serve_parser.add_argument('--port', type=int, default=8080, help='Port for API server (default: 8080)')
+    serve_parser.add_argument('--site', help='Site name (for worker)')
+    serve_parser.add_argument('--agent', help='Agent name (for worker)')
+    serve_parser.add_argument('--run', help='Run ID (for worker, default: most recent running run)')
+    serve_parser.add_argument('--base-ref', help='Base ref (for worker, default: main)')
 
     # Parse
     args = parser.parse_args(argv)

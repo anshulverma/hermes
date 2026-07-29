@@ -223,7 +223,7 @@ def record_result(
         clear_worker = False
 
         if result.outcome == "ok":
-            run = _load_run(conn, run_id)
+            run = load_run(conn, run_id)
             verified = playbook.verify(run, ticket, result, site)
             new_state = "reducing" if verified else "needs_human"
         elif result.outcome == "driver_failed":
@@ -864,7 +864,7 @@ def _load_prior_reductions(
     ]
 
 
-def _load_run(conn: sqlite3.Connection, run_id: str) -> Run:
+def load_run(conn: sqlite3.Connection, run_id: str) -> Run:
     """Load a read-only ``Run`` snapshot (§9).
 
     ``reductions`` carries the PRIOR phase's reductions (loaded from the db via

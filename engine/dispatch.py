@@ -130,7 +130,7 @@ def master_loop(
             continue
 
         # (b) Progression — running only. Drive the serve loops for each host.
-        run = queue._load_run(conn, run_id)
+        run = queue.load_run(conn, run_id)
         for host in hosts:
             serve_loop(conn, site, agent, host, run, playbook, base_ref, now=t)
 
@@ -152,7 +152,7 @@ def _reduce_and_advance(
     call, so ``master_loop`` can stop. Every state write goes through a ``queue``
     writer — this function only ORCHESTRATES.
     """
-    run = queue._load_run(conn, run_id)
+    run = queue.load_run(conn, run_id)
     phase = run.phase
     counts = queue.phase_ticket_counts(conn, run_id, phase)
     active = sum(counts.get(s, 0) for s in _ACTIVE_STATES)
@@ -180,13 +180,13 @@ def _reduce_and_advance(
         return False
 
     # Phase fully settled (done/failed only). Advance or terminate.
-    run = queue._load_run(conn, run_id)  # reductions = this phase's, for next_phase
+    run = queue.load_run(conn, run_id)  # reductions = this phase's, for next_phase
     nxt = playbook.next_phase(run)
     if nxt is not None:
         queue.set_run_phase(conn, run_id, nxt, now=now)
         # Reload so the snapshot carries phase=nxt and the PRIOR phase's
         # reductions (§9); seed builds phase-N tickets from phase-(N-1) output.
-        next_run = queue._load_run(conn, run_id)
+        next_run = queue.load_run(conn, run_id)
         queue.seed_tickets(conn, next_run, playbook, site)
         return False
 
@@ -203,7 +203,7 @@ def _do_reduce(
     conn: sqlite3.Connection, run_id: str, playbook, site, phase: str, now: float
 ) -> None:
     """Run the REDUCE step for a settled phase via the queue seam (§9)."""
-    run = queue._load_run(conn, run_id)
+    run = queue.load_run(conn, run_id)
     findings = queue.load_findings(conn, run_id, phase)
     reductions = playbook.reduce(run, phase, findings, site)
     for reduction in reductions:
