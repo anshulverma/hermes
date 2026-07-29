@@ -251,9 +251,15 @@ def record_result(
             )
 
         # Apply the ticket-row transition.
-        # SLICE-6 LEASE SEAM: on leaving 'running' (every branch below) release
-        # this ticket's held lease so a scarce class frees immediately rather
-        # than after the full backoff/TTL. Not implemented here (Slice 6).
+        # Release the ticket's lease on leaving 'running' (every branch) so a
+        # scarce class frees immediately rather than after backoff/TTL (§9).
+        lease_id_row = conn.execute(
+            "SELECT lease_id FROM tickets WHERE id=?", (ticket.id,)
+        ).fetchone()
+        if lease_id_row and lease_id_row[0]:
+            from engine import leases
+            leases.release(conn, lease_id_row[0], now=now)
+
         if new_available_at is not None:
             conn.execute(
                 """UPDATE tickets
@@ -315,12 +321,15 @@ def requeue(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
     now = _now(now)
     try:
         row = conn.execute(
-            "SELECT run_id, attempts FROM tickets WHERE id=?", (ticket.id,)
+            "SELECT run_id, attempts, lease_id FROM tickets WHERE id=?", (ticket.id,)
         ).fetchone()
         if row is None:
             raise ValueError(f"unknown ticket {ticket.id!r}")
-        run_id, attempts = row
-        # SLICE-6 LEASE SEAM: release the ticket's lease here (leaving running).
+        run_id, attempts, lease_id = row
+        # Release the ticket's lease here (leaving running) (§9).
+        if lease_id:
+            from engine import leases
+            leases.release(conn, lease_id, now=now)
         new_attempts = attempts + 1
         available_at = now + _backoff(attempts)
         conn.execute(
@@ -349,12 +358,15 @@ def requeue_transport(conn: sqlite3.Connection, ticket: Ticket, now=None) -> Non
     now = _now(now)
     try:
         row = conn.execute(
-            "SELECT run_id FROM tickets WHERE id=?", (ticket.id,)
+            "SELECT run_id, lease_id FROM tickets WHERE id=?", (ticket.id,)
         ).fetchone()
         if row is None:
             raise ValueError(f"unknown ticket {ticket.id!r}")
-        run_id = row[0]
-        # SLICE-6 LEASE SEAM: release the ticket's lease here (leaving running).
+        run_id, lease_id = row
+        # Release the ticket's lease here (leaving running) (§9).
+        if lease_id:
+            from engine import leases
+            leases.release(conn, lease_id, now=now)
         conn.execute(
             """UPDATE tickets SET state='queued', available_at=?,
                    worker_host=NULL, updated_at=? WHERE id=?""",
@@ -406,6 +418,34 @@ def park_ticket(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
     except Exception:
         conn.rollback()
         raise
+
+
+def unpark_ready(conn: sqlite3.Connection, resource_class: str, now=None) -> None:
+    """Return ``parked`` tickets of ``resource_class`` to ``queued`` (§9).
+
+    Called when the class regains capacity (lease freed, crew added). Moves
+    parked tickets back to queued (fresh claim, no penalty). Does NOT commit —
+    caller owns the transaction (like events.emit).
+    """
+    now = _now(now)
+    # Find all parked tickets for this resource class
+    rows = conn.execute(
+        """SELECT id, run_id FROM tickets
+           WHERE state='parked' AND resource_req=?""",
+        (resource_class,),
+    ).fetchall()
+
+    for ticket_id, run_id in rows:
+        conn.execute(
+            """UPDATE tickets SET state='queued', available_at=?, updated_at=?
+               WHERE id=?""",
+            (now, now, ticket_id),
+        )
+        events.emit(
+            conn, "ticket_requeued", run_id=run_id, ticket_id=ticket_id,
+            message="unparked (capacity regained)",
+            data={"no_penalty": True, "resource_class": resource_class},
+        )
 
 
 # --- run state machine (sole runs.state transitioner) --------------------
