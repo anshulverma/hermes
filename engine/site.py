@@ -1,4 +1,4 @@
-"""Site Protocol (§8) + registry/loader.
+"""Site Protocol + registry/loader.
 
 A Site owns *where/how to reach a host* (transport, provisioning, health,
 review submission, issue sourcing). It is paired at runtime with an Agent
@@ -19,7 +19,7 @@ if TYPE_CHECKING:  # avoid import cycle (agent imports site imports agent)
 
 @runtime_checkable
 class Site(Protocol):
-    """The site interface (§8). Signatures are load-bearing for later slices."""
+    """The site interface. Signatures are load-bearing."""
 
     name: str
 

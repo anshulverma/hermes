@@ -2,7 +2,7 @@
 engine.db.migrate — idempotent additive migration runner + connect().
 
 Stdlib-only (sqlite3 only). Migrations are additive-only, tracked in schema_migrations.
-File mode enforced to 0600. PRAGMAs from spec §4.
+File mode enforced to 0600. PRAGMAs from spec.
 """
 import os
 import sqlite3
@@ -13,7 +13,7 @@ from typing import Optional
 
 def connect(path: str) -> sqlite3.Connection:
     """
-    Open a SQLite connection with spec §4 PRAGMAs and ensure file mode 0600.
+    Open a SQLite connection with spec PRAGMAs and ensure file mode 0600.
 
     PRAGMAs: journal_mode=WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON.
     Creates the file if it doesn't exist, then chmods to 0600.
@@ -38,7 +38,7 @@ def connect(path: str) -> sqlite3.Connection:
     # Open connection
     conn = sqlite3.connect(str(db_path))
 
-    # Set PRAGMAs (spec §4)
+    # Set PRAGMAs
     cursor = conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA synchronous=NORMAL")
@@ -85,12 +85,12 @@ def apply_migrations(path: str) -> None:
         cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
         applied_versions = {row[0] for row in cursor.fetchall()}
 
-        # Migration 1: initial schema from spec §4 (CREATE statements).
+        # Migration 1: initial schema from spec (CREATE statements).
         if 1 not in applied_versions:
             _apply_migration_1(conn)
             cursor.execute("""
                 INSERT INTO schema_migrations (version, applied_at, description)
-                VALUES (1, ?, 'Initial schema from engine-core.md §4')
+                VALUES (1, ?, 'Initial schema')
             """, (time.time(),))
             conn.commit()
 
@@ -150,7 +150,7 @@ def _parse_schema_by_version() -> dict[int, list[str]]:
 
 def _apply_migration_1(conn: sqlite3.Connection) -> None:
     """
-    Apply migration 1: full initial schema from spec §4.
+    Apply migration 1: full initial schema from spec.
 
     Executes the CREATE statements from schema.sql (everything above the first
     ``@migration`` marker). The file includes all tables, CHECK constraints, FKs,
@@ -168,7 +168,7 @@ def _apply_migration_1(conn: sqlite3.Connection) -> None:
 def _apply_migration_2(conn: sqlite3.Connection) -> None:
     """
     Apply migration 2: additive ALTERs marked ``@migration 2`` in schema.sql
-    (adds ``reductions.phase`` for phase-scope reductions, §9).
+    (adds ``reductions.phase`` for phase-scope reductions,).
     """
     cursor = conn.cursor()
     for stmt in _parse_schema_by_version().get(2, []):

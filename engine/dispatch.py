@@ -1,5 +1,5 @@
 """
-engine.dispatch — the serve + master loops (spec §5, §9, §10).
+engine.dispatch — the serve + master loops.
 
 Two loops tie the engine together:
 
@@ -9,7 +9,7 @@ Two loops tie the engine together:
   ``hermes serve --host``.
 - ``master_loop`` is the orchestrator. Each cycle it runs the heartbeat
   housekeeping (health re-probe, down-requeue, lease renew/reclaim) REGARDLESS of
-  run state, then — ONLY while the run is ``running`` (§5 pause freeze) — drives
+  run state, then — ONLY while the run is ``running`` (pause freeze) — drives
   the serve loops, reduces a fully-settled phase, advances to the next phase (or
   terminates the run ``done``/``failed``).
 
@@ -39,7 +39,7 @@ from typing import Optional
 from engine import config, crew, events, queue, transport
 
 # Ticket states that still count as "actionable" work in a phase: while any of
-# these exist the phase is not settled and must not be reduced/advanced (§5, §9).
+# these exist the phase is not settled and must not be reduced/advanced.
 # ``needs_human`` blocks too (a re-verify/guard-routed or reduce-flagged ticket
 # still awaits a human) and is handled separately from the pre-reduce gate.
 _ACTIVE_STATES = ("queued", "dispatched", "running", "parked")
@@ -66,7 +66,7 @@ def serve_loop(
     base_ref: str,
     now: Optional[float] = None,
 ) -> int:
-    """Drive ``serve_once_for_host`` for ``host`` until no claimable work (§9, §10).
+    """Drive ``serve_once_for_host`` for ``host`` until no claimable work.
 
     Loops while the run is ``running`` and ``serve_once_for_host`` keeps returning
     a Result (a ticket was executed + recorded). It stops as soon as ``serve_once``
@@ -93,7 +93,7 @@ def serve_loop(
 # --- attention detection (run-level) -------------------------------------
 
 def check_attention(conn: sqlite3.Connection, run_id: str, now: Optional[float] = None) -> None:
-    """Detect and emit run-level attention events (§7, Slice 11).
+    """Detect and emit run-level attention events. 
 
     Checks three conditions and emits an `attention` event (with reason in data)
     for each currently-true condition, DEDUPED: skip a reason already emitted
@@ -182,7 +182,7 @@ def master_loop(
     now: Optional[float] = None,
     max_cycles: Optional[int] = None,
 ) -> str:
-    """Orchestrate a run to a terminal state (§5, §9, §10).
+    """Orchestrate a run to a terminal state.
 
     Each cycle: (a) ``crew.heartbeat_sweep`` (always, regardless of run state);
     (b) only while the run is ``running``, drive the in-process serve loops for
@@ -197,11 +197,11 @@ def master_loop(
         cycles += 1
         t = _now(now)
 
-        # (a) Housekeeping runs every cycle regardless of run state (§5): health
+        # (a) Housekeeping runs every cycle regardless of run state: health
         # re-probe, down-requeue, lease renew/reclaim, un-park.
         crew.heartbeat_sweep(conn, site, agent, now=t)
 
-        # Check run-level attention conditions (Slice 11)
+        # Check run-level attention conditions (future extension)
         check_attention(conn, run_id, now=t)
 
         state = _run_state(conn, run_id)
@@ -209,7 +209,7 @@ def master_loop(
             # Terminal (or a stopped run makes no progression): nothing to drive.
             return state
         if state != "running":
-            # paused: only housekeeping continues (pause freeze, §5).
+            # paused: only housekeeping continues (pause freeze,).
             continue
 
         # (b) Progression — running only. Drive the serve loops for each host.
@@ -229,7 +229,7 @@ def master_loop(
 def _reduce_and_advance(
     conn: sqlite3.Connection, run_id: str, playbook, site, now: float
 ) -> bool:
-    """Reduce the current phase if settled, then advance or terminate (§9).
+    """Reduce the current phase if settled, then advance or terminate.
 
     Returns True iff the run reached a terminal state (``done``/``failed``) this
     call, so ``master_loop`` can stop. Every state write goes through a ``queue``
@@ -246,7 +246,7 @@ def _reduce_and_advance(
         return False
     if nh > 0:
         # Blocked awaiting a human decision (re-verify/guard-routed); do not
-        # reduce or advance (§5 needs_human blocks advancement).
+        # reduce or advance (needs_human blocks advancement).
         return False
 
     # active == 0 and nh == 0: the phase has settled into reducing/failed. Reduce
@@ -268,7 +268,7 @@ def _reduce_and_advance(
     if nxt is not None:
         queue.set_run_phase(conn, run_id, nxt, now=now)
         # Reload so the snapshot carries phase=nxt and the PRIOR phase's
-        # reductions (§9); seed builds phase-N tickets from phase-(N-1) output.
+        # reductions; seed builds phase-N tickets from phase-(N-1) output.
         next_run = queue.load_run(conn, run_id)
         queue.seed_tickets(conn, next_run, playbook, site)
         return False
@@ -277,7 +277,7 @@ def _reduce_and_advance(
         queue.set_run_state(conn, run_id, "done", now=now)
         return True
 
-    # Stuck: no next phase, not done, and no actionable tickets remain (§5).
+    # Stuck: no next phase, not done, and no actionable tickets remain.
     queue.set_run_state(conn, run_id, "failed", now=now)
     return True
 
@@ -285,7 +285,7 @@ def _reduce_and_advance(
 def _do_reduce(
     conn: sqlite3.Connection, run_id: str, playbook, site, phase: str, now: float
 ) -> None:
-    """Run the REDUCE step for a settled phase via the queue seam (§9)."""
+    """Run the REDUCE step for a settled phase via the queue seam."""
     run = queue.load_run(conn, run_id)
     findings = queue.load_findings(conn, run_id, phase)
     reductions = playbook.reduce(run, phase, findings, site)
@@ -295,7 +295,7 @@ def _do_reduce(
 
 
 def _phase_reduced(conn: sqlite3.Connection, run_id: str, phase: str) -> bool:
-    """True iff a reduction has already been recorded for this phase (§9).
+    """True iff a reduction has already been recorded for this phase.
 
     Guards against re-reducing a phase across cycles (e.g. after a reduce-flagged
     ``needs_human`` ticket is later settled by an operator).

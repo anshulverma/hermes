@@ -1,4 +1,4 @@
-"""Agent Protocol (§8) + registry/loader — the worker-runtime axis.
+"""Agent Protocol + registry/loader — the worker-runtime axis.
 
 An Agent owns *how to run the AI on a host*: it renders a Driver + envelope
 into a concrete headless invocation and parses the raw output into a Result,
@@ -23,7 +23,7 @@ if TYPE_CHECKING:  # avoid import cycle (site imports agent imports site)
 
 @runtime_checkable
 class Agent(Protocol):
-    """The agent interface (§8). Signatures are load-bearing for later slices."""
+    """The agent interface. Signatures are load-bearing."""
 
     name: str  # "claude" | "codex" | "mock"
 

@@ -1,10 +1,10 @@
 """
-engine.leases — resource semaphore and lease lifecycle (spec §9, §4).
+engine.leases — resource semaphore and lease lifecycle.
 
 This module implements the lease-based resource semaphore: it enforces class
 capacity (computed from crew.resources_json), issues leases to running tickets,
 and reclaims expired ones. It is a building block for the dispatch loop
-(Slice 7+) but does NOT own the dispatch semantics itself.
+(future extension) but does NOT own the dispatch semantics itself.
 
 Critical correctness:
 - Class capacity = Σ crew.resources_json[class] over crew members currently
@@ -38,7 +38,7 @@ def _compute_capacity(conn: sqlite3.Connection, resource_class: str) -> int:
     """Compute class capacity from crew.resources_json (idle|busy only).
 
     Capacity = Σ resources_json[resource_class] over crew members currently
-    idle|busy (§9). Down and draining hosts do NOT contribute.
+    idle|busy. Down and draining hosts do NOT contribute.
     """
     rows = conn.execute(
         "SELECT resources_json FROM crew WHERE state IN ('idle', 'busy')"
@@ -68,7 +68,7 @@ def acquire(
     now: Optional[float] = None,
     ttl_s: int = DEFAULT_TTL_S,
 ) -> Optional[Lease]:
-    """Grant a lease iff live leases < capacity, else return None (§9).
+    """Grant a lease iff live leases < capacity, else return None.
 
     Capacity = Σ crew.resources_json[resource_class] over idle|busy crew.
     On grant: insert a leases row with ttl_s, acquired_at, expires_at=now+ttl_s.
@@ -93,7 +93,7 @@ def acquire(
         (lease_id, run_id, resource_class, ticket_id, host, now, ttl_s, expires_at),
     )
 
-    # Emit lease_acquired event (Slice 11)
+    # Emit lease_acquired event (future extension)
     from engine import events
     events.emit(
         conn, "lease_acquired", run_id=run_id, ticket_id=ticket_id, host=host,
@@ -114,7 +114,7 @@ def acquire(
 
 
 def release(conn: sqlite3.Connection, lease_id: str, now: Optional[float] = None) -> None:
-    """Free a lease (delete) and unpark any waiting tickets for the class (§9).
+    """Free a lease (delete) and unpark any waiting tickets for the class.
 
     Does NOT commit — caller owns the transaction. After freeing, calls
     unpark_ready for the class so parked tickets can claim the freed slot.
@@ -137,7 +137,7 @@ def release(conn: sqlite3.Connection, lease_id: str, now: Optional[float] = None
 
 
 def renew(conn: sqlite3.Connection, lease_id: str, now: Optional[float] = None) -> None:
-    """Extend expires_at = now + ttl_s (§9).
+    """Extend expires_at = now + ttl_s.
 
     Does NOT commit — caller owns the transaction.
     """
@@ -155,7 +155,7 @@ def renew(conn: sqlite3.Connection, lease_id: str, now: Optional[float] = None) 
 
 
 def reclaim_expired(conn: sqlite3.Connection, now: Optional[float] = None) -> None:
-    """Free every expired lease and requeue only still-non-terminal tickets (§9).
+    """Free every expired lease and requeue only still-non-terminal tickets.
 
     A lease whose ticket is dispatched|running is requeued (no attempt penalty);
     a lease whose ticket is already terminal (done|failed|needs_human) or gone
@@ -195,7 +195,7 @@ def reclaim_expired(conn: sqlite3.Connection, now: Optional[float] = None) -> No
         # Delete the lease
         conn.execute("DELETE FROM leases WHERE id=?", (lease_id,))
 
-        # Emit lease_reclaimed event (Slice 11)
+        # Emit lease_reclaimed event (future extension)
         if lease_run_id:
             from engine import events
             events.emit(
@@ -219,7 +219,7 @@ def reclaim_expired(conn: sqlite3.Connection, now: Optional[float] = None) -> No
             # Terminal: done, failed, needs_human
             # We only requeue dispatched|running (the ones that were in flight)
             if state in ("dispatched", "running"):
-                # Requeue with no penalty (§9)
+                # Requeue with no penalty
                 conn.execute(
                     """UPDATE tickets SET state='queued', available_at=?,
                            worker_host=NULL, lease_id=NULL, updated_at=?

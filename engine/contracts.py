@@ -8,7 +8,7 @@ import json
 
 
 def payload_sha256(payload) -> str:
-    """SHA-256 hex digest of a payload's canonical JSON encoding (§6).
+    """SHA-256 hex digest of a payload's canonical JSON encoding.
 
     Canonical = sorted keys, no whitespace (``separators=(",", ":")``). This is
     the single source of truth used by the transport (which STAMPS the digest
@@ -145,10 +145,10 @@ def _type_name(value) -> str:
         return type(value).__name__
 
 
-# Schema definitions per §6
+# Schema definitions per
 
 # GOAL_ENVELOPE is the single source of truth for the goal envelope schema.
-# DISPATCH_ENVELOPE references it rather than duplicating (Slice 11 dedup).
+# DISPATCH_ENVELOPE references it rather than duplicating (future extension).
 GOAL_ENVELOPE = {
     "type": "object",
     "required": ["goal", "driver", "done_contract", "guardrails"],
@@ -193,7 +193,7 @@ DISPATCH_ENVELOPE = {
         "payload_sha256": {"type": "string"},
         "timeout_s": {"type": "number"},
         "site_context": {"type": "object"},
-        "goal_envelope": GOAL_ENVELOPE,  # Reference, not inline copy (Slice 11)
+        "goal_envelope": GOAL_ENVELOPE,  # Reference, not inline copy (future extension)
     },
     "additionalProperties": False,
 }

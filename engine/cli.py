@@ -1,4 +1,4 @@
-"""CLI entrypoint for Hermes engine (§10).
+"""CLI entrypoint for Hermes engine.
 
 Thin wrappers over engine modules. Stdlib-only (argparse).
 """
@@ -46,7 +46,7 @@ def _load_playbook_site_agent(args):
 def _load_goals_file(path):
     """Load goals from a file.
 
-    Format per §2.1a:
+    Format:
     - One goal per line
     - Skip blank lines
     - Skip lines whose first non-space char is '#'

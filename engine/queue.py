@@ -1,5 +1,5 @@
 """
-engine.queue — the ticket + run state machine (spec §5, §9).
+engine.queue — the ticket + run state machine .
 
 This is the central state-machine module. It owns every transition of
 ``tickets.state`` and is the SOLE transitioner of ``runs.state``
@@ -14,7 +14,7 @@ Transaction discipline (critical):
   callers can never claim the same ticket (the second blocks on the write lock,
   then sees the row already ``dispatched``).
 
-Lease handling is Slice 6. This module deliberately does NOT read or mutate the
+Lease handling: This module deliberately does NOT read or mutate the
 ``leases`` table. Where a lease would be released ("on leaving running") a
 ``# SLICE-6 LEASE SEAM`` comment marks the hook point.
 
@@ -32,12 +32,12 @@ from engine.models import Finding, Reduction, Result, Run, Ticket
 
 # Backoff: available_at = now + min(BACKOFF_CAP_S, BACKOFF_BASE_S * 2**attempts)
 # where ``attempts`` is the ticket's CURRENT (pre-increment) infra-failure count.
-# This yields the conventional 30 / 60 / 120 s schedule for retries 1/2/3 (§5).
+# This yields the conventional 30 / 60 / 120 s schedule for retries 1/2/3.
 BACKOFF_BASE_S = 30
 BACKOFF_CAP_S = 300
 MAX_INFRA_ATTEMPTS = 3  # a 4th infra failure is terminal (→ failed)
 
-# Legal run-state edges (§5). (current, target) -> event kind emitted.
+# Legal run-state edges. (current, target) -> event kind emitted.
 _RUN_EDGES: dict[tuple[str, str], str] = {
     ("running", "paused"): "run_paused",
     ("paused", "running"): "run_resumed",
@@ -49,22 +49,22 @@ _RUN_EDGES: dict[tuple[str, str], str] = {
 
 
 def _now(now: Optional[float]) -> float:
-    """Resolve a ``now`` argument, defaulting to wall-clock (§ ambiguity)."""
+    """Resolve a ``now`` argument, defaulting to wall-clock ."""
     return time.time() if now is None else now
 
 
 def _backoff(attempts: int) -> float:
-    """Backoff seconds for the current (pre-increment) attempts count (§5)."""
+    """Backoff seconds for the current (pre-increment) attempts count."""
     return float(min(BACKOFF_CAP_S, BACKOFF_BASE_S * (2 ** attempts)))
 
 
 # --- seeding -------------------------------------------------------------
 
 def seed_tickets(conn: sqlite3.Connection, run: Run, playbook, site) -> list[Ticket]:
-    """Insert the tickets from ``playbook.seed(run, site)`` as ``queued`` (§9).
+    """Insert the tickets from ``playbook.seed(run, site)`` as ``queued``.
 
     Returns the seeded tickets. Commits once. (No per-ticket event is emitted:
-    §7 defines no ``ticket_seeded``/``ticket_queued`` kind — a ticket first
+    no ``ticket_seeded``/``ticket_queued`` kind — a ticket first
     surfaces on the feed via ``ticket_claimed``; a mid-unit invalid emit would
     only raise.)
     """
@@ -93,7 +93,7 @@ def claim_ticket(
     resource_reqs: Iterable[str],
     now: Optional[float] = None,
 ) -> Optional[Ticket]:
-    """Atomically claim the highest-priority claimable ticket for ``host`` (§9).
+    """Atomically claim the highest-priority claimable ticket for ``host``.
 
     Selects, under ``BEGIN IMMEDIATE``, the highest-priority ``queued`` ticket
     whose owning run is ``running``, whose ``resource_req`` the host serves
@@ -176,14 +176,14 @@ def record_result(
     playbook,
     site,
 ) -> str:
-    """Apply the §5 ``running``-exit transition for ``result`` (§9). ONE atomic unit.
+    """Apply the ``running``-exit transition for ``result``. ONE atomic unit.
 
     Reads the authoritative ticket + run rows from the db (not the passed
     handle), appends an ``attempts`` audit row, applies the transition, inserts
     the result payload into ``findings`` on ``ok`` results, emits events, and
     commits exactly once. Any error rolls the whole unit back.
 
-    Transitions (§5):
+    Transitions:
       - ``ok`` & ``playbook.verify`` True  → ``reducing``
       - ``ok`` & ``playbook.verify`` False → ``needs_human`` (re-verify override)
       - ``driver_failed``                  → ``failed`` (terminal, no retry)
@@ -202,7 +202,7 @@ def record_result(
             raise ValueError(f"unknown ticket {ticket.id!r}")
         run_id, phase, attempts = trow
 
-        # Append the append-only attempts audit row (§4). ``attempt`` is the
+        # Append the append-only attempts audit row. ``attempt`` is the
         # 1-based index of this execution among the ticket's tries.
         conn.execute(
             """INSERT INTO attempts
@@ -228,7 +228,7 @@ def record_result(
             new_state = "reducing" if verified else "needs_human"
         elif result.outcome == "driver_failed":
             # Terminal on first occurrence (contract_fail / driver_error /
-            # timeout all arrive as driver_failed) — no retry (§5).
+            # timeout all arrive as driver_failed) — no retry.
             new_state = "failed"
         elif result.outcome == "infra_failed":
             if attempts < MAX_INFRA_ATTEMPTS:
@@ -242,7 +242,7 @@ def record_result(
             raise ValueError(f"unknown result outcome {result.outcome!r}")
 
         # On ``ok`` results, bank the playbook payload as a finding, stamping
-        # run_id + ticket_id (§9); used by ``playbook.reduce`` later.
+        # run_id + ticket_id; used by ``playbook.reduce`` later.
         if result.outcome == "ok":
             conn.execute(
                 """INSERT INTO findings (run_id, ticket_id, kind, json, created_at)
@@ -252,7 +252,7 @@ def record_result(
 
         # Apply the ticket-row transition.
         # Release the ticket's lease on leaving 'running' (every branch) so a
-        # scarce class frees immediately rather than after backoff/TTL (§9).
+        # scarce class frees immediately rather than after backoff/TTL.
         lease_id_row = conn.execute(
             "SELECT lease_id FROM tickets WHERE id=?", (ticket.id,)
         ).fetchone()
@@ -312,7 +312,7 @@ def record_result(
 # --- running -> queued requeue paths -------------------------------------
 
 def requeue(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
-    """Penalty (infra) ``running → queued`` requeue (§9).
+    """Penalty (infra) ``running → queued`` requeue.
 
     Increments ``attempts`` and applies exponential backoff (the caller uses
     this for envelope/validation errors detected outside a Result). Clears
@@ -326,7 +326,7 @@ def requeue(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
         if row is None:
             raise ValueError(f"unknown ticket {ticket.id!r}")
         run_id, attempts, lease_id = row
-        # Release the ticket's lease here (leaving running) (§9).
+        # Release the ticket's lease here (leaving running).
         if lease_id:
             from engine import leases
             leases.release(conn, lease_id, now=now)
@@ -355,7 +355,7 @@ def fail_contract_violation(
     error_summary: str,
     now=None,
 ) -> None:
-    """Terminal ``running → failed`` for deterministic contract violations (§11).
+    """Terminal ``running → failed`` for deterministic contract violations.
 
     Used for envelope validation errors (ContractError) and no-ship guard
     violations. These are DETERMINISTIC failures that will never succeed on retry,
@@ -373,12 +373,12 @@ def fail_contract_violation(
             raise ValueError(f"unknown ticket {ticket.id!r}")
         run_id, phase, attempts, lease_id = row
 
-        # Release the ticket's lease (leaving running) (§9).
+        # Release the ticket's lease (leaving running).
         if lease_id:
             from engine import leases
             leases.release(conn, lease_id, now=now)
 
-        # Append the append-only attempts audit row (§4).
+        # Append the append-only attempts audit row.
         conn.execute(
             """INSERT INTO attempts
                  (ticket_id, phase, host, attempt, started_at, ended_at,
@@ -412,7 +412,7 @@ def fail_contract_violation(
 def _requeue_transport_nocommit(
     conn: sqlite3.Connection, ticket: Ticket, now=None
 ) -> None:
-    """No-penalty transport ``running → queued`` requeue WITHOUT committing (§9).
+    """No-penalty transport ``running → queued`` requeue WITHOUT committing.
 
     Shared body of the transport requeue. It performs only row writes + an
     ``events.emit`` (which also does not commit), so a CALLER that is itself one
@@ -428,7 +428,7 @@ def _requeue_transport_nocommit(
     if row is None:
         raise ValueError(f"unknown ticket {ticket.id!r}")
     run_id, lease_id = row
-    # Release the ticket's lease here (leaving running) (§9).
+    # Release the ticket's lease here (leaving running).
     if lease_id:
         from engine import leases
         leases.release(conn, lease_id, now=now)
@@ -445,11 +445,11 @@ def _requeue_transport_nocommit(
 
 
 def requeue_transport(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
-    """No-penalty (transport host-lost) ``running → queued`` requeue (§5, §9).
+    """No-penalty (transport host-lost) ``running → queued`` requeue.
 
     ``attempts`` is UNCHANGED and the ticket is available immediately. Clears
     ``worker_host`` (the host was lost); ``tried_hosts`` is preserved so a fresh
-    claim lands elsewhere. (Marking the host ``down`` is crew's job, Slice 6.)
+    claim lands elsewhere. (Marking the host ``down`` is crew's job.)
     Standalone atomic unit: wraps ``_requeue_transport_nocommit`` + commits.
     """
     try:
@@ -463,11 +463,11 @@ def requeue_transport(conn: sqlite3.Connection, ticket: Ticket, now=None) -> Non
 # --- park ----------------------------------------------------------------
 
 def park_ticket(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
-    """Revert a just-claimed ``dispatched`` ticket to ``parked`` (§5, §9).
+    """Revert a just-claimed ``dispatched`` ticket to ``parked``.
 
     Clears ``worker_host``, drops the host just appended to ``tried_hosts`` (it
     never executed), leaves ``attempts`` unchanged, and emits ``ticket_parked``.
-    Callers decide *when* to park (capacity/leases are Slice 6).
+    Callers decide *when* to park (capacity/leases).
     """
     now = _now(now)
     try:
@@ -498,7 +498,7 @@ def park_ticket(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
 
 
 def unpark_ready(conn: sqlite3.Connection, resource_class: str, now=None) -> None:
-    """Return ``parked`` tickets of ``resource_class`` to ``queued`` (§9).
+    """Return ``parked`` tickets of ``resource_class`` to ``queued``.
 
     Called when the class regains capacity (lease freed, crew added). Moves
     parked tickets back to queued (fresh claim, no penalty). Does NOT commit —
@@ -528,9 +528,9 @@ def unpark_ready(conn: sqlite3.Connection, resource_class: str, now=None) -> Non
 # --- run state machine (sole runs.state transitioner) --------------------
 
 def set_run_state(conn: sqlite3.Connection, run_id: str, new_state: str, now=None) -> None:
-    """The SOLE transitioner of ``runs.state`` (§5, §9).
+    """The SOLE transitioner of ``runs.state``.
 
-    Applies a legal §5 run edge (running↔paused, running|paused→stopped,
+    Applies a legal run edge (running↔paused, running|paused→stopped,
     running→done, running→failed) and emits the matching ``run_*`` event; raises
     ``ValueError`` on an illegal edge (e.g. resuming a terminal run) or an
     unknown run.
@@ -565,14 +565,14 @@ def set_run_state(conn: sqlite3.Connection, run_id: str, new_state: str, now=Non
 
 def accept_reduction(conn: sqlite3.Connection, reduction_id: int, now=None) -> None:
     """Accept a ``pending`` reduction, settling its ``needs_human`` tickets to
-    ``done`` (§9)."""
+    ``done``."""
     _resolve_reduction(conn, reduction_id, decision="accepted",
                        ticket_state="done", event="reduction_accepted", now=now)
 
 
 def reject_reduction(conn: sqlite3.Connection, reduction_id: int, now=None) -> None:
     """Reject a ``pending`` reduction, settling its ``needs_human`` tickets to
-    ``failed`` (§9)."""
+    ``failed``."""
     _resolve_reduction(conn, reduction_id, decision="rejected",
                        ticket_state="failed", event="reduction_rejected", now=now)
 
@@ -599,7 +599,7 @@ def _resolve_reduction(conn, reduction_id, decision, ticket_state, event, now):
             (decision, now, reduction_id),
         )
 
-        # Settle every needs_human ticket this reduction routed (§4/§9 link).
+        # Settle every needs_human ticket this reduction routed.
         ticket_ids = [
             r[0] for r in conn.execute(
                 """SELECT id FROM tickets
@@ -612,7 +612,7 @@ def _resolve_reduction(conn, reduction_id, decision, ticket_state, event, now):
                 "UPDATE tickets SET state=?, updated_at=? WHERE id=?",
                 (ticket_state, now, tid),
             )
-            # Per-ticket transition event: only 'failed' has a §7 kind; a
+            # Per-ticket transition event: only 'failed' has a defined kind; a
             # settled 'done' ticket is reflected in the reduction event's data.
             if ticket_state == "failed":
                 events.emit(conn, "ticket_failed", run_id=run_id, ticket_id=tid,
@@ -629,7 +629,7 @@ def _resolve_reduction(conn, reduction_id, decision, ticket_state, event, now):
 
 
 def requeue_needs_human(conn: sqlite3.Connection, ticket_id: str, now=None) -> None:
-    """Operator requeue of a re-verify/guard-routed ``needs_human`` ticket (§9).
+    """Operator requeue of a re-verify/guard-routed ``needs_human`` ticket.
 
     ``needs_human → queued`` as a fresh attempt: ``attempts`` UNCHANGED, the
     ticket is available immediately, ``worker_host`` and any ``reduction_id``
@@ -663,9 +663,9 @@ def requeue_needs_human(conn: sqlite3.Connection, ticket_id: str, now=None) -> N
         raise
 
 
-# --- master-side reduce / advance writers (§9) ---------------------------
+# --- master-side reduce / advance writers ---------------------------
 #
-# These are the SEAM the master loop (Slice 9's dispatch.py) drives: dispatch.py
+# These are the SEAM the master loop (dispatch.py) drives: dispatch.py
 # ORCHESTRATES (calls playbook.reduce / next_phase / is_done and decides what to
 # do), while every ``tickets.state`` / ``runs.phase`` write for the reduce+advance
 # step happens HERE, keeping the queue the sole owner of state transitions. Each
@@ -675,7 +675,7 @@ def requeue_needs_human(conn: sqlite3.Connection, ticket_id: str, now=None) -> N
 def load_findings(
     conn: sqlite3.Connection, run_id: str, phase: str
 ) -> list[Finding]:
-    """Read the ``findings`` rows for a phase, as ``Finding`` models (§9).
+    """Read the ``findings`` rows for a phase, as ``Finding`` models.
 
     Scopes by ``tickets.phase`` via a ``findings→tickets`` join on ``ticket_id``
     (findings carry no phase of their own). Read-only; no commit. Feeds the
@@ -702,7 +702,7 @@ def record_reduction(
     reduction: Reduction,
     now: Optional[float] = None,
 ) -> int:
-    """Persist one ``Reduction`` for a phase and route its flagged tickets (§9).
+    """Persist one ``Reduction`` for a phase and route its flagged tickets.
 
     INSERTs one ``reductions`` row (run_id, phase, kind, json,
     review_state='pending'); for every ticket id in the reduction's
@@ -722,7 +722,7 @@ def record_reduction(
         )
         reduction_id = cur.lastrowid
 
-        # Route the flagged, still-reducing tickets to needs_human (§5/§9).
+        # Route the flagged, still-reducing tickets to needs_human.
         flagged = reduction.json.get("needs_human_ticket_ids") or []
         for tid in flagged:
             trow = conn.execute(
@@ -756,12 +756,12 @@ def record_reduction(
 def finish_phase_reductions(
     conn: sqlite3.Connection, run_id: str, phase: str, now: Optional[float] = None
 ) -> None:
-    """Settle a phase's remaining ``reducing`` tickets to ``done`` (§9).
+    """Settle a phase's remaining ``reducing`` tickets to ``done``.
 
     Called by the master loop after every reduction for ``phase`` is recorded:
     every phase ticket STILL in ``reducing`` (i.e. not flagged to ``needs_human``
     by ``record_reduction``) transitions ``reducing → done``. A settled ``done``
-    ticket has no §7 per-ticket kind (mirrors ``accept_reduction``); it surfaces
+    ticket has no per-ticket kind (mirrors ``accept_reduction``); it surfaces
     via the phase's reduction/advance events. ONE atomic unit (single commit).
     """
     now = _now(now)
@@ -780,7 +780,7 @@ def finish_phase_reductions(
 def set_run_phase(
     conn: sqlite3.Connection, run_id: str, phase: str, now: Optional[float] = None
 ) -> None:
-    """The SOLE writer of ``runs.phase`` (§9).
+    """The SOLE writer of ``runs.phase``.
 
     Updates ``runs.phase`` and emits ``phase_advanced``. Raises on an unknown
     run. ONE atomic unit (single commit).
@@ -809,7 +809,7 @@ def set_run_phase(
 def phase_ticket_counts(
     conn: sqlite3.Connection, run_id: str, phase: str
 ) -> dict[str, int]:
-    """Counts of phase-N tickets by ``state`` (§9).
+    """Counts of phase-N tickets by ``state``.
 
     Read-only helper for the master loop's advance/stuck decision (only phases
     whose tickets have all settled out of the active states may advance).
@@ -827,7 +827,7 @@ def phase_ticket_counts(
 def _load_prior_reductions(
     conn: sqlite3.Connection, run_id: str, current_phase
 ) -> list[Reduction]:
-    """Load the PRIOR phase's reductions for a ``Run`` snapshot (§8/§9).
+    """Load the PRIOR phase's reductions for a ``Run`` snapshot.
 
     ``seed`` builds phase-N tickets from phase-(N-1) reductions, so the snapshot
     must carry the immediately-preceding phase's reductions. The playbook's phase
@@ -865,7 +865,7 @@ def _load_prior_reductions(
 
 
 def load_run(conn: sqlite3.Connection, run_id: str) -> Run:
-    """Load a read-only ``Run`` snapshot (§9).
+    """Load a read-only ``Run`` snapshot.
 
     ``reductions`` carries the PRIOR phase's reductions (loaded from the db via
     ``_load_prior_reductions``), so ``seed``/``reduce`` can build phase-N work

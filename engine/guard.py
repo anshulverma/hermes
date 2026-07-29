@@ -1,4 +1,4 @@
-"""No-ship guard shims — shared across LocalSite and DevserverSite (§11).
+"""No-ship guard shims — shared across LocalSite and DevserverSite.
 
 Guard shims shadow real binaries and refuse land/push subcommands (exit 97),
 passing everything else through to the real binary's absolute path.
@@ -6,7 +6,7 @@ passing everything else through to the real binary's absolute path.
 Stdlib-only.
 """
 
-# No-ship guard shims (§11): each shim shadows a real binary and refuses the
+# No-ship guard shims: each shim shadows a real binary and refuses the
 # land/push subcommands (log + non-zero exit), passing everything else through to
 # the real binary. Maps shim name -> the subcommands it BLOCKS.
 GUARD_SHIMS: dict[str, tuple[str, ...]] = {
@@ -17,7 +17,7 @@ GUARD_SHIMS: dict[str, tuple[str, ...]] = {
     "arc": ("land",),
 }
 
-# Non-zero exit code a guard shim uses when it blocks a land/push (§11).
+# Non-zero exit code a guard shim uses when it blocks a land/push.
 GUARD_BLOCK_EXIT = 97
 
 
@@ -48,7 +48,7 @@ def render_shim_script(name: str, blocked: tuple[str, ...], real_path: str | Non
         )
 
     script = f"""#!/bin/sh
-# hermes no-ship guard shim for {name!r} (§11): blocks {cases}
+# hermes no-ship guard shim for {name!r}: blocks {cases}
 for _arg in "$@"; do
   case "$_arg" in
     {cases})

@@ -1,5 +1,5 @@
 -- Hermes engine core database schema (version 1)
--- From docs/specs/engine-core.md §4
+
 -- SQLite, WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON, file mode 0600
 
 CREATE TABLE runs (
@@ -18,7 +18,7 @@ CREATE TABLE tickets (
   id           TEXT PRIMARY KEY,         -- <run_id>/t-<n>
   run_id       TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   phase        TEXT NOT NULL,
-  state        TEXT NOT NULL             -- see §5 state machine
+  state        TEXT NOT NULL             -- see state machine
               CHECK(state IN ('queued','dispatched','running','reducing',
                               'done','parked','failed','needs_human')),
   resource_req TEXT NOT NULL DEFAULT 'cpu',
@@ -28,9 +28,9 @@ CREATE TABLE tickets (
   lease_id     TEXT,
   worker_host  TEXT,
   reduction_id INTEGER REFERENCES reductions(id), -- reduction that routed this
-                                                --   ticket to needs_human (§5, §9);
+                                                --   ticket to needs_human;
                                                 --   INTEGER to match reductions.id
-                                                --   (FK + §9 lookup require same type)
+                                                --   (FK + lookup require same type)
   tried_hosts  TEXT NOT NULL DEFAULT '[]',      -- JSON array
   payload_json TEXT NOT NULL DEFAULT '{}',      -- playbook payload for this phase
   created_at   REAL NOT NULL, updated_at REAL NOT NULL
@@ -41,7 +41,7 @@ CREATE TABLE attempts (                          -- append-only audit
   ticket_id     TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
   phase         TEXT NOT NULL, host TEXT NOT NULL, attempt INTEGER NOT NULL,
   started_at    REAL, ended_at REAL,
-  outcome       TEXT,   -- ok|driver_failed|infra_failed  (see §6 Result)
+  outcome       TEXT,   -- ok|driver_failed|infra_failed  (see Result)
   termination_reason TEXT, -- goal_met|contract_fail|driver_error|timeout|transport_error
   result_ref    TEXT, error_summary TEXT
 );
@@ -81,7 +81,7 @@ CREATE TABLE leases (
   expires_at    REAL NOT NULL
 );
 
-CREATE TABLE events (                             -- append-only feed (§7)
+CREATE TABLE events (                             -- append-only feed
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   ts        REAL NOT NULL, kind TEXT NOT NULL,
   run_id    TEXT, ticket_id TEXT, host TEXT,
@@ -103,5 +103,5 @@ CREATE INDEX idx_findings_run ON findings(run_id);
 -- migrate.py: v1 runs CREATE statements, v2 runs the ALTER statements here.
 -- --- @migration 2 ---
 -- Phase-scope reductions: master-side reduce/advance stamps the reduced phase
--- so pause/resume can reload a Run snapshot's prior-phase reductions (§9).
+-- so pause/resume can reload a Run snapshot's prior-phase reductions.
 ALTER TABLE reductions ADD COLUMN phase TEXT;

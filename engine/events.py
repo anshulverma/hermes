@@ -1,7 +1,7 @@
 """
 engine.events — append-only event feed.
 
-From docs/specs/engine-core.md §7 and §4 (events table DDL).
+
 
 Stdlib-only (sqlite3 + json + time). Events are append-only, monotonic by id.
 """
@@ -11,7 +11,7 @@ import time
 from typing import Any, Optional
 
 
-# Event kinds the engine emits (spec §7)
+# Event kinds the engine emits
 EVENT_KINDS = frozenset({
     "run_started", "run_paused", "run_resumed", "run_stopped", "run_done", "run_failed",
     "ticket_claimed", "ticket_started", "result_recorded", "ticket_requeued",
@@ -35,7 +35,7 @@ def emit(
     """
     Append one event to the events table within the caller's transaction.
 
-    The CALLER owns commit. This is critical for atomicity: the queue (Slice 5)
+    The CALLER owns commit. This is critical for atomicity: the queue
     runs claim_ticket under BEGIN IMMEDIATE and treats record_result as one
     atomic unit that emits multiple events. A mid-unit commit breaks atomicity.
 
@@ -55,7 +55,7 @@ def emit(
     if kind not in EVENT_KINDS:
         raise ValueError(f"unknown event kind: {kind!r}")
 
-    # Set ts (wall-clock epoch seconds, per spec §4)
+    # Set ts (wall-clock epoch seconds)
     ts = time.time()
 
     # Serialize data (default to empty dict)

@@ -1,5 +1,5 @@
 """
-engine.transport — the dispatch primitive (spec §6, §9).
+engine.transport — the dispatch primitive.
 
 Three responsibilities:
 
@@ -36,7 +36,7 @@ from typing import Optional
 from engine import contracts, leases, queue
 from engine.models import Result, Run, Ticket
 
-# The exit code GNU coreutils `timeout` uses when it kills the child (§6 budget).
+# The exit code GNU coreutils `timeout` uses when it kills the child.
 _TIMEOUT_EXIT = 124
 
 
@@ -48,7 +48,7 @@ class TransportError(Exception):
     distinct from a worker that ran and REPORTED an ``infra_failed`` result.
     ``serve_once_for_host`` routes this to the no-penalty ``requeue_transport``
     path (host lost), whereas an agent-reported ``infra_failed`` Result flows
-    through ``record_result`` (penalty retry, §5).
+    through ``record_result`` (penalty retry,).
     """
 
 
@@ -57,7 +57,7 @@ def _now(now: Optional[float]) -> float:
 
 
 def _driver_from_envelope(envelope: dict):
-    """Reconstruct the ``Driver`` the agent needs from the envelope (§6)."""
+    """Reconstruct the ``Driver`` the agent needs from the envelope."""
     from engine.models import Driver
 
     d = envelope["goal_envelope"]["driver"]
@@ -67,7 +67,7 @@ def _driver_from_envelope(envelope: dict):
 # --- local transport -----------------------------------------------------
 
 def local_transport(envelope: dict, host: str, agent, env: Optional[dict] = None) -> Result:
-    """Run the worker on this box under a ``timeout`` wrapper (§9).
+    """Run the worker on this box under a ``timeout`` wrapper.
 
     Builds ``agent.build_invocation(envelope, driver)``, wraps it with
     ``timeout <timeout_s>`` (when a ``timeout`` binary is available), runs it, and
@@ -77,7 +77,7 @@ def local_transport(envelope: dict, host: str, agent, env: Optional[dict] = None
 
     ``env`` (when given) is the child process environment — the site passes one
     with its no-ship guard shim dir prepended to ``PATH`` so the worker cannot
-    ``git push``/land (§11). ``None`` inherits the parent environment.
+    ``git push``/land. ``None`` inherits the parent environment.
     """
     driver = _driver_from_envelope(envelope)
     argv = agent.build_invocation(envelope, driver)
@@ -110,7 +110,7 @@ def local_transport(envelope: dict, host: str, agent, env: Optional[dict] = None
 # --- ssh transport -------------------------------------------------------
 
 # Hardened, NON-INTERACTIVE ssh/scp options for automation against real hosts
-# (Slice 12). No host-key prompts, no known_hosts pollution across ephemeral
+# (future extension). No host-key prompts, no known_hosts pollution across ephemeral
 # containers, no password fallback, and a bounded connect timeout so a lost host
 # surfaces quickly as a transport failure rather than hanging the serve loop.
 HARDENED_SSH_OPTS: list[str] = [
@@ -128,10 +128,7 @@ def build_ssh_opts(
     hardened: bool = True,
     extra: Optional[list] = None,
 ) -> list[str]:
-    """Build the ``ssh`` option list (``-i/-p/-o …``) for a host (§9, Slice 12).
-
-    ``hardened`` prepends the non-interactive automation ``-o`` flags. ``ssh``
-    uses ``-p`` for the port (contrast ``scp``'s ``-P``).
+    """Build the ``ssh`` option list (``-i/-p/-o …``) for a host.
     """
     opts = list(HARDENED_SSH_OPTS) if hardened else []
     if connect_timeout is not None:
@@ -153,9 +150,7 @@ def build_scp_opts(
     hardened: bool = True,
     extra: Optional[list] = None,
 ) -> list[str]:
-    """Build the ``scp`` option list for a host (§9, Slice 12).
-
-    Identical to ``build_ssh_opts`` except ``scp`` spells the port ``-P`` (capital).
+    """Build the ``scp`` option list for a host.
     """
     opts = list(HARDENED_SSH_OPTS) if hardened else []
     if connect_timeout is not None:
@@ -170,7 +165,7 @@ def build_scp_opts(
 
 
 def ssh_transport(host: str, ssh_opts=None, scp_opts=None, user=None):
-    """Return a callable ``(envelope, agent) -> Result`` that runs over ssh (§9).
+    """Return a callable ``(envelope, agent) -> Result`` that runs over ssh.
 
     The callable scps the envelope up, runs the worker over ssh, scps the result
     back, and parses it. A non-zero ssh exit (host unreachable / worker runner
@@ -218,7 +213,7 @@ def ssh_transport(host: str, ssh_opts=None, scp_opts=None, user=None):
                 capture_output=True, text=True,
             )
             if ssh_proc.returncode != 0:
-                # TODO(Slice 12): A real ssh site must signal host-lost by RAISING
+                # TODO(future extension): A real ssh site must signal host-lost by RAISING
                 # TransportError (→ no-penalty requeue_transport), NOT by returning
                 # an infra_failed Result (which record_result would penalize).
                 now = time.time()
@@ -262,7 +257,7 @@ def serve_once_for_host(
     base_ref: str,
     now: Optional[float] = None,
 ) -> Optional[Result]:
-    """Dispatch exactly one ticket for ``host`` (§9). The core serve step.
+    """Dispatch exactly one ticket for ``host``. The core serve step.
 
     Steps:
       1. ``queue.claim_ticket`` — nothing claimable ⇒ return ``None``.
@@ -274,7 +269,7 @@ def serve_once_for_host(
          validation error ⇒ ``queue.requeue`` (penalty) and return ``None``.
       4. ``site.run_worker(host, envelope, agent)``. A ``TransportError`` (host
          lost) ⇒ ``queue.requeue_transport`` (no penalty) and return ``None``.
-      5. ``queue.record_result`` applies the §5 running-exit transition. Return
+      5. ``queue.record_result`` applies the running-exit transition. Return
          the Result.
     """
     now = _now(now)
@@ -332,12 +327,12 @@ def serve_once_for_host(
 
 def _build_envelope(ticket: Ticket, run: Run, playbook, base_ref: str, site,
                     host: str) -> dict:
-    """Assemble the dispatch envelope for a ticket (§6).
+    """Assemble the dispatch envelope for a ticket.
 
     ``payload_sha256`` is stamped as the canonical digest of the payload; the
     agent recomputes it on the worker side and flags ``contract_fail`` on a
     mismatch. ``guardrails.no_ship`` is always true; if the site cannot guarantee
-    no-ship (§11) that is a hard error (routed to a penalty requeue by the
+    no-ship that is a hard error (routed to a penalty requeue by the
     caller).
     """
     driver = playbook.driver(ticket.phase)

@@ -1,7 +1,7 @@
 """
 engine.crew — crew management (register, add, health-gate, heartbeat, drain, remove).
 
-From docs/specs/engine-core.md §7, §9. Stdlib-only (sqlite3 + json + time).
+Stdlib-only (sqlite3 + json + time).
 
 Crew functions own their commit boundary (like queue mutators).
 """
@@ -27,7 +27,7 @@ def add(
     base_ref: str,
     now: Optional[float] = None,
 ) -> None:
-    """Provision and health-gate a host; admit only if healthy (§7, §9).
+    """Provision and health-gate a host; admit only if healthy.
 
     Calls site.provision(host, base_ref), then site.health(host, agent).
     Admits (INSERT/UPDATE crew row) ONLY if report.ok; otherwise raises
@@ -109,7 +109,7 @@ def add(
 
 
 def list(conn: sqlite3.Connection) -> list[CrewMember]:
-    """Return all crew members with parsed health/resources (§7, §9)."""
+    """Return all crew members with parsed health/resources."""
     rows = conn.execute(
         """SELECT id, site, capabilities, resources_json, state
            FROM crew ORDER BY id"""
@@ -130,7 +130,7 @@ def list(conn: sqlite3.Connection) -> list[CrewMember]:
 
 
 def drain(conn: sqlite3.Connection, host: str, now: Optional[float] = None) -> None:
-    """Set a crew member's state to draining (§7, §9)."""
+    """Set a crew member's state to draining."""
     now = _now(now)
     try:
         conn.execute(
@@ -148,7 +148,7 @@ def drain(conn: sqlite3.Connection, host: str, now: Optional[float] = None) -> N
 
 
 def remove(conn: sqlite3.Connection, host: str) -> None:
-    """Delete a crew member (§7, §9)."""
+    """Delete a crew member."""
     try:
         conn.execute("DELETE FROM crew WHERE id=?", (host,))
         conn.commit()
@@ -163,7 +163,7 @@ def heartbeat_sweep(
     agent,
     now: Optional[float] = None,
 ) -> None:
-    """Re-probe every crew member's health and apply transitions (§7, §9).
+    """Re-probe every crew member's health and apply transitions.
 
     For every crew member:
     - Re-probe site.health(host, agent)

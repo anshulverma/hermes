@@ -1,4 +1,4 @@
-"""Playbook Protocol (§8) + registry/loader.
+"""Playbook Protocol + registry/loader.
 
 A Playbook defines the phases of a run, seeds tickets, supplies per-phase
 payload/result schemas and drivers, reduces findings into reductions, verifies
@@ -20,7 +20,7 @@ if TYPE_CHECKING:  # avoid import cycle (site imports agent imports site)
 
 @runtime_checkable
 class Playbook(Protocol):
-    """The playbook interface (§8). Signatures are load-bearing for later slices."""
+    """The playbook interface. Signatures are load-bearing."""
 
     name: str
     phases: list[str]

@@ -1,13 +1,13 @@
 """Dataclasses for Hermes engine core.
 
 Stdlib-only: uses dataclasses, enum, typing.
-Field names/types match the spec §3/§4/§8.
+
 """
 from dataclasses import dataclass, field
 from typing import Any
 
 
-# §8 Driver model (command + args + loop; NO goal field)
+# Driver model (command + args + loop; NO goal field)
 
 @dataclass
 class Driver:
@@ -20,7 +20,7 @@ class Driver:
     loop: str | None
 
 
-# §6 GoalEnvelope (goal + driver + done_contract + guardrails)
+# GoalEnvelope (goal + driver + done_contract + guardrails)
 
 @dataclass
 class GoalEnvelope:
@@ -31,7 +31,7 @@ class GoalEnvelope:
     guardrails: dict[str, Any]
 
 
-# §6 Result (outcome + termination_reason + timestamps + refs + error_summary + payload + evidence_ref)
+# Result (outcome + termination_reason + timestamps + refs + error_summary + payload + evidence_ref)
 
 @dataclass
 class Result:
@@ -46,7 +46,7 @@ class Result:
     evidence_ref: str | None = None
 
 
-# §3 HealthReport + Check
+# HealthReport + Check
 
 @dataclass
 class Check:
@@ -70,11 +70,11 @@ class HealthReport:
 
     @property
     def ok(self) -> bool:
-        """True iff every Check passed (§8). Vacuously True with no checks."""
+        """True iff every Check passed. Vacuously True with no checks."""
         return all(c.ok for c in self.checks)
 
 
-# §3 IssueQuery + Issue
+# IssueQuery + Issue
 
 @dataclass
 class IssueQuery:
@@ -94,7 +94,7 @@ class Issue:
     data: dict[str, Any]
 
 
-# §4 Run snapshot (id, playbook, site, base_ref, config, phase, reductions)
+# Run snapshot (id, playbook, site, base_ref, config, phase, reductions)
 
 @dataclass
 class Run:
@@ -108,7 +108,7 @@ class Run:
     reductions: list['Reduction']
 
 
-# §4 Ticket
+# Ticket
 
 @dataclass
 class Ticket:
@@ -123,7 +123,7 @@ class Ticket:
     payload: dict[str, Any]
 
 
-# §4 Attempt (append-only audit)
+# Attempt (append-only audit)
 
 @dataclass
 class Attempt:
@@ -140,28 +140,28 @@ class Attempt:
     error_summary: str | None
 
 
-# §4 Finding
+# Finding
 
 @dataclass
 class Finding:
-    """Finding: run_id, ticket_id, kind, json (matching §4 findings table DDL)."""
+    """Finding: run_id, ticket_id, kind, json (matching the findings table DDL)."""
     run_id: str
     ticket_id: str
     kind: str
     json: dict[str, Any]
 
 
-# §4 Reduction
+# Reduction
 
 @dataclass
 class Reduction:
-    """Reduction: id, run_id, phase, kind, json, review_state (matching the §4
+    """Reduction: id, run_id, phase, kind, json, review_state (matching the
     reductions table DDL).
 
     The persistence fields (``id``, ``run_id``, ``phase``, ``review_state``)
     default so a playbook's ``reduce`` can return a light ``Reduction(kind=...,
     json=...)`` while the queue hydrates them fully when loading from / writing to
-    the reductions table (pause/resume reload needs the phase scope, §9)."""
+    the reductions table (pause/resume reload needs the phase scope)."""
     kind: str
     json: dict[str, Any]
     id: int | None = None
@@ -170,7 +170,7 @@ class Reduction:
     review_state: str = "pending"
 
 
-# §4 Lease
+# Lease
 
 @dataclass
 class Lease:
@@ -185,7 +185,7 @@ class Lease:
     expires_at: float
 
 
-# §4 CrewMember
+# CrewMember
 
 @dataclass
 class CrewMember:
