@@ -1,15 +1,9 @@
-"""Agent Protocol + registry/loader — the worker-runtime axis.
+"""Agent Protocol: how to run the AI on a host.
 
-An Agent owns *how to run the AI on a host*: it renders a Driver + envelope
-into a concrete headless invocation and parses the raw output into a Result,
-and contributes the agent_ok / auth_ok health checks. It is paired at runtime
-with a Site (the *where/how to reach the host* axis).
-
-Selected via HERMES_AGENT (default "claude"). Concrete agents (ClaudeAgent,
-MockAgent) are regular classes implementing this Protocol and registering on
-import.
-
-Stdlib-only: uses typing.Protocol.
+An Agent renders a Driver and envelope into a concrete headless invocation, parses
+raw output into a Result, and contributes agent_ok/auth_ok health checks. Paired at
+runtime with a Site (the where/how to reach the host axis). Selected via HERMES_AGENT
+(default "claude"). Stdlib-only.
 """
 from __future__ import annotations
 

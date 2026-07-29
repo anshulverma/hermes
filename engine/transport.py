@@ -1,26 +1,10 @@
-"""
-engine.transport — the dispatch primitive.
+"""The dispatch primitive: serve_once_for_host ties queue, leases, site, and agent together.
 
-Three responsibilities:
-
-- ``local_transport(envelope, host, agent)`` runs the worker on THIS box: it
-  builds the agent's argv and executes it under a ``timeout <timeout_s>`` wrapper
-  (the single wall-clock budget; there is no ``--max-turns``), then hands the
-  captured stdout to ``agent.parse_result``.
-- ``ssh_transport(host)`` returns a callable ``(envelope, agent)`` that scps the
-  envelope up, runs the worker over ssh, scps the result/evidence back, and
-  parses it. A non-zero ssh exit maps to a ``transport_error`` Result.
-- ``serve_once_for_host(...)`` is the dispatch primitive that ties the queue,
-  leases, site, and agent together for exactly one ticket (see its docstring).
-
-Transaction discipline (critical): the queue owns commits of queue state — this
-module calls the queue mutators (``claim_ticket``/``record_result``/``requeue``/
-``requeue_transport``/``park_ticket``) which each commit their own atomic unit;
-transport never rewrites ticket/run rows behind their back. The one row this
-module owns is stamping the acquired ``lease_id`` onto the claimed ticket (leases
-do not commit), which it commits itself.
-
-Stdlib-only (subprocess, json, os, shutil, tempfile, sqlite3).
+local_transport runs the worker on this box under timeout. ssh_transport scps the envelope
+up, runs the worker over ssh, and scps the result back. serve_once_for_host claims one
+ticket, acquires a lease, builds the envelope, dispatches the worker, and records the
+result. Calls queue mutators (which commit); only commits the lease_id stamp itself.
+Stdlib-only.
 """
 from __future__ import annotations
 

@@ -1,19 +1,8 @@
-"""
-engine.leases — resource semaphore and lease lifecycle.
+"""Lease-based resource semaphore: enforces capacity, issues leases, reclaims expired.
 
-This module implements the lease-based resource semaphore: it enforces class
-capacity (computed from crew.resources_json), issues leases to running tickets,
-and reclaims expired ones. It is a building block for the dispatch loop
-(future extension) but does NOT own the dispatch semantics itself.
-
-Critical correctness:
-- Class capacity = Σ crew.resources_json[class] over crew members currently
-  idle|busy. acquire grants iff live (unexpired) leases in the class < capacity.
-- The lease is released on EVERY exit from running (record_result, requeue,
-  requeue_transport). Caller owns the transaction/commit (like events.emit).
-- reclaim_expired requeues ONLY still-non-terminal tickets (no penalty).
-
-Stdlib-only (sqlite3 + json + time + uuid).
+Capacity is computed from crew.resources_json (sum over idle/busy hosts). acquire
+grants only when live leases are under capacity. Leases are released on every exit
+from running. Caller owns the transaction. Stdlib-only.
 """
 from __future__ import annotations
 

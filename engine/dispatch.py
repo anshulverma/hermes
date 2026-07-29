@@ -1,33 +1,10 @@
-"""
-engine.dispatch — the serve + master loops.
+"""The serve and master loops that drive a run to completion.
 
-Two loops tie the engine together:
-
-- ``serve_loop`` repeatedly drives ``transport.serve_once_for_host`` for one host
-  until there is no more claimable work for it (or the run leaves ``running``).
-  It is the in-process worker for the ``local`` site and the body of a remote
-  ``hermes serve --host``.
-- ``master_loop`` is the orchestrator. Each cycle it runs the heartbeat
-  housekeeping (health re-probe, down-requeue, lease renew/reclaim) REGARDLESS of
-  run state, then — ONLY while the run is ``running`` (pause freeze) — drives
-  the serve loops, reduces a fully-settled phase, advances to the next phase (or
-  terminates the run ``done``/``failed``).
-
-Critical correctness (the point of this slice):
-- ``master_loop`` NEVER writes ``tickets``/``runs`` state directly. Every state
-  transition goes through a ``queue`` writer: it drives the serve loops (which use
-  ``claim_ticket``/``record_result``/...), reduces via
-  ``load_findings`` → ``playbook.reduce`` → ``record_reduction`` →
-  ``finish_phase_reductions``, advances via ``next_phase`` → ``set_run_phase`` +
-  ``seed_tickets``, and terminates via ``set_run_state(done|failed)``.
-- A ``paused``/``stopped`` run makes NO progression: no claim, no reduce, no phase
-  advance, no seed, and no automatic terminal transition — only heartbeat
-  housekeeping continues, so an already-dispatched ticket can still land in
-  ``reducing`` and wait for ``resume``.
-- The loop is bounded (``max_cycles`` or a natural terminate-when-done) so it
-  never hangs.
-
-Stdlib-only (sqlite3 + time).
+serve_loop drives one host until no claimable work remains. master_loop orchestrates
+a run: each cycle runs heartbeat housekeeping (health re-probe, down-requeue, lease
+renew/reclaim) regardless of run state, then (only while running) drives serve loops,
+reduces settled phases, and advances to the next phase or terminates. A paused run
+makes no progression (only heartbeat continues). Stdlib-only.
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
--- Hermes engine core database schema (version 1)
-
+-- Hermes engine core database schema: runs, tickets, attempts, crew, leases, events, reductions.
+--
 -- SQLite, WAL, synchronous=NORMAL, busy_timeout=5000, foreign_keys=ON, file mode 0600
 
 CREATE TABLE runs (

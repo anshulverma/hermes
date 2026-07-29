@@ -1,24 +1,9 @@
-"""
-engine.queue — the ticket + run state machine .
+"""The central state machine for tickets and runs.
 
-This is the central state-machine module. It owns every transition of
-``tickets.state`` and is the SOLE transitioner of ``runs.state``
-(``set_run_state``). It also resolves reductions (accept/reject) and the
-operator requeue of ``needs_human`` tickets.
-
-Transaction discipline (critical):
-- ``events.emit`` does NOT commit — the queue owns the transaction. Every
-  mutating callable here is ONE atomic unit: it performs its row writes + emits
-  its events + commits exactly once at the end (or rolls back on error).
-- ``claim_ticket`` runs under an explicit ``BEGIN IMMEDIATE`` so two concurrent
-  callers can never claim the same ticket (the second blocks on the write lock,
-  then sees the row already ``dispatched``).
-
-Lease handling: This module deliberately does NOT read or mutate the
-``leases`` table. Where a lease would be released ("on leaving running") a
-``# SLICE-6 LEASE SEAM`` comment marks the hook point.
-
-Stdlib-only (sqlite3 + json + time).
+Owns every transition of tickets.state and runs.state. Each mutating function is one
+atomic unit: row writes, event emission, and commit. claim_ticket runs under BEGIN
+IMMEDIATE for concurrency safety. Does not directly touch leases (caller releases).
+Stdlib-only.
 """
 from __future__ import annotations
 

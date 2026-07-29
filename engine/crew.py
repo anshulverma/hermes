@@ -1,9 +1,6 @@
-"""
-engine.crew — crew management (register, add, health-gate, heartbeat, drain, remove).
+"""Crew management: register, health-gate, heartbeat, drain, remove.
 
-Stdlib-only (sqlite3 + json + time).
-
-Crew functions own their commit boundary (like queue mutators).
+Crew functions own their commit boundary (like queue mutators). Stdlib-only.
 """
 import json
 import sqlite3

@@ -1,9 +1,6 @@
-"""
-engine.events — append-only event feed.
+"""Append-only event feed for the run audit trail.
 
-
-
-Stdlib-only (sqlite3 + json + time). Events are append-only, monotonic by id.
+Events are append-only, monotonic by id. Stdlib-only.
 """
 import json
 import sqlite3
