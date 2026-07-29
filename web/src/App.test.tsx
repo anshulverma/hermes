@@ -3,8 +3,10 @@ import { render, screen, waitFor } from '@testing-library/react';
 import App from './App';
 import * as client from './api/client';
 import type { RunDetail } from './api/client';
+import * as useEventStreamModule from './hooks/useEventStream';
 
 vi.mock('./api/client');
+vi.mock('./hooks/useEventStream');
 
 const mockRunDetail: RunDetail = {
   id: 'run-001',
@@ -39,6 +41,14 @@ const mockRunDetail: RunDetail = {
 describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+
+    // Default mock for useEventStream (no authError)
+    vi.spyOn(useEventStreamModule, 'useEventStream').mockReturnValue({
+      connected: true,
+      events: [],
+      lastEvent: null,
+      authError: false,
+    });
   });
 
   it('should render empty state when no runs exist', async () => {
@@ -163,6 +173,29 @@ describe('App', () => {
     await waitFor(() => {
       // Activity tab should be present
       expect(screen.getByText('Activity')).toBeInTheDocument();
+    });
+  });
+
+  it('should display auth error banner when WebSocket reports 4401', async () => {
+    // Mock useEventStream to report authError=true and not connected
+    vi.spyOn(useEventStreamModule, 'useEventStream').mockReturnValue({
+      connected: false,
+      events: [],
+      lastEvent: null,
+      authError: true,
+    });
+
+    vi.spyOn(client, 'fetchHealth').mockResolvedValue({
+      status: 'ok',
+      version: '0.1.0',
+      home: '/tmp/hermes',
+    });
+    vi.spyOn(client, 'fetchRuns').mockResolvedValue([]);
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/live updates unauthorized/i)).toBeInTheDocument();
     });
   });
 });

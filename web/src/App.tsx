@@ -31,7 +31,8 @@ export default function App() {
   const [detailLoading, setDetailLoading] = useState(false);
 
   // WebSocket live event stream
-  const { connected, lastEvent } = useEventStream();
+  const { connected, lastEvent, authError } = useEventStream();
+  const [authErrorDismissed, setAuthErrorDismissed] = useState(false);
 
   // Initialize lucide icons after mount
   useEffect(() => {
@@ -112,6 +113,41 @@ export default function App() {
           flexDirection: 'column',
         }}
       >
+        {authError && !connected && !authErrorDismissed && (
+          <div
+            style={{
+              margin: '12px 12px 0 12px',
+              padding: 12,
+              background: 'var(--wash-subtle)',
+              border: '1px solid var(--status-warning)',
+              borderRadius: 'var(--radius-md)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              fontSize: 13,
+              color: 'var(--text-secondary)',
+            }}
+          >
+            <span>
+              Live updates unauthorized — the API token may have rotated; reload to refresh.
+            </span>
+            <button
+              onClick={() => setAuthErrorDismissed(true)}
+              style={{
+                padding: '4px 8px',
+                fontSize: 12,
+                color: 'var(--text-secondary)',
+                background: 'transparent',
+                border: '1px solid var(--border-hairline)',
+                borderRadius: 'var(--radius-sm)',
+                cursor: 'pointer',
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+        )}
+
         {loading && (
           <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
             Loading...

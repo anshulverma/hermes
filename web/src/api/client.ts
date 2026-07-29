@@ -98,7 +98,18 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
       throw new AuthError(response.statusText || 'Unauthorized');
     }
 
-    throw new Error(`HTTP error! status: ${response.status}`);
+    // For other errors, try to extract server detail from JSON body
+    let errorMessage = `HTTP error! status: ${response.status}`;
+    try {
+      const errorBody = await response.json();
+      if (errorBody.detail) {
+        errorMessage = errorBody.detail;
+      }
+    } catch (parseError) {
+      // Body is not JSON or doesn't have detail field - use default message
+    }
+
+    throw new Error(errorMessage);
   }
 
   return response.json();

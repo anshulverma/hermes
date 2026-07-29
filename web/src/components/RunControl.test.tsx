@@ -89,7 +89,7 @@ describe('RunControl', () => {
     });
 
     it('shows error on 409 (illegal transition)', async () => {
-      
+
       (globalThis.fetch as any).mockResolvedValue({
         ok: false,
         status: 409,
@@ -103,6 +103,22 @@ describe('RunControl', () => {
 
       await waitFor(() => {
         expect(screen.getByText(/cannot pause/i)).toBeInTheDocument();
+      });
+    });
+
+    it('displays actual server detail message on 409', async () => {
+      (globalThis.fetch as any).mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({ detail: 'illegal transition running->running' }),
+      });
+
+      render(<RunControl runId="run-001" runState="running" onSuccess={vi.fn()} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /pause/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText('illegal transition running->running')).toBeInTheDocument();
       });
     });
 

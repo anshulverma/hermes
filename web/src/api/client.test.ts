@@ -262,5 +262,29 @@ describe('API client', () => {
         expect(e).not.toBeInstanceOf(AuthError);
       }
     });
+
+    it('should surface server detail message on 409 conflict', async () => {
+      setToken('valid-token');
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({ detail: 'illegal transition running->running' }),
+      }) as any;
+
+      await expect(pauseRun('run-001')).rejects.toThrow('illegal transition running->running');
+    });
+
+    it('should fall back to generic message if response body is not JSON', async () => {
+      setToken('valid-token');
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => { throw new Error('not json'); },
+      }) as any;
+
+      await expect(pauseRun('run-001')).rejects.toThrow('HTTP error! status: 409');
+    });
   });
 });

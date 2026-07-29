@@ -35,8 +35,6 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
     } catch (e: any) {
       if (e instanceof AuthError) {
         setError('Unauthorized: invalid or missing token');
-      } else if (e.message.includes('409')) {
-        setError('Cannot pause: run is not running');
       } else {
         setError(e.message);
       }
@@ -55,8 +53,6 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
     } catch (e: any) {
       if (e instanceof AuthError) {
         setError('Unauthorized: invalid or missing token');
-      } else if (e.message.includes('409')) {
-        setError('Cannot resume: run is not paused');
       } else {
         setError(e.message);
       }
@@ -76,8 +72,6 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
     } catch (e: any) {
       if (e instanceof AuthError) {
         setError('Unauthorized: invalid or missing token');
-      } else if (e.message.includes('409')) {
-        setError('Cannot stop: run is in terminal state');
       } else {
         setError(e.message);
       }
