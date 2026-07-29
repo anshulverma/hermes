@@ -1,0 +1,58 @@
+# Hermes control plane systemd service unit (example).
+#
+# This is a SAMPLE configuration for running the Hermes control plane
+# as a systemd-managed service. Adjust paths, user, and environment
+# variables for your deployment.
+#
+# Installation (example):
+#   1. Copy to /etc/systemd/system/hermes-control-plane.service
+#   2. Set ownership and permissions: chmod 644, chown root:root
+#   3. Customize User=, HERMES_HOME, and paths as needed
+#   4. systemctl daemon-reload
+#   5. systemctl enable --now hermes-control-plane
+#
+# The TimeoutStopSec is set to allow the graceful shutdown pass to
+# complete. When systemd stops the service, it sends SIGTERM; the
+# Hermes worker exits its main loop, runs a final heartbeat sweep to
+# requeue in-flight work, logs the graceful shutdown, and closes the
+# database. The 90-second timeout provides ample margin for this
+# final housekeeping before systemd escalates to SIGKILL.
+
+[Unit]
+Description=Hermes Control Plane (Job Queue API)
+After=network.target
+
+[Service]
+Type=simple
+User=hermes
+Group=hermes
+WorkingDirectory=/opt/hermes
+
+# Control plane mode: serve the HTTP API
+ExecStart=/usr/local/bin/hermes serve --api
+
+# Worker mode (commented example):
+# For running a per-host worker, uncomment below and comment the --api line:
+# ExecStart=/usr/local/bin/hermes serve --host worker-hostname
+
+# Environment: HERMES_HOME for persistent queue.db + api_token, json logs
+Environment="HERMES_HOME=/var/lib/hermes"
+Environment="HERMES_LOG_FORMAT=json"
+
+# Restart policy: restart on failure (non-zero exit), not on clean shutdown
+Restart=on-failure
+RestartSec=5s
+
+# Graceful shutdown: send SIGTERM, allow time for final heartbeat sweep + DB close
+KillSignal=SIGTERM
+TimeoutStopSec=90s
+
+# Security hardening (optional, adjust per your environment)
+# NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=strict
+# ProtectHome=true
+# ReadWritePaths=/var/lib/hermes
+
+[Install]
+WantedBy=multi-user.target
