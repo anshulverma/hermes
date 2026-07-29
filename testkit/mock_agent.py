@@ -48,6 +48,12 @@ class MockAgent:
         self.scenarios = dict(SCENARIOS)
         if scenarios:
             self.scenarios.update(scenarios)
+        # Per-ticket execution counter. The engine reuses the SAME payload across
+        # retries (it increments tickets.attempts, not the payload), so the only
+        # honest way to key a scenario by "attempt" is to count actual worker
+        # executions per ticket. Each parse_result call for a ticket is one
+        # execution, so this yields the real 1-based attempt ordinal.
+        self._attempt_counts: dict[str, int] = {}
 
     def build_invocation(self, envelope: dict, driver: Driver) -> list[str]:
         """Return a trivial SUCCESSFUL no-op argv (real work is mocked).
@@ -59,20 +65,25 @@ class MockAgent:
         """
         return ["true"]
 
-    def _scenario_for(self, envelope: dict) -> str:
-        """Resolve the scenario name from envelope.
+    def _scenario_for(self, envelope: dict):
+        """Resolve the scenario key from an envelope (§8, §12).
 
-        First tries (ticket_id, attempt) key, then falls back to payload scenario.
+        Derives the 1-based execution ordinal for this ticket by counting real
+        parse_result calls (payloads are static across engine retries, so a
+        payload ``attempt`` field would never advance). If ``(ticket_id, attempt)``
+        is in the scenario table it wins (letting a retry yield a different
+        outcome, e.g. infra_failed on attempt 1 then ok on attempt 2); otherwise
+        we fall back to the payload's ``scenario`` string.
         """
         ticket_id = envelope.get("ticket_id")
         payload = envelope.get("payload") or {}
-        attempt = payload.get("attempt")
 
-        # Try (ticket_id, attempt) tuple key first
-        if ticket_id is not None and attempt is not None:
+        if ticket_id is not None:
+            attempt = self._attempt_counts.get(ticket_id, 0) + 1
+            self._attempt_counts[ticket_id] = attempt
             key = (ticket_id, attempt)
             if key in self.scenarios:
-                # Return the key itself for lookup (not scenario name)
+                # Return the tuple key itself for the outcome lookup.
                 return key
 
         # Fall back to scenario name from payload

@@ -137,136 +137,206 @@ def test_fleet_scenario_generation():
     assert hasattr(agent, "scenarios")
 
 
-def test_fleet_scenario_single_box_run(home, source_repo, conn, local_site, example_playbook):
-    """Single-box run with fake scenario drives FULL scenario (~40 tickets) and asserts rich outcomes.
+def _run_state(conn, run_id):
+    return conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
 
-    Exercises:
-    - All ~40 tickets run (no truncation)
-    - MockAgent keyed by (ticket_id, attempt) for retry differentiation
-    - Infra-retry-then-succeed path (infra_failed attempt1 → ok attempt2)
-    - Driver-failed terminal state
-    - Clustering by signature (verify scenario has shared signatures)
-    - GPU contention setup (more gpu tickets than capacity would force parking if implemented)
+
+def _state_of(conn, ticket_id):
+    return conn.execute(
+        "SELECT state FROM tickets WHERE id=?", (ticket_id,)
+    ).fetchone()[0]
+
+
+def _settle_needs_human(conn, run_id, now):
+    """Operator settle of needs_human tickets, by route (mirrors fleet §6).
+
+    A verify-routed ticket (no linked reduction) is operator-requeued; a
+    reduce-flagged ticket (linked to a pending reduction) is settled by accepting
+    that reduction. Returns the set of routes settled this call.
+    """
+    from engine import queue
+
+    routes = set()
+    rows = conn.execute(
+        "SELECT id, reduction_id FROM tickets WHERE run_id=? AND state='needs_human'",
+        (run_id,),
+    ).fetchall()
+    for ticket_id, reduction_id in rows:
+        if reduction_id is None:
+            queue.requeue_needs_human(conn, ticket_id, now=now)
+            routes.add("verify")
+        else:
+            review_state = conn.execute(
+                "SELECT review_state FROM reductions WHERE id=?", (reduction_id,)
+            ).fetchone()[0]
+            if review_state == "pending":
+                queue.accept_reduction(conn, reduction_id, now=now)
+            routes.add("reduce")
+    return routes
+
+
+def test_fleet_scenario_single_box_run(home, source_repo, conn):
+    """Drive the FULL fleet scenario to ``done`` on ONE box and assert every path.
+
+    Mirrors the fleet harness §6 convergence procedure without Docker: seed the
+    full scenario, register a crew host with ample cpu but zero-then-limited gpu
+    (forcing parking), drive ``dispatch.master_loop`` in a bounded controlled
+    loop, settle both needs_human routes via the operator paths, and continue to
+    completion. Then assert the rich outcome against the REAL db state.
     """
     from engine import crew, dispatch, queue
     from testkit.scenarios.fleet import build_fleet_scenario
-    from engine.models import Run
-    import unittest.mock as mock
+    from testkit.scenarios.fleet_playbook import FleetPlaybook, GpuLimitedLocalSite
 
-    with mock.patch("os.cpu_count", return_value=16):
-        # Build scenario (gives us ALL ~40 tickets + agent with result table)
-        tickets, mock_agent = build_fleet_scenario(seed=42)
+    tickets, mock_agent = build_fleet_scenario(seed=42)
+    pb = FleetPlaybook()
+    gpu_site = GpuLimitedLocalSite(gpu_capacity=0, cpu_capacity=16)
+    host = gpu_site.discover_hosts()[0]
 
-        run_id = "fleet-test-1"
-
+    run_id = "fleet-test-1"
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, base_ref, config_json, state,
+                             phase, created_at, updated_at)
+           VALUES (?, 'fleet', 'local', 'HEAD', '{}', 'running', 'work', 0, 0)""",
+        (run_id,),
+    )
+    # Insert ALL scenario tickets (no truncation). available_at=0 -> claimable now.
+    for ticket in tickets:
+        ticket.run_id = run_id
         conn.execute(
-            """INSERT INTO runs (id, playbook, site, base_ref, config_json, state,
-                                 phase, created_at, updated_at)
-               VALUES (?, 'example', 'local', 'HEAD', '{}', 'running', 'work', 0, 0)""",
-            (run_id,),
+            """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority,
+                                   attempts, available_at, payload_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, ?, 0, 0)""",
+            (ticket.id, ticket.run_id, ticket.phase, ticket.state,
+             ticket.resource_req, ticket.priority, ticket.attempts,
+             json.dumps(ticket.payload)),
         )
-        conn.commit()
+    conn.commit()
 
-        # Insert ALL scenario tickets (not truncated)
-        for ticket in tickets:
-            ticket.run_id = run_id
-            conn.execute(
-                """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority,
-                                       attempts, available_at, payload_json, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)""",
-                (
-                    ticket.id,
-                    ticket.run_id,
-                    ticket.phase,
-                    ticket.state,
-                    ticket.resource_req,
-                    ticket.priority,
-                    ticket.attempts,
-                    0.0,
-                    json.dumps(ticket.payload),
-                ),
-            )
-        conn.commit()
+    reverify_id = next(t.id for t in tickets if t.payload.get("needs_reverify"))
+    reduce_review_id = next(t.id for t in tickets if t.payload.get("needs_reduce_review"))
+    n_tickets = len(tickets)
 
-        # Add local host with LIMITED gpu capacity (2 gpus vs. 10 gpu tickets)
-        # This SETUP creates parking pressure (though parking requires dispatcher impl)
-        host = local_site.discover_hosts()[0]
-        original_health = local_site.health
+    # Register the crew host (ample cpu, gpu capacity 0 -> gpu tickets will park).
+    crew.add(conn, gpu_site, mock_agent, host=host, base_ref="HEAD", now=1000.0)
 
-        def limited_health(h, agent):
-            report = original_health(h, agent)
-            report.resources["gpu"] = 2  # Only 2 gpus available
-            return report
+    # --- Stage 1: gpu capacity 0 forces parking; process everything else. -----
+    # Advancing ``now`` between calls clears the infra retry backoff so the
+    # infra-failed tickets can be re-claimed and succeed on attempt 2.
+    t = 1000.0
+    STEP = 700.0
+    for _ in range(4):
+        dispatch.master_loop(
+            conn, run_id, pb, gpu_site, mock_agent, "HEAD",
+            hosts=[host], now=t, max_cycles=4,
+        )
+        t += STEP
 
-        with mock.patch.object(local_site, "health", limited_health):
-            crew.add(conn, local_site, mock_agent, host=host, base_ref="HEAD", now=1000.0)
+    # Dispatch has quiesced with gpu tickets genuinely parked (contention) and
+    # the verify-routed ticket blocked in needs_human; the run is still running.
+    assert _run_state(conn, run_id) == "running"
+    parked_now = conn.execute(
+        "SELECT COUNT(*) FROM tickets WHERE run_id=? AND state='parked'", (run_id,)
+    ).fetchone()[0]
+    assert parked_now > 0, "gpu tickets should be parked under zero gpu capacity"
 
-            # Drive master loop with enough cycles for ~40 tickets
-            dispatch.master_loop(
-                conn,
-                run_id,
-                example_playbook,
-                local_site,
-                mock_agent,
-                "HEAD",
-                hosts=[host],
-                now=1000.0,
-                max_cycles=100,
-            )
+    # --- Stage 2: regain gpu capacity and unpark the parked gpu tickets. ------
+    gpu_site.gpu_capacity = 2
+    queue.unpark_ready(conn, "gpu", now=t)
+    conn.commit()
 
-        # RICH OUTCOME ASSERTIONS
+    # --- Stage 3: drive to completion, settling needs_human via operator paths.
+    routes_settled = set()
+    for _ in range(30):
+        dispatch.master_loop(
+            conn, run_id, pb, gpu_site, mock_agent, "HEAD",
+            hosts=[host], now=t, max_cycles=6,
+        )
+        if _run_state(conn, run_id) in ("done", "failed"):
+            break
+        routes_settled |= _settle_needs_human(conn, run_id, now=t)
+        t += STEP
 
-        # 1. All ~40 tickets were processed (no truncation)
-        ticket_count = conn.execute(
-            "SELECT COUNT(*) FROM tickets WHERE run_id=?", (run_id,)
-        ).fetchone()[0]
-        assert ticket_count >= 35, f"Expected ~40 tickets, got {ticket_count}"
+    # ==================== RICH OUTCOME ASSERTIONS (real db) ==================
 
-        # 2. Run reached terminal state
-        run_state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
-        assert run_state in ("done", "failed", "running"), f"Run state: {run_state}"
+    # 1. The run reached ``done`` (not merely a terminal-or-running set).
+    assert _run_state(conn, run_id) == "done"
 
-        # 3. Scenario has infra-retry tickets CONFIGURED (whether they run depends on dispatcher)
-        # Just verify the scenario table is set up correctly
-        infra_retry_scenario_keys = [
-            k for k, v in mock_agent.scenarios.items()
-            if k[1] == 1 and v[0] == "infra_failed"
-        ]
-        assert len(infra_retry_scenario_keys) >= 4, \
-            f"Expected 4 infra-retry tickets in scenario, got {len(infra_retry_scenario_keys)}"
-
-        # If any tickets actually retried (depends on dispatcher retry logic), verify second attempt succeeds
-        retried_tickets = conn.execute(
-            """SELECT id, state, attempts FROM tickets WHERE run_id=? AND attempts >= 2""",
-            (run_id,)
+    # 2. Every ticket is terminal (done/failed), and none were truncated.
+    states = [
+        r[0] for r in conn.execute(
+            "SELECT state FROM tickets WHERE run_id=?", (run_id,)
         ).fetchall()
-        if len(retried_tickets) > 0:
-            # At least one retry happened - verify the pattern
-            for tid, state, attempts in retried_tickets:
-                if mock_agent.scenarios.get((tid, 1), (None,))[0] == "infra_failed":
-                    # This ticket should have succeeded on attempt 2
-                    assert mock_agent.scenarios.get((tid, 2), (None,))[0] == "ok", \
-                        f"Ticket {tid} infra_failed on attempt 1 should succeed on attempt 2"
+    ]
+    assert len(states) == n_tickets == 40
+    assert set(states) <= {"done", "failed"}, sorted(set(states))
 
-        # 4. At least one driver_failed is terminal 'failed' (or queued if not processed)
-        # Verify scenario HAS driver_failed tickets configured
-        driver_failed_scenario_keys = [
-            k for k, v in mock_agent.scenarios.items()
-            if v[0] == "driver_failed"
-        ]
-        assert len(driver_failed_scenario_keys) >= 3, \
-            f"Expected 3 driver_failed tickets in scenario, got {len(driver_failed_scenario_keys)}"
+    # 3. The engine produced ONE reductions row per distinct root_cause.signature
+    #    among the findings it actually banked (real clustering, not a fixture claim).
+    finding_sigs = [
+        (json.loads(j).get("root_cause") or {}).get("signature", "unknown")
+        for (j,) in conn.execute(
+            "SELECT json FROM findings WHERE run_id=?", (run_id,)
+        ).fetchall()
+    ]
+    distinct_sigs = set(finding_sigs)
+    n_reductions = conn.execute(
+        "SELECT COUNT(*) FROM reductions WHERE run_id=?", (run_id,)
+    ).fetchone()[0]
+    assert n_reductions == len(distinct_sigs), (n_reductions, sorted(distinct_sigs))
+    assert n_reductions >= 2, "expected multiple signature clusters"
+    # At least one cluster actually deduplicated several tickets (e.g. the gpu class).
+    from collections import Counter
+    assert max(Counter(finding_sigs).values()) > 1, "expected a multi-ticket cluster"
 
-        # 5. Scenario has clusterable tickets (shared signatures)
-        signatures = [t.payload.get("signature") for t in tickets if "signature" in t.payload]
-        unique_sigs = len(set(signatures))
-        total_sigs = len(signatures)
-        assert unique_sigs < total_sigs, "Expected clustering scenario (duplicate signatures)"
-        assert len(set(signatures)) >= 2, "Expected at least 2 signature clusters"
+    # 4. At least one ticket shows attempt 1 infra_failed then attempt 2 ok, and
+    #    that retry-then-succeed ticket is terminal ``done``.
+    retried = conn.execute(
+        """SELECT a1.ticket_id FROM attempts a1
+           JOIN attempts a2 ON a2.ticket_id = a1.ticket_id
+           WHERE a1.attempt=1 AND a1.outcome='infra_failed'
+             AND a2.attempt=2 AND a2.outcome='ok'"""
+    ).fetchall()
+    assert retried, "expected an infra-retry-then-succeed ticket"
+    assert _state_of(conn, retried[0][0]) == "done"
 
-        # 6. GPU contention setup verified (more gpu tickets than capacity)
-        gpu_tickets = [t for t in tickets if t.resource_req == "gpu"]
-        assert len(gpu_tickets) > 2, f"Expected >2 gpu tickets for parking pressure, got {len(gpu_tickets)}"
+    # 5. At least one driver_failed ticket is terminal ``failed``.
+    driver_failed = conn.execute(
+        """SELECT t.id FROM tickets t JOIN attempts a ON a.ticket_id=t.id
+           WHERE a.outcome='driver_failed' AND t.state='failed'"""
+    ).fetchall()
+    assert driver_failed, "expected a driver_failed terminal ticket"
+
+    # 6. BOTH needs_human routes were REACHED (distinct emit sites) AND RESOLVED.
+    verify_route = conn.execute(
+        """SELECT COUNT(*) FROM events
+           WHERE kind='needs_human' AND ticket_id=? AND message='re-verify override'""",
+        (reverify_id,),
+    ).fetchone()[0]
+    assert verify_route >= 1, "verify=False needs_human route not reached"
+    reduce_route = conn.execute(
+        """SELECT COUNT(*) FROM events
+           WHERE kind='needs_human' AND ticket_id=? AND message='reduction flagged for human'""",
+        (reduce_review_id,),
+    ).fetchone()[0]
+    assert reduce_route >= 1, "reduction-flag needs_human route not reached"
+    assert routes_settled == {"verify", "reduce"}, routes_settled
+    assert _state_of(conn, reverify_id) in {"done", "failed"}
+    assert _state_of(conn, reduce_review_id) in {"done", "failed"}
+
+    # 7. At least one ticket was parked (gpu contention) and later reached ``done``.
+    parked_events = conn.execute(
+        """SELECT DISTINCT ticket_id FROM events
+           WHERE kind='ticket_parked' AND run_id=?""",
+        (run_id,),
+    ).fetchall()
+    assert parked_events, "expected at least one ticket_parked event"
+    parked_ticket = parked_events[0][0]
+    assert _state_of(conn, parked_ticket) == "done"
+    parked_req = conn.execute(
+        "SELECT resource_req FROM tickets WHERE id=?", (parked_ticket,)
+    ).fetchone()[0]
+    assert parked_req == "gpu"
 
 
 def test_fleet_scenario_has_clustering():

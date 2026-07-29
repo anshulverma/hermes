@@ -33,11 +33,24 @@ def build_fleet_scenario(seed: int = 42) -> tuple[list[Ticket], MockAgent]:
     run_id = "fleet-scenario-1"
     ticket_num = 0
 
-    # Helper to create a ticket
-    def mk_ticket(resource_req="cpu", payload=None, priority=0.0):
+    # Helper to create a ticket. Every payload carries ``root_cause.signature``
+    # (the reduce clustering key); a flat ``signature`` mirror is kept for the
+    # lightweight scenario-shape unit tests. ``attempt`` is informational only —
+    # the MockAgent derives the real attempt from execution order, not the
+    # payload (payloads are static across engine retries).
+    def mk_ticket(resource_req="cpu", *, signature, scenario="ok", extra=None,
+                  priority=0.0):
         nonlocal ticket_num
         tid = f"{run_id}/t-{ticket_num}"
         ticket_num += 1
+        payload = {
+            "scenario": scenario,
+            "signature": signature,
+            "root_cause": {"signature": signature},
+            "attempt": 1,
+        }
+        if extra:
+            payload.update(extra)
         return Ticket(
             id=tid,
             run_id=run_id,
@@ -46,64 +59,54 @@ def build_fleet_scenario(seed: int = 42) -> tuple[list[Ticket], MockAgent]:
             resource_req=resource_req,
             priority=priority,
             attempts=0,
-            payload=payload or {},
+            payload=payload,
         )
 
     # 1. CPU tickets with clustering (shared signatures)
     signatures = ["sig-A", "sig-B", "sig-C"]
     for i in range(15):
         sig = rng.choice(signatures)  # Some will share signatures
-        ticket = mk_ticket(
-            resource_req="cpu",
-            payload={"scenario": "ok", "signature": sig, "attempt": 1},
-        )
+        ticket = mk_ticket(resource_req="cpu", signature=sig)
         tickets.append(ticket)
         # All succeed on first attempt
         scenarios[(ticket.id, 1)] = ("ok", "goal_met")
 
     # 2. GPU tickets (more than typical capacity to force parking)
     for i in range(10):
-        ticket = mk_ticket(
-            resource_req="gpu",
-            payload={"scenario": "ok", "attempt": 1},
-        )
+        ticket = mk_ticket(resource_req="gpu", signature="sig-GPU")
         tickets.append(ticket)
         scenarios[(ticket.id, 1)] = ("ok", "goal_met")
 
     # 3. Driver-failed tickets (terminal, no retry)
     for i in range(3):
         ticket = mk_ticket(
-            resource_req="cpu",
-            payload={"scenario": "driver_error", "attempt": 1},
+            resource_req="cpu", signature="sig-DRIVER", scenario="driver_error"
         )
         tickets.append(ticket)
         scenarios[(ticket.id, 1)] = ("driver_failed", "driver_error")
 
-    # 4. Infra-failed then succeed (retry path)
+    # 4. Infra-failed then succeed (retry path): fail attempt 1, ok attempt 2.
     for i in range(4):
         ticket = mk_ticket(
-            resource_req="cpu",
-            payload={"scenario": "infra_then_ok", "attempt": 1},
+            resource_req="cpu", signature="sig-INFRA", scenario="infra_then_ok"
         )
         tickets.append(ticket)
-        # Fail on attempt 1, succeed on attempt 2
         scenarios[(ticket.id, 1)] = ("infra_failed", "transport_error")
         scenarios[(ticket.id, 2)] = ("ok", "goal_met")
 
-    # 5. needs_human via verify=False route (re-verify override)
-    # This would need playbook support, so we'll simulate with a special marker
+    # 5. needs_human via verify=False route (re-verify override). The worker
+    # SUCCEEDS; the playbook's verify fails it on attempt 1 -> needs_human.
     ticket = mk_ticket(
-        resource_req="cpu",
-        payload={"scenario": "ok", "needs_reverify": True, "attempt": 1},
+        resource_req="cpu", signature="sig-VERIFY", extra={"needs_reverify": True}
     )
     tickets.append(ticket)
-    scenarios[(ticket.id, 1)] = ("ok", "goal_met")  # Worker succeeds but verify fails
+    scenarios[(ticket.id, 1)] = ("ok", "goal_met")
 
-    # 6. needs_human via reduce flagging route
-    # This would need reduction logic, so we'll mark it
+    # 6. needs_human via reduce flagging route. Unique signature so its cluster is
+    # exactly this ticket; the playbook flags that cluster to needs_human.
     ticket = mk_ticket(
-        resource_req="cpu",
-        payload={"scenario": "ok", "needs_reduce_review": True, "attempt": 1},
+        resource_req="cpu", signature="sig-REVIEW",
+        extra={"needs_reduce_review": True},
     )
     tickets.append(ticket)
     scenarios[(ticket.id, 1)] = ("ok", "goal_met")
@@ -112,10 +115,7 @@ def build_fleet_scenario(seed: int = 42) -> tuple[list[Ticket], MockAgent]:
     remaining = 40 - len(tickets)
     for i in range(max(0, remaining)):
         sig = rng.choice(signatures)
-        ticket = mk_ticket(
-            resource_req="cpu",
-            payload={"scenario": "ok", "signature": sig, "attempt": 1},
-        )
+        ticket = mk_ticket(resource_req="cpu", signature=sig)
         tickets.append(ticket)
         scenarios[(ticket.id, 1)] = ("ok", "goal_met")
 
