@@ -82,8 +82,8 @@ probes, add-host probe checklist) · Findings (deduped root causes) · Activity
 ## Note on the page backdrop
 
 `CrewBackdrop` (theme `graph`) references
-`_ds/…/assets/backdrops/graph.png` as a low-alpha (~0.09) CSS background. That
-binary is **not** included — the design brief marks it optional, and it exceeded
-the import size cap. A missing file renders no background (it's a CSS
-`background-image`, so no broken-image icon). Drop a `graph.png` into
-`assets/backdrops/` if you want the texture.
+`_ds/…/assets/backdrops/graph.png` as a low-alpha (~0.09) CSS background. Only
+`graph.png` (the theme the app uses) ships under `_ds/…/assets/backdrops/`; the
+DS defines seven other themes (`construction`, `robots`, `farm`, `depot`,
+`pipeline`, `tree`, `neural`) whose textures are not included. A missing file
+renders no background (it's a CSS `background-image`, so no broken-image icon).
