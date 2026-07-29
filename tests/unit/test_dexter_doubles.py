@@ -101,16 +101,17 @@ def test_dexter_mock_agent_attempt_keying_does_not_hold_then_holds():
     # Agent with a fix-does-not-hold scenario keyed by (ticket_id, attempt)
     agent = DexterMockAgent()
 
+    # Goal containing "fix-unstable" triggers the attempt-keyed behavior
     # Same envelope used twice (engine reuses payload across requeue)
     envelope = {
-        "ticket_id": "run-1/solve-fix-unstable",
+        "ticket_id": "run-1/solve-0",
         "payload": {
-            "goal": "fix unstable test (requeue scenario)",
+            "goal": "Investigate flaky test (fix-unstable)",
             "issue_ref": None,
             "context": {},
         },
         "payload_sha256": contracts.payload_sha256(
-            {"goal": "fix unstable test (requeue scenario)", "issue_ref": None, "context": {}}
+            {"goal": "Investigate flaky test (fix-unstable)", "issue_ref": None, "context": {}}
         ),
     }
 

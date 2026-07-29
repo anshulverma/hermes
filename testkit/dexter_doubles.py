@@ -126,10 +126,10 @@ class DexterMockAgent:
             cause_category = "timing"
             mechanism = "timeout in wait_for_event"
 
-        # FIX-DOES-NOT-HOLD SCENARIO: ticket ending with "fix-unstable"
+        # FIX-DOES-NOT-HOLD SCENARIO: goal containing "fix-unstable"
         # Attempt 1 -> does not hold (ci_status != "passing")
         # Attempt 2 -> holds (ci_status == "passing")
-        if ticket_id.endswith("fix-unstable"):
+        if "fix-unstable" in goal.lower():
             if attempt == 1:
                 verified = False
                 ci_status = "failing"
