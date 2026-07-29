@@ -31,6 +31,7 @@ Stdlib-only (sqlite3 + time).
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from typing import Optional
@@ -118,7 +119,6 @@ def check_attention(conn: sqlite3.Connection, run_id: str, now: Optional[float] 
         (run_id, window_start),
     ).fetchall()
     for (data_json,) in rows:
-        import json
         data = json.loads(data_json) if data_json else {}
         reason = data.get("reason")
         if reason:
