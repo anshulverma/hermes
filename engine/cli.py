@@ -31,7 +31,10 @@ def _load_playbook_site_agent(args):
     import testkit.example_playbook
     import testkit.mock_agent
     import sites.local.site
-    # TODO: import agents.claude.agent when it exists
+    # Import modules that register dexter/devserver/claude
+    import playbooks.dexter
+    import sites.devserver.site
+    import agents.claude
 
     pb = playbook.load(args.playbook if hasattr(args, 'playbook') else 'example')
     st = site.load(args.site)

@@ -45,7 +45,7 @@ def test_engine_core_imports_only_stdlib():
 
     # Internal modules (within the workspace) + demo/server-only third-party
     # (uvicorn is imported conditionally in cli.py serve command; testkit for demo)
-    internal_prefixes = {"engine", "sites", "agents", "server", "testkit", "uvicorn"}
+    internal_prefixes = {"engine", "sites", "agents", "server", "testkit", "uvicorn", "playbooks"}
 
     violations = []
 
@@ -122,3 +122,72 @@ def test_queue_db_created_with_0600(tmp_path, monkeypatch):
     assert db_path.exists()
     mode = db_path.stat().st_mode & 0o777
     assert mode == 0o600, f"Expected mode 0600, got {oct(mode)}"
+
+
+def test_dexter_devserver_stdlib_only():
+    """playbooks.dexter and sites.devserver import NO third-party packages.
+
+    These adapters are stdlib-only by design (no runtime third-party dependencies).
+    """
+    # Find workspace root
+    test_dir = Path(__file__).parent
+    workspace = test_dir.parent.parent
+    dexter_dir = workspace / "playbooks" / "dexter"
+    devserver_dir = workspace / "sites" / "devserver"
+
+    assert dexter_dir.exists(), f"Expected playbooks/dexter/ dir at {dexter_dir}"
+    assert devserver_dir.exists(), f"Expected sites/devserver/ dir at {devserver_dir}"
+
+    # Collect all .py files
+    dexter_files = list(dexter_dir.rglob("*.py"))
+    devserver_files = list(devserver_dir.rglob("*.py"))
+
+    assert len(dexter_files) > 0, "No Python files found in playbooks/dexter/"
+    assert len(devserver_files) > 0, "No Python files found in sites/devserver/"
+
+    # Stdlib modules we allow (same whitelist as engine core)
+    stdlib_modules = {
+        "__future__", "abc", "argparse", "ast", "asyncio", "base64", "collections",
+        "contextlib", "copy", "csv", "dataclasses", "datetime", "decimal",
+        "email", "enum", "functools", "hashlib", "http", "io", "itertools",
+        "json", "logging", "math", "os", "pathlib", "pickle", "platform",
+        "pprint", "queue", "random", "re", "shlex", "shutil", "socket", "sqlite3",
+        "stat", "string", "subprocess", "sys", "tempfile", "textwrap",
+        "time", "traceback", "typing", "unittest", "urllib", "uuid", "warnings",
+        "weakref", "xml", "zipfile",
+    }
+
+    # Internal modules (within the workspace)
+    internal_prefixes = {"engine", "sites", "agents", "server", "testkit", "playbooks"}
+
+    violations = []
+
+    for pyfile in dexter_files + devserver_files:
+        if "__pycache__" in pyfile.parts:
+            continue
+
+        try:
+            source = pyfile.read_text()
+            tree = ast.parse(source, filename=str(pyfile))
+        except SyntaxError:
+            # Skip files with syntax errors (shouldn't happen)
+            continue
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    module = alias.name.split(".")[0]
+                    if module not in stdlib_modules and module not in internal_prefixes:
+                        violations.append((pyfile.relative_to(workspace), module))
+
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    module = node.module.split(".")[0]
+                    if module not in stdlib_modules and module not in internal_prefixes:
+                        violations.append((pyfile.relative_to(workspace), module))
+
+    if violations:
+        msg_lines = ["Dexter/devserver adapters import third-party packages (stdlib-only invariant):"]
+        for fpath, mod in violations:
+            msg_lines.append(f"  {fpath}: {mod}")
+        pytest.fail("\n".join(msg_lines))

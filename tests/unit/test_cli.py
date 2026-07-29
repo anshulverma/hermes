@@ -843,3 +843,43 @@ def test_run_with_goals_missing_file(setup_testkit, tmp_path):
         config = json.loads(config_json)
         assert config["goals"] == []
         conn.close()
+
+
+# --- _load_playbook_site_agent loader tests ----------------------------------
+
+def test_load_playbook_site_agent_dexter_devserver_claude():
+    """_load_playbook_site_agent resolves dexter/devserver/claude adapters."""
+    from engine.cli import _load_playbook_site_agent
+    import argparse
+
+    # Build an args object
+    args = argparse.Namespace(
+        playbook='dexter',
+        site='devserver',
+        agent='claude',
+    )
+
+    pb, st, ag = _load_playbook_site_agent(args)
+
+    assert pb.name == 'dexter', "should load dexter playbook"
+    assert st.name == 'devserver', "should load devserver site"
+    assert ag.name == 'claude', "should load claude agent"
+
+
+def test_load_playbook_site_agent_example_local_mock_regression():
+    """_load_playbook_site_agent still resolves example/local/mock (regression test)."""
+    from engine.cli import _load_playbook_site_agent
+    import argparse
+
+    # Build an args object
+    args = argparse.Namespace(
+        playbook='example',
+        site='local',
+        agent='mock',
+    )
+
+    pb, st, ag = _load_playbook_site_agent(args)
+
+    assert pb.name == 'example', "should load example playbook"
+    assert st.name == 'local', "should load local site"
+    assert ag.name == 'mock', "should load mock agent"
