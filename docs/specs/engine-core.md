@@ -434,7 +434,7 @@ filters (test/demo source).
   run is `running`, whose `resource_req` the host serves, and whose
   `available_at<=now`, sets `dispatched` +
   `worker_host` + appends `tried_hosts`; `record_result(conn, ticket, host,
-  result, playbook, site, now)` applies the §5 transitions — for an
+  result, now, playbook, site)` applies the §5 transitions — for an
   `outcome==ok` result it evaluates `playbook.verify(run, ticket, result, site)`
   (the `run` snapshot loaded from the ticket's `run_id`) and routes
   `running → reducing` on True or `running → needs_human` on False (the §3 master
