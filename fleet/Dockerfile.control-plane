@@ -24,8 +24,8 @@ WORKDIR /opt/hermes
 COPY . /opt/hermes/
 
 # Install the package with the server extra (FastAPI + uvicorn)
-# This resolves the server dependencies properly
-RUN pip install --no-cache-dir -e '.[server]'
+# Use constraints.txt for reproducible builds
+RUN pip install --no-cache-dir -e '.[server]' -c constraints.txt
 
 # Create HERMES_HOME directory (will be bind-mounted in production)
 RUN mkdir -p /hermes-home
