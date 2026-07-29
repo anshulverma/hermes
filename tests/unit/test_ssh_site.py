@@ -1,4 +1,4 @@
-"""Tests for sites.ssh.SSHSite (spec §4, §8).
+"""Tests for sites.ssh.SSHSite.
 
 TDD: written FIRST. Commands are constructed correctly for provision/health/
 run_worker; subprocess is MOCKED (no real SSH). Connection failure (ssh exit
@@ -288,7 +288,7 @@ def test_discover_hosts_from_config():
 def test_run_worker_uses_per_host_connection_options(mock_agent, tmp_path):
     """run_worker builds argv with the per-host identity/port/user + hardened -o opts.
 
-    This is the Part-B2 enhancement: real containers need -i/-p/-o and user@host.
+    Real containers need -i/-p/-o and user@host.
     """
     from sites.ssh.site import SSHSite
 

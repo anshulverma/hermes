@@ -1,7 +1,7 @@
 """
 Unit tests for engine/db/migrate.py — idempotent migrations, connection setup, schema validation.
 
-Per §4 spec: all tables + indexes from engine-core.md §4, PRAGMAs enforced, file mode 0600.
+All tables + indexes, PRAGMAs enforced, file mode 0600.
 """
 import os
 import sqlite3
@@ -12,7 +12,7 @@ import pytest
 
 
 def test_apply_migrations_creates_all_tables(tmp_path):
-    """On a fresh db, apply_migrations creates every table listed in spec §4."""
+    """On a fresh db, apply_migrations creates every required table."""
     from engine.db.migrate import apply_migrations
 
     db_path = tmp_path / "queue.db"
@@ -46,7 +46,7 @@ def test_apply_migrations_creates_all_tables(tmp_path):
 
 
 def test_apply_migrations_creates_all_indexes(tmp_path):
-    """Assert all named indexes from spec §4 are created."""
+    """Assert all named indexes are created."""
     from engine.db.migrate import apply_migrations
 
     db_path = tmp_path / "queue.db"
@@ -156,7 +156,7 @@ def test_connect_sets_file_mode_0600(tmp_path):
 
 
 def test_connect_sets_pragmas(tmp_path):
-    """connect() sets the required PRAGMAs from spec §4."""
+    """connect() sets the required PRAGMAs."""
     from engine.db.migrate import connect
 
     db_path = tmp_path / "queue.db"
@@ -198,7 +198,7 @@ def test_apply_migrations_sets_file_mode_0600(tmp_path):
 
 
 def test_tickets_table_has_reduction_id_fk(tmp_path):
-    """tickets.reduction_id is an INTEGER FK to reductions.id (spec §4)."""
+    """tickets.reduction_id is an INTEGER FK to reductions.id."""
     from engine.db.migrate import apply_migrations
 
     db_path = tmp_path / "queue.db"
@@ -228,7 +228,7 @@ def test_tickets_table_has_reduction_id_fk(tmp_path):
 
 
 def test_migration_v2_adds_reductions_phase_column(tmp_path):
-    """Migration v2 adds an additive `phase TEXT` column to reductions (§4)."""
+    """Migration v2 adds an additive `phase TEXT` column to reductions."""
     from engine.db.migrate import apply_migrations
 
     db_path = tmp_path / "queue.db"

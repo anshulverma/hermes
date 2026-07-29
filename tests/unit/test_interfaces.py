@@ -1,8 +1,7 @@
 """Tests for the Playbook / Site / Agent Protocols, their registries, and
 HealthReport.ok.
 
-TDD: written first. These pin the §8 interface surface every later slice
-depends on.
+TDD: written first. These pin the interface surface.
 """
 import pytest
 

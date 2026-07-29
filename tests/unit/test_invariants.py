@@ -1,4 +1,4 @@
-"""Invariant tests for the Hermes engine core (Slice 11).
+"""Invariant tests for the Hermes engine core.
 
 These tests enforce system-wide invariants:
 - Engine core is stdlib-only (no third-party runtime imports)

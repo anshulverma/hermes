@@ -168,7 +168,7 @@ def test_submit_for_review_returns_file_ref_and_never_pushes(home, local_site, m
 
 
 def test_run_worker_installs_guard_when_missing(home, local_site, monkeypatch):
-    """run_worker auto-installs guard if missing (Slice 11 self-defense)."""
+    """run_worker auto-installs guard if missing."""
     from testkit.mock_agent import MockAgent
 
     host = socket.gethostname()

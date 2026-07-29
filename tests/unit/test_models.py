@@ -218,7 +218,7 @@ def test_reduction_has_kind_json():
 
 
 def test_reduction_carries_persistence_fields():
-    """Reduction carries id, run_id, phase, kind, json, review_state (§4 table)."""
+    """Reduction carries id, run_id, phase, kind, json, review_state."""
     from engine.models import Reduction
 
     # Persistence fields default so playbook-produced Reductions stay light.
@@ -246,7 +246,7 @@ def test_reduction_carries_persistence_fields():
 
 
 def test_finding_has_run_id_ticket_id_kind_json():
-    """Finding has run_id, ticket_id, kind, json (matching §4 findings table)."""
+    """Finding has run_id, ticket_id, kind, json."""
     from engine.models import Finding
 
     finding = Finding(

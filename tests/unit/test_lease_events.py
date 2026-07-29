@@ -1,4 +1,4 @@
-"""Tests for lease event emission (Slice 11).
+"""Tests for lease event emission.
 
 TDD: written FIRST to drive lease event emission in leases.py.
 """

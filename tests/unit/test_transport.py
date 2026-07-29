@@ -1,4 +1,4 @@
-"""Tests for engine.transport (§6, §9).
+"""Tests for engine.transport.
 
 TDD: written FIRST, watched fail, then engine/transport.py implemented.
 
@@ -216,7 +216,7 @@ def test_ssh_transport_builds_scp_ssh_scp_argv(mock_agent):
 
 
 def test_ssh_transport_includes_connection_options(mock_agent):
-    """ssh_transport threads ssh_opts/scp_opts/user into the scp+ssh argv (§9, Slice 12).
+    """ssh_transport threads ssh_opts/scp_opts/user into the scp+ssh argv.
 
     For REAL hosts the transport must carry an identity file, port, user, and the
     hardened -o options. With opts + user given, the ssh argv targets ``user@host``

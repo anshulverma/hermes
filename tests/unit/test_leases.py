@@ -1,13 +1,12 @@
-"""Tests for engine.leases — resource semaphore and lease lifecycle (§9, §4).
+"""Tests for engine.leases — resource semaphore and lease lifecycle.
 
 TDD: written FIRST, watched fail, then engine/leases.py implemented minimally
 to spec. Covers capacity computation from crew rows, acquire semantics (grant
 iff under capacity), release+unpark, wiring into queue (record_result/requeue/
 requeue_transport), renew, and reclaim_expired.
 
-Stdlib-only (sqlite3 + json + time). Crew ROWS are inserted directly (Slice 8
-populates crew; this slice consumes it). Tests verify the semaphore never
-over-issues and expired leases self-heal.
+Stdlib-only (sqlite3 + json + time). Crew ROWS are inserted directly. Tests verify
+the semaphore never over-issues and expired leases self-heal.
 """
 from __future__ import annotations
 

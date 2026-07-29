@@ -1,12 +1,11 @@
-"""Tests for engine.queue — the ticket + run state machine (§5, §9).
+"""Tests for engine.queue — the ticket + run state machine.
 
-TDD: written FIRST, watched fail, then engine/queue.py implemented minimally
-to §5/§9. Table-driven over the §5 transitions, plus a real-threads concurrency
-test for claim atomicity, run-state edges, and reduction resolution.
+TDD: written FIRST, watched fail, then engine/queue.py implemented minimally.
+Table-driven over transitions, plus a real-threads concurrency test for claim
+atomicity, run-state edges, and reduction resolution.
 
-No lease logic is exercised here — lease release is Slice 6 (queue leaves a
-clean seam). These tests only touch runs/tickets/attempts/findings/reductions/
-events.
+No lease logic is exercised here. These tests only touch runs/tickets/attempts/
+findings/reductions/events.
 """
 from __future__ import annotations
 
@@ -291,7 +290,7 @@ def test_claim_atomic_under_real_threads(db_path):
     assert len(set(claimed)) == n_tickets
 
 
-# --- record_result: ticket state machine (table-driven over §5) ----------
+# --- record_result: ticket state machine (table-driven) ------------------
 
 def test_record_result_ok_verify_true_to_reducing(conn):
     from engine import queue
@@ -643,7 +642,7 @@ def test_requeue_needs_human_rejects_non_needs_human(conn):
         queue.requeue_needs_human(conn, "r1/t-0", now=100.0)
 
 
-# --- master-side reduce/advance writers (FIX 1) --------------------------
+# --- master-side reduce/advance writers ----------------------------------
 
 def _mk_finding(conn, run_id, ticket_id, kind="result", json_doc=None):
     conn.execute(
