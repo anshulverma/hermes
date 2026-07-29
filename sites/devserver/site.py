@@ -6,12 +6,14 @@ guard reporting. Reuses transport.build_ssh_opts/build_scp_opts. Meta-internal
 specifics (host-list source, install recipe, dashboard endpoint) stay deploy-time
 pluggable (env/config hooks), NOT hardcoded.
 
-Stdlib-only: subprocess, json, os, tempfile, time.
+Stdlib-only: subprocess, json, os, tempfile, time, shlex.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import subprocess
 import tempfile
 import time
@@ -64,27 +66,75 @@ class DevserverSite:
 
         Install recipe is a pluggable hook (deployment-specific).
         """
-        # NOTE: This is a pluggable hook placeholder. In a real deployment,
-        # this would call site-specific provisioning scripts over SSH.
-        # For now, we do basic idempotent checks:
+        ssh_opts = self._ssh_opts(host)
 
         # 1. Verify ssh connectivity
         subprocess.run(
-            ["ssh", *self._ssh_opts(host), host, "true"],
+            ["ssh", *ssh_opts, host, "true"],
             capture_output=True,
             text=True,
             check=True,
         )
 
-        # 2. Ensure checkout at base_ref (idempotent: check current ref first)
-        # This is deployment-specific; placeholder for now
+        # 2. Ensure checkout at base_ref (idempotent: check current ref first, re-verify on 2nd call)
+        # Try git first, fall back to sl
+        workspace_dir = "/tmp/hermes-workspace"
+        workspace_dir_quoted = shlex.quote(workspace_dir)
+        base_ref_quoted = shlex.quote(base_ref)
+
+        # Check if workspace exists
+        check_workspace = subprocess.run(
+            ["ssh", *ssh_opts, host, f"test -d {workspace_dir_quoted}"],
+            capture_output=True,
+            text=True,
+        )
+
+        if check_workspace.returncode != 0:
+            # Workspace doesn't exist, clone it
+            # Try git clone (prefer git over sl for devservers)
+            repo_url = os.environ.get("HERMES_REPO_URL", "")
+            if repo_url:
+                repo_url_quoted = shlex.quote(repo_url)
+                subprocess.run(
+                    ["ssh", *ssh_opts, host,
+                     f"git clone {repo_url_quoted} {workspace_dir_quoted}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,  # May fail if git not available
+                )
+
+        # Ensure we're at the correct ref (idempotent: re-verify on 2nd call)
+        subprocess.run(
+            ["ssh", *ssh_opts, host,
+             f"cd {workspace_dir_quoted} && git checkout {base_ref_quoted}"],
+            capture_output=True,
+            text=True,
+            check=False,  # May fail if workspace doesn't exist or not git repo
+        )
 
         # 3. Ensure claude + dexter installed (deployment-specific hook)
+        install_cmd = os.environ.get("HERMES_DEVSERVER_INSTALL_CMD", "")
+        if install_cmd:
+            # Run the install command (already shell-safe via env var)
+            subprocess.run(
+                ["ssh", *ssh_opts, host, install_cmd],
+                capture_output=True,
+                text=True,
+                check=False,  # Don't fail provision if install hook fails
+            )
 
         # 4. Install guard shims (always re-install for idempotence)
         self._install_guard(host)
 
-        # 5. Ensure dexter runtime dir exists (deployment-specific)
+        # 5. Ensure dexter runtime dir exists
+        runtime_dir = "/tmp/hermes-dexter-runtime"
+        runtime_dir_quoted = shlex.quote(runtime_dir)
+        subprocess.run(
+            ["ssh", *ssh_opts, host, f"mkdir -p {runtime_dir_quoted}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     def _install_guard(self, host: str) -> None:
         """Install no-ship guard shims over SSH (always re-install).
@@ -92,10 +142,12 @@ class DevserverSite:
         Guard dir is deployment-specific; use a standard location.
         """
         guard_dir = f"/tmp/hermes-guard-{host}/bin"
+        guard_dir_quoted = shlex.quote(guard_dir)
+        ssh_opts = self._ssh_opts(host)
 
         # Create guard dir
         subprocess.run(
-            ["ssh", *self._ssh_opts(host), host, "mkdir", "-p", guard_dir],
+            ["ssh", *ssh_opts, host, "mkdir", "-p", guard_dir_quoted],
             capture_output=True,
             text=True,
             check=False,  # Don't fail if already exists
@@ -103,11 +155,35 @@ class DevserverSite:
 
         # Write each guard shim
         for name, blocked in GUARD_SHIMS.items():
-            self._write_remote_shim(host, guard_dir, name, blocked)
+            self._write_remote_shim(host, guard_dir, name, blocked, ssh_opts)
 
-    def _write_remote_shim(self, host: str, guard_dir: str, name: str, blocked: tuple) -> None:
-        """Write one guard shim to the remote host."""
+    def _write_remote_shim(self, host: str, guard_dir: str, name: str, blocked: tuple, ssh_opts: list[str]) -> None:
+        """Write one guard shim to the remote host.
+
+        CRITICAL: Resolve the real binary's ABSOLUTE path on the remote (via 'command -v')
+        and bake it into the shim as 'exec "<realpath>" "$@"'. This prevents infinite
+        recursion when the guard dir is prepended to PATH. When the real binary is absent,
+        fail closed (exit 127) rather than recursing.
+        """
+        # Resolve real binary on remote (guard dir NOT yet on PATH, so this finds the real one)
+        proc = subprocess.run(
+            ["ssh", *ssh_opts, host, f"command -v {shlex.quote(name)}"],
+            capture_output=True,
+            text=True,
+        )
+
         cases = "|".join(blocked)
+
+        if proc.returncode == 0 and proc.stdout.strip():
+            # Real binary found: use its absolute path
+            real_path = proc.stdout.strip()
+            passthrough = f'exec "{real_path}" "$@"'
+        else:
+            # Real binary absent: fail closed (exit 127), never recurse
+            passthrough = (
+                f'echo "[hermes-no-ship-guard] real {name!r} not found" >&2; exit 127'
+            )
+
         script = f"""#!/bin/sh
 # hermes no-ship guard shim for {name!r}: blocks {cases}
 for _arg in "$@"; do
@@ -118,21 +194,21 @@ for _arg in "$@"; do
       ;;
   esac
 done
-# Passthrough to real binary (find it in original PATH)
-exec {name} "$@"
+{passthrough}
 """
         shim_path = f"{guard_dir}/{name}"
+        shim_path_quoted = shlex.quote(shim_path)
 
-        # Write shim via ssh (echo script to file + chmod +x)
+        # Write shim via ssh (cat > file + chmod +x) with QUOTED paths
         subprocess.run(
-            ["ssh", *self._ssh_opts(host), host, f"cat > {shim_path}"],
+            ["ssh", *ssh_opts, host, f"cat > {shim_path_quoted}"],
             input=script,
             capture_output=True,
             text=True,
             check=False,
         )
         subprocess.run(
-            ["ssh", *self._ssh_opts(host), host, "chmod", "+x", shim_path],
+            ["ssh", *ssh_opts, host, "chmod", "+x", shim_path_quoted],
             capture_output=True,
             text=True,
             check=False,
@@ -293,13 +369,16 @@ exec {name} "$@"
 
             # 2) run the worker over ssh WITH guard dir prepended to remote PATH
             # CRITICAL: Pass as a SINGLE SHELL STRING so $PATH expands
+            # AND shlex.quote all interpolated values to prevent shell injection
             timeout_s = int(envelope.get("timeout_s", 3600))
             guard_dir = self._guard_dir(host)
 
             # Build remote command as a shell string that exports PATH then runs serve-once
+            # CRITICAL: shlex.quote() all interpolated values (guard_dir, paths, timeout)
             remote_cmd = (
-                f'PATH={guard_dir}:$PATH hermes serve-once '
-                f'--envelope {remote_env} --result {remote_result} --timeout {timeout_s}'
+                f'PATH={shlex.quote(guard_dir)}:$PATH hermes serve-once '
+                f'--envelope {shlex.quote(remote_env)} --result {shlex.quote(remote_result)} '
+                f'--timeout {shlex.quote(str(timeout_s))}'
             )
 
             try:
@@ -362,13 +441,46 @@ exec {name} "$@"
     def submit_for_review(self, host: str, change: dict) -> str:
         """Wrap jf submit (publish-only, never land) and return review URL.
 
-        Deployment-specific: placeholder returns a mock URL.
+        Actually shells the publish-only submit command over SSH (pluggable via
+        HERMES_DEVSERVER_SUBMIT_CMD, default "jf submit"), parses the review URL
+        from stdout, and returns it. NEVER issues land/push subcommands.
+
+        Raises: ValueError if submit command fails or URL can't be parsed.
         """
-        # NOTE: In a real deployment, this would call `jf submit` over SSH
-        # and parse the review URL from the output.
-        # For now, return a placeholder.
-        change_id = change.get("id", "change")
-        return f"https://review.example/D{change_id}"
+        submit_cmd = os.environ.get("HERMES_DEVSERVER_SUBMIT_CMD", "jf submit")
+        ssh_opts = self._ssh_opts(host)
+
+        # Run the submit command over SSH
+        try:
+            proc = subprocess.run(
+                ["ssh", *ssh_opts, host, submit_cmd],
+                capture_output=True,
+                text=True,
+                timeout=self.connect_timeout + 30,
+                check=False,  # Don't raise on non-zero, handle it ourselves
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ValueError(f"Submit command timed out: {exc}") from exc
+
+        if proc.returncode != 0:
+            raise ValueError(
+                f"Submit command failed (exit {proc.returncode}): {proc.stderr.strip()}"
+            )
+
+        # Parse the review URL from stdout
+        # Common patterns: "Created review: <URL>", "Review URL: <URL>", or just the URL
+        output = proc.stdout.strip()
+
+        # Try to extract a URL from the output
+        # Look for https?:// URLs
+        url_match = re.search(r'https?://[^\s]+', output)
+        if url_match:
+            return url_match.group(0)
+
+        # If no URL found, raise an error
+        raise ValueError(
+            f"Could not parse review URL from submit command output: {output}"
+        )
 
     def issue_source(self, query: IssueQuery) -> list[Issue]:
         """Query internal dashboard for issues (optional, pluggable endpoint).
