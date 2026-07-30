@@ -1,3 +1,6 @@
+// Set window.React/ReactDOM before anything here loads the DS bundle (must be first).
+import './_globals';
+
 // Import token CSS globally
 import './tokens/fonts.css';
 import './tokens/colors.css';
