@@ -477,6 +477,10 @@ export type RunMetrics = {
   run_id: string;
   bucket_s: number;
   buckets: MetricsBucket[];
+  totals: { attempts: number; done: number; failed: number; results: number; tickets: number };
+  retry_rate: number;
+  mean_time_to_result_s: number | null;
+  by_phase: Array<{ phase: string; tickets: number; mean_time_s: number | null; failure_pct: number }>;
 };
 
 export async function fetchRunMetrics(runId: string, bucketS?: number): Promise<RunMetrics> {

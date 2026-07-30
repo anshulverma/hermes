@@ -31,3 +31,15 @@ export function fmtDuration(
   const m = Math.floor(s / 60);
   return `${m}m ${s % 60}s`;
 }
+
+/** Format a number of seconds: "—" when null/undefined; "42s" / "3m 5s" / "2h 15m". */
+export function fmtSeconds(s: number | null | undefined): string {
+  if (s == null) return '—';
+  const sec = Math.round(s);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  if (sec < 3600) return `${m}m ${sec % 60}s`;
+  const h = Math.floor(sec / 3600);
+  const remainingM = Math.floor((sec % 3600) / 60);
+  return `${h}h ${remainingM}m`;
+}

@@ -13,6 +13,7 @@ import { fetchRunMetrics } from '../api/client';
 import type { RunMetrics, MetricsBucket } from '../api/client';
 import { Card, StatTile, EmptyState } from '../ds';
 import { LoadingOverlay } from '../components/Spinner';
+import { fmtSeconds } from '../util/time';
 
 // --- helpers ---------------------------------------------------------------
 
@@ -473,6 +474,8 @@ export default function MetricsView({ runId }: MetricsViewProps) {
     { label: 'done', value: String(last.done_cumulative), delta: 'completed', tone: undefined },
     { label: 'failed', value: String(last.failed_cumulative), delta: 'failed', tone: last.failed_cumulative > 0 ? 'danger' : undefined },
     { label: 'error rate', value: `${(last.error_rate * 100).toFixed(1)}%`, delta: 'of results', tone: last.error_rate > 0 ? 'danger' : undefined },
+    { label: 'retry rate', value: `${Math.round(metrics.retry_rate * 100)}%`, delta: 'tickets retried once+', tone: undefined },
+    { label: 'time to result', value: fmtSeconds(metrics.mean_time_to_result_s), delta: 'mean claim→result', tone: undefined },
   ];
 
   const spanMin = Math.round((n * bucketWidth) / 60);
@@ -509,7 +512,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
       </div>
 
       {/* Summary tiles */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
         {tiles.map((t) => (
           <StatTile
             key={t.label}
@@ -611,6 +614,50 @@ export default function MetricsView({ runId }: MetricsViewProps) {
           />
         </ChartFrame>
       </div>
+
+      {/* By phase table */}
+      {metrics.by_phase && metrics.by_phase.length > 0 && (
+        <Card padding="md" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <span style={{ color: 'var(--text-primary)', fontSize: 14 }}>By phase</span>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr 1fr 1fr',
+              gap: 12,
+              color: 'var(--text-muted)',
+              fontSize: 12,
+              fontFamily: 'var(--font-mono)',
+              paddingBottom: 8,
+              borderBottom: '1px solid var(--border-hairline)',
+            }}
+          >
+            <span>phase</span>
+            <span>tickets</span>
+            <span>mean_time</span>
+            <span>failure_pct</span>
+          </div>
+          {metrics.by_phase.map((p) => (
+            <div
+              key={p.phase}
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr 1fr 1fr',
+                gap: 12,
+                fontSize: 12,
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              <span style={{ color: 'var(--text-secondary)' }}>{p.phase}</span>
+              <span>{p.tickets}</span>
+              <span>{fmtSeconds(p.mean_time_s)}</span>
+              <span style={{ color: p.failure_pct > 5 ? 'var(--status-danger)' : 'var(--text-secondary)' }}>
+                {p.failure_pct.toFixed(1)}%
+              </span>
+            </div>
+          ))}
+        </Card>
+      )}
     </div>
   );
 }

@@ -48,6 +48,10 @@ describe('MetricsView', () => {
             crew_online: 2,
           },
         ],
+        totals: { attempts: 4, done: 3, failed: 1, results: 4, tickets: 3 },
+        retry_rate: 0.25,
+        mean_time_to_result_s: 125,
+        by_phase: [{ phase: 'work', tickets: 3, mean_time_s: 12, failure_pct: 10 }],
       }),
     });
 
@@ -73,6 +77,22 @@ describe('MetricsView', () => {
     expect(screen.getAllByText('now').length).toBeGreaterThan(0);
     expect(screen.getByText('done 24')).toBeInTheDocument();
     expect(screen.getByText('failed 6')).toBeInTheDocument();
+
+    // New metrics tiles
+    expect(screen.getAllByText('25%').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/retry rate/i).length).toBeGreaterThan(0);
+    expect(screen.getByText('2m 5s')).toBeInTheDocument();
+    expect(screen.getAllByText(/time to result/i).length).toBeGreaterThan(0);
+
+    // By-phase table
+    expect(screen.getByText('work')).toBeInTheDocument();
+    expect(screen.getByText('10.0%')).toBeInTheDocument();
+
+    // No GPU/budget/token/spend content
+    expect(screen.queryByText(/gpu/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/budget/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/token/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/spend/i)).not.toBeInTheDocument();
   });
 
   it('shows empty state when buckets are empty', async () => {
