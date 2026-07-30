@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Annotated
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 
@@ -1443,6 +1443,22 @@ def create_app(bind: str | None = None) -> FastAPI:
             html = injection + html
 
         return html
+
+    # Serve dist-root static files the SPA references (favicon, icon sprite).
+    # Ungated (like /assets) so the browser can fetch the tab icon without a token.
+    @app.get("/favicon.svg")
+    def serve_favicon() -> FileResponse:
+        fpath = dist_dir / "favicon.svg"
+        if not fpath.exists():
+            raise HTTPException(status_code=404, detail="favicon.svg not found")
+        return FileResponse(str(fpath), media_type="image/svg+xml")
+
+    @app.get("/icons.svg")
+    def serve_icons() -> FileResponse:
+        fpath = dist_dir / "icons.svg"
+        if not fpath.exists():
+            raise HTTPException(status_code=404, detail="icons.svg not found")
+        return FileResponse(str(fpath), media_type="image/svg+xml")
 
     # Mount static assets if assets dir exists
     assets_dir = dist_dir / "assets"

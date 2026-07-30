@@ -1912,6 +1912,27 @@ def test_spa_loopback_injects_token(loopback_client: TestClient, temp_home: Path
     assert "<title>Hermes</title>" in html
 
 
+def test_favicon_served_from_dist_root(temp_home: Path):
+    """GET /favicon.svg serves the dist-root file as image/svg+xml (ungated)."""
+    import os
+
+    dist_dir = temp_home / "web_dist"
+    dist_dir.mkdir()
+    (dist_dir / "index.html").write_text("<html><head></head><body></body></html>")
+    (dist_dir / "favicon.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"></svg>'
+    )
+    os.environ["HERMES_WEB_DIST"] = str(dist_dir)
+
+    app = create_app(bind="127.0.0.1")
+    client = TestClient(app)
+
+    resp = client.get("/favicon.svg")
+    assert resp.status_code == 200
+    assert "svg" in resp.headers["content-type"]
+    assert "<svg" in resp.text
+
+
 def test_spa_nonloopback_omits_token(nonloopback_client: TestClient, temp_home: Path):
     """GET / on non-loopback does NOT inject token (only bind marker)."""
     from server.auth import read_token
