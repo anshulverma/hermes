@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from dataclasses import replace
 from typing import Optional
 
 from engine import contracts, leases, queue
@@ -22,6 +23,9 @@ from engine.models import Result, Run, Ticket
 
 # The exit code GNU coreutils `timeout` uses when it kills the child.
 _TIMEOUT_EXIT = 124
+
+# Cap captured stderr so a chatty/looping worker can't bloat the db.
+_DETAIL_LIMIT = 16384
 
 
 class TransportError(Exception):
@@ -75,6 +79,8 @@ def local_transport(envelope: dict, host: str, agent, env: Optional[dict] = None
     except OSError as exc:  # could not even launch -> treat as host lost
         raise TransportError(f"failed to launch worker on {host}: {exc}") from exc
 
+    stderr_tail = (proc.stderr or "").strip()[-_DETAIL_LIMIT:] or None
+
     if proc.returncode == _TIMEOUT_EXIT:
         now = time.time()
         return Result(
@@ -86,9 +92,15 @@ def local_transport(envelope: dict, host: str, agent, env: Optional[dict] = None
             ended_at=now,
             payload={},
             evidence_ref=None,
+            detail=stderr_tail,
         )
 
-    return agent.parse_result(proc.stdout or "", envelope)
+    res = agent.parse_result(proc.stdout or "", envelope)
+    # On a failure, surface stderr (where stack traces land) as the detail when
+    # the parsed result carries none of its own.
+    if res.outcome != "ok" and not res.detail and stderr_tail:
+        res = replace(res, detail=stderr_tail)
+    return res
 
 
 # --- ssh transport -------------------------------------------------------

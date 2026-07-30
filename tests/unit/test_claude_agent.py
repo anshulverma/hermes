@@ -142,6 +142,31 @@ def test_parse_result_empty_output_is_driver_failure(claude):
     assert result.termination_reason == "driver_error"
 
 
+def test_parse_result_unparseable_output_captured_as_detail(claude):
+    """Unparseable worker output is kept verbatim in ``detail`` for the operator."""
+    env = _envelope()
+    raw = "Traceback (most recent call last):\n  File ...\nValueError: nope"
+    result = claude.parse_result(raw, env)
+    assert result.outcome == "driver_failed"
+    assert result.termination_reason == "driver_error"
+    assert result.detail == raw  # the exact unparseable output, not just a summary
+
+
+def test_parse_result_worker_stack_trace_captured_as_detail(claude):
+    """A worker-reported stack_trace/detail is surfaced on the Result."""
+    env = _envelope()
+    raw = json.dumps(
+        {
+            "outcome": "driver_failed",
+            "termination_reason": "driver_error",
+            "error_summary": "boom",
+            "stack_trace": "line 1\nline 2\nBoomError",
+        }
+    )
+    result = claude.parse_result(raw, env)
+    assert result.detail == "line 1\nline 2\nBoomError"
+
+
 def test_health_checks_returns_agent_and_auth(claude):
     import sites.local  # noqa: F401
     from engine import site

@@ -16,6 +16,7 @@ import TokenLogin from './components/TokenLogin';
 import { useHealth, useRuns } from './hooks/useApi';
 import { useEventStream } from './hooks/useEventStream';
 import { EmptyState, CrewBackdrop } from './ds';
+import { LoadingOverlay } from './components/Spinner';
 import { fetchRun } from './api/client';
 import type { RunDetail } from './api/client';
 import { hasToken, isRemote } from './api/auth';
@@ -82,7 +83,9 @@ export default function App() {
     }
   }, [lastEvent, runDetail, refreshRunDetail]);
 
-  const loading = healthLoading || runsLoading || detailLoading;
+  // Only the INITIAL load blanks the app. A background run-detail refresh (fired
+  // on every live event) must NOT unmount the views/drawer — it updates in place.
+  const loading = healthLoading || runsLoading || (detailLoading && !runDetail);
   const error = healthError || runsError;
 
   // Show token login if remote and not authenticated
@@ -149,11 +152,7 @@ export default function App() {
           </div>
         )}
 
-        {loading && (
-          <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
-            Loading...
-          </div>
-        )}
+        {loading && <LoadingOverlay label="Loading Hermes…" />}
 
         {error && (
           <div style={{ padding: 32 }}>

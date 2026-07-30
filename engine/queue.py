@@ -192,12 +192,12 @@ def record_result(
         conn.execute(
             """INSERT INTO attempts
                  (ticket_id, phase, host, attempt, started_at, ended_at,
-                  outcome, termination_reason, result_ref, error_summary)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                  outcome, termination_reason, result_ref, error_summary, error_detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 ticket.id, phase, host, attempts + 1, result.started_at,
                 result.ended_at, result.outcome, result.termination_reason,
-                result.result_ref, result.error_summary,
+                result.result_ref, result.error_summary, result.detail,
             ),
         )
 

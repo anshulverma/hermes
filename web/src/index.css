@@ -7,3 +7,13 @@ body {
 #root {
   min-height: 100vh;
 }
+
+/* Spinner rotation (used by components/Spinner.tsx). */
+@keyframes hermes-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

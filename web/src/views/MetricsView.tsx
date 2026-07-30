@@ -12,6 +12,7 @@ import { useState, useEffect, useRef } from 'react';
 import { fetchRunMetrics } from '../api/client';
 import type { RunMetrics, MetricsBucket } from '../api/client';
 import { Card, StatTile, EmptyState } from '../ds';
+import { LoadingOverlay } from '../components/Spinner';
 
 // --- helpers ---------------------------------------------------------------
 
@@ -423,10 +424,8 @@ export default function MetricsView({ runId }: MetricsViewProps) {
 
   if (loading) {
     return (
-      <div
-        style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}
-      >
-        Loading metrics...
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        <LoadingOverlay label="Loading metrics…" />
       </div>
     );
   }

@@ -105,3 +105,10 @@ CREATE INDEX idx_findings_run ON findings(run_id);
 -- Phase-scope reductions: master-side reduce/advance stamps the reduced phase
 -- so pause/resume can reload a Run snapshot's prior-phase reductions.
 ALTER TABLE reductions ADD COLUMN phase TEXT;
+
+-- ==========================================================================
+-- Migration v3 (schema_migrations version 3) — ADDITIVE only.
+-- --- @migration 3 ---
+-- Failure detail: the raw worker output / stderr / stack trace captured on a
+-- driver failure, so the UI can show WHAT actually happened (not just a summary).
+ALTER TABLE attempts ADD COLUMN error_detail TEXT;

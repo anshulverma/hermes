@@ -44,6 +44,7 @@ class Result:
     ended_at: float
     payload: dict = field(default_factory=dict)
     evidence_ref: str | None = None
+    detail: str | None = None  # raw output / stderr / stack trace captured on failure
 
 
 # HealthReport + Check

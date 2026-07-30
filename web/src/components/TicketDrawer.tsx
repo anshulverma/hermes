@@ -21,7 +21,46 @@ import {
   AuthError,
 } from '../api/client';
 import { Drawer, StatusPill, Badge } from '../ds';
+import { LoadingOverlay } from './Spinner';
 import { normalizeTicketState, normalizeTicketDetail } from '../api/normalize';
+
+/** Epoch seconds → local "MMM D, HH:MM:SS"; empty for missing timestamps. */
+function fmtTime(ts: number | null | undefined): string {
+  if (ts == null) return '—';
+  const d = new Date(ts * 1000);
+  if (isNaN(d.getTime())) return '—';
+  return d.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+/** Whole-second duration between two epoch-second stamps, e.g. "42s". */
+function fmtDuration(start: number | null | undefined, end: number | null | undefined): string | null {
+  if (start == null || end == null) return null;
+  const s = Math.max(0, Math.round(end - start));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
+
+const preStyle: React.CSSProperties = {
+  margin: 0,
+  background: 'var(--surface-card)',
+  border: '1px solid var(--border-hairline)',
+  borderRadius: 'var(--radius-sm)',
+  padding: 12,
+  fontSize: 12,
+  fontFamily: 'var(--font-mono)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+  overflow: 'auto',
+  maxHeight: 280,
+  color: 'var(--text-secondary)',
+};
 
 type TicketDrawerProps = {
   isOpen: boolean;
@@ -120,7 +159,9 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
 
   return (
     <Drawer open={isOpen} fixed onClose={onClose} title={ticket.id} width="600px">
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: '20px 24px' }}>
+      <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 24, padding: '20px 24px', minHeight: 240 }}>
+        {loading && <LoadingOverlay label="Loading ticket…" />}
+
         {/* Board-level header */}
         <div style={{ display: 'flex', gap: 10 }}>
           <StatusPill state={uiState} size="md" />
@@ -128,10 +169,6 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
             {ticket.phase}
           </Badge>
         </div>
-
-        {loading && (
-          <div style={{ color: 'var(--text-muted)', fontSize: 14 }}>Loading ticket detail...</div>
-        )}
 
         {error && (
           <div style={{ color: 'var(--status-danger)', fontSize: 14 }}>Error: {error}</div>
@@ -291,10 +328,23 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
               </div>
             )}
 
-            {/* Subject */}
+            {/* Goal */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Subject</span>
+              <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Goal</span>
               <span style={{ color: 'var(--text-primary)', fontSize: 14 }}>{detail.ticket.subject}</span>
+            </div>
+
+            {/* Created / updated timestamps */}
+            <div style={{ display: 'flex', gap: 24, fontSize: 12 }}>
+              <span style={{ color: 'var(--text-muted)' }}>
+                Created <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{fmtTime(detail.ticket.created_at)}</span>
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                Updated <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{fmtTime(detail.ticket.updated_at)}</span>
+              </span>
+              <span style={{ color: 'var(--text-muted)' }}>
+                Priority <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{detail.ticket.priority}</span>
+              </span>
             </div>
 
             {/* Reduction summary (when flagged) */}
@@ -420,6 +470,17 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
               )}
             </div>
 
+            {/* Failure output — raw worker output / stderr / stack trace */}
+            {detail.result?.detail && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>Output</span>
+                <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                  What the worker emitted before failing.
+                </span>
+                <pre style={preStyle}>{detail.result.detail}</pre>
+              </div>
+            )}
+
             {/* Progress / state history */}
             {detail.history.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -430,7 +491,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                       key={ev.id}
                       style={{
                         display: 'flex',
-                        gap: 8,
+                        gap: 10,
                         alignItems: 'baseline',
                         fontSize: 12,
                         padding: '4px 0',
@@ -440,8 +501,19 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                       <span
                         style={{
                           fontFamily: 'var(--font-mono)',
-                          color: 'var(--status-live)',
+                          color: 'var(--text-muted)',
                           minWidth: 140,
+                          flex: 'none',
+                        }}
+                      >
+                        {fmtTime(ev.ts)}
+                      </span>
+                      <span
+                        style={{
+                          fontFamily: 'var(--font-mono)',
+                          color: 'var(--status-live)',
+                          minWidth: 118,
+                          flex: 'none',
                         }}
                       >
                         {ev.kind}
@@ -471,7 +543,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                         fontSize: 12,
                       }}
                     >
-                      <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+                      <div style={{ display: 'flex', gap: 8, marginBottom: 6, alignItems: 'center' }}>
                         <Badge variant="subtle">#{att.attempt}</Badge>
                         <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
                           {att.host}
@@ -482,6 +554,10 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                           </Badge>
                         )}
                       </div>
+                      <div style={{ color: 'var(--text-muted)', fontSize: 11, fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
+                        {fmtTime(att.started_at)} → {fmtTime(att.ended_at)}
+                        {fmtDuration(att.started_at, att.ended_at) && ` · ${fmtDuration(att.started_at, att.ended_at)}`}
+                      </div>
                       {att.termination_reason && (
                         <div style={{ color: 'var(--text-muted)', fontSize: 11 }}>
                           {att.termination_reason}
@@ -491,6 +567,9 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                         <div style={{ color: 'var(--status-danger)', fontSize: 11, marginTop: 4 }}>
                           {att.error_summary}
                         </div>
+                      )}
+                      {att.detail && (
+                        <pre style={{ ...preStyle, marginTop: 6, maxHeight: 200, fontSize: 11 }}>{att.detail}</pre>
                       )}
                     </div>
                   ))}

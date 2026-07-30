@@ -27,6 +27,9 @@ from engine.models import Check, Driver, Result
 if TYPE_CHECKING:  # avoid import cycle
     from engine.site import Site
 
+# Cap the captured failure detail so a runaway worker can't bloat the db.
+_DETAIL_LIMIT = 16384
+
 
 class ClaudeAgent:
     """Claude Code agent adapter: ``claude -p "/goal …"``."""
@@ -82,8 +85,10 @@ class ClaudeAgent:
 
         doc = self._load_doc(raw)
         if doc is None:
+            # Keep the raw output so the operator can see WHAT could not be parsed.
             return self._failure(
-                "driver_error", "empty or unparseable worker output", now
+                "driver_error", "empty or unparseable worker output", now,
+                detail=(raw or "")[:_DETAIL_LIMIT] or None,
             )
 
         outcome = doc.get("outcome", "ok")
@@ -91,6 +96,8 @@ class ClaudeAgent:
             "termination_reason", "goal_met" if outcome == "ok" else "driver_error"
         )
         payload = doc.get("payload", {}) if outcome == "ok" else {}
+        # A worker may report a stack trace / long detail alongside the summary.
+        detail = doc.get("detail") or doc.get("stack_trace")
         return Result(
             outcome=outcome,
             termination_reason=termination_reason,
@@ -100,6 +107,7 @@ class ClaudeAgent:
             ended_at=doc.get("ended_at", now),
             payload=payload or {},
             evidence_ref=doc.get("evidence_ref"),
+            detail=(str(detail)[:_DETAIL_LIMIT] if detail else None),
         )
 
     @staticmethod
@@ -114,7 +122,9 @@ class ClaudeAgent:
         return doc if isinstance(doc, dict) else None
 
     @staticmethod
-    def _failure(termination_reason: str, summary: str, now: float) -> Result:
+    def _failure(
+        termination_reason: str, summary: str, now: float, detail: str | None = None
+    ) -> Result:
         return Result(
             outcome="driver_failed",
             termination_reason=termination_reason,
@@ -124,6 +134,7 @@ class ClaudeAgent:
             ended_at=now,
             payload={},
             evidence_ref=None,
+            detail=detail,
         )
 
     # --- health ---------------------------------------------------------

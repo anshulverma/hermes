@@ -8,6 +8,7 @@ import { useState, useEffect } from 'react';
 import { fetchCrew } from '../api/client';
 import type { CrewMember } from '../api/client';
 import { HealthBadge, EmptyState, Button } from '../ds';
+import { LoadingOverlay } from '../components/Spinner';
 import CrewDrawer from '../components/CrewDrawer';
 import AddHostModal from '../components/AddHostModal';
 
@@ -37,8 +38,8 @@ export default function CrewPanel() {
 
   if (loading) {
     return (
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <span style={{ color: 'var(--text-muted)' }}>Loading crew...</span>
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        <LoadingOverlay label="Loading crew…" />
       </div>
     );
   }

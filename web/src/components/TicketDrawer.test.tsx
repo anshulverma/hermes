@@ -457,4 +457,40 @@ describe('TicketDrawer', () => {
       });
     });
   });
+
+  describe('Detail enrichment', () => {
+    it('labels the goal as "Goal" and shows created/priority meta', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Goal')).toBeInTheDocument());
+      expect(screen.getByText('Created')).toBeInTheDocument();
+      expect(screen.getByText('Priority')).toBeInTheDocument();
+      // The old "Subject" label is gone.
+      expect(screen.queryByText('Subject')).not.toBeInTheDocument();
+    });
+
+    it('shows the failure Output block with the raw detail when present', async () => {
+      const failed = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'failed' },
+        result: {
+          ...mockTicketDetail.result,
+          outcome: 'driver_failed',
+          detail: 'Traceback (most recent call last): ValueError: boom',
+        },
+        available_actions: ['retry'],
+      };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => failed });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Output')).toBeInTheDocument());
+      expect(screen.getByText(/ValueError: boom/)).toBeInTheDocument();
+    });
+
+    it('does not show an Output block when there is no detail', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Goal')).toBeInTheDocument());
+      expect(screen.queryByText('Output')).not.toBeInTheDocument();
+    });
+  });
 });

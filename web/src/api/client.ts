@@ -149,6 +149,7 @@ export type TicketDetailAttempt = {
   ended_at: number | null;
   result_ref: string | null;
   error_summary: string | null;
+  detail: string | null;
 };
 
 export type TicketDetailResult = {
@@ -158,6 +159,7 @@ export type TicketDetailResult = {
   error_summary: string | null;
   started_at: number;
   ended_at: number;
+  detail: string | null;
 };
 
 export type TicketHistoryEvent = {

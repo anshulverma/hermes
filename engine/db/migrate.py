@@ -103,6 +103,15 @@ def apply_migrations(path: str) -> None:
             """, (time.time(),))
             conn.commit()
 
+        # Migration 3: additive error_detail column on attempts (ALTER statements).
+        if 3 not in applied_versions:
+            _apply_migration_3(conn)
+            cursor.execute("""
+                INSERT INTO schema_migrations (version, applied_at, description)
+                VALUES (3, ?, 'Add attempts.error_detail (raw failure output)')
+            """, (time.time(),))
+            conn.commit()
+
     finally:
         conn.close()
 
@@ -172,5 +181,16 @@ def _apply_migration_2(conn: sqlite3.Connection) -> None:
     """
     cursor = conn.cursor()
     for stmt in _parse_schema_by_version().get(2, []):
+        cursor.execute(stmt)
+    conn.commit()
+
+
+def _apply_migration_3(conn: sqlite3.Connection) -> None:
+    """
+    Apply migration 3: additive ALTERs marked ``@migration 3`` in schema.sql
+    (adds ``attempts.error_detail`` for captured raw failure output).
+    """
+    cursor = conn.cursor()
+    for stmt in _parse_schema_by_version().get(3, []):
         cursor.execute(stmt)
     conn.commit()

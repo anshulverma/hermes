@@ -257,7 +257,7 @@ def test_migration_v2_recorded_and_idempotent(tmp_path):
     versions = [row[0] for row in cursor.fetchall()]
     conn.close()
 
-    assert versions == [1, 2], f"expected [1, 2], got {versions}"
+    assert versions == [1, 2, 3], f"expected [1, 2, 3], got {versions}"
 
 
 def test_migration_v2_applies_on_legacy_v1_db(tmp_path):
@@ -278,6 +278,15 @@ def test_migration_v2_applies_on_legacy_v1_db(tmp_path):
              review_state TEXT NOT NULL DEFAULT 'pending',
              created_at REAL NOT NULL, updated_at REAL NOT NULL)"""
     )
+    # A real v1 db also has attempts (migration 3 ALTERs it); include a minimal one.
+    conn.execute(
+        """CREATE TABLE attempts (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             ticket_id TEXT NOT NULL, phase TEXT NOT NULL, host TEXT NOT NULL,
+             attempt INTEGER NOT NULL, started_at REAL, ended_at REAL,
+             outcome TEXT, termination_reason TEXT, result_ref TEXT,
+             error_summary TEXT)"""
+    )
     conn.execute(
         "INSERT INTO schema_migrations (version, applied_at, description) "
         "VALUES (1, 0, 'legacy')"
@@ -292,8 +301,12 @@ def test_migration_v2_applies_on_legacy_v1_db(tmp_path):
     cursor.execute("PRAGMA table_info(reductions)")
     columns = {row[1] for row in cursor.fetchall()}
     assert "phase" in columns
+    # Migration 3 adds attempts.error_detail on the legacy db too.
+    cursor.execute("PRAGMA table_info(attempts)")
+    attempt_cols = {row[1] for row in cursor.fetchall()}
+    assert "error_detail" in attempt_cols
     cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
-    assert [r[0] for r in cursor.fetchall()] == [1, 2]
+    assert [r[0] for r in cursor.fetchall()] == [1, 2, 3]
     conn.close()
 
 

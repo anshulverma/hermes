@@ -3528,6 +3528,36 @@ def test_ticket_detail_reason_abandoned(loopback_client: TestClient, temp_home: 
     assert "abandon" in data["reason"].lower()
 
 
+def test_ticket_detail_includes_failure_detail(loopback_client: TestClient, temp_home: Path):
+    """GET /api/tickets/{id} surfaces the captured raw failure output (result + timeline)."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'failed', 'cpu', 0, 1, 0, '[]', '{"goal": "test"}', 0, 0)"""
+    )
+    raw = "Traceback (most recent call last):\n  File x\nValueError: nope"
+    conn.execute(
+        """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at,
+                                 outcome, termination_reason, result_ref, error_summary, error_detail)
+           VALUES ('r1/t-0', 'work', 'host-A', 1, 0, 100, 'driver_failed', 'driver_error', NULL, 'empty output', ?)""",
+        (raw,),
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.get("/api/tickets/r1%2Ft-0")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["result"]["detail"] == raw
+    assert data["attempt_timeline"][-1]["detail"] == raw
+
+
 def test_set_priority_endpoint_409_running(loopback_client: TestClient, temp_home: Path):
     """Reprioritize is not offered for in-flight tickets, so the endpoint 409s (matches available_actions)."""
     from server.auth import read_token

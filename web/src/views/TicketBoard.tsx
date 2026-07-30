@@ -10,6 +10,7 @@ import type { Ticket, TicketFilters } from '../api/client';
 import { normalizeTicketState } from '../api/normalize';
 import { Button, StatusPill, TicketCard, TICKET_STATES, TONES } from '../ds';
 import TicketDrawer from '../components/TicketDrawer';
+import { LoadingOverlay } from '../components/Spinner';
 
 // Lane definitions matching prototype
 const TICKET_LANES = [
@@ -115,20 +116,43 @@ function TicketLane({ lane, tickets, stateFilter, onStateFilter, onOpen, filteri
       >
         {rows.length ? (
           rows.map((t) => (
-            <TicketCard
-              key={t.id}
-              ticket={{
-                id: t.id,
-                subject: t.subject,
-                phase: t.phase,
-                attempts: t.attempts,
-                elapsed_s: t.elapsed_s,
-                resource_req: t.resource_req,
-                host: t.host || undefined,
-              }}
-              onClick={() => onOpen(t)}
-              style={{ borderLeft: `2px solid ${hueOf(normalizeTicketState(t.state))}` }}
-            />
+            <div key={t.id} style={{ position: 'relative' }}>
+              <TicketCard
+                ticket={{
+                  id: t.id,
+                  subject: t.subject,
+                  phase: t.phase,
+                  attempts: t.attempts,
+                  elapsed_s: t.elapsed_s,
+                  resource_req: t.resource_req,
+                  host: t.host || undefined,
+                }}
+                onClick={() => onOpen(t)}
+                style={{ borderLeft: `2px solid ${hueOf(normalizeTicketState(t.state))}` }}
+              />
+              {/* Priority badge — clicks pass through to the card. */}
+              <span
+                title={`priority ${t.priority}`}
+                style={{
+                  position: 'absolute',
+                  top: 8,
+                  right: 8,
+                  pointerEvents: 'none',
+                  padding: '0 6px',
+                  height: 18,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--text-muted)',
+                  background: 'var(--wash-subtle)',
+                  border: '1px solid var(--border-hairline)',
+                  borderRadius: 'var(--radius-lg)',
+                }}
+              >
+                P{t.priority}
+              </span>
+            </div>
           ))
         ) : (
           <div
@@ -202,16 +226,8 @@ export default function TicketBoard({ runId }: TicketBoardProps) {
 
   if (loading && tickets.length === 0) {
     return (
-      <div
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'var(--text-muted)',
-        }}
-      >
-        Loading tickets...
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        <LoadingOverlay label="Loading tickets…" />
       </div>
     );
   }

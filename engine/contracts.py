@@ -221,6 +221,7 @@ RESULT_OUTER = {
         "started_at": {"type": "number"},
         "ended_at": {"type": "number"},
         "error_summary": {"type": ["string", "null"]},
+        "detail": {"type": ["string", "null"]},
         "payload": {"type": "object"},
     },
     "additionalProperties": False,

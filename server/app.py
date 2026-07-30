@@ -443,7 +443,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             # Get all attempts (ordered by id for timeline)
             attempt_rows = conn.execute(
                 """SELECT id, attempt, host, outcome, termination_reason,
-                          started_at, ended_at, result_ref, error_summary
+                          started_at, ended_at, result_ref, error_summary, error_detail
                    FROM attempts WHERE ticket_id=? ORDER BY id""",
                 (ticket_id,),
             ).fetchall()
@@ -453,7 +453,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             for row in attempt_rows:
                 (
                     attempt_id, attempt_num, host, outcome, term_reason,
-                    started_at, ended_at, result_ref, error_summary
+                    started_at, ended_at, result_ref, error_summary, error_detail
                 ) = row
                 attempt_timeline.append({
                     "attempt": attempt_num,
@@ -464,6 +464,7 @@ def create_app(bind: str | None = None) -> FastAPI:
                     "ended_at": ended_at,
                     "result_ref": result_ref,
                     "error_summary": error_summary,
+                    "detail": error_detail,
                 })
 
             # Derive strict latest result (max id attempt)
@@ -472,7 +473,7 @@ def create_app(bind: str | None = None) -> FastAPI:
                 latest = attempt_rows[-1]  # Last in id-ordered list
                 (
                     _, _, _, outcome, term_reason,
-                    started_at, ended_at, result_ref, error_summary
+                    started_at, ended_at, result_ref, error_summary, error_detail
                 ) = latest
                 result = {
                     "outcome": outcome,
@@ -481,6 +482,7 @@ def create_app(bind: str | None = None) -> FastAPI:
                     "error_summary": error_summary,
                     "started_at": started_at,
                     "ended_at": ended_at,
+                    "detail": error_detail,
                 }
 
             # Build evidence (non-null result_refs)
