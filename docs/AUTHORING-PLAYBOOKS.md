@@ -328,7 +328,122 @@ Run the suite (Docker-tagged tests excluded):
 ./.venv/bin/python -m pytest -m "not docker" -q
 ```
 
-## 7. Where to go next
+## 7. Local / private playbooks (this host only)
+
+When you need playbooks or sites that **must stay on this host** and never be
+committed — for example, code that references internal/Meta infra (hostnames,
+dashboards, buck2/sl/testinfra wiring, `jf submit`) that isn't public — use
+Hermes' **local adapter auto-discovery**.
+
+### When to use
+
+- Playbooks or sites that must remain private to this machine.
+- Code that references internal infra and should never appear in shared repos.
+- Host-specific prototypes or one-off investigations.
+
+### Zero-config drop-in (recommended)
+
+The simplest approach: **drop your adapter module into `$HERMES_HOME/local/`**
+(default `~/.hermes/local/`) and it auto-loads on every `hermes` invocation with
+**no env vars and no engine edit**.
+
+The auto-discovery mechanism (see `engine/cli.py::_import_registration_modules`)
+imports built-in adapters first, then all top-level modules in
+`config.local_dir()` (default `$HERMES_HOME/local`, overridable via
+`HERMES_LOCAL_DIR`). Files starting with `_` and `__pycache__` are skipped. A
+broken local module raises a `ConfigError` naming the file; a missing directory
+is a no-op.
+
+**How to use it:**
+
+1. Create your playbook/site adapter in `~/.hermes/local/<name>.py` (or as a
+   package at `~/.hermes/local/<name>/__init__.py`). Each module must call
+   `playbook.register()`, `site.register()`, or `agent.register()` on import.
+2. Verify it loads:
+   ```bash
+   hermes doctor
+   ```
+3. Run a dry-run to confirm seeding:
+   ```bash
+   hermes run <name> --site <site> --agent claude --goals goals.txt --dry-run
+   ```
+4. Execute:
+   ```bash
+   hermes run <name> --site <site> --agent claude --goals goals.txt
+   ```
+
+**Files starting with `_` are ignored** by auto-discovery. Use `_templates.py` or
+`_helpers.py` for shared utilities that shouldn't auto-import.
+
+**Override the local directory:**
+
+Set `HERMES_LOCAL_DIR` to a custom location if you don't want to use
+`~/.hermes/local/`:
+
+```bash
+export HERMES_LOCAL_DIR=/path/to/my/private-adapters
+hermes doctor
+```
+
+### Alternative: code living elsewhere
+
+If your adapter code lives in a separate directory structure (e.g., a private
+repo or a project-specific path), **point `PYTHONPATH` at the parent directory**
+and list the module in the appropriate env var:
+
+- `HERMES_PLAYBOOK_MODULES` — comma-separated dotted module paths for playbooks.
+- `HERMES_SITE_MODULES` — same, for custom sites.
+- `HERMES_AGENT_MODULES` — same, for custom agents.
+
+Both sources (env-var modules and the local dir) are imported and **compose**
+with each other. A bad module in either source raises a `ConfigError` naming it.
+
+**Example:**
+
+```bash
+# Your adapter lives at /home/user/my-work/internal/adapters/my_playbook.py
+export PYTHONPATH=/home/user/my-work/internal/adapters:$PYTHONPATH
+export HERMES_PLAYBOOK_MODULES=my_playbook
+
+hermes doctor
+hermes run my_playbook --site devserver --agent claude --goals goals.txt
+```
+
+### Private SITE with internal infra
+
+When writing a private **site** adapter that shells to internal tooling (e.g.,
+buck2, jf, sl), **copy `sites/devserver/site.py` as your starting point**:
+
+- It provides idempotent provisioning over SSH (`provision`).
+- It includes the **no-ship guard** (install shims + `guarantees_no_ship()` →
+  `True`).
+- It shows how to run workers with the guard dir prepended to `PATH`.
+- Deploy-time hooks (install cmd, submit cmd, recheck cmd) are pluggable via env
+  vars, not hardcoded.
+
+For operational details on provisioning and running workers on devserver-style
+sites, see `docs/RUNBOOK.md`.
+
+### Guardrails (so nothing leaks)
+
+Keep your private code **outside the shared Hermes repo**. The `$HERMES_HOME/local/`
+directory (default `~/.hermes/local/`) is **outside the repo** by design — good.
+
+**Checklist:**
+
+- **Never commit/push private adapters** to a shared repo.
+- **Read tokens/keys from env**, never hardcode them. The logging layer already
+  redacts known secret keys (`HERMES_SSH_IDENTITY`, `HERMES_AUTHORIZED_KEY`,
+  `api_token`), and `hermes doctor` shows secret vars as `set` or `unset` (never
+  the value).
+- **The no-ship guard still applies** (for sites that `guarantees_no_ship()` →
+  `True`). Install the guard shims during `provision` and prepend the guard dir
+  to worker `PATH` in `run_worker`.
+
+Cross-reference: `docs/AUTHORING-PLAYBOOKS.md` for the main authoring steps,
+`docs/RUNBOOK.md` for operations.
+
+## 8. Where to go next
 
 - `docs/DESIGN.md` — the umbrella architecture (the four axes, the queue, the
   dispatch and reduction model, the safety invariants).

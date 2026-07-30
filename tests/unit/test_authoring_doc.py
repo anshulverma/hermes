@@ -25,3 +25,10 @@ def test_authoring_doc_mentions_discovery_env_var():
 def test_authoring_doc_mentions_run_command():
     """Guide must show the real `hermes run` command."""
     assert "hermes run" in _doc_text()
+
+
+def test_authoring_doc_mentions_local_dir_mechanism():
+    """Guide must document the local drop-in mechanism (HERMES_LOCAL_DIR + $HERMES_HOME/local)."""
+    text = _doc_text()
+    assert "HERMES_LOCAL_DIR" in text, "Missing HERMES_LOCAL_DIR env var"
+    assert "$HERMES_HOME/local" in text or "~/.hermes/local" in text, "Missing default local dir path"
