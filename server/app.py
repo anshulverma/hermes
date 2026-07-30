@@ -330,7 +330,8 @@ def create_app(bind: str | None = None) -> FastAPI:
                 search_pattern = f"%{search}%"
                 params.extend([search_pattern, search_pattern])
 
-            query += " ORDER BY priority DESC, id"
+            # p0 is highest priority (lowest number first), matching claim order.
+            query += " ORDER BY priority ASC, id"
 
             rows = conn.execute(query, params).fetchall()
 

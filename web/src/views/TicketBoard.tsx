@@ -8,8 +8,9 @@ import { useState, useEffect } from 'react';
 import { fetchTickets } from '../api/client';
 import type { Ticket, TicketFilters } from '../api/client';
 import { normalizeTicketState } from '../api/normalize';
-import { Button, StatusPill, TicketCard, TICKET_STATES, TONES } from '../ds';
+import { Button, StatusPill, TICKET_STATES, TONES } from '../ds';
 import TicketDrawer from '../components/TicketDrawer';
+import HermesTicketCard from '../components/HermesTicketCard';
 import { LoadingOverlay } from '../components/Spinner';
 
 // Lane definitions matching prototype
@@ -116,11 +117,12 @@ function TicketLane({ lane, tickets, stateFilter, onStateFilter, onOpen, filteri
       >
         {rows.length ? (
           rows.map((t) => (
-            <TicketCard
+            <HermesTicketCard
               key={t.id}
               ticket={{
                 id: t.id,
                 subject: t.subject,
+                state: t.state,
                 phase: t.phase,
                 attempts: t.attempts,
                 elapsed_s: t.elapsed_s,

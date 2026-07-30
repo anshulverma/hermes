@@ -407,11 +407,13 @@ export default function MetricsView({ runId }: MetricsViewProps) {
   const [metrics, setMetrics] = useState<RunMetrics | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Configurable bucket granularity (undefined = API default).
+  const [bucketS, setBucketS] = useState<number | undefined>(undefined);
 
   useEffect(() => {
     setLoading(true);
     setError(null);
-    fetchRunMetrics(runId)
+    fetchRunMetrics(runId, bucketS)
       .then((data) => {
         setMetrics(data);
         setLoading(false);
@@ -420,7 +422,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
         setError(err.message);
         setLoading(false);
       });
-  }, [runId]);
+  }, [runId, bucketS]);
 
   if (loading) {
     return (
@@ -451,10 +453,10 @@ export default function MetricsView({ runId }: MetricsViewProps) {
   }
 
   const buckets: MetricsBucket[] = metrics.buckets;
-  const bucketS = metrics.bucket_s;
+  const bucketWidth = metrics.bucket_s; // actual bucket size of the returned data
   const n = buckets.length;
   const last = buckets[n - 1];
-  const labels = xAxisLabels(n, bucketS);
+  const labels = xAxisLabels(n, bucketWidth);
 
   const donePts = buckets.map((b) => b.done_cumulative);
   const failedPts = buckets.map((b) => b.failed_cumulative);
@@ -475,7 +477,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
     { label: 'error rate', value: `${(last.error_rate * 100).toFixed(1)}%`, delta: 'of results', tone: last.error_rate > 0 ? 'danger' : undefined },
   ];
 
-  const spanMin = Math.round((n * bucketS) / 60);
+  const spanMin = Math.round((n * bucketWidth) / 60);
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -484,6 +486,28 @@ export default function MetricsView({ runId }: MetricsViewProps) {
         <span style={{ color: 'var(--text-muted)', fontSize: 13, fontFamily: 'var(--font-mono)' }}>
           run {metrics.run_id} · last {spanMin}m · {n} buckets
         </span>
+        <div style={{ flex: 1 }} />
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--text-muted)', fontSize: 12 }}>
+          bucket
+          <select
+            value={bucketWidth}
+            onChange={(e) => setBucketS(Number(e.target.value))}
+            style={{
+              padding: '4px 8px',
+              fontSize: 12,
+              color: 'var(--text-primary)',
+              background: 'var(--wash-subtle)',
+              border: '1px solid var(--border-hairline)',
+              borderRadius: 'var(--radius-md)',
+              fontFamily: 'var(--font-mono)',
+            }}
+          >
+            <option value={60}>1m</option>
+            <option value={300}>5m</option>
+            <option value={900}>15m</option>
+            <option value={3600}>1h</option>
+          </select>
+        </label>
       </div>
 
       {/* Summary tiles */}
@@ -520,7 +544,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
             height={130}
             max={maxProgress}
             labels={labels}
-            bucketS={bucketS}
+            bucketS={bucketWidth}
             yFormat={(v) => Math.round(v)}
             series={[
               { label: 'done', points: donePts, color: 'var(--status-ok)' },
@@ -539,7 +563,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
             height={130}
             max={maxError}
             labels={labels}
-            bucketS={bucketS}
+            bucketS={bucketWidth}
             format={(v) => `${Math.round(v * 10) / 10}%`}
             yFormat={(v) => `${Math.round(v)}%`}
             series={[{ label: 'error rate', points: errorPts, color: 'var(--status-danger)' }]}
@@ -565,7 +589,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
             color="var(--status-live)"
             height={130}
             labels={labels}
-            bucketS={bucketS}
+            bucketS={bucketWidth}
             format={(v) => String(v)}
             yFormat={(v) => Math.round(v * 10) / 10}
             overlay={{ points: crewPts, max: maxCrew, color: 'rgba(255,255,255,0.5)', label: 'crew online' }}
@@ -582,7 +606,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
             height={130}
             max={maxCrew}
             labels={labels}
-            bucketS={bucketS}
+            bucketS={bucketWidth}
             format={(v) => `${v} hosts`}
             yFormat={(v) => Math.round(v)}
             series={[{ label: 'crew online', points: crewPts, color: 'var(--text-secondary)' }]}

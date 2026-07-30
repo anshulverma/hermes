@@ -190,14 +190,15 @@ def test_claim_returns_highest_priority_running_run_only(conn):
 
     _mk_run(conn, "r1", state="running")
     _mk_run(conn, "r2", state="paused")
-    _mk_ticket(conn, "r1/t-lo", run_id="r1", priority=1.0)
-    _mk_ticket(conn, "r1/t-hi", run_id="r1", priority=5.0)
-    _mk_ticket(conn, "r2/t-x", run_id="r2", priority=99.0)  # paused run: ignored
+    # p0 is highest priority (lowest number first).
+    _mk_ticket(conn, "r1/t-hi", run_id="r1", priority=0.0)  # p0 = highest
+    _mk_ticket(conn, "r1/t-lo", run_id="r1", priority=5.0)  # higher number = lower priority
+    _mk_ticket(conn, "r2/t-x", run_id="r2", priority=0.0)  # paused run: ignored
 
     t = queue.claim_ticket(conn, "host-A", {"cpu"}, now=100.0)
 
     assert t is not None
-    assert t.id == "r1/t-hi"  # highest priority among running-run queued tickets
+    assert t.id == "r1/t-hi"  # p0 is highest priority among running-run queued tickets
     row = _ticket_row(conn, "r1/t-hi")
     assert row["state"] == "dispatched"
     assert row["worker_host"] == "host-A"

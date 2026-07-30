@@ -22,30 +22,9 @@ import {
 } from '../api/client';
 import { Drawer, StatusPill, Badge } from '../ds';
 import { LoadingOverlay, CARD_SCRIM } from './Spinner';
+import { priorityColor } from './HermesTicketCard';
 import { normalizeTicketState, normalizeTicketDetail } from '../api/normalize';
-
-/** Epoch seconds → local "MMM D, HH:MM:SS"; empty for missing timestamps. */
-function fmtTime(ts: number | null | undefined): string {
-  if (ts == null) return '—';
-  const d = new Date(ts * 1000);
-  if (isNaN(d.getTime())) return '—';
-  return d.toLocaleString(undefined, {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  });
-}
-
-/** Whole-second duration between two epoch-second stamps, e.g. "42s". */
-function fmtDuration(start: number | null | undefined, end: number | null | undefined): string | null {
-  if (start == null || end == null) return null;
-  const s = Math.max(0, Math.round(end - start));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m ${s % 60}s`;
-}
+import { fmtTime, fmtDuration } from '../util/time';
 
 const preStyle: React.CSSProperties = {
   margin: 0,
@@ -343,7 +322,13 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                 Updated <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{fmtTime(detail.ticket.updated_at)}</span>
               </span>
               <span style={{ color: 'var(--text-muted)' }}>
-                Priority <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>{detail.ticket.priority}</span>
+                Priority{' '}
+                <span
+                  title="p0 = highest priority"
+                  style={{ color: priorityColor(detail.ticket.priority ?? 0), fontFamily: 'var(--font-mono)', fontWeight: 600 }}
+                >
+                  P{detail.ticket.priority}
+                </span>
               </span>
             </div>
 
@@ -470,12 +455,11 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
               )}
             </div>
 
-            {/* Failure output — raw worker output / stderr / stack trace. Shown for
-                any failed/needs-attention ticket so an absent capture reads as an
-                explicit note rather than nothing. */}
-            {(detail.result?.detail ||
-              detail.ticket.state === 'failed' ||
-              detail.ticket.state === 'needs-human') && (
+            {/* Failure output — raw worker output / stderr / stack trace. Tied to
+                the latest ATTEMPT result (which persists across a requeue/retry),
+                so it shows whenever the last run failed — even if the ticket has
+                since moved back to queued. An absent capture reads as a note. */}
+            {detail.result && (detail.result.detail || detail.result.outcome !== 'ok') && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>Output</span>
                 {detail.result?.detail ? (

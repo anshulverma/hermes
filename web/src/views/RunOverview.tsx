@@ -9,6 +9,7 @@ import { deriveContext } from '../api/normalize';
 import { StatTile, Card, StatusPill } from '../ds';
 import PlaybookDialog from '../components/PlaybookDialog';
 import RunControl from '../components/RunControl';
+import { fmtTime } from '../util/time';
 
 type PhaseTimelineProps = {
   phases: Phase[];
@@ -169,7 +170,7 @@ export default function RunOverview({ run, onRunUpdate }: RunOverviewProps) {
                 fontFamily: 'var(--font-mono)',
               }}
             >
-              started {run.created_at}
+              started {fmtTime(run.created_at)}
             </span>
           </div>
 

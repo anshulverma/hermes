@@ -80,6 +80,8 @@ def claim_ticket(
 ) -> Optional[Ticket]:
     """Atomically claim the highest-priority claimable ticket for ``host``.
 
+    Priority is lowest-number-first: ``p0`` is the highest priority and is claimed
+    before ``p1``, ``p2`` … (ties broken FIFO by ``created_at`` then ``id``).
     Selects, under ``BEGIN IMMEDIATE``, the highest-priority ``queued`` ticket
     whose owning run is ``running``, whose ``resource_req`` the host serves
     (``resource_reqs``), and whose ``available_at <= now``; marks it
@@ -110,7 +112,7 @@ def claim_ticket(
                       AND r.state = 'running'
                       AND t.available_at <= ?
                       AND t.resource_req IN ({placeholders})
-                    ORDER BY t.priority DESC, t.created_at ASC, t.id ASC
+                    ORDER BY t.priority ASC, t.created_at ASC, t.id ASC
                     LIMIT 1""",
                 (now, *reqs),
             ).fetchone()

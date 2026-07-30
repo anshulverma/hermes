@@ -9,7 +9,9 @@
   --surface-page: rgb(0, 0, 0);
   --surface-card: rgb(22, 22, 22);
   --surface-header: oklab(0 0 0 / 0.85);
-  --surface-overlay: oklab(0 0 0 / 0.85);
+  /* Overlay scrim behind drawers/dialogs: dim a little + rely on the blur, rather
+     than blacking the page out. */
+  --surface-overlay: oklab(0 0 0 / 0.5);
 
   /* Text — three opacity levels, no fourth */
   --fg-1: rgb(255, 255, 255);
