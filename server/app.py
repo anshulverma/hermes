@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depe
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
 
 from engine import config
 from engine.db.migrate import connect
@@ -79,6 +80,9 @@ def create_app(bind: str | None = None) -> FastAPI:
         logger.info("API server stopped")
 
     app = FastAPI(title="Hermes Control Plane", version="0.1.0", lifespan=lifespan)
+
+    # Compress responses (the SPA JS bundle + JSON) so page loads are fast over a network.
+    app.add_middleware(GZipMiddleware, minimum_size=500)
 
     # Request logging middleware (strip query strings to avoid logging tokens)
     @app.middleware("http")

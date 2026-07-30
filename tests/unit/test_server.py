@@ -1933,6 +1933,14 @@ def test_favicon_served_from_dist_root(temp_home: Path):
     assert "<svg" in resp.text
 
 
+def test_gzip_middleware_registered():
+    """The app compresses responses (GZipMiddleware) so the SPA/JSON transfer is small."""
+    from fastapi.middleware.gzip import GZipMiddleware
+
+    app = create_app(bind="127.0.0.1")
+    assert any(m.cls is GZipMiddleware for m in app.user_middleware)
+
+
 def test_spa_nonloopback_omits_token(nonloopback_client: TestClient, temp_home: Path):
     """GET / on non-loopback does NOT inject token (only bind marker)."""
     from server.auth import read_token
