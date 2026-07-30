@@ -160,6 +160,21 @@ export type TicketDetailResult = {
   ended_at: number;
 };
 
+export type TicketHistoryEvent = {
+  id: number;
+  ts: number;
+  kind: string;
+  message: string | null;
+  data: Record<string, any>;
+};
+
+export type TicketReductionSummary = {
+  id: number;
+  kind: string;
+  review_state: string;
+  json: Record<string, any>;
+};
+
 export type TicketDetail = {
   ticket: {
     id: string;
@@ -179,6 +194,11 @@ export type TicketDetail = {
   result: TicketDetailResult | null;
   attempt_timeline: TicketDetailAttempt[];
   evidence: Array<{ attempt: number; ref: string }>;
+  // Progress/state context (enriched detail).
+  history: TicketHistoryEvent[];
+  reason: string | null;
+  reduction: TicketReductionSummary | null;
+  available_actions: string[];
 };
 
 export async function fetchTicketDetail(ticketId: string): Promise<TicketDetail> {
@@ -392,6 +412,28 @@ export type TicketControlResponse = {
 export async function requeueTicket(ticketId: string): Promise<TicketControlResponse> {
   return fetchJSON<TicketControlResponse>(`/api/tickets/${ticketId}/requeue`, {
     method: 'POST',
+  });
+}
+
+export async function abandonTicket(ticketId: string): Promise<TicketControlResponse> {
+  return fetchJSON<TicketControlResponse>(`/api/tickets/${ticketId}/abandon`, {
+    method: 'POST',
+  });
+}
+
+export async function retryTicket(ticketId: string): Promise<TicketControlResponse> {
+  return fetchJSON<TicketControlResponse>(`/api/tickets/${ticketId}/retry`, {
+    method: 'POST',
+  });
+}
+
+export async function setTicketPriority(
+  ticketId: string,
+  priority: number,
+): Promise<TicketControlResponse> {
+  return fetchJSON<TicketControlResponse>(`/api/tickets/${ticketId}/priority`, {
+    method: 'POST',
+    body: JSON.stringify({ priority }),
   });
 }
 

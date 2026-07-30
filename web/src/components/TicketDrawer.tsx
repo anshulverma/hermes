@@ -1,44 +1,79 @@
 /**
- * TicketDrawer - full ticket detail drawer.
- * Phase B2: board-level fields only.
- * Phase B3: expanded with payload/result/attempt timeline/evidence (THIS FILE).
+ * TicketDrawer - full ticket detail drawer: live context + operator actions.
+ *
+ * Shows why a ticket is in its current state (derived reason banner), its
+ * progress/state history, the flagging reduction when present, and the full
+ * payload/result/attempt/evidence detail. Renders an actions menu strictly from
+ * the server's available_actions so the UI and API agree on legality:
+ * requeue / retry / abandon (confirm) / reprioritize / accept-reject reduction.
  */
 
 import { useEffect, useState } from 'react';
 import type { Ticket, TicketDetail } from '../api/client';
-import { fetchTicketDetail, requeueTicket } from '../api/client';
+import {
+  fetchTicketDetail,
+  requeueTicket,
+  retryTicket,
+  abandonTicket,
+  setTicketPriority,
+  acceptReduction,
+  rejectReduction,
+  AuthError,
+} from '../api/client';
 import { Drawer, StatusPill, Badge } from '../ds';
 import { normalizeTicketState, normalizeTicketDetail } from '../api/normalize';
-import { AuthError } from '../api/client';
 
 type TicketDrawerProps = {
   isOpen: boolean;
   ticket: Ticket | null;
   onClose: () => void;
+  // Called after a successful mutation so callers can refresh the board.
+  onActionSuccess?: () => void;
 };
 
-export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerProps) {
+const ATTENTION_STATES = new Set(['needs-human', 'failed', 'parked']);
+
+const btnStyle = (tone: 'default' | 'danger' | 'primary', disabled: boolean): React.CSSProperties => ({
+  padding: '6px 12px',
+  fontSize: 13,
+  fontWeight: 500,
+  color: tone === 'danger' ? 'var(--status-danger)' : 'var(--text-primary)',
+  background: tone === 'primary' ? 'var(--status-live)' : 'var(--wash-subtle)',
+  border: '1px solid var(--border-hairline)',
+  borderRadius: 'var(--radius-md)',
+  cursor: disabled ? 'not-allowed' : 'pointer',
+  opacity: disabled ? 0.6 : 1,
+});
+
+export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess }: TicketDrawerProps) {
   const [detail, setDetail] = useState<TicketDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [requeueLoading, setRequeueLoading] = useState(false);
-  const [requeueError, setRequeueError] = useState<string | null>(null);
+
+  const [actionLoading, setActionLoading] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [confirmAbandon, setConfirmAbandon] = useState(false);
+  const [priorityInput, setPriorityInput] = useState('');
 
   useEffect(() => {
     if (!isOpen || !ticket) {
       setDetail(null);
       setError(null);
-      setRequeueError(null);
+      setActionError(null);
+      setConfirmAbandon(false);
       return;
     }
 
     setLoading(true);
     setError(null);
-    setRequeueError(null);
+    setActionError(null);
+    setConfirmAbandon(false);
 
     fetchTicketDetail(ticket.id)
       .then((data) => {
-        setDetail(normalizeTicketDetail(data));
+        const norm = normalizeTicketDetail(data);
+        setDetail(norm);
+        setPriorityInput(String(norm.ticket.priority ?? ''));
         setLoading(false);
       })
       .catch((err) => {
@@ -47,29 +82,32 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
       });
   }, [isOpen, ticket]);
 
-  const handleRequeue = async () => {
+  async function refresh() {
     if (!ticket) return;
+    const data = await fetchTicketDetail(ticket.id);
+    setDetail(normalizeTicketDetail(data));
+  }
 
-    setRequeueLoading(true);
-    setRequeueError(null);
-
+  async function runAction(fn: () => Promise<unknown>) {
+    setActionLoading(true);
+    setActionError(null);
     try {
-      await requeueTicket(ticket.id);
-      // Refresh the ticket detail
-      const data = await fetchTicketDetail(ticket.id);
-      setDetail(normalizeTicketDetail(data));
-      setRequeueLoading(false);
+      await fn();
+      await refresh();
+      onActionSuccess?.();
     } catch (err) {
       if (err instanceof AuthError) {
-        setRequeueError('Authentication required');
+        setActionError('Authentication required');
       } else if (err instanceof Error) {
-        setRequeueError(err.message);
+        setActionError(err.message);
       } else {
-        setRequeueError('Failed to requeue ticket');
+        setActionError('Action failed');
       }
-      setRequeueLoading(false);
+    } finally {
+      setActionLoading(false);
+      setConfirmAbandon(false);
     }
-  };
+  }
 
   if (!ticket) {
     return null;
@@ -77,10 +115,13 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
 
   const uiState = normalizeTicketState(ticket.state);
 
+  const actions = detail?.available_actions ?? [];
+  const reductionId = detail?.reduction?.id ?? detail?.ticket.reduction_id ?? null;
+
   return (
     <Drawer isOpen={isOpen} onClose={onClose} title={ticket.id} width="600px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24, padding: '20px 24px' }}>
-        {/* Board-level header (B2) */}
+        {/* Board-level header */}
         <div style={{ display: 'flex', gap: 10 }}>
           <StatusPill state={uiState} size="md" />
           <Badge variant="outline" tone="ok">
@@ -88,46 +129,164 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
           </Badge>
         </div>
 
-        {/* Loading state */}
         {loading && (
-          <div style={{ color: 'var(--text-muted)', fontSize: 14 }}>
-            Loading ticket detail...
-          </div>
+          <div style={{ color: 'var(--text-muted)', fontSize: 14 }}>Loading ticket detail...</div>
         )}
 
-        {/* Error state */}
         {error && (
-          <div style={{ color: 'var(--status-danger)', fontSize: 14 }}>
-            Error: {error}
-          </div>
+          <div style={{ color: 'var(--status-danger)', fontSize: 14 }}>Error: {error}</div>
         )}
 
-        {/* Detail loaded */}
         {detail && !loading && !error && (
           <>
-            {/* Requeue control (D3) - only for guard-routed needs_human tickets */}
-            {detail.ticket.state === 'needs-human' && !detail.ticket.reduction_id && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <button
-                  onClick={handleRequeue}
-                  disabled={requeueLoading}
-                  style={{
-                    padding: '8px 16px',
-                    background: 'var(--surface-card)',
-                    color: 'var(--text-primary)',
-                    border: '1px solid var(--border-hairline)',
-                    borderRadius: 'var(--radius-sm)',
-                    cursor: requeueLoading ? 'not-allowed' : 'pointer',
-                    fontSize: 13,
-                    fontWeight: 500,
-                  }}
-                >
-                  {requeueLoading ? 'Requeuing...' : 'Requeue'}
-                </button>
-                {requeueError && (
-                  <div style={{ color: 'var(--status-danger)', fontSize: 12 }}>
-                    {requeueError}
+            {/* Reason banner — why the ticket is in its current state */}
+            {detail.reason && (
+              <div
+                data-testid="ticket-reason"
+                role="note"
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-md)',
+                  border: '1px solid var(--border-hairline)',
+                  background: 'var(--wash-subtle)',
+                  borderLeft: `3px solid ${
+                    ATTENTION_STATES.has(detail.ticket.state)
+                      ? 'var(--status-attention)'
+                      : 'var(--status-live)'
+                  }`,
+                }}
+              >
+                <span style={{ color: 'var(--text-muted)', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4 }}>
+                  Why this state
+                </span>
+                <span style={{ color: 'var(--text-primary)', fontSize: 13 }}>{detail.reason}</span>
+              </div>
+            )}
+
+            {/* Actions menu — rendered strictly from available_actions */}
+            {actions.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>
+                  Actions
+                </span>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                  {actions.includes('requeue') && (
+                    <button
+                      style={btnStyle('default', actionLoading)}
+                      disabled={actionLoading}
+                      onClick={() => runAction(() => requeueTicket(ticket.id))}
+                    >
+                      Requeue
+                    </button>
+                  )}
+
+                  {actions.includes('retry') && (
+                    <button
+                      style={btnStyle('default', actionLoading)}
+                      disabled={actionLoading}
+                      onClick={() => runAction(() => retryTicket(ticket.id))}
+                    >
+                      Retry
+                    </button>
+                  )}
+
+                  {actions.includes('accept_reduction') && (
+                    <button
+                      style={btnStyle('primary', actionLoading)}
+                      disabled={actionLoading || reductionId == null}
+                      onClick={() => reductionId != null && runAction(() => acceptReduction(reductionId))}
+                    >
+                      Accept
+                    </button>
+                  )}
+
+                  {actions.includes('reject_reduction') && (
+                    <button
+                      style={btnStyle('default', actionLoading)}
+                      disabled={actionLoading || reductionId == null}
+                      onClick={() => reductionId != null && runAction(() => rejectReduction(reductionId))}
+                    >
+                      Reject
+                    </button>
+                  )}
+
+                  {actions.includes('reprioritize') && (
+                    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                      <input
+                        aria-label="priority"
+                        type="number"
+                        value={priorityInput}
+                        onChange={(e) => setPriorityInput(e.target.value)}
+                        style={{
+                          width: 72,
+                          padding: '6px 8px',
+                          fontSize: 13,
+                          color: 'var(--text-primary)',
+                          background: 'var(--surface-card)',
+                          border: '1px solid var(--border-hairline)',
+                          borderRadius: 'var(--radius-md)',
+                        }}
+                      />
+                      <button
+                        style={btnStyle('default', actionLoading || priorityInput.trim() === '')}
+                        disabled={actionLoading || priorityInput.trim() === ''}
+                        onClick={() => runAction(() => setTicketPriority(ticket.id, Number(priorityInput)))}
+                      >
+                        Set priority
+                      </button>
+                    </span>
+                  )}
+
+                  {actions.includes('abandon') && !confirmAbandon && (
+                    <button
+                      style={btnStyle('danger', actionLoading)}
+                      disabled={actionLoading}
+                      onClick={() => setConfirmAbandon(true)}
+                    >
+                      Abandon
+                    </button>
+                  )}
+                </div>
+
+                {confirmAbandon && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 8,
+                      padding: 12,
+                      background: 'var(--wash-subtle)',
+                      border: '1px solid var(--border-hairline)',
+                      borderRadius: 'var(--radius-md)',
+                    }}
+                  >
+                    <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                      Abandon this ticket? It will be marked failed and its lease released.
+                    </div>
+                    <div style={{ display: 'flex', gap: 8 }}>
+                      <button
+                        style={btnStyle('danger', actionLoading)}
+                        disabled={actionLoading}
+                        onClick={() => runAction(() => abandonTicket(ticket.id))}
+                      >
+                        {actionLoading ? 'Abandoning...' : 'Confirm abandon'}
+                      </button>
+                      <button
+                        style={btnStyle('default', actionLoading)}
+                        disabled={actionLoading}
+                        onClick={() => setConfirmAbandon(false)}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
+                )}
+
+                {actionError && (
+                  <div style={{ color: 'var(--status-danger)', fontSize: 12 }}>{actionError}</div>
                 )}
               </div>
             )}
@@ -135,16 +294,51 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
             {/* Subject */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Subject</span>
-              <span style={{ color: 'var(--text-primary)', fontSize: 14 }}>
-                {detail.ticket.subject}
-              </span>
+              <span style={{ color: 'var(--text-primary)', fontSize: 14 }}>{detail.ticket.subject}</span>
             </div>
+
+            {/* Reduction summary (when flagged) */}
+            {detail.reduction && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>
+                  Reduction #{detail.reduction.id}
+                </span>
+                <div
+                  style={{
+                    background: 'var(--surface-card)',
+                    border: '1px solid var(--border-hairline)',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: 12,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 8,
+                  }}
+                >
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <Badge variant="subtle">{detail.reduction.kind}</Badge>
+                    <Badge variant="subtle" tone="attention">
+                      {detail.reduction.review_state}
+                    </Badge>
+                  </div>
+                  <pre
+                    style={{
+                      margin: 0,
+                      fontSize: 12,
+                      fontFamily: 'var(--font-mono)',
+                      color: 'var(--text-secondary)',
+                      overflow: 'auto',
+                      maxHeight: 160,
+                    }}
+                  >
+                    {JSON.stringify(detail.reduction.json, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            )}
 
             {/* Payload section */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>
-                Payload
-              </span>
+              <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>Payload</span>
               <pre
                 style={{
                   background: 'var(--surface-card)',
@@ -164,9 +358,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
 
             {/* Result section */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>
-                Result
-              </span>
+              <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>Result</span>
               {detail.result ? (
                 <div
                   style={{
@@ -222,18 +414,44 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                   )}
                 </div>
               ) : (
-                <div
-                  style={{
-                    color: 'var(--text-muted)',
-                    fontSize: 13,
-                    fontStyle: 'italic',
-                    padding: 12,
-                  }}
-                >
+                <div style={{ color: 'var(--text-muted)', fontSize: 13, fontStyle: 'italic', padding: 12 }}>
                   No result yet
                 </div>
               )}
             </div>
+
+            {/* Progress / state history */}
+            {detail.history.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>History</span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {detail.history.map((ev) => (
+                    <div
+                      key={ev.id}
+                      style={{
+                        display: 'flex',
+                        gap: 8,
+                        alignItems: 'baseline',
+                        fontSize: 12,
+                        padding: '4px 0',
+                        borderBottom: '1px solid var(--border-hairline)',
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontFamily: 'var(--font-mono)',
+                          color: 'var(--status-live)',
+                          minWidth: 140,
+                        }}
+                      >
+                        {ev.kind}
+                      </span>
+                      <span style={{ color: 'var(--text-secondary)' }}>{ev.message || '—'}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Attempt timeline */}
             {detail.attempt_timeline.length > 0 && (
@@ -254,17 +472,12 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                       }}
                     >
                       <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
-                        <Badge variant="subtle">
-                          #{att.attempt}
-                        </Badge>
+                        <Badge variant="subtle">#{att.attempt}</Badge>
                         <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
                           {att.host}
                         </span>
                         {att.outcome && (
-                          <Badge
-                            variant="subtle"
-                            tone={att.outcome === 'ok' ? 'ok' : 'danger'}
-                          >
+                          <Badge variant="subtle" tone={att.outcome === 'ok' ? 'ok' : 'danger'}>
                             {att.outcome}
                           </Badge>
                         )}
@@ -288,9 +501,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
             {/* Evidence */}
             {detail.evidence.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>
-                  Evidence
-                </span>
+                <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>Evidence</span>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {detail.evidence.map((ev, idx) => (
                     <div
@@ -306,9 +517,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose }: TicketDrawerPr
                         alignItems: 'center',
                       }}
                     >
-                      <Badge variant="subtle">
-                        #{ev.attempt}
-                      </Badge>
+                      <Badge variant="subtle">#{ev.attempt}</Badge>
                       <a
                         href={ev.ref}
                         style={{

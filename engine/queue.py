@@ -718,7 +718,7 @@ def retry_ticket(conn: sqlite3.Connection, ticket_id: str, now=None) -> None:
 
         conn.execute(
             """UPDATE tickets SET state='queued', available_at=?,
-                   worker_host=NULL, reduction_id=NULL, updated_at=?
+                   worker_host=NULL, lease_id=NULL, reduction_id=NULL, updated_at=?
                WHERE id=?""",
             (now, now, ticket_id),
         )

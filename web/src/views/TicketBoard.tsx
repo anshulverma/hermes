@@ -167,6 +167,9 @@ export default function TicketBoard({ runId }: TicketBoardProps) {
   // Drawer
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
 
+  // Bumped after a drawer action mutates a ticket, to refetch the board.
+  const [refreshTick, setRefreshTick] = useState(0);
+
   // Fetch tickets
   useEffect(() => {
     const filters: TicketFilters = {};
@@ -186,7 +189,7 @@ export default function TicketBoard({ runId }: TicketBoardProps) {
         setError(err.message);
         setLoading(false);
       });
-  }, [runId, stateFilter, phase, resource, search]);
+  }, [runId, stateFilter, phase, resource, search, refreshTick]);
 
   const clearFilters = () => {
     setSearch('');
@@ -324,6 +327,7 @@ export default function TicketBoard({ runId }: TicketBoardProps) {
         isOpen={selectedTicket !== null}
         ticket={selectedTicket}
         onClose={() => setSelectedTicket(null)}
+        onActionSuccess={() => setRefreshTick((n) => n + 1)}
       />
     </div>
   );

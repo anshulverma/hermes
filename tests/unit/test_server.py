@@ -2584,11 +2584,12 @@ def test_requeue_non_needs_human_ticket_409(loopback_client: TestClient, temp_ho
     )
     assert response.status_code == 409
 
-    # Should contain error detail
+    # Should contain error detail naming the unavailable action + current state.
     data = response.json()
     assert "detail" in data
     assert "queued" in data["detail"]
-    assert "not 'needs_human'" in data["detail"]
+    assert "requeue" in data["detail"]
+    assert "not available" in data["detail"]
 
 
 def test_requeue_unknown_ticket_404(loopback_client: TestClient, temp_home: Path):
@@ -3433,3 +3434,217 @@ def test_set_priority_endpoint_409_terminal(loopback_client: TestClient, temp_ho
         headers={"Authorization": f"Bearer {token}"}
     )
     assert response.status_code == 409
+
+
+def test_ticket_detail_reason_needs_human_guard_routed(loopback_client: TestClient, temp_home: Path):
+    """A guard-routed (no-reduction) needs_human ticket explains the review, not 'goal_met'.
+
+    The re-verify override path records an 'ok'/'goal_met' attempt but routes the
+    ticket to needs_human. The derived reason must reflect the review need (from the
+    needs_human event), never echo the misleading success token.
+    """
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'needs_human', 'cpu', 0, 1, 0, '[]', NULL, '{"goal": "test"}', 0, 0)"""
+    )
+    # The re-verify override attempt is a *success* result.
+    conn.execute(
+        """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at,
+                                 outcome, termination_reason, result_ref, error_summary)
+           VALUES ('r1/t-0', 'work', 'host-A', 1, 0, 100, 'ok', 'goal_met', 's3://r', NULL)"""
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, ticket_id, message, data_json)
+           VALUES (100, 'needs_human', 'r1', 'r1/t-0', 're-verify override', '{}')"""
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.get("/api/tickets/r1%2Ft-0")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["reason"] is not None
+    # Never surface the misleading success token as the reason.
+    assert data["reason"] != "goal_met"
+    assert "goal_met" not in data["reason"]
+    assert "re-verify" in data["reason"].lower() or "review" in data["reason"].lower()
+
+
+def test_ticket_detail_reason_parked(loopback_client: TestClient, temp_home: Path):
+    """A parked ticket's reason names the resource it is waiting on."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'parked', 'gpu', 0, 0, 0, '[]', '{"goal": "test"}', 0, 0)"""
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.get("/api/tickets/r1%2Ft-0")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["reason"] is not None
+    assert "capacity" in data["reason"].lower()
+    assert "gpu" in data["reason"]
+
+
+def test_ticket_detail_reason_abandoned(loopback_client: TestClient, temp_home: Path):
+    """A ticket failed via operator abandon explains that, even with no attempts."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'failed', 'cpu', 0, 0, 0, '[]', '{"goal": "test"}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, ticket_id, data_json)
+           VALUES (100, 'ticket_abandoned', 'r1', 'r1/t-0', '{"reason": "operator_abandoned"}')"""
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.get("/api/tickets/r1%2Ft-0")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["reason"] is not None
+    assert "abandon" in data["reason"].lower()
+
+
+def test_set_priority_endpoint_409_running(loopback_client: TestClient, temp_home: Path):
+    """Reprioritize is not offered for in-flight tickets, so the endpoint 409s (matches available_actions)."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'running', 'cpu', 0, 0, 0, '[]', '{"goal": "test"}', 0, 0)"""
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.post(
+        "/api/tickets/r1%2Ft-0/priority",
+        json={"priority": 10.0},
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 409
+    # Endpoint legality agrees with the advertised available_actions.
+    detail = loopback_client.get("/api/tickets/r1%2Ft-0").json()["available_actions"]
+    assert "reprioritize" not in detail
+
+
+def test_requeue_reduction_flagged_409(loopback_client: TestClient, temp_home: Path):
+    """Requeue is not offered for a reduction-flagged needs_human ticket, so the endpoint 409s."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO reductions (run_id, phase, kind, review_state, json, created_at, updated_at)
+           VALUES ('r1', 'work', 'cluster', 'pending', '{"cause_category": "x", "signature": "y"}', 0, 0)"""
+    )
+    rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, reduction_id, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'needs_human', 'cpu', 0, 0, 0, '[]', ?, '{"goal": "test"}', 0, 0)""",
+        (rid,),
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.post(
+        "/api/tickets/r1%2Ft-0/requeue",
+        headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 409
+
+
+def test_abandon_ticket_requires_auth(loopback_client: TestClient, temp_home: Path):
+    """POST /api/tickets/{id}/abandon without token => 401."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'queued', 'cpu', 0, 0, 0, '[]', '{"goal": "test"}', 0, 0)"""
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.post("/api/tickets/r1%2Ft-0/abandon")
+    assert response.status_code == 401
+
+
+def test_retry_ticket_requires_auth(loopback_client: TestClient, temp_home: Path):
+    """POST /api/tickets/{id}/retry without token => 401."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'failed', 'cpu', 0, 0, 0, '[]', '{"goal": "test"}', 0, 0)"""
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.post("/api/tickets/r1%2Ft-0/retry")
+    assert response.status_code == 401
+
+
+def test_set_priority_requires_auth(loopback_client: TestClient, temp_home: Path):
+    """POST /api/tickets/{id}/priority without token => 401."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', 'queued', 'cpu', 0, 0, 0, '[]', '{"goal": "test"}', 0, 0)"""
+    )
+    conn.commit()
+    conn.close()
+
+    response = loopback_client.post("/api/tickets/r1%2Ft-0/priority", json={"priority": 3.0})
+    assert response.status_code == 401

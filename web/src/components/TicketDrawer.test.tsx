@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import TicketDrawer from './TicketDrawer';
 import type { Ticket } from '../api/client';
 
@@ -86,6 +86,13 @@ const mockTicketDetail = {
       ref: 's3://results/ticket-1.json',
     },
   ],
+  history: [
+    { id: 1, ts: 1722211000.0, kind: 'dispatched', message: null, data: { host: 'worker-1' } },
+    { id: 2, ts: 1722211320.0, kind: 'needs_human', message: 're-verify override', data: {} },
+  ],
+  reason: 'Independent re-verify did not confirm the reported result; routed for human review.',
+  reduction: null,
+  available_actions: ['requeue', 'reprioritize', 'abandon'],
 };
 
 describe('TicketDrawer', () => {
@@ -221,178 +228,218 @@ describe('TicketDrawer', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
-  describe('Requeue control (Phase D3)', () => {
-    it('should show Requeue button for guard-routed needs_human ticket', async () => {
-      const guardRoutedDetail = {
-        ...mockTicketDetail,
-        ticket: {
-          ...mockTicketDetail.ticket,
-          state: 'needs_human',  // Raw engine state (will be normalized by fetchTicketDetail)
-          reduction_id: null,  // Guard-routed
-        },
-      };
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: async () => guardRoutedDetail,
-      });
+  describe('Reason banner', () => {
+    it('shows the derived reason when present', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
 
       render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => {
-        expect(screen.getByText('Requeue')).toBeInTheDocument();
+        expect(screen.getByText(/independent re-verify did not confirm/i)).toBeInTheDocument();
       });
     });
 
-    it('should NOT show Requeue button for reduction-flagged needs_human ticket', async () => {
-      const reductionFlaggedDetail = {
-        ...mockTicketDetail,
-        ticket: {
-          ...mockTicketDetail.ticket,
-          state: 'needs_human',  // Raw engine state (will be normalized by fetchTicketDetail)
-          reduction_id: 42,  // Reduction-flagged
-        },
-      };
-
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: async () => reductionFlaggedDetail,
-      });
+    it('does not render a banner when reason is null', async () => {
+      const noReason = { ...mockTicketDetail, reason: null };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => noReason });
 
       render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => {
         expect(screen.getByText(/investigate issue/i)).toBeInTheDocument();
       });
-
-      expect(screen.queryByText('Requeue')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('ticket-reason')).not.toBeInTheDocument();
     });
+  });
 
-    it('should NOT show Requeue button for non-needs_human ticket', async () => {
-      const queuedDetail = {
-        ...mockTicketDetail,
-        ticket: {
-          ...mockTicketDetail.ticket,
-          state: 'queued',
-          reduction_id: null,
-        },
-      };
+  describe('History timeline', () => {
+    it('renders each history event kind', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
 
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: async () => queuedDetail,
-      });
-
-      const queuedTicket = { ...mockTicket, state: 'queued' };
-
-      render(<TicketDrawer isOpen={true} ticket={queuedTicket} onClose={() => {}} />);
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => {
-        expect(screen.getByText(/investigate issue/i)).toBeInTheDocument();
+        expect(screen.getByText('History')).toBeInTheDocument();
       });
+      expect(screen.getByText('dispatched')).toBeInTheDocument();
+      // needs_human appears both as an event kind and the state pill; at least one.
+      expect(screen.getAllByText('needs_human').length).toBeGreaterThan(0);
+    });
+  });
 
+  describe('Actions menu (available_actions)', () => {
+    it('renders Requeue for a guard-routed needs_human ticket', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Requeue')).toBeInTheDocument());
+    });
+
+    it('does NOT render Requeue for a reduction-flagged ticket (offers Accept/Reject)', async () => {
+      const flagged = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'needs_human', reduction_id: 42 },
+        reduction: { id: 42, kind: 'cluster', review_state: 'pending', json: { cause_category: 'parser' } },
+        available_actions: ['accept_reduction', 'reject_reduction', 'abandon'],
+      };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => flagged });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByText('Accept')).toBeInTheDocument());
+      expect(screen.getByText('Reject')).toBeInTheDocument();
       expect(screen.queryByText('Requeue')).not.toBeInTheDocument();
     });
 
-    it('should call requeueTicket and refresh detail when Requeue clicked', async () => {
-      const guardRoutedDetail = {
+    it('renders only Retry for a failed ticket', async () => {
+      const failed = {
         ...mockTicketDetail,
-        ticket: {
-          ...mockTicketDetail.ticket,
-          state: 'needs_human',  // Raw engine state (will be normalized by fetchTicketDetail)
-          reduction_id: null,
-        },
+        ticket: { ...mockTicketDetail.ticket, state: 'failed', reduction_id: null },
+        reason: 'driver_error: empty output',
+        available_actions: ['retry'],
       };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => failed });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
-      const requeuedDetail = {
-        ...guardRoutedDetail,
-        ticket: {
-          ...guardRoutedDetail.ticket,
-          state: 'queued',  // After requeue
-        },
+      await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
+      expect(screen.queryByText('Requeue')).not.toBeInTheDocument();
+      expect(screen.queryByText('Abandon')).not.toBeInTheDocument();
+    });
+
+    it('calls requeueTicket and refreshes when Requeue clicked', async () => {
+      const requeued = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'queued' },
+        available_actions: ['reprioritize', 'abandon'],
       };
-
-      // First call: initial detail fetch
-      // Second call: requeue POST
-      // Third call: refresh detail fetch
       mockFetch
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => guardRoutedDetail,
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => ({ state: 'queued' }),
-        })
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => requeuedDetail,
-        });
+        .mockResolvedValueOnce({ ok: true, json: async () => mockTicketDetail })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'queued' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => requeued });
 
       render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Requeue')).toBeInTheDocument());
+      screen.getByText('Requeue').click();
 
-      // Wait for initial load
-      await waitFor(() => {
-        expect(screen.getByText('Requeue')).toBeInTheDocument();
-      });
-
-      // Click requeue
-      const requeueButton = screen.getByText('Requeue');
-      requeueButton.click();
-
-      // Wait for requeue to complete and detail to refresh
       await waitFor(() => {
         expect(mockFetch).toHaveBeenCalledWith(
           '/api/tickets/test-run/t-0/requeue',
-          expect.objectContaining({
-            method: 'POST',
-          })
+          expect.objectContaining({ method: 'POST' }),
         );
       });
+      await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(3));
+    });
 
-      // Verify detail was refreshed (third call to fetch detail)
+    it('calls retryTicket when Retry clicked', async () => {
+      const failed = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'failed', reduction_id: null },
+        available_actions: ['retry'],
+      };
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => failed })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'queued' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => failed });
+
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
+      screen.getByText('Retry').click();
+
       await waitFor(() => {
-        expect(mockFetch).toHaveBeenCalledTimes(3);
+        expect(mockFetch).toHaveBeenCalledWith(
+          '/api/tickets/test-run/t-0/retry',
+          expect.objectContaining({ method: 'POST' }),
+        );
       });
     });
 
-    it('should show error when requeue returns 409', async () => {
-      const guardRoutedDetail = {
-        ...mockTicketDetail,
-        ticket: {
-          ...mockTicketDetail.ticket,
-          state: 'needs_human',  // Raw engine state (will be normalized by fetchTicketDetail)
-          reduction_id: null,
-        },
-      };
-
-      // First call: initial detail fetch
-      // Second call: requeue POST (409 error)
+    it('confirms before abandoning, then calls abandonTicket', async () => {
       mockFetch
-        .mockResolvedValueOnce({
-          ok: true,
-          json: async () => guardRoutedDetail,
-        })
+        .mockResolvedValueOnce({ ok: true, json: async () => mockTicketDetail })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'failed' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => mockTicketDetail });
+
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Abandon')).toBeInTheDocument());
+
+      // First click reveals a confirm; no POST yet.
+      screen.getByText('Abandon').click();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+
+      await waitFor(() => expect(screen.getByText('Confirm abandon')).toBeInTheDocument());
+      screen.getByText('Confirm abandon').click();
+
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledWith(
+          '/api/tickets/test-run/t-0/abandon',
+          expect.objectContaining({ method: 'POST' }),
+        );
+      });
+    });
+
+    it('reprioritizes with the entered value', async () => {
+      const queued = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'queued', reduction_id: null },
+        available_actions: ['reprioritize', 'abandon'],
+      };
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => queued })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'queued' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => queued });
+
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Set priority')).toBeInTheDocument());
+
+      const input = screen.getByLabelText('priority') as HTMLInputElement;
+      fireEvent.change(input, { target: { value: '7' } });
+      screen.getByText('Set priority').click();
+
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledWith(
+          '/api/tickets/test-run/t-0/priority',
+          expect.objectContaining({ method: 'POST', body: JSON.stringify({ priority: 7 }) }),
+        );
+      });
+    });
+
+    it('accepts a flagged reduction', async () => {
+      const flagged = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'needs_human', reduction_id: 42 },
+        reduction: { id: 42, kind: 'cluster', review_state: 'pending', json: {} },
+        available_actions: ['accept_reduction', 'reject_reduction', 'abandon'],
+      };
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => flagged })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ review_state: 'accepted' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => flagged });
+
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Accept')).toBeInTheDocument());
+      screen.getByText('Accept').click();
+
+      await waitFor(() => {
+        expect(mockFetch).toHaveBeenCalledWith(
+          '/api/reductions/42/accept',
+          expect.objectContaining({ method: 'POST' }),
+        );
+      });
+    });
+
+    it('shows an error when an action returns 409', async () => {
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => mockTicketDetail })
         .mockResolvedValueOnce({
           ok: false,
           status: 409,
-          json: async () => ({ detail: "ticket 'test-run/t-0' is 'queued', not 'needs_human'; cannot operator-requeue" }),
+          json: async () => ({ detail: "action 'requeue' is not available for ticket in state 'queued'" }),
         });
 
       render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Requeue')).toBeInTheDocument());
+      screen.getByText('Requeue').click();
 
-      // Wait for initial load
       await waitFor(() => {
-        expect(screen.getByText('Requeue')).toBeInTheDocument();
-      });
-
-      // Click requeue
-      const requeueButton = screen.getByText('Requeue');
-      requeueButton.click();
-
-      // Wait for error to show
-      await waitFor(() => {
-        expect(screen.getByText(/not 'needs_human'/)).toBeInTheDocument();
+        expect(screen.getByText(/not available/i)).toBeInTheDocument();
       });
     });
   });

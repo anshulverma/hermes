@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, acceptReduction, rejectReduction, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
+import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, abandonTicket, retryTicket, setTicketPriority, acceptReduction, rejectReduction, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
 import { clearToken, setToken } from './auth';
 
 describe('API client', () => {
@@ -574,6 +574,107 @@ describe('API client', () => {
         }) as any;
 
         await expect(requeueTicket('ticket-123')).rejects.toThrow(AuthError);
+      });
+    });
+
+    describe('abandonTicket', () => {
+      it('should POST to /api/tickets/{id}/abandon with auth header', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ state: 'failed' }),
+        }) as any;
+
+        const result = await abandonTicket('ticket-123');
+
+        expect(result).toEqual({ state: 'failed' });
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/tickets/ticket-123/abandon',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({ 'Authorization': 'Bearer test-token' }),
+          })
+        );
+      });
+
+      it('should throw 409 with server detail if ticket terminal', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "ticket 'ticket-123' is terminal ('done'); cannot abandon" }),
+        }) as any;
+
+        await expect(abandonTicket('ticket-123')).rejects.toThrow("ticket 'ticket-123' is terminal ('done'); cannot abandon");
+      });
+
+      it('should throw AuthError on 401', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 401,
+          statusText: 'Unauthorized',
+        }) as any;
+
+        await expect(abandonTicket('ticket-123')).rejects.toThrow(AuthError);
+      });
+    });
+
+    describe('retryTicket', () => {
+      it('should POST to /api/tickets/{id}/retry with auth header', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ state: 'queued' }),
+        }) as any;
+
+        const result = await retryTicket('ticket-123');
+
+        expect(result).toEqual({ state: 'queued' });
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/tickets/ticket-123/retry',
+          expect.objectContaining({
+            method: 'POST',
+            headers: expect.objectContaining({ 'Authorization': 'Bearer test-token' }),
+          })
+        );
+      });
+
+      it('should throw 409 with server detail if ticket not failed', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "ticket 'ticket-123' is 'running', not 'failed'; cannot retry" }),
+        }) as any;
+
+        await expect(retryTicket('ticket-123')).rejects.toThrow("ticket 'ticket-123' is 'running', not 'failed'; cannot retry");
+      });
+    });
+
+    describe('setTicketPriority', () => {
+      it('should POST to /api/tickets/{id}/priority with priority body and auth header', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ state: 'queued' }),
+        }) as any;
+
+        const result = await setTicketPriority('ticket-123', 5);
+
+        expect(result).toEqual({ state: 'queued' });
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/tickets/ticket-123/priority',
+          expect.objectContaining({
+            method: 'POST',
+            body: JSON.stringify({ priority: 5 }),
+            headers: expect.objectContaining({ 'Authorization': 'Bearer test-token' }),
+          })
+        );
+      });
+
+      it('should throw 409 with server detail if ticket terminal', async () => {
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: false,
+          status: 409,
+          json: async () => ({ detail: "ticket 'ticket-123' is terminal ('done'); cannot reprioritize" }),
+        }) as any;
+
+        await expect(setTicketPriority('ticket-123', 2)).rejects.toThrow("cannot reprioritize");
       });
     });
   });

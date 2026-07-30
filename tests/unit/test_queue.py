@@ -714,7 +714,16 @@ def test_retry_ticket_failed_to_queued(conn):
     from engine import queue
 
     _mk_run(conn, "r1")
-    _mk_ticket(conn, "r1/t-0", state="failed", attempts=3, worker_host="host-A", reduction_id=None)
+    # Seed a ticket that reached 'failed' carrying a reduction link and a stale
+    # lease_id, so the retry genuinely exercises the clearing (not a no-op).
+    conn.execute(
+        """INSERT INTO reductions (run_id, phase, kind, review_state, json, created_at, updated_at)
+           VALUES ('r1', 'work', 'cluster', 'rejected', '{}', 0, 0)"""
+    )
+    rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    _mk_ticket(conn, "r1/t-0", state="failed", attempts=3, worker_host="host-A", reduction_id=rid)
+    conn.execute("UPDATE tickets SET lease_id='stale-lease' WHERE id='r1/t-0'")
+    conn.commit()
 
     queue.retry_ticket(conn, "r1/t-0", now=100.0)
 
@@ -722,7 +731,9 @@ def test_retry_ticket_failed_to_queued(conn):
     assert row["state"] == "queued"
     assert row["attempts"] == 3  # UNCHANGED
     assert row["worker_host"] is None
-    assert row["reduction_id"] is None
+    assert row["reduction_id"] is None  # cleared from 42
+    lease_id = conn.execute("SELECT lease_id FROM tickets WHERE id='r1/t-0'").fetchone()[0]
+    assert lease_id is None  # stale lease cleared
     assert "ticket_requeued" in _kinds(conn)
 
 

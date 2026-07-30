@@ -527,24 +527,33 @@ def create_app(bind: str | None = None) -> FastAPI:
                         summary = f"{cause}: {sig}" if cause and sig else cause or sig or "reduction"
                         reason = f"Flagged for human review by reduction #{reduction_id} ({review_state}): {summary}"
                 else:
-                    # Guard-routed: get reason from latest attempt or event
-                    if attempt_rows:
+                    # Guard-routed (re-verify override / tripped guard): the
+                    # needs_human event carries the truthful explanation. The
+                    # latest attempt on this path is an 'ok' success whose tokens
+                    # ('goal_met') would mislead, so prefer the event message and
+                    # fall back to an attempt only when it genuinely failed.
+                    event_row = conn.execute(
+                        """SELECT message FROM events WHERE ticket_id=? AND kind='needs_human'
+                           ORDER BY id DESC LIMIT 1""",
+                        (ticket_id,),
+                    ).fetchone()
+                    if event_row and event_row[0]:
+                        msg = event_row[0]
+                        reason = (
+                            "Independent re-verify did not confirm the reported "
+                            "result; routed for human review."
+                            if msg == "re-verify override"
+                            else msg
+                        )
+                    if reason is None and attempt_rows:
                         latest_attempt = attempt_rows[-1]
-                        term_reason = latest_attempt[4]  # termination_reason
-                        error_summary = latest_attempt[8]  # error_summary
-                        if error_summary:
-                            reason = f"{term_reason}: {error_summary}"
-                        elif term_reason:
-                            reason = term_reason
-                    if reason is None:
-                        # Fallback to latest needs_human event message
-                        event_row = conn.execute(
-                            """SELECT message FROM events WHERE ticket_id=? AND kind='needs_human'
-                               ORDER BY id DESC LIMIT 1""",
-                            (ticket_id,),
-                        ).fetchone()
-                        if event_row and event_row[0]:
-                            reason = event_row[0]
+                        if latest_attempt[3] != "ok":  # outcome
+                            term_reason = latest_attempt[4]
+                            error_summary = latest_attempt[8]
+                            if error_summary:
+                                reason = f"{term_reason}: {error_summary}"
+                            elif term_reason:
+                                reason = term_reason
             elif state == "failed":
                 # Get from latest attempt
                 if attempt_rows:
@@ -565,6 +574,15 @@ def create_app(bind: str | None = None) -> FastAPI:
                     if event_row and event_row[0]:
                         event_data = json.loads(event_row[0])
                         reason = event_data.get("reason")
+                if reason is None:
+                    # Operator-abandoned tickets carry no attempt/ticket_failed row.
+                    event_row = conn.execute(
+                        """SELECT 1 FROM events WHERE ticket_id=? AND kind='ticket_abandoned'
+                           LIMIT 1""",
+                        (ticket_id,),
+                    ).fetchone()
+                    if event_row:
+                        reason = "Abandoned by operator"
             elif state == "parked":
                 reason = f"No capacity for resource '{resource_req}'"
 
@@ -1301,8 +1319,15 @@ def create_app(bind: str | None = None) -> FastAPI:
         mutate_fn: Any,
         result_field: str,
         result_sql: str,
+        action: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Helper for transition endpoints: existence check → 404, ValueError → 409, return new state."""
+        """Helper for transition endpoints: existence check → 404, ValueError → 409, return new state.
+
+        When ``action`` is given (ticket operator actions), the ticket's current
+        state decides legality via the same ``_available_actions`` map the detail
+        endpoint advertises — so the API and the UI action menu never disagree. The
+        engine primitive's own guard remains as a backstop.
+        """
         home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
@@ -1311,6 +1336,23 @@ def create_app(bind: str | None = None) -> FastAPI:
             exists = conn.execute(exists_sql, (id_value,)).fetchone()
             if exists is None:
                 raise HTTPException(status_code=404, detail=f"{table.capitalize()} {id_value!r} not found")
+
+            # Ticket actions: gate on the advertised available_actions (single
+            # source of truth), so an action the menu hides can never succeed.
+            if action is not None:
+                srow = conn.execute(
+                    "SELECT state, reduction_id FROM tickets WHERE id=?", (id_value,)
+                ).fetchone()
+                state, reduction_id = srow
+                allowed = _available_actions(state, reduction_id)
+                if action not in allowed:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"action {action!r} is not available for ticket "
+                            f"{id_value!r} in state {state!r}; available: {allowed}"
+                        ),
+                    )
 
             # Attempt mutation: 409 if ValueError
             try:
@@ -1390,6 +1432,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             mutate_fn=requeue_needs_human,
             result_field="state",
             result_sql="SELECT state FROM tickets WHERE id=?",
+            action="requeue",
         )
 
     @app.post("/api/tickets/{ticket_id:path}/abandon")
@@ -1408,6 +1451,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             mutate_fn=abandon_ticket,
             result_field="state",
             result_sql="SELECT state FROM tickets WHERE id=?",
+            action="abandon",
         )
 
     @app.post("/api/tickets/{ticket_id:path}/retry")
@@ -1426,6 +1470,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             mutate_fn=retry_ticket,
             result_field="state",
             result_sql="SELECT state FROM tickets WHERE id=?",
+            action="retry",
         )
 
     @app.post("/api/tickets/{ticket_id:path}/priority")
@@ -1454,6 +1499,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             mutate_fn=lambda conn, tid: set_ticket_priority(conn, tid, float(priority)),
             result_field="state",
             result_sql="SELECT state FROM tickets WHERE id=?",
+            action="reprioritize",
         )
 
     # --- Reduction Control Endpoints (D4) ---
