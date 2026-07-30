@@ -128,7 +128,7 @@ export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDra
   }
 
   return (
-    <Drawer isOpen={isOpen} onClose={onClose} title={`Host: ${host.id}`} width="500px">
+    <Drawer open={isOpen} fixed onClose={onClose} title={`Host: ${host.id}`} width="500px">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
         {/* Host info */}
         <section>
@@ -361,7 +361,7 @@ export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDra
           {!loading && !error && leases.length === 0 && (
             <EmptyState
               title="No active leases"
-              message="This host currently holds no active resource leases"
+              description="This host currently holds no active resource leases"
               icon="file-minus"
             />
           )}

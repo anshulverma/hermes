@@ -71,7 +71,7 @@ export default function Findings({ runId }: FindingsProps) {
       <div style={{ padding: 32 }}>
         <EmptyState
           title="Error loading findings"
-          message={error.message}
+          description={error.message}
           icon="alert-circle"
         />
       </div>
@@ -83,7 +83,7 @@ export default function Findings({ runId }: FindingsProps) {
       <div style={{ padding: 32 }}>
         <EmptyState
           title="No findings"
-          message="This run has no reductions yet. Findings appear as the reduce phase processes tickets."
+          description="This run has no reductions yet. Findings appear as the reduce phase processes tickets."
           icon="inbox"
         />
       </div>
@@ -129,7 +129,7 @@ export default function Findings({ runId }: FindingsProps) {
         const status = deriveFindingStatus(reduction);
 
         return (
-          <Card key={reduction.id} padding={true}>
+          <Card key={reduction.id} padding="md">
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
               <div
                 style={{

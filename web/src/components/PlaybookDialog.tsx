@@ -49,7 +49,8 @@ export default function PlaybookDialog({ open, run, onClose }: PlaybookDialogPro
 
   return (
     <Dialog
-      isOpen={open}
+      open={open}
+      fixed
       title={playbookInfo.name + ' playbook'}
       description={playbookInfo.summary}
       width={560}

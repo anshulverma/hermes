@@ -128,7 +128,7 @@ describe('Design System Components', () => {
 
   it('should render Drawer without crashing', () => {
     const { container } = render(
-      <DS.Drawer isOpen={false} onClose={() => {}}>
+      <DS.Drawer open={false} onClose={() => {}}>
         <div>Content</div>
       </DS.Drawer>
     );
@@ -137,7 +137,7 @@ describe('Design System Components', () => {
 
   it('should render Dialog without crashing', () => {
     const { container } = render(
-      <DS.Dialog isOpen={false} onClose={() => {}}>
+      <DS.Dialog open={false} onClose={() => {}}>
         <div>Content</div>
       </DS.Dialog>
     );
@@ -180,7 +180,7 @@ describe('Design System Components', () => {
 
   it('should render Tooltip without crashing', () => {
     const { container } = render(
-      <DS.Tooltip content="Tooltip text">
+      <DS.Tooltip label="Tooltip text">
         <button>Hover me</button>
       </DS.Tooltip>
     );

@@ -228,6 +228,20 @@ describe('TicketDrawer', () => {
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
+  it('actually opens the DS drawer when isOpen (dialog is exposed, not hidden)', async () => {
+    // The DS Drawer sets aria-hidden from its `open` prop; a mis-wired prop name
+    // leaves the panel permanently hidden. getByRole excludes aria-hidden nodes,
+    // so this fails if `open` is not wired through.
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('keeps the DS drawer closed (dialog hidden) when isOpen is false', () => {
+    render(<TicketDrawer isOpen={false} ticket={mockTicket} onClose={() => {}} />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+
   describe('Reason banner', () => {
     it('shows the derived reason when present', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });

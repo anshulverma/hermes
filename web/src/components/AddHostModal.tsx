@@ -101,7 +101,7 @@ export default function AddHostModal({ isOpen, onClose, onAdded }: AddHostModalP
   }
 
   return (
-    <Dialog isOpen={isOpen} onClose={handleClose} title="Add Host">
+    <Dialog open={isOpen} fixed onClose={handleClose} title="Add Host">
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {/* Form inputs */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>

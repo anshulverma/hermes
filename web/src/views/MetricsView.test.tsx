@@ -63,15 +63,16 @@ describe('MetricsView', () => {
       expect.objectContaining({ headers: expect.any(Object) })
     );
 
-    // Should show metrics sections
-    expect(screen.getByText(/throughput/i)).toBeInTheDocument();
-    expect(screen.getByText(/progress/i)).toBeInTheDocument();
-    expect(screen.getByText(/error rate/i)).toBeInTheDocument();
-    expect(screen.getByText(/crew online/i)).toBeInTheDocument();
+    // Chart sections (terms recur as tile labels + chart titles + legends).
+    expect(screen.getByText('Progress over time')).toBeInTheDocument();
+    expect(screen.getAllByText(/throughput/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/error rate/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/crew online/i).length).toBeGreaterThan(0);
 
-    // Should show final values
-    expect(screen.getByText(/done: 24/i)).toBeInTheDocument();
-    expect(screen.getByText(/failed: 6/i)).toBeInTheDocument();
+    // Readability affordances: X-axis time labels and final values.
+    expect(screen.getAllByText('now').length).toBeGreaterThan(0);
+    expect(screen.getByText('done 24')).toBeInTheDocument();
+    expect(screen.getByText('failed 6')).toBeInTheDocument();
   });
 
   it('shows empty state when buckets are empty', async () => {

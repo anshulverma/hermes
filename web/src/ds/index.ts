@@ -40,7 +40,8 @@ export type ButtonProps = {
 export type CardProps = {
   children: React.ReactNode;
   variant?: 'default' | 'outlined';
-  padding?: boolean;
+  // The DS component reads a size token (e.g. 'md'), not a boolean.
+  padding?: 'none' | 'sm' | 'md' | 'lg' | 'xl' | boolean;
   style?: React.CSSProperties;
   [key: string]: any;
 };
@@ -68,17 +69,23 @@ export type TableProps = {
 };
 
 export type DialogProps = {
-  isOpen: boolean;
+  // NOTE: the DS component reads `open` (not `isOpen`); `open` defaults to true.
+  open: boolean;
+  fixed?: boolean;
   onClose: () => void;
   children: React.ReactNode;
   title?: string;
+  description?: string;
+  footer?: React.ReactNode;
+  width?: string | number;
   style?: React.CSSProperties;
   [key: string]: any;
 };
 
 export type EmptyStateProps = {
   title: string;
-  message?: string;
+  // NOTE: the DS component reads `description` (not `message`).
+  description?: string;
   icon?: string;
   action?: React.ReactNode;
   style?: React.CSSProperties;
@@ -86,7 +93,8 @@ export type EmptyStateProps = {
 };
 
 export type TooltipProps = {
-  content: React.ReactNode;
+  // NOTE: the DS component reads `label` (not `content`).
+  label: React.ReactNode;
   children: React.ReactNode;
   placement?: 'top' | 'bottom' | 'left' | 'right';
   style?: React.CSSProperties;
@@ -123,11 +131,17 @@ export type CrewRowProps = {
 };
 
 export type DrawerProps = {
-  isOpen: boolean;
+  // NOTE: the DS component reads `open` (not `isOpen`). Pass `fixed` when the
+  // drawer is rendered on a scrolling/flex page so it anchors to the viewport.
+  open: boolean;
+  fixed?: boolean;
   onClose: () => void;
   children: React.ReactNode;
   title?: string;
-  width?: string;
+  subtitle?: string;
+  tabs?: React.ReactNode;
+  footer?: React.ReactNode;
+  width?: string | number;
   style?: React.CSSProperties;
   [key: string]: any;
 };

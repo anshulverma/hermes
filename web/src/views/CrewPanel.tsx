@@ -48,7 +48,7 @@ export default function CrewPanel() {
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <EmptyState
           title="Error loading crew"
-          message={error}
+          description={error}
           icon="alert-circle"
         />
       </div>
@@ -60,7 +60,7 @@ export default function CrewPanel() {
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <EmptyState
           title="No crew members"
-          message="No hosts have been registered yet"
+          description="No hosts have been registered yet"
           icon="users"
         />
       </div>

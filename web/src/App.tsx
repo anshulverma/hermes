@@ -159,7 +159,7 @@ export default function App() {
           <div style={{ padding: 32 }}>
             <EmptyState
               title="Error loading data"
-              message={error.message}
+              description={error.message}
               icon="alert-circle"
             />
           </div>
@@ -169,7 +169,7 @@ export default function App() {
           <div style={{ padding: 32 }}>
             <EmptyState
               title="No active run"
-              message="No runs are currently active. Start a run with `hermes run <playbook>`."
+              description="No runs are currently active. Start a run with `hermes run <playbook>`."
               icon="inbox"
             />
           </div>

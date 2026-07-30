@@ -124,7 +124,7 @@ export default function ActivityFeed() {
       <div style={{ padding: 32 }}>
         <EmptyState
           title="Error loading events"
-          message={error}
+          description={error}
           icon="alert-circle"
         />
       </div>
@@ -175,7 +175,7 @@ export default function ActivityFeed() {
           <div style={{ padding: 32 }}>
             <EmptyState
               title="No events yet"
-              message="Events will appear here as the run progresses."
+              description="Events will appear here as the run progresses."
               icon="inbox"
             />
           </div>

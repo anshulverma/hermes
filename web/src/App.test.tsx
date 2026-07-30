@@ -134,9 +134,11 @@ describe('App', () => {
 
     render(<App />);
 
+    // Title AND the now-rendered description both surface the failure.
     await waitFor(() => {
-      expect(screen.getByText(/error/i)).toBeInTheDocument();
+      expect(screen.getByText('Error loading data')).toBeInTheDocument();
     });
+    expect(screen.getByText('Network error')).toBeInTheDocument();
   });
 
   it('should show loading state initially', () => {
