@@ -1,0 +1,14 @@
+# Keep the image build context lean. NOTE: web/dist is intentionally NOT ignored —
+# the built SPA is baked into the control-plane image so the web UI is served from it.
+.venv/
+.git/
+build/
+*.egg-info/
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+web/node_modules/
+.sdd-progress.md
+docs/auto-plan/
+tests/

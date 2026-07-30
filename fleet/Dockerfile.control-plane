@@ -39,6 +39,8 @@ ENV HERMES_HOME=/hermes-home
 # The compose file should bind the host side to 127.0.0.1 for loopback-only access
 ENV HERMES_BIND=0.0.0.0
 ENV HERMES_LOG_FORMAT=json
+# Serve the pre-built SPA (copied in via `COPY .`) regardless of the process CWD.
+ENV HERMES_WEB_DIST=/opt/hermes/web/dist
 
 # Run the control plane API server
 # Migrations apply on start via cli._connect() called by cmd_serve_api

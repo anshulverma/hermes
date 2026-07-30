@@ -23,8 +23,9 @@ services:
     ports:
       # Loopback bind (default): API accessible only from localhost on host
       # The server inside the container binds to 0.0.0.0 (so it's accessible via port mapping)
-      # but the host-side port is bound to 127.0.0.1 for loopback-only access
-      - "127.0.0.1:8080:8080"
+      # but the host-side port is bound to 127.0.0.1 for loopback-only access.
+      # Host port is configurable via HERMES_UI_PORT (default 8080); the Makefile sets it.
+      - "127.0.0.1:${HERMES_UI_PORT:-8080}:8080"
     environment:
       HERMES_HOME: /hermes-home
       HERMES_BIND: 0.0.0.0  # Bind to all interfaces inside container
