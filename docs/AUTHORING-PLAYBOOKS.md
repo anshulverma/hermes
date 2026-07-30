@@ -11,7 +11,7 @@ A worked reference lives in `playbooks/dexter/playbook.py`; a minimal one in
 
 Hermes has four extension axes: **playbook** (the job — what work to do), **site**
 (the environment — hosts, tools, issue source, no-ship guard), **agent** (the
-worker runtime — `claude`, later `codex`), and the **engine** (the generic core
+worker runtime — `claude` or `codex`), and the **engine** (the generic core
 you never touch). This guide covers the playbook axis.
 
 Write a **playbook** when you have a new *kind of job*: how to turn inputs into
@@ -245,7 +245,7 @@ imports any modules named in three env vars for their **registration side-effect
 
 Point the variable at your module (the one that calls `register`) and it loads
 with **no `cli.py` edit**. Built-in adapters (`local`/`devserver` sites, `dexter`
-playbook, `claude` agent) are imported by the loader already; custom ones use the
+playbook, `claude`/`codex` agents) are imported by the loader already; custom ones use the
 env vars. If a listed module fails to import, the CLI raises `ConfigError` naming
 the module.
 

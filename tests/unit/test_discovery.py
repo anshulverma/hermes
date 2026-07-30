@@ -289,3 +289,21 @@ def test_unset_env_preserves_existing_behavior(monkeypatch):
     assert pb.name == 'dexter'
     assert st.name == 'local'
     assert ag.name == 'claude'
+
+
+def test_codex_agent_resolves_via_builtin_registration():
+    """codex agent resolves out-of-the-box via built-in registration."""
+    from engine.cli import _load_playbook_site_agent
+    import engine.agent
+
+    # Trigger built-in registration by calling _load_playbook_site_agent
+    # (which imports agents.codex alongside agents.claude)
+    args = Namespace(site='local', agent='codex')
+    _load_playbook_site_agent(args)
+
+    # Load codex agent
+    obj = engine.agent.load("codex")
+
+    # Verify it's the correct agent
+    assert obj.name == "codex"
+    assert isinstance(obj, engine.agent.Agent)

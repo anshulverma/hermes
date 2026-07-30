@@ -110,6 +110,7 @@ def _load_playbook_site_agent(args):
     import playbooks.dexter
     import sites.devserver.site
     import agents.claude
+    import agents.codex
 
     # Import testkit modules only when needed
     playbook_name = getattr(args, 'playbook', None)
