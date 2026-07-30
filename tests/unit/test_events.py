@@ -42,7 +42,8 @@ def test_event_kinds_exposed():
     expected_kinds = {
         "run_started", "run_paused", "run_resumed", "run_stopped", "run_done", "run_failed",
         "ticket_claimed", "ticket_started", "result_recorded", "ticket_requeued",
-        "ticket_parked", "ticket_failed", "needs_human", "phase_advanced",
+        "ticket_parked", "ticket_failed", "ticket_abandoned", "ticket_reprioritized",
+        "needs_human", "phase_advanced",
         "reduction_created", "reduction_accepted", "reduction_rejected",
         "crew_added", "crew_health", "crew_down", "crew_drained",
         "lease_acquired", "lease_reclaimed", "attention",

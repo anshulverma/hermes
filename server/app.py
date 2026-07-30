@@ -6,7 +6,7 @@ import os
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Annotated
+from typing import Any, Annotated, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.responses import HTMLResponse, FileResponse
@@ -369,6 +369,26 @@ def create_app(bind: str | None = None) -> FastAPI:
         finally:
             conn.close()
 
+    def _available_actions(state: str, reduction_id: Optional[int]) -> list[str]:
+        """Derive available operator actions for a ticket state."""
+        if state == "needs_human":
+            if reduction_id is None:
+                return ["requeue", "reprioritize", "abandon"]
+            else:
+                return ["accept_reduction", "reject_reduction", "abandon"]
+        elif state == "failed":
+            return ["retry"]
+        elif state == "queued":
+            return ["reprioritize", "abandon"]
+        elif state in ("dispatched", "running", "reducing"):
+            return ["abandon"]
+        elif state == "parked":
+            return ["reprioritize", "abandon"]
+        elif state == "done":
+            return []
+        else:
+            return []
+
     @app.get("/api/tickets/{ticket_id:path}")
     def get_ticket_detail(ticket_id: str, _: None = Depends(require_auth_read)) -> dict[str, Any]:
         """Get full ticket detail.
@@ -474,12 +494,108 @@ def create_app(bind: str | None = None) -> FastAPI:
                         "ref": result_ref,
                     })
 
+            # Get history (event stream for this ticket)
+            history_rows = conn.execute(
+                """SELECT id, ts, kind, message, data_json
+                   FROM events WHERE ticket_id=? ORDER BY id""",
+                (ticket_id,),
+            ).fetchall()
+            history = []
+            for row in history_rows:
+                history.append({
+                    "id": row[0],
+                    "ts": row[1],
+                    "kind": row[2],
+                    "message": row[3],
+                    "data": json.loads(row[4]) if row[4] else {},
+                })
+
+            # Derive reason (human-readable explanation of current state)
+            reason = None
+            if state == "needs_human":
+                if reduction_id is not None:
+                    # Flagged by reduction
+                    red_row = conn.execute(
+                        """SELECT review_state, json FROM reductions WHERE id=?""",
+                        (reduction_id,),
+                    ).fetchone()
+                    if red_row:
+                        review_state, red_json_str = red_row
+                        red_json = json.loads(red_json_str)
+                        cause = red_json.get("cause_category", "")
+                        sig = red_json.get("signature", "")
+                        summary = f"{cause}: {sig}" if cause and sig else cause or sig or "reduction"
+                        reason = f"Flagged for human review by reduction #{reduction_id} ({review_state}): {summary}"
+                else:
+                    # Guard-routed: get reason from latest attempt or event
+                    if attempt_rows:
+                        latest_attempt = attempt_rows[-1]
+                        term_reason = latest_attempt[4]  # termination_reason
+                        error_summary = latest_attempt[8]  # error_summary
+                        if error_summary:
+                            reason = f"{term_reason}: {error_summary}"
+                        elif term_reason:
+                            reason = term_reason
+                    if reason is None:
+                        # Fallback to latest needs_human event message
+                        event_row = conn.execute(
+                            """SELECT message FROM events WHERE ticket_id=? AND kind='needs_human'
+                               ORDER BY id DESC LIMIT 1""",
+                            (ticket_id,),
+                        ).fetchone()
+                        if event_row and event_row[0]:
+                            reason = event_row[0]
+            elif state == "failed":
+                # Get from latest attempt
+                if attempt_rows:
+                    latest_attempt = attempt_rows[-1]
+                    term_reason = latest_attempt[4]
+                    error_summary = latest_attempt[8]
+                    if error_summary:
+                        reason = f"{term_reason}: {error_summary}"
+                    elif term_reason:
+                        reason = term_reason
+                if reason is None:
+                    # Fallback to latest ticket_failed event data
+                    event_row = conn.execute(
+                        """SELECT data_json FROM events WHERE ticket_id=? AND kind='ticket_failed'
+                           ORDER BY id DESC LIMIT 1""",
+                        (ticket_id,),
+                    ).fetchone()
+                    if event_row and event_row[0]:
+                        event_data = json.loads(event_row[0])
+                        reason = event_data.get("reason")
+            elif state == "parked":
+                reason = f"No capacity for resource '{resource_req}'"
+
+            # Get reduction summary if reduction_id set
+            reduction_summary = None
+            if reduction_id is not None:
+                red_row = conn.execute(
+                    """SELECT kind, review_state, json FROM reductions WHERE id=?""",
+                    (reduction_id,),
+                ).fetchone()
+                if red_row:
+                    reduction_summary = {
+                        "id": reduction_id,
+                        "kind": red_row[0],
+                        "review_state": red_row[1],
+                        "json": json.loads(red_row[2]),
+                    }
+
+            # Get available actions
+            available_actions = _available_actions(state, reduction_id)
+
             return {
                 "ticket": ticket,
                 "payload": payload,
                 "result": result,
                 "attempt_timeline": attempt_timeline,
                 "evidence": evidence,
+                "history": history,
+                "reason": reason,
+                "reduction": reduction_summary,
+                "available_actions": available_actions,
             }
         finally:
             conn.close()
@@ -1258,7 +1374,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
     # --- Ticket Control Endpoints (D3) ---
 
-    @app.post("/api/tickets/{ticket_id}/requeue")
+    @app.post("/api/tickets/{ticket_id:path}/requeue")
     def requeue_ticket(ticket_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
         """Requeue a guard-routed needs_human ticket.
 
@@ -1272,6 +1388,70 @@ def create_app(bind: str | None = None) -> FastAPI:
             id_value=ticket_id,
             exists_sql="SELECT 1 FROM tickets WHERE id=?",
             mutate_fn=requeue_needs_human,
+            result_field="state",
+            result_sql="SELECT state FROM tickets WHERE id=?",
+        )
+
+    @app.post("/api/tickets/{ticket_id:path}/abandon")
+    def abandon_ticket_endpoint(ticket_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Abandon a non-terminal ticket (operator action).
+
+        Returns the ticket's new state on success.
+        404 if ticket unknown, 409 if terminal.
+        """
+        from engine.queue import abandon_ticket
+
+        return _guarded_transition(
+            table="ticket",
+            id_value=ticket_id,
+            exists_sql="SELECT 1 FROM tickets WHERE id=?",
+            mutate_fn=abandon_ticket,
+            result_field="state",
+            result_sql="SELECT state FROM tickets WHERE id=?",
+        )
+
+    @app.post("/api/tickets/{ticket_id:path}/retry")
+    def retry_ticket_endpoint(ticket_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Retry a failed ticket (operator action).
+
+        Returns the ticket's new state on success.
+        404 if ticket unknown, 409 if not failed.
+        """
+        from engine.queue import retry_ticket
+
+        return _guarded_transition(
+            table="ticket",
+            id_value=ticket_id,
+            exists_sql="SELECT 1 FROM tickets WHERE id=?",
+            mutate_fn=retry_ticket,
+            result_field="state",
+            result_sql="SELECT state FROM tickets WHERE id=?",
+        )
+
+    @app.post("/api/tickets/{ticket_id:path}/priority")
+    def set_ticket_priority_endpoint(
+        ticket_id: str,
+        body: dict[str, Any],
+        _: None = Depends(require_auth),
+    ) -> dict[str, Any]:
+        """Set a non-terminal ticket's priority (operator action).
+
+        Body: {"priority": float}
+
+        Returns the ticket's new state on success.
+        404 if ticket unknown, 409 if terminal.
+        """
+        from engine.queue import set_ticket_priority
+
+        priority = body.get("priority")
+        if priority is None or not isinstance(priority, (int, float)):
+            raise HTTPException(status_code=400, detail="priority must be a number")
+
+        return _guarded_transition(
+            table="ticket",
+            id_value=ticket_id,
+            exists_sql="SELECT 1 FROM tickets WHERE id=?",
+            mutate_fn=lambda conn, tid: set_ticket_priority(conn, tid, float(priority)),
             result_field="state",
             result_sql="SELECT state FROM tickets WHERE id=?",
         )

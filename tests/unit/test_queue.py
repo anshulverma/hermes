@@ -642,6 +642,143 @@ def test_requeue_needs_human_rejects_non_needs_human(conn):
         queue.requeue_needs_human(conn, "r1/t-0", now=100.0)
 
 
+# --- abandon_ticket / retry_ticket / set_ticket_priority -----------------
+
+def test_abandon_ticket_non_terminal_to_failed(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    for state in ["queued", "dispatched", "running", "reducing", "parked", "needs_human"]:
+        tid = f"r1/t-{state}"
+        _mk_ticket(conn, tid, state=state, worker_host="host-A")
+        queue.abandon_ticket(conn, tid, now=100.0)
+        row = _ticket_row(conn, tid)
+        assert row["state"] == "failed"
+        assert row["worker_host"] is None
+
+    kinds = _kinds(conn)
+    assert kinds.count("ticket_abandoned") == 6
+
+
+def test_abandon_ticket_releases_lease(conn):
+    from engine import queue
+    from engine import leases
+
+    _mk_run(conn, "r1")
+    _mk_ticket(conn, "r1/t-0", state="running")
+
+    # Add crew capacity for cpu
+    conn.execute(
+        """INSERT INTO crew (id, site, state, capabilities, resources_json, last_heartbeat, registered_at)
+           VALUES ('host-A', 'stub', 'idle', '[]', '{"cpu": 1}', 0, 0)"""
+    )
+    conn.commit()
+
+    # Acquire a lease for the ticket
+    lease = leases.acquire(conn, run_id="r1", resource_class="cpu", ticket_id="r1/t-0", host="host-A", now=100.0)
+    assert lease is not None
+    conn.execute("UPDATE tickets SET lease_id=? WHERE id=?", (lease.id, "r1/t-0"))
+    conn.commit()
+
+    # Abandon should release the lease
+    queue.abandon_ticket(conn, "r1/t-0", now=200.0)
+
+    # Verify lease no longer exists
+    lease_row = conn.execute("SELECT id FROM leases WHERE id=?", (lease.id,)).fetchone()
+    assert lease_row is None
+
+
+def test_abandon_ticket_raises_on_terminal(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    _mk_ticket(conn, "r1/t-done", state="done")
+    _mk_ticket(conn, "r1/t-failed", state="failed")
+
+    with pytest.raises(ValueError):
+        queue.abandon_ticket(conn, "r1/t-done", now=100.0)
+
+    with pytest.raises(ValueError):
+        queue.abandon_ticket(conn, "r1/t-failed", now=100.0)
+
+
+def test_abandon_ticket_raises_on_unknown(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    with pytest.raises(ValueError):
+        queue.abandon_ticket(conn, "r1/t-unknown", now=100.0)
+
+
+def test_retry_ticket_failed_to_queued(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    _mk_ticket(conn, "r1/t-0", state="failed", attempts=3, worker_host="host-A", reduction_id=None)
+
+    queue.retry_ticket(conn, "r1/t-0", now=100.0)
+
+    row = _ticket_row(conn, "r1/t-0")
+    assert row["state"] == "queued"
+    assert row["attempts"] == 3  # UNCHANGED
+    assert row["worker_host"] is None
+    assert row["reduction_id"] is None
+    assert "ticket_requeued" in _kinds(conn)
+
+
+def test_retry_ticket_raises_on_non_failed(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    _mk_ticket(conn, "r1/t-0", state="queued")
+
+    with pytest.raises(ValueError):
+        queue.retry_ticket(conn, "r1/t-0", now=100.0)
+
+
+def test_retry_ticket_raises_on_unknown(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    with pytest.raises(ValueError):
+        queue.retry_ticket(conn, "r1/t-unknown", now=100.0)
+
+
+def test_set_ticket_priority_updates_priority_and_emits(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    _mk_ticket(conn, "r1/t-0", state="queued", priority=5.0)
+
+    queue.set_ticket_priority(conn, "r1/t-0", priority=10.0, now=100.0)
+
+    new_priority = conn.execute("SELECT priority FROM tickets WHERE id=?", ("r1/t-0",)).fetchone()[0]
+    assert new_priority == 10.0
+    assert "ticket_reprioritized" in _kinds(conn)
+
+
+def test_set_ticket_priority_raises_on_terminal(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    _mk_ticket(conn, "r1/t-done", state="done")
+    _mk_ticket(conn, "r1/t-failed", state="failed")
+
+    with pytest.raises(ValueError):
+        queue.set_ticket_priority(conn, "r1/t-done", priority=10.0, now=100.0)
+
+    with pytest.raises(ValueError):
+        queue.set_ticket_priority(conn, "r1/t-failed", priority=10.0, now=100.0)
+
+
+def test_set_ticket_priority_raises_on_unknown(conn):
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    with pytest.raises(ValueError):
+        queue.set_ticket_priority(conn, "r1/t-unknown", priority=10.0, now=100.0)
+
+
 # --- master-side reduce/advance writers ----------------------------------
 
 def _mk_finding(conn, run_id, ticket_id, kind="result", json_doc=None):

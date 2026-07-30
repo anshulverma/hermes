@@ -648,6 +648,131 @@ def requeue_needs_human(conn: sqlite3.Connection, ticket_id: str, now=None) -> N
         raise
 
 
+def abandon_ticket(conn: sqlite3.Connection, ticket_id: str, now=None) -> None:
+    """Operator abandon: non-terminal ticket → failed.
+
+    Transitions any non-terminal state (queued/dispatched/running/reducing/parked/
+    needs_human) to ``failed``. Releases the ticket's live lease if present, clears
+    ``worker_host``, and emits ``ticket_abandoned``. Raises ``ValueError`` if the
+    ticket is already terminal (done/failed) or unknown.
+    """
+    now = _now(now)
+    try:
+        row = conn.execute(
+            "SELECT run_id, state, lease_id FROM tickets WHERE id=?", (ticket_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown ticket {ticket_id!r}")
+        run_id, state, lease_id = row
+
+        # Terminal states cannot be abandoned
+        if state in ("done", "failed"):
+            raise ValueError(
+                f"ticket {ticket_id!r} is {state!r} (terminal); cannot abandon"
+            )
+
+        # Release the ticket's lease if present
+        if lease_id:
+            from engine import leases
+            leases.release(conn, lease_id, now=now)
+
+        # Transition to failed and clear worker_host
+        conn.execute(
+            """UPDATE tickets SET state='failed', worker_host=NULL, updated_at=?
+               WHERE id=?""",
+            (now, ticket_id),
+        )
+
+        # Emit event
+        events.emit(
+            conn, "ticket_abandoned", run_id=run_id, ticket_id=ticket_id,
+            data={"reason": "operator_abandoned"},
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def retry_ticket(conn: sqlite3.Connection, ticket_id: str, now=None) -> None:
+    """Operator retry: failed ticket → queued.
+
+    Transitions a ``failed`` ticket to ``queued`` (available immediately), clearing
+    ``worker_host``, ``lease_id``, and ``reduction_id``. Attempts count is UNCHANGED
+    (no penalty). Emits ``ticket_requeued``. Raises ``ValueError`` if the ticket is
+    not in ``failed`` state or unknown.
+    """
+    now = _now(now)
+    try:
+        row = conn.execute(
+            "SELECT run_id, state FROM tickets WHERE id=?", (ticket_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown ticket {ticket_id!r}")
+        run_id, state = row
+
+        if state != "failed":
+            raise ValueError(
+                f"ticket {ticket_id!r} is {state!r}, not 'failed'; cannot retry"
+            )
+
+        conn.execute(
+            """UPDATE tickets SET state='queued', available_at=?,
+                   worker_host=NULL, reduction_id=NULL, updated_at=?
+               WHERE id=?""",
+            (now, now, ticket_id),
+        )
+
+        events.emit(
+            conn, "ticket_requeued", run_id=run_id, ticket_id=ticket_id,
+            message="operator retry",
+            data={"reason": "operator_retry"},
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def set_ticket_priority(
+    conn: sqlite3.Connection, ticket_id: str, priority: float, now=None
+) -> None:
+    """Operator reprioritize: update a non-terminal ticket's priority.
+
+    Updates the ``priority`` field for a non-terminal ticket and emits
+    ``ticket_reprioritized``. Raises ``ValueError`` if the ticket is terminal
+    (done/failed) or unknown.
+    """
+    now = _now(now)
+    try:
+        row = conn.execute(
+            "SELECT run_id, state FROM tickets WHERE id=?", (ticket_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"unknown ticket {ticket_id!r}")
+        run_id, state = row
+
+        # Terminal states cannot be reprioritized
+        if state in ("done", "failed"):
+            raise ValueError(
+                f"ticket {ticket_id!r} is {state!r} (terminal); cannot reprioritize"
+            )
+
+        conn.execute(
+            "UPDATE tickets SET priority=?, updated_at=? WHERE id=?",
+            (priority, now, ticket_id),
+        )
+
+        events.emit(
+            conn, "ticket_reprioritized", run_id=run_id, ticket_id=ticket_id,
+            data={"priority": priority},
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 # --- master-side reduce / advance writers ---------------------------
 #
 # These are the SEAM the master loop (dispatch.py) drives: dispatch.py
