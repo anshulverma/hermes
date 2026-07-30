@@ -1,5 +1,0 @@
-agents
-engine
-playbooks
-server
-sites
