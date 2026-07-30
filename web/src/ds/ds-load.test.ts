@@ -1,13 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+// Import this module's own source text via Vite's ?raw (a string) — no Node fs, so the
+// production `tsc` build type-checks cleanly.
+import dsIndexSource from './index?raw';
 
 describe('DS bundle load-order regression test', () => {
   it('enforces _globals is imported FIRST in index.ts (source-order invariant)', () => {
-    const indexPath = join(__dirname, 'index.ts');
-    const source = readFileSync(indexPath, 'utf-8');
-
-    const lines = source.split('\n');
+    const lines = (dsIndexSource as string).split('\n');
     let firstImportIdx = -1;
     let globalsImportIdx = -1;
     let bundleImportIdx = -1;
