@@ -30,10 +30,47 @@ def _import_registration_modules():
     Each module's import side-effect registers adapters via playbook.register(),
     site.register(), or agent.register().
 
+    Additionally imports local adapter modules from config.local_dir() if it exists,
+    auto-discovering any top-level .py files (non-_ prefixed) and packages.
+
     Raises:
         config.ConfigError: If any listed module fails to import, naming the module
                            and the underlying error.
     """
+    # Auto-import local adapters (before env modules, so env can override)
+    local_path = config.local_dir()
+    if local_path.exists() and local_path.is_dir():
+        # Add to sys.path (idempotent)
+        local_path_str = str(local_path)
+        if local_path_str not in sys.path:
+            sys.path.insert(0, local_path_str)
+
+        # Auto-import top-level modules in local/
+        for item in local_path.iterdir():
+            # Skip __pycache__ and hidden files
+            if item.name.startswith('_') or item.name == '__pycache__':
+                continue
+
+            # .py files (non-_ prefixed)
+            if item.is_file() and item.suffix == '.py':
+                module_name = item.stem
+                try:
+                    importlib.import_module(module_name)
+                except Exception as e:
+                    raise config.ConfigError(
+                        f"Failed to import local adapter module {item.name!r}: {e}"
+                    ) from e
+
+            # Packages (directories with __init__.py)
+            elif item.is_dir() and (item / '__init__.py').exists():
+                module_name = item.name
+                try:
+                    importlib.import_module(module_name)
+                except Exception as e:
+                    raise config.ConfigError(
+                        f"Failed to import local adapter package {item.name!r}: {e}"
+                    ) from e
+
     # Import playbook modules
     for module_path in config.playbook_modules():
         try:

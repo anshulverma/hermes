@@ -312,6 +312,7 @@ def test_known_vars_contains_all_non_dynamic_vars():
         'HERMES_PLAYBOOK_MODULES',
         'HERMES_SITE_MODULES',
         'HERMES_AGENT_MODULES',
+        'HERMES_LOCAL_DIR',
     }
 
     assert required_vars.issubset(set(KNOWN_VARS.keys())), \

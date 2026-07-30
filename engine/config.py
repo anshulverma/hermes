@@ -169,6 +169,17 @@ def agent_modules() -> list[str]:
     return [m.strip() for m in val.split(',') if m.strip()]
 
 
+def local_dir() -> Path:
+    """Return HERMES_LOCAL_DIR from env or default to resolve_home()/local.
+
+    Returns the path for local adapter auto-discovery (does NOT verify existence).
+    """
+    val = os.environ.get('HERMES_LOCAL_DIR')
+    if val:
+        return Path(val)
+    return resolve_home() / 'local'
+
+
 def validate_startup(*, is_networked=None, require_server=False) -> None:
     """Validate startup preconditions.
 
@@ -268,4 +279,5 @@ KNOWN_VARS: dict[str, str] = {
     'HERMES_PLAYBOOK_MODULES': 'Comma-separated custom playbook module paths to import for adapter registration.',
     'HERMES_SITE_MODULES': 'Comma-separated custom site module paths to import for adapter registration.',
     'HERMES_AGENT_MODULES': 'Comma-separated custom agent module paths to import for adapter registration.',
+    'HERMES_LOCAL_DIR': 'Directory for zero-config local adapter auto-discovery (default: HERMES_HOME/local).',
 }
