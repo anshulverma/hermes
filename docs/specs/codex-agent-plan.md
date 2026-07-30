@@ -114,8 +114,8 @@ tests pass unchanged**; full suite green.
 **Scope.** Make `HERMES_AGENT=codex` resolve without extra config, and document it.
 
 **Files.**
-- `engine/cli.py` (edit): in `_import_registration_modules`, add
-  `import agents.codex` next to `import agents.claude`.
+- `engine/cli.py` (edit): add `import agents.codex` next to the existing
+  `import agents.claude` in the built-in adapter imports (`_load_playbook_site_agent`).
 - `docs/AUTHORING-PLAYBOOKS.md` (edit): where built-in agents / `HERMES_AGENT` are
   described, list `codex` alongside `claude`.
 

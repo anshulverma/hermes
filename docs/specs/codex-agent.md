@@ -70,9 +70,9 @@ An independent concrete class (NOT inheriting the protocol) with:
 ### 3. Registration + discovery
 - `agents/codex/__init__.py`: importing the package registers `CodexAgent` under
   the name `codex` (import side-effect), exactly like `agents/claude/__init__.py`.
-- Add `import agents.codex` to the built-in registration modules in
-  `engine/cli.py` (`_import_registration_modules`) so `HERMES_AGENT=codex` resolves
-  without extra config, alongside `agents.claude`.
+- Add `import agents.codex` next to the existing `import agents.claude` in
+  `engine/cli.py`'s built-in adapter imports (`_load_playbook_site_agent`) so
+  `HERMES_AGENT=codex` / `--agent codex` resolves without extra config.
 
 ### 4. Tests (TDD)
 Mirror `tests/unit/test_claude_agent.py` for the codex agent:
