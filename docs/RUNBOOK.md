@@ -3,6 +3,9 @@
 This runbook covers the operational lifecycle of a Hermes deployment: deploy,
 run topology, startup, shutdown, backup, and maintenance.
 
+To author a custom playbook (rather than operate an existing one), see
+`docs/AUTHORING-PLAYBOOKS.md`.
+
 ## Deploy and upgrade
 
 Hermes uses an additive-only migration strategy tracked in the `schema_migrations`

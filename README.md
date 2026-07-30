@@ -21,6 +21,9 @@ their environment.
 - **Engine** — the generic core that fans work across the crew (queue, dispatch,
   transport, crew+health, leases, contracts, events, control-plane API, CLI).
 
+To write your own playbook (and run it with no engine edit), see
+`docs/AUTHORING-PLAYBOOKS.md`.
+
 ## Status
 
 The engine core, dexter playbook, local and devserver sites, and control-plane
