@@ -951,7 +951,17 @@ def create_app(bind: str | None = None) -> FastAPI:
                 return {
                     "run_id": run_id,
                     "bucket_s": bucket_s,
-                    "buckets": []
+                    "buckets": [],
+                    "totals": {
+                        "attempts": 0,
+                        "done": 0,
+                        "failed": 0,
+                        "results": 0,
+                        "tickets": 0,
+                    },
+                    "retry_rate": 0.0,
+                    "mean_time_to_result_s": None,
+                    "by_phase": [],
                 }
 
             # Generate buckets from run_created_at to range_end
@@ -959,15 +969,18 @@ def create_app(bind: str | None = None) -> FastAPI:
             if num_buckets == 0:
                 num_buckets = 1  # At least one bucket if there's any data
 
-            # Fetch all attempts for this run (with ended_at and outcome)
-            attempts = conn.execute(
-                """SELECT a.ended_at, a.outcome
+            # Fetch all attempts for this run (with all required columns for both buckets and aggregates)
+            all_attempts = conn.execute(
+                """SELECT a.id, a.phase, a.ticket_id, a.attempt, a.started_at, a.ended_at, a.outcome
                    FROM attempts a
                    JOIN tickets t ON a.ticket_id = t.id
-                   WHERE t.run_id=? AND a.ended_at IS NOT NULL
-                   ORDER BY a.ended_at""",
+                   WHERE t.run_id=?
+                   ORDER BY a.id""",
                 (run_id,)
             ).fetchall()
+
+            # Filter for bucketing (only attempts with ended_at)
+            attempts = [(row[5], row[6]) for row in all_attempts if row[5] is not None]  # (ended_at, outcome)
 
             # Fetch all crew events (global, not run-scoped - crew is fleet-wide)
             # But for deterministic test behavior, scope to this run's events or use all
@@ -1030,10 +1043,101 @@ def create_app(bind: str | None = None) -> FastAPI:
                     "crew_online": crew_online,
                 })
 
+            # Compute aggregates from all_attempts
+            # totals
+            total_attempts = len(all_attempts)
+            done_count = sum(1 for row in all_attempts if row[6] == "ok")
+            failed_count = sum(1 for row in all_attempts if row[6] in ("driver_failed", "infra_failed"))
+            results_count = done_count + failed_count
+            distinct_tickets = len(set(row[2] for row in all_attempts))
+
+            totals = {
+                "attempts": total_attempts,
+                "done": done_count,
+                "failed": failed_count,
+                "results": results_count,
+                "tickets": distinct_tickets,
+            }
+
+            # retry_rate: tickets with max attempt > 1 / total tickets
+            if distinct_tickets == 0:
+                retry_rate = 0.0
+            else:
+                ticket_max_attempts = {}
+                for row in all_attempts:
+                    ticket_id = row[2]
+                    attempt_num = row[3]
+                    if ticket_id not in ticket_max_attempts:
+                        ticket_max_attempts[ticket_id] = attempt_num
+                    else:
+                        ticket_max_attempts[ticket_id] = max(ticket_max_attempts[ticket_id], attempt_num)
+                retried_tickets = sum(1 for max_att in ticket_max_attempts.values() if max_att > 1)
+                retry_rate = retried_tickets / distinct_tickets
+
+            # mean_time_to_result_s: mean of (ended_at - started_at) over rows with both non-null
+            durations = []
+            for row in all_attempts:
+                started = row[4]
+                ended = row[5]
+                if started is not None and ended is not None:
+                    durations.append(ended - started)
+
+            if len(durations) > 0:
+                mean_time_to_result_s = sum(durations) / len(durations)
+            else:
+                mean_time_to_result_s = None
+
+            # by_phase: per-phase stats, ordered by first appearance
+            phase_data = {}
+            phase_order = []
+            for row in all_attempts:
+                phase = row[1]
+                if phase not in phase_data:
+                    phase_data[phase] = {
+                        "tickets": set(),
+                        "durations": [],
+                        "total": 0,
+                        "failed": 0,
+                    }
+                    phase_order.append(phase)
+
+                ticket_id = row[2]
+                started = row[4]
+                ended = row[5]
+                outcome = row[6]
+
+                phase_data[phase]["tickets"].add(ticket_id)
+                phase_data[phase]["total"] += 1
+                if outcome in ("driver_failed", "infra_failed"):
+                    phase_data[phase]["failed"] += 1
+                if started is not None and ended is not None:
+                    phase_data[phase]["durations"].append(ended - started)
+
+            by_phase = []
+            for phase in phase_order:
+                data = phase_data[phase]
+                ticket_count = len(data["tickets"])
+                if len(data["durations"]) > 0:
+                    mean_time_s = sum(data["durations"]) / len(data["durations"])
+                else:
+                    mean_time_s = None
+                failure_pct = (data["failed"] / data["total"] * 100.0) if data["total"] > 0 else 0.0
+
+                by_phase.append({
+                    "phase": phase,
+                    "tickets": ticket_count,
+                    "mean_time_s": mean_time_s,
+                    "failure_pct": failure_pct,
+                })
+
             return {
                 "run_id": run_id,
                 "bucket_s": bucket_s,
                 "buckets": buckets,
+                "totals": totals,
+                "retry_rate": retry_rate,
+                "mean_time_to_result_s": mean_time_to_result_s,
+                "by_phase": by_phase,
             }
         finally:
             conn.close()

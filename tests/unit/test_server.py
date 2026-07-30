@@ -3678,3 +3678,202 @@ def test_set_priority_requires_auth(loopback_client: TestClient, temp_home: Path
 
     response = loopback_client.post("/api/tickets/r1%2Ft-0/priority", json={"priority": 3.0})
     assert response.status_code == 401
+
+
+def test_metrics_totals_and_retry_and_mean(client: TestClient, temp_home: Path):
+    """GET /api/runs/{id}/metrics computes totals, retry_rate, mean_time_to_result_s from real attempts."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed a run with tickets and attempts as specified in the brief
+    run_id = "metrics-test-run"
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (run_id, "stub", "stub", "running", "work", "main", '{}', now, now)
+    )
+
+    # Seed tickets
+    ticket_a = f"{run_id}/ticket-A"
+    ticket_b = f"{run_id}/ticket-B"
+    ticket_c = f"{run_id}/ticket-C"
+
+    for tid in [ticket_a, ticket_b, ticket_c]:
+        conn.execute(
+            """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                    available_at, tried_hosts, payload_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tid, run_id, "work", "queued", "cpu", 0, 0, now, '[]', '{"goal": "test"}', now, now)
+        )
+    conn.commit()
+
+    # Seed attempts exactly as specified in the brief
+    # ticket A, phase "work", attempt 1, outcome ok, started 0 ended 10
+    # ticket A, phase "work", attempt 2, outcome ok, started 20 ended 50
+    # ticket B, phase "work", attempt 1, outcome driver_failed, started 0 ended 4
+    # ticket C, phase "reduce", attempt 1, outcome ok, started 0 ended 6
+    attempts_data = [
+        (ticket_a, "work", 1, now, now + 10, "ok"),
+        (ticket_a, "work", 2, now + 20, now + 50, "ok"),
+        (ticket_b, "work", 1, now, now + 4, "driver_failed"),
+        (ticket_c, "reduce", 1, now, now + 6, "ok"),
+    ]
+
+    for tid, phase, attempt_num, started, ended, outcome in attempts_data:
+        conn.execute(
+            """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome,
+                                     termination_reason, result_ref, error_summary, error_detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tid, phase, "test-host", attempt_num, started, ended, outcome, "reason", None, None, None)
+        )
+    conn.commit()
+    conn.close()
+
+    # Fetch metrics
+    response = client.get(f"/api/runs/{run_id}/metrics")
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # Verify totals: {attempts:4, done:3, failed:1, results:4, tickets:3}
+    assert "totals" in data
+    totals = data["totals"]
+    assert totals["attempts"] == 4
+    assert totals["done"] == 3
+    assert totals["failed"] == 1
+    assert totals["results"] == 4
+    assert totals["tickets"] == 3
+
+    # Verify retry_rate: 1/3 (ticket A has max attempt > 1, out of 3 tickets)
+    assert "retry_rate" in data
+    assert data["retry_rate"] == pytest.approx(1.0 / 3.0)
+
+    # Verify mean_time_to_result_s: (10+30+4+6)/4 = 12.5
+    assert "mean_time_to_result_s" in data
+    assert data["mean_time_to_result_s"] == pytest.approx(12.5)
+
+
+def test_metrics_by_phase(client: TestClient, temp_home: Path):
+    """GET /api/runs/{id}/metrics computes by_phase stats with correct ordering and values."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed a run with tickets and attempts
+    run_id = "metrics-phase-run"
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (run_id, "stub", "stub", "running", "work", "main", '{}', now, now)
+    )
+
+    # Seed tickets
+    ticket_a = f"{run_id}/ticket-A"
+    ticket_b = f"{run_id}/ticket-B"
+    ticket_c = f"{run_id}/ticket-C"
+
+    for tid in [ticket_a, ticket_b, ticket_c]:
+        conn.execute(
+            """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                    available_at, tried_hosts, payload_json, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tid, run_id, "work", "queued", "cpu", 0, 0, now, '[]', '{"goal": "test"}', now, now)
+        )
+    conn.commit()
+
+    # Seed attempts (same as above) - ordered by id to ensure phase ordering
+    attempts_data = [
+        (ticket_a, "work", 1, now, now + 10, "ok"),
+        (ticket_a, "work", 2, now + 20, now + 50, "ok"),
+        (ticket_b, "work", 1, now, now + 4, "driver_failed"),
+        (ticket_c, "reduce", 1, now, now + 6, "ok"),
+    ]
+
+    for tid, phase, attempt_num, started, ended, outcome in attempts_data:
+        conn.execute(
+            """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome,
+                                     termination_reason, result_ref, error_summary, error_detail)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tid, phase, "test-host", attempt_num, started, ended, outcome, "reason", None, None, None)
+        )
+    conn.commit()
+    conn.close()
+
+    # Fetch metrics
+    response = client.get(f"/api/runs/{run_id}/metrics")
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # Verify by_phase is exactly two entries in order
+    assert "by_phase" in data
+    by_phase = data["by_phase"]
+    assert len(by_phase) == 2
+
+    # First entry: work phase
+    work = by_phase[0]
+    assert work["phase"] == "work"
+    assert work["tickets"] == 2  # ticket A and B
+    # mean_time_s: (10+30+4)/3 = 44/3 = 14.666...
+    assert work["mean_time_s"] == pytest.approx((10 + 30 + 4) / 3.0)
+    # failure_pct: 1 failed out of 3 attempts = 100/3 = 33.333...
+    assert work["failure_pct"] == pytest.approx(100.0 / 3.0)
+
+    # Second entry: reduce phase
+    reduce = by_phase[1]
+    assert reduce["phase"] == "reduce"
+    assert reduce["tickets"] == 1  # ticket C
+    assert reduce["mean_time_s"] == pytest.approx(6.0)
+    assert reduce["failure_pct"] == pytest.approx(0.0)
+
+
+def test_metrics_empty_run_aggregates(client: TestClient, temp_home: Path):
+    """GET /api/runs/{id}/metrics for a run with no attempts returns correct empty aggregates."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+
+    # Seed a run with NO attempts
+    run_id = "empty-run"
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (run_id, "stub", "stub", "running", "work", "main", '{}', now, now)
+    )
+    conn.commit()
+    conn.close()
+
+    # Fetch metrics
+    response = client.get(f"/api/runs/{run_id}/metrics")
+    assert response.status_code == 200
+
+    data = response.json()
+
+    # Verify totals all 0
+    assert "totals" in data
+    totals = data["totals"]
+    assert totals["attempts"] == 0
+    assert totals["done"] == 0
+    assert totals["failed"] == 0
+    assert totals["results"] == 0
+    assert totals["tickets"] == 0
+
+    # Verify retry_rate is 0.0
+    assert "retry_rate" in data
+    assert data["retry_rate"] == 0.0
+
+    # Verify mean_time_to_result_s is None
+    assert "mean_time_to_result_s" in data
+    assert data["mean_time_to_result_s"] is None
+
+    # Verify by_phase is empty list
+    assert "by_phase" in data
+    assert data["by_phase"] == []
+
+    # Verify buckets is still present (and empty)
+    assert "buckets" in data
+    assert data["buckets"] == []
