@@ -1500,6 +1500,178 @@ def test_websocket_auth_wrong_token_closes_4401(loopback_client: TestClient, tem
         assert e.code == 4401
 
 
+def test_run_detail_unregistered_playbook_derives_phases_from_tickets(
+    client: TestClient, temp_home: Path
+):
+    """GET /api/runs/{id} for an unregistered playbook returns 200 with derived phases from tickets."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = connect(db_path)
+
+    # Create a run with a playbook name that is NOT registered
+    run_id = "test-orphan-run"
+    conn.execute(
+        """INSERT INTO runs
+           (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            run_id, "unknown_playbook", "local", "running", "analyze", "main",
+            json.dumps({}), now, now
+        ),
+    )
+    conn.commit()
+
+    # Seed tickets in 3 distinct phases (analyze, investigate, report)
+    # Order matters - we'll insert in mixed order to test sorting by first appearance
+    tickets_data = [
+        (f"{run_id}/t-0", "analyze", "queued", 10),
+        (f"{run_id}/t-1", "investigate", "queued", 9),
+        (f"{run_id}/t-2", "analyze", "done", 8),
+        (f"{run_id}/t-3", "report", "queued", 7),
+        (f"{run_id}/t-4", "investigate", "failed", 6),
+    ]
+
+    for tid, phase, state, priority in tickets_data:
+        conn.execute(
+            """INSERT INTO tickets
+               (id, run_id, phase, state, resource_req, priority, created_at, updated_at, payload_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tid, run_id, phase, state, "cpu", priority, now, now, '{"goal": "test"}'),
+        )
+    conn.commit()
+    conn.close()
+
+    # GET the run - should NOT 500, should return 200 with derived phases
+    response = client.get(f"/api/runs/{run_id}")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["id"] == run_id
+    assert data["playbook"] == "unknown_playbook"
+    assert data["phase"] == "analyze"
+
+    # phases array should be derived from DISTINCT phases in tickets, ordered by first appearance
+    assert "phases" in data
+    phases = data["phases"]
+    assert isinstance(phases, list)
+    assert len(phases) == 3
+
+    # Verify phase names in order of first appearance (analyze -> investigate -> report)
+    assert phases[0]["name"] == "analyze"
+    assert phases[1]["name"] == "investigate"
+    assert phases[2]["name"] == "report"
+
+    # Verify current flag
+    assert phases[0]["current"] is True  # run.phase == "analyze"
+    assert phases[1]["current"] is False
+    assert phases[2]["current"] is False
+
+    # Verify counts match the seeded tickets
+    assert phases[0]["counts"]["queued"] == 1  # t-0
+    assert phases[0]["counts"]["done"] == 1    # t-2
+    assert phases[1]["counts"]["queued"] == 1  # t-1
+    assert phases[1]["counts"]["failed"] == 1  # t-4
+    assert phases[2]["counts"]["queued"] == 1  # t-3
+
+
+def test_run_detail_unregistered_playbook_no_tickets_uses_current_phase(
+    client: TestClient, temp_home: Path
+):
+    """GET /api/runs/{id} for unregistered playbook with no tickets derives phases from current_phase."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = connect(db_path)
+
+    # Create a run with NO tickets
+    run_id = "test-orphan-no-tickets"
+    conn.execute(
+        """INSERT INTO runs
+           (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            run_id, "unknown_playbook2", "local", "running", "init", "main",
+            json.dumps({}), now, now
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    # GET the run - should return 200 with at least current_phase
+    response = client.get(f"/api/runs/{run_id}")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["id"] == run_id
+
+    # phases should have at least current_phase
+    assert "phases" in data
+    phases = data["phases"]
+    assert len(phases) >= 1
+    assert phases[0]["name"] == "init"
+    assert phases[0]["current"] is True
+    assert phases[0]["counts"] == {}  # No tickets
+
+
+def test_run_detail_registered_playbook_uses_canonical_phases(
+    client: TestClient, temp_home: Path
+):
+    """GET /api/runs/{id} for a registered playbook (dexter) uses canonical phase order."""
+    import time
+    now = time.time()
+    db_path = str(temp_home / "queue.db")
+    conn = connect(db_path)
+
+    # Create a run with "dexter" playbook (which IS registered)
+    run_id = "test-dexter-run"
+    conn.execute(
+        """INSERT INTO runs
+           (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            run_id, "dexter", "local", "running", "solve", "main",
+            json.dumps({}), now, now
+        ),
+    )
+    conn.commit()
+
+    # Seed a few tickets in the solve phase
+    tickets_data = [
+        (f"{run_id}/t-0", "solve", "queued", 10),
+        (f"{run_id}/t-1", "solve", "done", 9),
+    ]
+
+    for tid, phase, state, priority in tickets_data:
+        conn.execute(
+            """INSERT INTO tickets
+               (id, run_id, phase, state, resource_req, priority, created_at, updated_at, payload_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (tid, run_id, phase, state, "cpu", priority, now, now, '{"goal": "test"}'),
+        )
+    conn.commit()
+    conn.close()
+
+    # GET the run - should use the playbook's canonical phase order
+    response = client.get(f"/api/runs/{run_id}")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["id"] == run_id
+    assert data["playbook"] == "dexter"
+
+    # phases should match the dexter playbook's canonical order (just "solve")
+    assert "phases" in data
+    phases = data["phases"]
+    assert len(phases) == 1
+    assert phases[0]["name"] == "solve"
+    assert phases[0]["current"] is True
+
+    # Verify counts match the tickets we seeded
+    assert phases[0]["counts"]["queued"] == 1
+    assert phases[0]["counts"]["done"] == 1
+
+
 def test_websocket_auth_correct_token_receives_hello(loopback_client: TestClient, temp_home: Path, monkeypatch):
     """WS /api/ws with CORRECT token => receives hello (C1 behavior preserved)."""
     from server.auth import read_token

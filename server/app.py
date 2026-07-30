@@ -57,6 +57,20 @@ def create_app(bind: str | None = None) -> FastAPI:
     token_path = home / "api_token"
     logger.info(f"Server starting: bind={bind}, home={home}, token_file={token_path}")
 
+    # Register real adapters (playbooks, sites, agents) once at startup
+    # Import built-in adapters
+    import sites.local.site  # noqa: F401
+    import sites.devserver.site  # noqa: F401
+    import playbooks.dexter  # noqa: F401
+    import agents.claude  # noqa: F401
+
+    # Import custom adapter modules from env vars + local/ dir
+    from engine.cli import _import_registration_modules
+    try:
+        _import_registration_modules()
+    except Exception as e:
+        logger.warning(f"Failed to import custom registration modules: {e}")
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Lifespan context manager for startup/shutdown logging."""
@@ -193,21 +207,49 @@ def create_app(bind: str | None = None) -> FastAPI:
             ).fetchall()
             tickets = {state: count for state, count in ticket_rows}
 
-            # Load playbook to get canonical phase order
+            # Try to load playbook to get canonical phase order
             from engine import playbook as playbook_module
-            # Register example playbook
-            import testkit.example_playbook  # noqa: F401
-            playbook_obj = playbook_module.load(playbook_name)
 
-            # Build phases array in playbook order
             phases = []
-            for phase_name in playbook_obj.phases:
-                phase_counts = phase_ticket_counts(conn, run_id, phase_name)
-                phases.append({
-                    "name": phase_name,
-                    "counts": phase_counts,
-                    "current": phase_name == current_phase,
-                })
+            try:
+                playbook_obj = playbook_module.load(playbook_name)
+                # Playbook registered - use canonical phase order
+                for phase_name in playbook_obj.phases:
+                    phase_counts = phase_ticket_counts(conn, run_id, phase_name)
+                    phases.append({
+                        "name": phase_name,
+                        "counts": phase_counts,
+                        "current": phase_name == current_phase,
+                    })
+            except KeyError:
+                # Playbook not registered - derive phases from tickets
+                # SELECT DISTINCT phase FROM tickets WHERE run_id=? ORDER BY MIN(rowid)
+                # This gives us phases in order of first appearance
+                distinct_phases = conn.execute(
+                    """SELECT phase FROM tickets
+                       WHERE run_id=?
+                       GROUP BY phase
+                       ORDER BY MIN(rowid)""",
+                    (run_id,),
+                ).fetchall()
+
+                # If no tickets, fall back to current_phase
+                if not distinct_phases:
+                    if current_phase:
+                        phase_names = [current_phase]
+                    else:
+                        phase_names = []
+                else:
+                    phase_names = [row[0] for row in distinct_phases]
+
+                # Build phases array from derived list
+                for phase_name in phase_names:
+                    phase_counts = phase_ticket_counts(conn, run_id, phase_name)
+                    phases.append({
+                        "name": phase_name,
+                        "counts": phase_counts,
+                        "current": phase_name == current_phase,
+                    })
 
             return {
                 "id": rid,
