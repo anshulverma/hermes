@@ -11,7 +11,7 @@ write first**, and its **DoD**. Engine core stays **stdlib-only at runtime**;
 adapters (`sites/devserver`) may shell out via `subprocess`. `pytest` is dev-only.
 
 Conventions: paths are under `hermes/`. "GREEN" = `scripts/run_tests.sh` passes.
-Commit after each slice. Section references (`§2.3`, `D1`…) point at the spec.
+Commit after each slice. Section references (e.g., "result_schema", `D1`…) point at the spec.
 
 ---
 
@@ -36,7 +36,7 @@ Commit after each slice. Section references (`§2.3`, `D1`…) point at the spec
   `provision`, `health`, `run_worker`, `resource_classes`, `guarantees_no_ship`,
   `submit_for_review`, `issue_source`). `recheck_fix` is an **extension** method,
   NOT added to the Protocol (D3).
-- **No-ship invariant (two layers, §7).** `devserver.guarantees_no_ship()` returns
+- **No-ship invariant (two layers, see "Safety" in the spec).** `devserver.guarantees_no_ship()` returns
   `True` only because `provision` installs and `health` honestly reports the guard
   shims; `run_worker` prepends the per-host guard dir to the remote `PATH`.
   `reduce` lands nothing. Every slice that touches dispatch/exec must preserve both
@@ -44,8 +44,8 @@ Commit after each slice. Section references (`§2.3`, `D1`…) point at the spec
   (exit `97`).
 - **No faked test data.** Tests use real engine writers (`queue.*`, `dispatch.*`)
   against a temp `HERMES_HOME` (via `testkit/fixtures.py`), real
-  `contracts.validate_result`, and real §2.3-shaped payloads. The only doubles are
-  `DexterMockAgent` (emits §2.3 docs, no real `claude`/SSH), `DexterLocalSite`
+  `contracts.validate_result`, and real result_schema-shaped payloads. The only doubles are
+  `DexterMockAgent` (emits result_schema docs, no real `claude`/SSH), `DexterLocalSite`
   (adds `recheck_fix` on localhost), and `FakeSink` (in-memory learning sink). No
   monkey-patching of engine state; drive everything through the public writers.
 - **Registration by import side-effect.** Each adapter module registers its
@@ -63,7 +63,7 @@ Commit after each slice. Section references (`§2.3`, `D1`…) point at the spec
   Decision: **do NOT add a new engine delta.** The documented operator path is the
   existing `hermes ticket requeue <id>` (`queue.requeue_needs_human`), which the
   integration slice (Slice 9) exercises end-to-end. The absence of a terminal
-  `ticket abandon` is recorded as an **accepted limitation** (spec §9) and asserted
+  `ticket abandon` is recorded as an **accepted limitation** (see "Open items (non-blocking)" in the spec) and asserted
   as a behavior (a never-re-verifiable fix keeps the phase blocked until requeued).
   Promoting `recheck_fix` to the core Protocol and adding `ticket abandon` are
   explicitly deferred; noted in the plan's Deferred section, not implemented here.
@@ -104,12 +104,12 @@ cleanly. No engine files changed yet.
 
 **Scope.** The only functional CLI change. Add `--goals PATH` to the `run`
 subparser; make `cmd_run` build `run_config["goals"]` from it (replacing the
-hardcoded `run_config = {}` at `engine/cli.py:64`). Goals-file format per §2.1a.
+hardcoded `run_config = {}` at `engine/cli.py:64`). Goals-file format per "`--goals FILE` format + semantics (delta D1)" in the spec.
 
 **Files.** `engine/cli.py` (run subparser + `cmd_run`); a small helper
 `_load_goals_file(path) -> list[str]` (in `cli.py`).
 
-**Format + semantics (§2.1a), pin exactly.**
+**Format + semantics (see "`--goals FILE` format + semantics" in the spec), pin exactly.**
 - `--goals PATH`: read `PATH`, **one goal per line**; **skip blank lines and lines
   whose first non-space char is `#`**; strip surrounding whitespace on each kept
   line. Result is a `list[str]`.
@@ -120,7 +120,7 @@ hardcoded `run_config = {}` at `engine/cli.py:64`). Goals-file format per §2.1a
 - Empty/missing-after-filtering file ⇒ `{"goals": []}` ⇒ zero tickets ⇒ the run
   seeds nothing and terminates immediately (correct degenerate no-op).
 - `issue_query` gets **no** CLI flag here (deferred; supplied via the control-plane
-  API's arbitrary `config`, §2.1a).
+  API's arbitrary `config`, see "`--goals FILE` format + semantics" in the spec).
 
 **Tests first (RED)** — `tests/unit/test_cli.py` (extend):
 - `_load_goals_file` parses a temp file: keeps 3 goals, drops blank lines, drops
@@ -150,40 +150,40 @@ in Slices 3–4. The sink constructor arg is introduced but unused until Slice 4
 **Files.** `playbooks/dexter/playbook.py`, `playbooks/dexter/__init__.py`
 (re-export). No engine change.
 
-**Behavior to pin (§2.1–2.4, §2.7).**
+**Behavior to pin (see spec sections "seed(run, site) → list[Ticket]" through "driver(solve) → Driver" and "next_phase / is_done").**
 - `name = "dexter"`, `phases = ["solve"]`.
 - `__init__(self, sink=None)` — stores `self.sink` (default deferred to Slice 4's
-  `DexterKbSink`); mirrors `MockAgent(scenarios=…)` injection (§5).
+  `DexterKbSink`); mirrors `MockAgent(scenarios=…)` injection (see "Learning-sink coupling (master side)" in the spec).
 - `seed(run, site)`: build one `Ticket` per goal. Goals from **either**:
   (a) `run.config["goals"]` — accept a `list[str]` (used directly) **or** a `str`
-  path (read with the §2.1a filter); (b) if `run.config.get("issue_query")`, call
+  path (read with the "`--goals FILE` format + semantics" filter); (b) if `run.config.get("issue_query")`, call
   `site.issue_source(IssueQuery(**run.config["issue_query"]))` and map each `Issue`
   to a goal (`goal=issue.title`, `issue_ref=issue.ref`,
   `priority=issue.data.get("priority", 0)`). Ticket fields exactly per
   `engine/models.py`: `id=f"{run.id}/solve-{i}"`, `run_id=run.id`, `phase="solve"`,
   `state="queued"`, `resource_req="cpu"`, `priority` (float), `attempts=0`,
   `payload={"goal": <str>, "issue_ref": <str|null>, "context": <object>}` — and
-  **only** those payload keys (`additionalProperties:false`, §2.2).
-- `payload_schema("solve")` = the §2.2 object (required `["goal"]`,
+  **only** those payload keys (`additionalProperties:false`, see "payload_schema(solve)" in the spec).
+- `payload_schema("solve")` = the "payload_schema(solve)" object (required `["goal"]`,
   `additionalProperties:false`, props `goal`/`issue_ref`/`context`), within the
   `contracts.validate` subset.
-- `result_schema("solve")` = the §2.3 object (the dexter finding doc).
+- `result_schema("solve")` = the "result_schema(solve)" object (the dexter finding doc).
 - `driver("solve") = Driver(command="/dexter:solve", args={}, loop=None)` —
-  `args={}` is deliberate (§2.4: a non-empty `args` renders as literal `k=v` after
+  `args={}` is deliberate (see "driver(solve) → Driver" in the spec: a non-empty `args` renders as literal `k=v` after
   the command; the goal reaches the worker only via `/goal <goal>`).
 - `next_phase(run) -> None` always; `is_done(run) -> run.phase == "solve"` (True).
 
 **Tests first (RED)** — `tests/unit/test_dexter_playbook.py`:
 - `seed` from a `run.config["goals"]` **list** → N tickets with the exact
   ids/fields/payload keys; goal lands in `payload["goal"]`.
-- `seed` from a `run.config["goals"]` **file path** (§2.1a comment/blank filtering).
+- `seed` from a `run.config["goals"]` **file path** ("`--goals FILE` format + semantics" comment/blank filtering).
 - `seed` from a **mocked `issue_source`** (a fake site returning `Issue`s) →
   `issue_ref`/`priority` mapped; `IssueQuery(**…)` built from `run.config`.
 - `seed` with no goals ⇒ `[]`.
 - `payload_schema` **accepts** `{goal, issue_ref, context}` and **rejects** an
   extra key (`additionalProperties:false`) and a missing `goal`, via
   `contracts.validate_envelope`/`validate`.
-- `result_schema` accepts a valid §2.3 doc and rejects one missing `root_cause`,
+- `result_schema` accepts a valid result_schema doc and rejects one missing `root_cause`,
   via `contracts.validate_result`.
 - `driver("solve")` == `Driver("/dexter:solve", {}, None)`; and the rendered prompt
   through `ClaudeAgent._build_prompt(goal, driver)` is exactly
@@ -198,14 +198,14 @@ instance; the schema/seed/driver tests are green; `verify`/`reduce` raise
 
 ## Slice 3 — dexter Playbook: `verify` (shape gate + D3 duck-type, fail-safe)
 
-**Scope.** Implement `verify(run, ticket, result, site) -> bool` (§2.5) — the point
-where the §2.3 contract is actually enforced (the engine never auto-validates a
+**Scope.** Implement `verify(run, ticket, result, site) -> bool` (see "verify(run, ticket, result, site) → bool" in the spec) — the point
+where the result_schema contract is actually enforced (the engine never auto-validates a
 result payload) and where the **playbook half of D3** lives (duck-typing
 `site.recheck_fix`, fail-safe when absent).
 
 **Files.** `playbooks/dexter/playbook.py` (fill `verify`). No engine change.
 
-**Behavior to pin (§2.5).** `verify` runs inside `queue.record_result` on every
+**Behavior to pin (see "verify(run, ticket, result, site) → bool" in the spec).** `verify` runs inside `queue.record_result` on every
 `outcome=="ok"` result (True ⇒ `reducing`; False ⇒ `needs_human`). No-trust rule —
 do **not** read `result.payload["fix"]["verified"]`.
 1. **Shape gate.** Reconstruct the outer result dict from the `Result` dataclass
@@ -222,9 +222,9 @@ do **not** read `result.payload["fix"]["verified"]`.
 3. Return `True` iff shape gate passes **and** the re-check confirms.
 
 **Tests first (RED)** — `tests/unit/test_dexter_playbook.py`:
-- Valid §2.3 payload + a fake site whose `recheck_fix` returns `True` ⇒ `verify`
+- Valid result_schema payload + a fake site whose `recheck_fix` returns `True` ⇒ `verify`
   True.
-- Valid §2.3 payload + `recheck_fix` returns `False` ⇒ `verify` False.
+- Valid result_schema payload + `recheck_fix` returns `False` ⇒ `verify` False.
 - Malformed payload (missing `root_cause`) + `recheck_fix` True ⇒ `verify` False
   (shape gate wins; no-trust).
 - Site **without** `recheck_fix` (e.g. bare `LocalSite`) ⇒ `verify` False
@@ -240,7 +240,7 @@ do **not** read `result.payload["fix"]["verified"]`.
 ## Slice 4 — dexter Playbook: `reduce` + LearningSink (cross-host dedup + bank)
 
 **Scope.** Implement `reduce(run, phase, findings, site) -> list[Reduction]`
-(§2.6): fold-latest-per-ticket, cluster by root-cause signature, canonical/
+(see "reduce(run, \"solve\", findings, site) → list[Reduction]" in the spec): fold-latest-per-ticket, cluster by root-cause signature, canonical/
 duplicate split, one best-effort banked learning per cluster, and the exact
 `Reduction.json` shape with `needs_human_ticket_ids`. Add the `LearningSink`
 interface + `DexterKbSink` (default) + `FakeSink` (tests).
@@ -249,7 +249,7 @@ interface + `DexterKbSink` (default) + `FakeSink` (tests).
 `playbooks/dexter/sink.py` (`LearningSink` protocol, `DexterKbSink`, `FakeSink`).
 No engine change.
 
-**Behavior to pin (§2.6, §5).**
+**Behavior to pin (see spec sections "reduce(run, \"solve\", findings, site) → list[Reduction]" and "Learning-sink coupling (master side)").**
 - **Fold to latest finding per ticket.** `findings` is append-only, ordered by
   `findings.id` asc (`queue.load_findings`); collapse to the **last** finding per
   `ticket_id` before clustering (a ticket with two `ok` findings counts once).
@@ -257,7 +257,7 @@ No engine change.
 - Per cluster: **canonical** `ticket_id` = deterministic **lowest ticket id**.
   Pin the ordering: ids are `f"{run.id}/solve-{i}"`, so pick canonical by the
   **numeric `i`** (parse the `solve-<i>` suffix), not a raw string `min()` — string
-  order would rank `solve-10 < solve-2`. (Any deterministic rule satisfies §2.6;
+  order would rank `solve-10 < solve-2`. (Any deterministic rule satisfies the spec;
   numeric keeps tests intuitive.) Duplicates = other members (each with its
   `fix.diff_ref`).
 - **Bank one learning per cluster** via `self.sink.bank(cluster) -> str | None`.
@@ -273,12 +273,12 @@ No engine change.
   hydrates `id/run_id/phase/review_state='pending'`.
 - `LearningSink.bank(cluster: dict) -> str | None`. `DexterKbSink` shells the
   dexter plugin's `kb.py` (`validate` then `index`) against `INVESTIGATIONS_DIR`
-  (the single master-side dexter coupling, §5); `FakeSink` records calls in memory
+  (the single master-side dexter coupling, see "Learning-sink coupling (master side)" in the spec); `FakeSink` records calls in memory
   and returns a canned ref (or raises when constructed to simulate failure).
 
 **Stale-finding handling (top-risk).** Rely on fold-latest + verify gating (only
 verified tickets contribute; verify-failed ones are `needs_human` and block reduce,
-§2.6). Add a note + a unit test documenting the residual ok-then-failed edge is
+see "reduce(run, \"solve\", findings, site) → list[Reduction]" in the spec). Add a note + a unit test documenting the residual ok-then-failed edge is
 surfaced-and-rejectable (never silently banked); no engine change.
 
 **Tests first (RED)** — `tests/unit/test_dexter_playbook.py` (+ `sink` tests):
@@ -313,7 +313,7 @@ recipe, dashboard endpoint), not hardcoded.
 **Files.** `sites/devserver/site.py`, `sites/devserver/__init__.py` (re-export).
 `recheck_fix` deferred to Slice 6. No engine change.
 
-**Behavior to pin (§3).**
+**Behavior to pin (see "The `devserver` site" in the spec).**
 - `name = "devserver"`.
 - `discover_hosts()` — read an internal host list from config (env/config seam),
   else `[]` (hosts supplied via `--hosts`, which `cmd_run` already splits +
@@ -379,7 +379,7 @@ This is the site half of D3.
 
 **Files.** `sites/devserver/site.py` (add `recheck_fix`). No engine change.
 
-**Behavior to pin (§2.5, §3, D3).** Host-agnostic independent re-check: re-query
+**Behavior to pin (see spec sections "verify(run, ticket, result, site) → bool" and "The `devserver` site", D3).** Host-agnostic independent re-check: re-query
 the published diff's CI signal via the internal tool
 (`result_payload["fix"]["diff_ref"]`) and/or spin the recorded minimal repro on a
 `discover_hosts()`-chosen box at the run's `base_ref`; return whether the fix
@@ -432,19 +432,19 @@ loads all three adapters and seeds tickets; loader tests green.
 ## Slice 8 — Test doubles: `DexterMockAgent` + `DexterLocalSite`
 
 **Scope.** The two doubles that let the whole flow run without real dexter, SSH, or
-Meta (§6). Kept in the dexter sub-project's testkit area, not in production
+Meta (see "Testing (no Meta / no real dexter)" in the spec). Kept in the dexter sub-project's testkit area, not in production
 adapters.
 
 **Files.** `testkit/dexter_doubles.py` (or `testkit/dexter/…`): `DexterMockAgent`,
 `DexterLocalSite`. Register `DexterMockAgent` under a name (e.g. `dexter_mock`) via
 import side-effect so `HERMES_AGENT` can select it.
 
-**Behavior to pin (§6).**
+**Behavior to pin (see "Testing (no Meta / no real dexter)" in the spec).**
 - `DexterMockAgent(Agent)` — `build_invocation` returns a trivial argv (like
-  `MockAgent`: `["true"]`); `parse_result` returns a **§2.3-shaped payload**
+  `MockAgent`: `["true"]`); `parse_result` returns a **result_schema-shaped payload**
   selected per ticket/goal from a scenario map (decoupled from the
   schema-constrained ticket payload — the stock `MockAgent` only echoes the payload
-  and cannot emit an arbitrary §2.3 doc). Honors `payload_sha256` integrity like
+  and cannot emit an arbitrary result_schema doc). Honors `payload_sha256` integrity like
   the other agents (recompute over the RECEIVED `envelope["payload"]`;
   `contract_fail` on mismatch). `health_checks` pass.
 - **Attempt-awareness (load-bearing for the requeue→settle path).** The scenario
@@ -452,12 +452,12 @@ import side-effect so `HERMES_AGENT` can select it.
   **mirroring the stock `MockAgent._scenario_for` / `_attempt_counts`** (and the
   `FleetPlaybook._reverify_failed_once` precedent). This is required because the
   engine reuses the SAME ticket payload across a requeue, so a "fix-does-not-hold"
-  goal must emit a *does-not-hold* §2.3 doc on **attempt 1** and a *holds* doc on
+  goal must emit a *does-not-hold* result_schema doc on **attempt 1** and a *holds* doc on
   **attempt 2** (after `hermes ticket requeue`), letting attempt 2 re-verify and the
   phase settle. Fallback to a plain per-goal scenario when no `(ticket_id, attempt)`
   entry matches.
 - `DexterLocalSite(LocalSite)` — subclass adding `recheck_fix(payload) -> bool` that
-  is a **pure function of the emitted §2.3 payload** (e.g. reads a deterministic
+  is a **pure function of the emitted result_schema payload** (e.g. reads a deterministic
   marker such as `payload["fix"]["ci_status"] == "passing"` / a `root_cause`
   scenario tag) — so a *holds* doc ⇒ `True` (→ `reducing`) and a *does-not-hold* doc
   ⇒ `False` (→ `needs_human`). Keeping the verdict payload-derived (not site
@@ -466,7 +466,7 @@ import side-effect so `HERMES_AGENT` can select it.
   real git worktree + guard. Register under `dexter_local`.
 
 **Tests first (RED)** — `tests/unit/test_dexter_doubles.py`:
-- `DexterMockAgent.parse_result` yields a **valid §2.3 doc** per scenario (assert
+- `DexterMockAgent.parse_result` yields a **valid result_schema doc** per scenario (assert
   via `contracts.validate_result` against `result_schema("solve")`), incl. two
   goals sharing a `root_cause.signature` and one "fix-does-not-hold" scenario.
 - **Attempt-keying**: for the "fix-does-not-hold" ticket, attempt 1's doc yields
@@ -476,7 +476,7 @@ import side-effect so `HERMES_AGENT` can select it.
   with the dexter `verify`, a "holds" payload ⇒ True, a "does-not-hold" ⇒ False.
 - Doubles register and resolve via the agent/site registries.
 
-**DoD.** The doubles emit real §2.3 data, are attempt-aware, and drive both `verify`
+**DoD.** The doubles emit real result_schema data, are attempt-aware, and drive both `verify`
 branches on localhost; no real `claude`/SSH/Meta.
 
 ---
@@ -485,7 +485,7 @@ branches on localhost; no real `claude`/SSH/Meta.
 
 **Scope.** The end-to-end proof on `DexterLocalSite` + `DexterMockAgent` +
 `DexterPlaybook(sink=FakeSink())`, driven through the real `dispatch.master_loop`
-against a temp `HERMES_HOME`. This is the acceptance slice (spec §8).
+against a temp `HERMES_HOME`. This is the acceptance slice (see "Acceptance criteria" in the spec).
 
 **Files.** `tests/integration/test_dexter_run.py`. No production code (all prior
 slices supply it); may add a `FakeSink`-injected playbook registration helper in
@@ -501,10 +501,10 @@ fixture pattern; drive `dispatch.master_loop` in a bounded controlled loop, sett
 `needs_human` via the operator paths between cycles (mirror
 `test_fleet_scenario_single_box_run`).
 
-**Behavior to pin / assert (§4, §6, §8).**
+**Behavior to pin / assert (see spec sections "Data flow", "Testing", and "Acceptance criteria").**
 - **Fan-out.** `seed` one `solve` ticket per goal; each host runs
   `"/goal <goal> /dexter:solve"`; `record_result` writes a finding (`kind="result"`,
-  `json`=§2.3 doc) and runs `verify`.
+  `json`=result_schema doc) and runs `verify`.
 - **Cross-host dedup → one banked learning per cluster.** Two goals sharing a
   `root_cause.signature` → `reduce` yields **one** cluster reduction (canonical +
   **one** duplicate); `FakeSink` banked **exactly one** learning for that cluster;
@@ -515,20 +515,20 @@ fixture pattern; drive `dispatch.master_loop` in a bounded controlled loop, sett
 - **Human resolution.** `queue.accept_reduction` (or `hermes reduction accept`) →
   members `done`; a separate reject run → members `failed`.
 - **verify-fail blocks + requeue clears (blocked-run top-risk).** A
-  "fix-does-not-hold" goal (attempt-1 §2.3 doc ⇒ `recheck_fix` False ⇒ verify False)
+  "fix-does-not-hold" goal (attempt-1 result_schema doc ⇒ `recheck_fix` False ⇒ verify False)
   lands in `needs_human` and **blocks phase reduce** — assert concretely that while
   that ticket is `needs_human` the phase has **zero `reductions` rows** (the engine's
   `_reduce_and_advance` returns early on `nh>0`, so `_do_reduce`/`playbook.reduce`
   never runs). Then `hermes ticket requeue` (`queue.requeue_needs_human`) returns it
-  to `queued` with attempts unchanged; the attempt-2 doc (§ Slice 8 attempt-keying)
+  to `queued` with attempts unchanged; the attempt-2 doc (see Slice 8 attempt-keying)
   ⇒ `recheck_fix` True ⇒ verify True ⇒ `reducing`, letting the phase settle and the
   run reach `done`. Also assert there is **no** terminal-abandon path: with the
   ticket left in `needs_human` and never requeued, the run never leaves `running`
-  (documented accepted limitation, §9) — `requeue_needs_human` is the only exit.
+  (documented accepted limitation, see "Open items (non-blocking)" in the spec) — `requeue_needs_human` is the only exit.
 - **Run reaches done.** After every cluster is accepted, the phase settles
   (done/failed only), `is_done` → True, run `running → done`; learnings already
   banked in `reduce`.
-- **No-ship invariant (§7).** Assert both layers concretely:
+- **No-ship invariant (see "Safety" in the spec).** Assert both layers concretely:
   (a) **runtime guard** — after a host is provisioned, invoke the installed shim
   directly from the guard dir (`DexterLocalSite.guard_bin_dir(host)/git`,
   `subprocess.run([...,"push"], env with guard dir on PATH)`) and assert exit `97`
@@ -545,7 +545,7 @@ fixture pattern; drive `dispatch.master_loop` in a bounded controlled loop, sett
 `master_loop`; all through real engine writers; zero external deps; runs under
 `scripts/run_tests.sh`.
 
-**DoD.** Spec §8 acceptance criteria 1–5 pass end-to-end on localhost with no
+**DoD.** Spec "Acceptance criteria" 1–5 pass end-to-end on localhost with no
 dexter/devserver/Meta dependency; `run_tests.sh` ALL GREEN.
 
 ---
@@ -577,7 +577,7 @@ dexter/devserver/Meta dependency; `run_tests.sh` ALL GREEN.
 install in any test — `DexterLocalSite` + `DexterMockAgent` + `FakeSink` provide
 full coverage. `subprocess` is mocked in all `sites/devserver` unit tests.
 
-## Deferred (not implemented here; recorded, per spec §9)
+## Deferred (not implemented here; recorded, see "Open items (non-blocking)" in the spec)
 
 - A terminal `hermes ticket abandon <id>` engine transition for a never-
   re-verifiable `needs_human` ticket (would be an engine change; out of scope).

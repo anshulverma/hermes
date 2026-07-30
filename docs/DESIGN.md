@@ -5,7 +5,7 @@ Status: **draft**. Date: 2026-07-28.
 Hermes is a **standalone** generic engine for running **multi-agent work across a
 fleet of remote hosts** — where a "worker" is a headless AI coding agent (Claude
 Code today; Codex and others via an agent adapter). Hermes is not a Claude Code
-plugin; it *uses* an agent runtime and *exposes* thin host integrations (§4). It is
+plugin; it *uses* an agent runtime and *exposes* thin host integrations (see "Component map & repo structure"). It is
 the successor to `test-fix-harness`, redesigned to cleanly separate four concerns
 that were fused together in the original:
 
@@ -41,7 +41,7 @@ Plus two requirements added during design:
   dependency via the `local` site + a mock agent.
 - **Best use of Claude** — workers pursue tickets autonomously using high-level
   Claude Code commands as **drivers** (`/goal`, `/loop`, `/auto-research`, …).
-  See §8.
+  See "The driver model".
 
 ---
 
@@ -52,7 +52,7 @@ Plus two requirements added during design:
 - **Run** — one invocation of a playbook over a batch of tickets.
 - **Playbook** — a job-type's methodology (mechanic / rigger / medic).
 - **Driver** — the Claude Code command/skill a worker runs to pursue a ticket
-  autonomously (see §8).
+  autonomously (see "The driver model").
 - **Finding** / **Reduction** — a worker's structured result, and the master-side
   deduped/aggregated conclusion over many findings.
 - **Lease** — a claim on a scarce resource (e.g. a GPU).
@@ -101,7 +101,7 @@ crew), and let workers pursue goals via the agent's own autonomous commands.**
   `claude -p "/goal …" --permission-mode bypassPermissions`; a `codex` (or other)
   adapter targets that CLI. Selected via `HERMES_AGENT` (default `claude`). The
   agent adapter also supplies the runtime-specific health checks (`agent_ok`,
-  `auth_ok`; §7). Hermes *uses* an agent runtime — it is not a plugin *of* one.
+  `auth_ok`; see "Crew: provisioning, health, add-a-host"). Hermes *uses* an agent runtime — it is not a plugin *of* one.
 
 ### The extension interfaces (extension points)
 
@@ -115,7 +115,7 @@ class Playbook(Protocol):
     def result_schema(self, phase: str) -> dict: ...
     def driver(self, phase: str) -> Driver: ...          # which agent command/skill drives it
     def verify(self, run, ticket, result, site) -> bool: ...  # master-side independent
-                             #   re-verify of a goal_met/ok result (§3, §11): re-checks the
+                             #   re-verify of a goal_met/ok result (see "Architecture" and "Safety"): re-checks the
                              #   worker's success claim through the site (not just schema
                              #   validation). True ⇒ admit to reducing/done; False ⇒ route to
                              #   needs_human. Default True for phases with nothing to re-check.
@@ -128,16 +128,16 @@ class Site(Protocol):
     name: str
     def discover_hosts(self) -> list[str]: ...           # optional auto-enumeration
     def provision(self, host, base_ref) -> None: ...     # idempotent
-    def health(self, host, agent) -> HealthReport: ...   # §7 (delegates agent checks to `agent`)
+    def health(self, host, agent) -> HealthReport: ...   # see "Crew: provisioning, health, add-a-host" (delegates agent checks to `agent`)
     def run_worker(self, host, envelope, agent) -> Result: ...  # the remote-exec recipe (runs `agent`)
     def resource_classes(self) -> list[str]: ...         # e.g. ["cpu","gpu"]
     def submit_for_review(self, host, change) -> str: ... # returns a review URL; never lands
     def issue_source(self, query: IssueQuery) -> list[Issue]: ...  # e.g. failing-test dashboard
-    def guarantees_no_ship(self) -> bool: ...            # can this site install the no-ship guard? (§6, §11)
+    def guarantees_no_ship(self) -> bool: ...            # can this site install the no-ship guard? (see "Contracts" and "Safety")
 ```
 
 The value types the `Site` interface returns/accepts (dataclasses; `HealthReport`
-is defined in §7):
+is defined in "Crew: provisioning, health, add-a-host"):
 
 ```python
 # engine/site.py (cont.)
@@ -169,18 +169,18 @@ class Issue:                 # one item returned by Site.issue_source
 ```
 
 **`termination_reason` → `outcome` → disposition** (the mapping is total over the
-`termination_reason` enum; §5 consumes `outcome`):
+`termination_reason` enum; see "Data model" for how `outcome` is consumed):
 
-| `termination_reason` | `outcome` | Disposition (§5) |
+| `termination_reason` | `outcome` | Disposition (see "Data model") |
 |----------------------|-----------|------------------|
-| `goal_met` | `ok` | Ticket → `reducing`/`done`, **subject to master re-verify** (§11). |
+| `goal_met` | `ok` | Ticket → `reducing`/`done`, **subject to master re-verify** (see "Safety"). |
 | `contract_fail` | `driver_failed` | **Terminal, no retry** (`failed`). |
 | `driver_error` | `driver_failed` | **Terminal, no retry** (`failed`). |
 | `timeout` | `driver_failed` | **Terminal, no retry** (`failed`). A `timeout_s` blow-out is treated as a driver failure, not infra: re-running the same driver on the same input under the same budget is not expected to change the outcome, so it does **not** consume an infra retry. |
-| `transport_error` | `infra_failed` | **Retried up to 3×** (§5); the 4th → `failed`. |
+| `transport_error` | `infra_failed` | **Retried up to 3×** (see "Data model"); the 4th → `failed`. |
 
 **Master re-verify override:** an `outcome == "ok"` / `goal_met` result whose
-independent master-side re-verify (§11) **contradicts** the worker's success claim
+independent master-side re-verify (see "Safety") **contradicts** the worker's success claim
 is not admitted as done. The ticket is routed to **`needs_human`** (an integrity
 signal — the worker asserted success the master could not confirm — that warrants
 inspection rather than a silent retry). This is the only path by which an `ok`
@@ -196,7 +196,7 @@ class Agent(Protocol):
         # render the GoalEnvelope's goal + driver into a headless-CLI argv, e.g.
         # ["claude","-p","/goal …","--permission-mode","bypassPermissions"]
     def parse_result(self, raw: str, envelope: dict) -> Result: ...   # CLI output -> Result
-    def health_checks(self, host, site) -> list[Check]: ...  # agent present/version + auth (§7)
+    def health_checks(self, host, site) -> list[Check]: ...  # agent present/version + auth (see "Crew: provisioning, health, add-a-host")
 ```
 
 `Site.run_worker` executes the agent's invocation over its transport and hands the
@@ -251,7 +251,7 @@ hermes/                          # standalone repo (was: a dir in the plugins re
 
 **Two senses of "plugin", kept separate:**
 - **Agent adapter** (`agents/…`) — *what AI runs a worker* (claude, codex). Core to
-  Hermes (§3); selected via `HERMES_AGENT`.
+  Hermes (see "Architecture"); selected via `HERMES_AGENT`.
 - **Host integration** (`integrations/…`) — *how a human launches Hermes* from an
   IDE/agent. A thin wrapper over the `hermes` CLI. The Claude Code plugin is just
   one consumer; it lives in this repo and versions with the engine. The separate
@@ -294,7 +294,7 @@ additive-only migrations (ported discipline from `schema.sql`).
 
 Ticket states: `queued · dispatched · running · reducing · done · parked ·
 failed · needs_human`. **Two failure classes, resolved distinctly** by
-`Result.outcome` (§3):
+`Result.outcome` (see "Architecture"):
 
 - **Driver-reported (non-infra) failure** (`Result.outcome == "driver_failed"` —
   the driver ran to completion but its result fails `done_contract` validation, or
@@ -307,27 +307,27 @@ failed · needs_human`. **Two failure classes, resolved distinctly** by
   invariant); `attempts` increments only on this class, and the 4th infra failure
   sends the ticket to `failed`.
 
-(A host lost mid-run and reclaimed via the heartbeat/lease path — §7, §9 — is a
+(A host lost mid-run and reclaimed via the heartbeat/lease path — see "Crew: provisioning, health, add-a-host" and "Scheduling & leases" — is a
 *no-penalty requeue*, distinct from the two classes above: it does not increment
 `attempts`, since the attempt never produced a `Result`.)
 
 `failed` and `needs_human` **both** raise an attention banner (each demands human
 notice). `needs_human` is reserved for tickets a playbook's `reduce`/`is_done`
-logic or a tripped guard (§11) flags for a human decision, whereas `failed`
+logic or a tripped guard (see "Safety") flags for a human decision, whereas `failed`
 signals exhaustion of automated options. **Resolving a `needs_human` ticket:**
 when the ticket was routed there **by a reduction**, the human decision is made
-by accepting/rejecting that reduction (§10) — **accept** transitions it
+by accepting/rejecting that reduction (see "Control plane & status") — **accept** transitions it
 `needs_human → done` (the reduction's conclusion is affirmed and actioned; any
 follow-on work is seeded as *new* tickets, never by reopening this one),
 **reject** transitions it `needs_human → failed` (no automated conclusion
-remains). When the ticket was routed there by the §3 master re-verify override or
+remains). When the ticket was routed there by the master re-verify override (see "Architecture") or
 a tripped guard (no reduction to decide), an operator clears it with a control
-action (§10: `requeue` re-queues it as a fresh attempt, or the banner is
+action (see "Control plane & status": `requeue` re-queues it as a fresh attempt, or the banner is
 `ack`'d). A ticket's `needs_human` banner is an attribute of the `needs_human`
 state and clears the instant the ticket leaves it; the `failed` banner that a
-reject produces is the distinct terminal signal (ackable, §10), not the
+reject produces is the distinct terminal signal (ackable, see "Control plane & status"), not the
 `needs_human` banner re-raised. `parked` means blocked on a scarce lease
-(§9) and is re-queued automatically when a lease frees.
+(see "Scheduling & leases") and is re-queued automatically when a lease frees.
 
 Playbook-specific structure never grows the core schema — it lives as namespaced
 `findings`/`reductions` documents. This keeps the engine truly generic (goal #2).
@@ -342,24 +342,24 @@ preserved (dependency-free validator ported verbatim). Contracts are layered:
 - **Engine envelope** (fixed shell): `ticket_id, run_id, phase, resource_req,
   base_ref, payload_sha256, timeout_s, site_context, goal_envelope`. `timeout_s`
   is the single wall-clock budget for the worker run (default 3600 s, capped per
-  deployment), enforced by the transport's `timeout` wrapper (§14); it is the
+  deployment), enforced by the transport's `timeout` wrapper (see "Open questions & spikes"); it is the
   only timeout in the system.
 - **Playbook sub-schemas**: the playbook contributes the `payload` (inside the
   envelope) and the `result` schema for each phase. The engine validates both
   the envelope and the playbook sub-schemas on dispatch and on result.
-- **GoalEnvelope** (new, §8): the value of the envelope's `goal_envelope` field.
+- **GoalEnvelope** (new, see "The driver model"): the value of the envelope's `goal_envelope` field.
   Fields: `goal` (definition-of-done text, set per ticket by the playbook),
-  `driver` (a `Driver`, §8), `done_contract` (the required result schema — the
+  `driver` (a `Driver`, see "The driver model"), `done_contract` (the required result schema — the
   playbook's `result_schema(phase)`), `guardrails` — a concrete object
   `{"no_ship": bool}` (default `true`) asserting the no-ship posture the worker
-  must run under (submit-only identity + PATH shims, §11). No-ship is enforced at
+  must run under (submit-only identity + PATH shims, see "Safety"). No-ship is enforced at
   two levels: (a) **site-level capability** — the master rejects an envelope with
-  `no_ship:true` at dispatch if `not site.guarantees_no_ship()` (§3); (b)
+  `no_ship:true` at dispatch if `not site.guarantees_no_ship()` (see "Architecture"); (b)
   **per-host guarantee** — only crew members whose health probe reported
-  `guard_installed == True` are admitted (§7), and `guard_installed == False` is
-  always admission-blocking (§11), so an `no_ship:true` envelope can only ever
+  `guard_installed == True` are admitted (see "Crew: provisioning, health, add-a-host"), and `guard_installed == False` is
+  always admission-blocking (see "Safety"), so an `no_ship:true` envelope can only ever
   target a host on which the guard was proven installed. **No turn/token/$ budget lives in
-  `guardrails`:** this build has no `--max-turns` flag (§14), so the sole worker
+  `guardrails`:** this build has no `--max-turns` flag (see "Open questions & spikes"), so the sole worker
   budget is the wall-clock `timeout_s` above.
 
 A contract mismatch in either direction is a hard error (the dry-run NO-GO gate
@@ -388,7 +388,7 @@ class HealthReport:
     agent_ok: bool           # headless Claude present + correct version
     auth_ok: bool            # `claude -p ping` authenticates
     workspace_ready: bool    # checkout at base_ref, clean
-    guard_installed: bool    # no-ship shims earlier on PATH (§11)
+    guard_installed: bool    # no-ship shims earlier on PATH (see "Safety")
     resources: dict          # {"gpu": 8, "cpu": 96}
     latency_ms: int
     checks: list[Check]      # named sub-checks with pass/fail + detail
@@ -407,7 +407,7 @@ in `checks` passes. The five named booleans (`reachable`, `agent_ok`, `auth_ok`,
 `workspace_ready`, `guard_installed`) are **required, convenience mirrors** of the
 same-named `Check` entries every site must emit; a site may add further checks
 (which also gate `ok`). `guard_installed == False` is always admission-blocking
-(§11).
+(see "Safety").
 
 The daemon re-probes health on a heartbeat (default every 30 s, configurable via
 `HERMES_HEARTBEAT_S`); a member that fails a probe goes `down`, its in-flight
@@ -442,17 +442,17 @@ class Driver:
     command: str | None   # methodology driver, e.g. "/auto-research", "/mp-diagnose"
     args: dict            # command-specific
     loop: str | None      # optional /loop interval, e.g. "10m", for polling drivers
-    # NB: no turn cap here. This build has no --max-turns flag (§14), so the sole
-    # worker budget is the envelope's wall-clock timeout_s (§6); a per-phase turn
+    # NB: no turn cap here. This build has no --max-turns flag (see "Open questions & spikes"), so the sole
+    # worker budget is the envelope's wall-clock timeout_s (see "Contracts"); a per-phase turn
     # limit would be unenforceable and is deliberately omitted.
     # NB: the completion condition (`goal`) is NOT here — it is per-ticket and
-    # lives on the GoalEnvelope (§6); a Driver is per-phase and goal-agnostic.
+    # lives on the GoalEnvelope (see "Contracts"); a Driver is per-phase and goal-agnostic.
 ```
 
 So `/goal` (completion condition) and the methodology command **compose**: e.g.
 set `/goal "test X is green and a diff is published"`, then kick off with
 `/mp-diagnose`/`/ci-autopilot`. Two layers of verification result — `/goal`'s
-worker-side verifier, and hermes's independent master-side re-verify (§11) — and
+worker-side verifier, and hermes's independent master-side re-verify (see "Safety") — and
 the no-trust invariant holds.
 
 **Why:** these commands already encode disciplined, autonomous loops (diagnose →
@@ -477,7 +477,7 @@ point, configurable per deployment, and can grow without engine changes.
 
 **Confirmed drivers** available in this environment:
 
-- **Completion condition:** `/goal` (backbone; §above).
+- **Completion condition:** `/goal` (backbone; described above).
 - **Methodology loops:** `/auto-research` (experiment vs. a metric), `/divine`
   (multi-phase pipeline), `/ci-autopilot` + `/ci-patrol` (drive CI to green),
   `/mp-diagnose` + `/testx-debug` (disciplined diagnosis), `/auto-plan`
@@ -502,7 +502,7 @@ Generic resource leases (not GPU-specific): a ticket declares `resource_req`
 (a resource class the site defines, e.g. `cpu`/`gpu`); the scheduler leases a
 matching, healthy crew member. Scarce classes sit behind a semaphore; overflow
 **parks** (ported behavior). A lease carries a TTL (`ttl_s`, default 1800 s) and
-is renewed **on the same 30 s crew-health heartbeat cycle** (§7,
+is renewed **on the same 30 s crew-health heartbeat cycle** (see "Crew: provisioning, health, add-a-host",
 `HERMES_HEARTBEAT_S`) while its ticket runs — there is **no** separate lease
 timer; the daemon renews every live lease as part of each heartbeat sweep. `ttl_s`
 (1800 s) is deliberately ≫ the 30 s heartbeat so a lease survives a few missed
@@ -523,14 +523,14 @@ master or worker. GPU/RE specifics live entirely in the `meta` site's
   actions: pause/resume/stop run, add/drain/remove host,
   requeue/reprioritize/park ticket, **accept/reject reduction**
   (`POST /reductions/{id}/accept` · `POST /reductions/{id}/reject`, transitioning
-  `review_state` `pending → accepted`/`rejected` (§5) and emitting a
+  `review_state` `pending → accepted`/`rejected` (see "Data model") and emitting a
   `reduction_accepted`/`reduction_rejected` event; only a `pending` reduction is
   transitionable — an accept/reject on an `accepted`/`rejected`/`superseded`
   reduction ⇒ `409`; and accepting/rejecting a reduction that routed one or more
-  tickets to `needs_human` (§5) also transitions each such ticket out of
+  tickets to `needs_human` (see "Data model") also transitions each such ticket out of
   `needs_human` — `needs_human → done` on accept, `needs_human → failed` on
   reject — clearing that ticket's `needs_human` attention banner (the ticket is no
-  longer `needs_human`, so §5's blanket banner rule no longer applies to it; a
+  longer `needs_human`, so the "Data model" section's blanket banner rule no longer applies to it; a
   reject's resulting `failed` banner is the distinct terminal signal, not the
   cleared banner re-raised)), ack banner.
 - **Auth & binding (required — these actions are destructive and workers run
@@ -576,7 +576,7 @@ master or worker. GPU/RE specifics live entirely in the `meta` site's
   delegation interface*: it includes (a) "submit a batch of externally-created
   tickets into a run" and (b) "`events since(cursor)`" — both already needed by the
   UI — so a future **parent Hermes can drive a deputy purely as an API client**
-  with no separate protocol. See §15 and `docs/specs/federation-future.md`.
+  with no separate protocol. See "Future extension: federation" and `docs/specs/federation-future.md`.
 
 ---
 
@@ -585,11 +585,11 @@ master or worker. GPU/RE specifics live entirely in the `meta` site's
 Enforced **by construction**, not prompt trust: the site installs PATH shims that
 shadow land/push/submit-and-land on workers (ported `land_guard.sh`), workers use
 a submit-only identity, and the master re-verifies any "green"/"success" claim
-independently via `Playbook.verify(run, ticket, result, site)` (§3) — which
+independently via `Playbook.verify(run, ticket, result, site)` (see "Architecture") — which
 re-checks the claim through the site rather than trusting the worker's assertion or
 a mere schema-valid `result_ref`, and whose contradicting verdict routes the ticket
-to `needs_human` (§3). `site.submit_for_review` returns a review URL and can never land.
-`guard_installed` is a health-gate check (§7).
+to `needs_human` (see "Architecture"). `site.submit_for_review` returns a review URL and can never land.
+`guard_installed` is a health-gate check (see "Crew: provisioning, health, add-a-host").
 
 ---
 
@@ -635,7 +635,7 @@ Each sub-project gets a spec + plan under `docs/specs/`:
 6. **medic** — designed-for; stub/optional.
 
 Ordering is adjustable; the engine core must land first. Agent adapters
-(`claude` in scope; `codex` later) ship with the engine (§4).
+(`claude` in scope; `codex` later) ship with the engine (see "Component map & repo structure").
 
 ---
 
@@ -648,9 +648,9 @@ Ordering is adjustable; the engine core must land first. Agent adapters
   the correct side effects (exit 0). Design consequences now baked in:
   - Workers invoke `claude -p "/goal <condition>"` (+ methodology driver) with
     **`--permission-mode bypassPermissions`** so the agent can act freely; the
-    no-ship guard (§11) — not the permission prompt — is what keeps it safe.
+    no-ship guard (see "Safety") — not the permission prompt — is what keeps it safe.
   - **This build has no `--max-turns` flag**, so there is no turn-based limiting at
-    all; the sole worker budget is the envelope's wall-clock `timeout_s` (§6),
+    all; the sole worker budget is the envelope's wall-clock `timeout_s` (see "Contracts"),
     enforced by a `timeout` wrapper at the transport layer (ported from the
     original `run_unit.sh`). `Driver` therefore carries no `max_turns` field.
   - Fallback if a future driver can't be passed as a slash command: inline the
@@ -659,9 +659,9 @@ Ordering is adjustable; the engine core must land first. Agent adapters
 - **RESOLVED — FastAPI dependency (2026-07-28).** `server/` depends on FastAPI;
   the engine **core** (`engine/`) stays strictly stdlib-only, so a deployment
   that only needs the CLI never imports FastAPI. The dependency is isolated to
-  the control-plane server (§4, §10).
+  the control-plane server (see "Component map & repo structure" and "Control plane & status").
 - **RESOLVED — `meta` site location (2026-07-28).** The `meta` adapter ships **in
-  this repo** as the reference implementation under `sites/meta/` (§4) and
+  this repo** as the reference implementation under `sites/meta/` (see "Component map & repo structure") and
   is selected at deploy time via `HERMES_SITE=meta` (default `local`). No
   separate private location.
 
@@ -676,7 +676,7 @@ Hermes delegate a shard of tickets to deputy Hermes nodes**, each running its ow
 
 Decided shape (built only when a real trigger appears — scale beyond one root,
 multi-region/zone crews, or org boundaries):
-- **Delegation link** = the §10 control-plane API (parent is an API client of each
+- **Delegation link** = the control-plane API (see "Control plane & status"; parent is an API client of each
   deputy); **reduce** = global roll-up at the root, with opt-in associative
   pre-reduce at deputies; **leases** = local disjoint pools per deputy, with an
   opt-in parent-held global semaphore for a genuinely shared scarce pool.
@@ -685,7 +685,7 @@ multi-region/zone crews, or org boundaries):
   `queue.db`, preserving the flat invariant.
 
 **Do not build it now.** The flat design stays authoritative. Today we only adopt
-the cheap **federation-ready seams** (`federation-future.md` §14): shape the
-control-plane API as the north-bound delegation interface (§10 seam bullet), keep
+the cheap **federation-ready seams** (see "Federation-ready seams to adopt NOW" in `federation-future.md`): shape the
+control-plane API as the north-bound delegation interface (see "Control plane & status" for the seam detail), keep
 `driver.command` opaque enough that `hermes run` can be a driver, and keep every
 node's state/guard strictly per-node. Nothing else in the flat engine changes.

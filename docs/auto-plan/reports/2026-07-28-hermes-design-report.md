@@ -35,8 +35,8 @@ instability score per pass (material + gaps + pending + unresolved markers)
 | 2 | Defined `Result`, `Check`, `IssueQuery`, `Issue` types; split driver-failure (terminal) vs infra-failure (retry ×3); made `guardrails` concrete (`{no_ship}`); dropped unenforceable `max_turns`; added localhost-bind + bearer-token API auth. | NOT CONVERGED (9 material) |
 | 3 | Total `termination_reason → outcome → disposition` table (timeout ⇒ terminal); `Site.guarantees_no_ship()`; `review_state` enum; two-level no-ship enforcement; SPA token acquisition + token lifecycle; re-verify-failure ⇒ `needs_human`. | NOT CONVERGED (6 material) |
 | 4 | Added reduction accept/reject control action (REST + events + `409`) and the `reductions` read endpoint. | NOT CONVERGED (2 material) |
-| 5 | Defined `needs_human` exit transitions (accept ⇒ `done`, reject ⇒ `failed`) and reconciled the banner rule between §5 and §10. | NOT CONVERGED (2 material) |
-| 6 | Added `Playbook.verify(...)` — the interface for the master-side independent re-verify relied on by §3/§8/§11. | NOT CONVERGED (2 material) |
+| 5 | Defined `needs_human` exit transitions (accept ⇒ `done`, reject ⇒ `failed`) and reconciled the banner rule between "Data model" and "Control plane & status". | NOT CONVERGED (2 material) |
+| 6 | Added `Playbook.verify(...)` — the interface for the master-side independent re-verify relied on by "Architecture", "The driver model", and "Safety". | NOT CONVERGED (2 material) |
 | 7 | (none — clean confirmation pass) | **CONVERGED** |
 
 ## Decisions worth a human glance

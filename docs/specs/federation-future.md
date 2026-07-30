@@ -5,11 +5,11 @@ Parent: `docs/DESIGN.md`.
 
 Hermes ships **flat**: one root Hermes owns a `queue.db`, musters a `crew` of
 hosts, and dispatches `tickets`. This document specs an optional **federation**
-layer for later, so today's design can adopt a few cheap seams (§14) that keep the
+layer for later, so today's design can adopt a few cheap seams (see "Federation-ready seams to adopt NOW") that keep the
 door open without paying any distributed-systems cost now.
 
 The rule for adopting this: **don't build it until a concrete trigger appears**
-(§2). When one does, this is the design.
+(see "When to reach for it"). When one does, this is the design.
 
 ---
 
@@ -75,7 +75,7 @@ deputy.** No separate inter-node protocol is invented.
   its zone-reachable interface (not loopback), and the parent holds the deputy's
   token. Cross-node auth inherits the same rotation semantics (`--rotate-token`
   invalidates in-flight parent sessions, which reconnect). Non-loopback binding
-  carries the same trusted-network/proxy caveat already noted in DESIGN §10.
+  carries the same trusted-network/proxy caveat already noted in the "Control plane & status" section of DESIGN.
 - Deputies are **provisioned like crew** (SSH bootstrap: install Hermes, start its
   control-plane API server with `hermes serve --api` — not the `hermes serve --host`
   worker loop — health-gate on admission), then driven over the API.
@@ -86,7 +86,7 @@ A deputy advertises its **capabilities** (resource classes, zone) exactly as a
 crew member advertises resources. The parent routes a ticket to a deputy whose
 capabilities satisfy the ticket's `resource_req` (+ zone affinity), balancing
 load — i.e. the flat `claim`/routing logic applied one level up. The parent keeps
-a **delegation ledger** (§12) recording which tickets went to which deputy, plus
+a **delegation ledger** (see "Data-model additions") recording which tickets went to which deputy, plus
 that deputy's event cursor, so it can track and reclaim.
 
 ## 6. Reduce model (decided: global roll-up + optional pre-reduce)
@@ -128,7 +128,7 @@ that deputy's event cursor, so it can track and reclaim.
   locally).
 - Reassignment is safe by the flat invariants: nothing auto-ships, tickets are
   idempotent (a re-dispatched ticket is just re-diagnosed/re-fixed), and the
-  delegation ledger (§12) records exactly which tickets to reclaim. A deputy that
+  delegation ledger (see "Data-model additions") records exactly which tickets to reclaim. A deputy that
   later revives finds its shard already reclaimed and drops it (fenced by a
   delegation epoch/token to avoid double-work).
 
@@ -180,7 +180,7 @@ sub-run when its `driver` runs `hermes run` locally (a worker that decomposes it
 task into its own run). That "recursion" flavor and this "federation" flavor
 compose but are separate: federation shards an existing run's tickets across
 deputies; recursion turns one ticket into a nested run. Both rely on the same
-seam (§14): a Hermes node is reachable/usable exactly like the engine itself.
+seam (see "Federation-ready seams to adopt NOW"): a Hermes node is reachable/usable exactly like the engine itself.
 
 ## 14. Federation-ready seams to adopt NOW (cheap; keep the door open)
 
@@ -189,7 +189,7 @@ These cost a note today and avoid a rewrite later. Adopt them in the flat build:
 1. **Shape the control-plane API (sub-project 3) as the north-bound delegation
    API too.** Ensure it includes (a) "submit a batch of externally-created tickets
    into a run" and (b) "`events since(cursor)`" — both already needed by the UI —
-   so a future parent can be a plain API client. Recorded in DESIGN §10.
+   so a future parent can be a plain API client. Recorded in the "Control plane & status" section of DESIGN.
 2. **Keep `driver.command` opaque enough that `hermes run` can be a driver.**
    Already true in the flat `Driver`/`/goal` model; just reserve that a ticket's
    result may summarize a nested run.
@@ -204,7 +204,7 @@ Nothing else in the flat engine changes for federation.
 
 - **Not built now**: `nodes`/`delegations` tables, deputy provisioning, the
   parent-as-API-client loop, global-semaphore grants, tree status roll-up. All
-  deferred until a §2 trigger.
+  deferred until a trigger appears (see "When to reach for it").
 - Open when built: cross-node clock skew handling for heartbeats/leases; back-
   pressure when a deputy's crew is saturated (park at parent vs. queue at deputy);
   whether the SPA renders one federated tree or per-node views with a switcher;

@@ -2,7 +2,7 @@
 
 Status: **draft**. Date: 2026-07-28. Parent: `docs/DESIGN.md`.
 
-This spec covers **sub-project 1** from the umbrella design's §13: the generic
+This spec covers **sub-project 1** from the umbrella design's "Decomposition & sequencing" section: the generic
 engine, its `local` reference site, the `testkit` mock agent, and the full
 unit + integration test suite. It deliberately **excludes** the FastAPI server
 and React SPA (sub-project 3), the `mechanic`/`rigger` playbooks (sub-projects
@@ -36,7 +36,7 @@ model are defined in `DESIGN.md`; this spec makes them implementation-ready.
 - Real playbooks, the `meta` site, and non-`claude` agent adapters (e.g. `codex`).
 
 **Non-goals**
-- No auto-landing, ever (enforced by construction; see §11).
+- No auto-landing, ever (enforced by construction; see "Safety (no-ship, by construction)").
 - Engine core imports no third-party package at runtime (dev/test may use pytest).
 
 ---
@@ -48,7 +48,7 @@ engine/
   __init__.py
   config.py        # HERMES_HOME / HERMES_SITE / HERMES_AGENT resolution, env vars, defaults
   db/
-    schema.sql     # DDL (§4)
+    schema.sql     # DDL (see "Database schema (DDL)")
     migrate.py     # idempotent additive migration runner + connect()
   models.py        # dataclasses: Ticket, Result, HealthReport, Check, Driver,
                    #   GoalEnvelope, Reduction, IssueQuery, Issue, Lease, CrewMember
@@ -88,12 +88,12 @@ and the agent adapters spawns subprocesses.
 
 ```
 $HERMES_HOME/
-  queue.db                 # SQLite, WAL, mode 0600 (§4)
+  queue.db                 # SQLite, WAL, mode 0600 (see "Database schema (DDL)")
   api_token                # bearer token (created by `hermes serve --api`, sub-project 3; not engine-core)
   logs/                    # serve loop logs
   tickets/<ticket_id>/
-    envelope.json          # dispatched GoalEnvelope (§6)
-    result.json            # worker result (§6)
+    envelope.json          # dispatched GoalEnvelope (see "Contracts & envelopes")
+    result.json            # worker result (see "Contracts & envelopes")
     evidence.*             # optional durable evidence pulled back from a worker
 ```
 
@@ -126,7 +126,7 @@ CREATE TABLE tickets (
   id           TEXT PRIMARY KEY,         -- <run_id>/t-<n>
   run_id       TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
   phase        TEXT NOT NULL,
-  state        TEXT NOT NULL             -- see §5 state machine
+  state        TEXT NOT NULL             -- see "Ticket state machine"
               CHECK(state IN ('queued','dispatched','running','reducing',
                               'done','parked','failed','needs_human')),
   resource_req TEXT NOT NULL DEFAULT 'cpu',
@@ -136,9 +136,9 @@ CREATE TABLE tickets (
   lease_id     TEXT,
   worker_host  TEXT,
   reduction_id INTEGER REFERENCES reductions(id), -- reduction that routed this
-                                                --   ticket to needs_human (§5, §9);
+                                                --   ticket to needs_human (see "Ticket state machine" and "Queue, dispatch, leases, crew, drivers");
                                                 --   INTEGER to match reductions.id
-                                                --   (FK + §9 lookup require same type)
+                                                --   (FK + "Queue, dispatch, leases, crew, drivers" lookup require same type)
   tried_hosts  TEXT NOT NULL DEFAULT '[]',      -- JSON array
   payload_json TEXT NOT NULL DEFAULT '{}',      -- playbook payload for this phase
   created_at   REAL NOT NULL, updated_at REAL NOT NULL
@@ -149,7 +149,7 @@ CREATE TABLE attempts (                          -- append-only audit
   ticket_id     TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
   phase         TEXT NOT NULL, host TEXT NOT NULL, attempt INTEGER NOT NULL,
   started_at    REAL, ended_at REAL,
-  outcome       TEXT,   -- ok|driver_failed|infra_failed  (see §6 Result)
+  outcome       TEXT,   -- ok|driver_failed|infra_failed  (see "Contracts & envelopes" Result)
   termination_reason TEXT, -- goal_met|contract_fail|driver_error|timeout|transport_error
   result_ref    TEXT, error_summary TEXT
 );
@@ -189,7 +189,7 @@ CREATE TABLE leases (
   expires_at    REAL NOT NULL
 );
 
-CREATE TABLE events (                             -- append-only feed (§7)
+CREATE TABLE events (                             -- append-only feed (see "Events")
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   ts        REAL NOT NULL, kind TEXT NOT NULL,
   run_id    TEXT, ticket_id TEXT, host TEXT,
@@ -209,7 +209,7 @@ CREATE INDEX idx_findings_run ON findings(run_id);
 
 ## 5. Ticket state machine
 
-States and their entry/exit (authoritative; mirrors `DESIGN.md` §5):
+States and their entry/exit (authoritative; mirrors the "Data model" section of the design doc):
 
 ```
 queued ──claim──▶ dispatched ──worker starts──▶ running
@@ -236,7 +236,7 @@ needs_human ──operator requeue──▶ queued  (re-verify/guard-routed tick
   attention-banner event; the banner is an attribute of the state and clears when
   the ticket leaves it.
 
-**Run state machine** (`runs.state`, resolving the umbrella §14 deferral):
+**Run state machine** (`runs.state`, resolving the umbrella "Open questions & spikes" deferral):
 
 ```
 running ──playbook.is_done(run)==True──▶ done          (all work complete)
@@ -252,7 +252,7 @@ running|paused ──control: stop──▶ stopped              (terminal)
   `stopped` are terminal.
 - `pause`/`resume`/`stop` are **control actions**, each applied by the engine
   callable `queue.set_run_state(conn, run_id, target, now)` (the single function
-  that mutates `runs.state`; §9). All three have a CLI surface in this sub-project
+  that mutates `runs.state`; see "Queue, dispatch, leases, crew, drivers"). All three have a CLI surface in this sub-project
   via `hermes run {pause|resume|stop} <run_id>` (`hermes run <playbook>` starts a
   run); the server sub-project 3 additionally exposes them over HTTP. The engine
   must honor all three states regardless of caller. `set_run_state` is the single
@@ -297,7 +297,7 @@ integrity — a mismatch on the worker side is a `contract_fail`.
 **GoalEnvelope** (value of `goal_envelope`): `{ "goal": str,
 "driver": {"command": str|null, "args": obj, "loop": str|null}, "done_contract": obj,
 "guardrails": {"no_ship": bool} }`. `done_contract` is the required result schema
-(the playbook's `result_schema(phase)`, per DESIGN §6); `driver.loop` is the
+(the playbook's `result_schema(phase)`, per the "Contracts" section of the design doc); `driver.loop` is the
 optional `/loop` interval for polling-style drivers (null otherwise);
 `guardrails.no_ship` defaults `true`.
 
@@ -310,7 +310,7 @@ optional `/loop` interval for polling-style drivers (null otherwise);
 "payload": <playbook doc> }`. `started_at`/`ended_at` are epoch seconds set by
 the site's `run_worker`; `started_at`, `ended_at`, `outcome`,
 `termination_reason`, `result_ref`, and `error_summary` are what `record_result`
-persists into the `attempts` audit row (§4). The `payload` sub-doc is validated
+persists into the `attempts` audit row (see "Database schema (DDL)"). The `payload` sub-doc is validated
 against `result_schema(phase)` only when `outcome=="ok"`.
 
 `timeout_s` is the **single** wall-clock budget (default 3600; per-deployment
@@ -387,7 +387,7 @@ over it, and returns `agent.parse_result(...)`.
 resources: dict, latency_ms: int, checks: list[Check]}`; `ok` is True iff every
 `Check` passed. `Check{name, ok, detail}`. The site contributes the transport /
 workspace / guard / resource checks; `agent_ok` + `auth_ok` come from the agent
-adapter's `health_checks` (§below). `Result` as in §6. Per DESIGN §3:
+adapter's `health_checks` (see "Agent" below). `Result` as in "Contracts & envelopes". Per the "Architecture — extension axes + drivers" section of the design doc:
 `IssueQuery{kind: str, filters: dict={}, limit: int=100}`;
 `Issue{id: str, kind: str, title: str, ref: str, data: dict}` (`kind` echoes the
 query's `kind`, `ref` is a URL/path back to the source of record).
@@ -434,39 +434,39 @@ filters (test/demo source).
   run is `running`, whose `resource_req` the host serves, and whose
   `available_at<=now`, sets `dispatched` +
   `worker_host` + appends `tried_hosts`; `record_result(conn, ticket, host,
-  result, now, playbook, site)` applies the §5 transitions — for an
+  result, now, playbook, site)` applies the "Ticket state machine" transitions — for an
   `outcome==ok` result it evaluates `playbook.verify(run, ticket, result, site)`
   (the `run` snapshot loaded from the ticket's `run_id`) and routes
-  `running → reducing` on True or `running → needs_human` on False (the §3 master
+  `running → reducing` on True or `running → needs_human` on False (the "Runtime data layout" master
   re-verify override) — appends an `attempts` row, stores the
   playbook payload into `findings`, and emits events; `requeue` (penalty, infra
   retry) / `requeue_transport` (no-penalty, transport/host-lost) implement the two
   `running→queued` paths, and **each releases the ticket's held lease** as it leaves
-  `running` (§leases below), so a scarce class frees immediately instead of after a
+  `running` (see leases below), so a scarce class frees immediately instead of after a
   full backoff/TTL.
   `park_ticket(conn, ticket, now)` handles the no-lease overflow: it reverts a
   just-claimed ticket `dispatched → parked` (clears `worker_host`, drops the host it
   just appended to `tried_hosts` since nothing executed, no attempt penalty) and
   emits `ticket_parked`; `unpark_ready(conn, resource_class, now)` returns `parked`
   tickets of a class to `queued` (fresh claim, no penalty, emits `ticket_requeued`)
-  whenever that class has free capacity (per leases §above).
+  whenever that class has free capacity (per leases above).
   `set_run_state(conn, run_id, target, now)` is the **only** function that
   *transitions* `runs.state` (the initial `running` is written by the run-creation
-  insert): it applies the §5 run state machine (control edges running↔paused,
+  insert): it applies the "Ticket state machine" run state machine (control edges running↔paused,
   running|paused→stopped; automatic edges running→done, running→failed),
   raises on an illegal transition, updates `updated_at`, and emits
-  `run_paused`/`run_resumed`/`run_stopped`/`run_done`/`run_failed` (§7);
+  `run_paused`/`run_resumed`/`run_stopped`/`run_done`/`run_failed` (see "Events");
   `master_loop` reaches `done`/`failed` through it too. `accept_reduction(conn,
   reduction_id, now)` / `reject_reduction(conn, reduction_id, now)` are the **only**
   writers of `reductions.review_state` for a human decision: they transition it
   `pending → accepted` / `pending → rejected` (raising if it is not `pending`,
   since `accepted`/`rejected`/`superseded` are already resolved), and, for **every**
   ticket the reduction routed to `needs_human` (`tickets.reduction_id ==
-  reduction_id`, §4, still in state `needs_human`), transition that ticket
+  reduction_id`, see "Database schema (DDL)", still in state `needs_human`), transition that ticket
   `needs_human → done` on accept / `needs_human → failed` on reject, clearing its
   attention banner and emitting `reduction_accepted`/`reduction_rejected` plus the
   per-ticket transition events. `requeue_needs_human(conn, ticket_id, now)` is the
-  **operator requeue** path for a `needs_human` ticket that was routed by the §3
+  **operator requeue** path for a `needs_human` ticket that was routed by the "Runtime data layout"
   master re-verify override or a tripped guard (no reduction to decide): it
   transitions `needs_human → queued` as a fresh attempt (no `attempts` penalty) and
   emits `ticket_requeued`.
@@ -476,7 +476,7 @@ filters (test/demo source).
   the sum of `resources_json[resource_class]` over crew members currently `idle`/
   `busy` (the per-host counts a site reports in `HealthReport.resources`, e.g.
   LocalSite `cpu` = `os.cpu_count()`): `resource_classes()` names the classes, the
-  crew rows supply their counts (DESIGN §9 "class name + count + semaphore").
+  crew rows supply their counts (see the "Scheduling & leases" section of the design doc — "class name + count + semaphore").
   `release(conn, lease, now)` frees a lease; the ticket's lease is released on
   **every** exit from `running`, not just the terminal/reducing ones, so a scarce
   class is returned to the pool immediately rather than lingering a full TTL/backoff:
@@ -497,9 +497,9 @@ filters (test/demo source).
   class that regained capacity (`queue.unpark_ready`); `drain`/`remove`.
 - **drivers.py** — the runtime-agnostic **Driver model** (methodology `command`,
   `args`, `loop`; the per-ticket completion condition `goal` is **not** here — it
-  lives on the GoalEnvelope, §6). It carries **no** CLI specifics: turning a
+  lives on the GoalEnvelope, see "Contracts & envelopes"). It carries **no** CLI specifics: turning a
   Driver + envelope into a concrete headless invocation and parsing the output is
-  the **agent adapter's** job (`agent.build_invocation` / `agent.parse_result`, §8).
+  the **agent adapter's** job (`agent.build_invocation` / `agent.parse_result`, see "Interfaces").
   `timeout_s` is enforced by the transport's `timeout` wrapper (no `--max-turns`).
 - **transport.py** — `local_transport(envelope, host, agent)` runs the worker on
   this box; `ssh_transport(host)` scp envelope + ssh run + scp result/evidence back;
@@ -510,15 +510,15 @@ filters (test/demo source).
   envelope/validation errors ⇒ requeue with penalty, transport errors ⇒ requeue
   without penalty (host→down). When building the envelope it **computes**
   `payload_sha256` as the SHA-256 hex digest of the payload's canonical
-  (sorted-key, no-whitespace) JSON encoding (§6) and stamps it into the envelope;
+  (sorted-key, no-whitespace) JSON encoding (see "Contracts & envelopes") and stamps it into the envelope;
   the agent adapter (`MockAgent` in tests, `ClaudeAgent` in production) **recomputes**
   the digest over the received `payload` and, on mismatch, returns a Result with
-  `outcome=driver_failed` / `termination_reason=contract_fail` (§6) — no retry.
+  `outcome=driver_failed` / `termination_reason=contract_fail` (see "Contracts & envelopes") — no retry.
 - **dispatch.py** — `serve_loop(conn, site, host)` repeatedly calls
   `serve_once_for_host`; `master_loop(conn, run, playbook, site)` runs the
   heartbeat sweep (health re-probe, down-requeue, lease renew/reclaim) **every
   cycle regardless of run state**, but performs **all run progression only while
-  `run.state == running`** (§5 pause freeze): while a run is
+  `run.state == running`** (see "Ticket state machine" pause freeze): while a run is
   `paused`/`stopped`/`done`/`failed` it does no `reduce`, no phase advancement, no
   `seed`, and no automatic run→`done`/run→`failed` transition, and a resumed run
   picks progression back up on the next cycle. When `running`, it drives phase
@@ -559,18 +559,18 @@ filters (test/demo source).
   every host served **in-process** (the `local` site's single box) it **also
   starts an in-process `serve_loop` per such host**, so a single
   `hermes run --site local` without `--dry-run` actually claims and executes
-  tickets and drives the run to a terminal state (AC2, §13); on a distributed
+  tickets and drives the run to a terminal state (AC2, see "Acceptance criteria"); on a distributed
   site, remote worker boxes run their own `hermes serve --host` (below) instead.
 - `hermes run {pause|resume|stop} <run_id>` — apply a run control action via
-  `queue.set_run_state` (§5, §9); prints the resulting `runs.state` and errors on
+  `queue.set_run_state` (see "Ticket state machine" and "Queue, dispatch, leases, crew, drivers"); prints the resulting `runs.state` and errors on
   an illegal transition (e.g. resume of a terminal run).
 - `hermes reduction {accept|reject} <reduction_id>` — apply the human decision via
-  `queue.accept_reduction`/`reject_reduction` (§9): transitions the reduction
+  `queue.accept_reduction`/`reject_reduction` (see "Queue, dispatch, leases, crew, drivers"): transitions the reduction
   `pending → accepted`/`rejected` and settles every ticket it routed to
   `needs_human` (`→ done` on accept, `→ failed` on reject). Errors (no-op) if the
   reduction is not `pending`.
 - `hermes ticket requeue <ticket_id>` — operator requeue of a re-verify/guard-routed
-  `needs_human` ticket via `queue.requeue_needs_human` (§9): `needs_human → queued`
+  `needs_human` ticket via `queue.requeue_needs_human` (see "Queue, dispatch, leases, crew, drivers"): `needs_human → queued`
   as a fresh attempt (no `attempts` penalty).
 - `hermes serve --host <h> --site <site>` — run one host's serve loop (used on a
   worker box / by `add_worker`).
@@ -605,7 +605,7 @@ reports + estimates without dispatching.
 - **`testkit/mock_agent.py`** — a fake agent adapter invoked by `LocalSite.run_worker`
   in tests (selected via `HERMES_AGENT=mock`): reads `envelope.json`,
   **recomputes `payload_sha256` over the received `payload` and returns
-  `contract_fail` on mismatch** (§6), otherwise per a scenario table writes a
+  `contract_fail` on mismatch** (see "Contracts & envelopes"), otherwise per a scenario table writes a
   deterministic `result.json` (ok / contract_fail / driver_error / timeout /
   infra_failed). Lets integration tests exercise the full pipeline with **no real
   `claude`, no SSH, no Meta**.
@@ -614,13 +614,13 @@ reports + estimates without dispatching.
   `["work","reduce"]`, trivial payload/result schemas, `seed` from a canned issue
   file, `reduce` that clusters findings by a field and — when `run.config`
   requests it — returns a reduction carrying `needs_human_ticket_ids` (to exercise
-  the reduce→needs_human→accept/reject path, §5/§9), `verify` returning True by
+  the reduce→needs_human→accept/reject path, see "Ticket state machine" and "Queue, dispatch, leases, crew, drivers"), `verify` returning True by
   default (and False under a config flag, to exercise the re-verify→needs_human→
   operator-requeue path).
 
 **Unit tests** (pytest) — one module each: migrations idempotency; contract
 validator (accept/reject incl. `additionalProperties`); ticket state-machine
-transitions (table-driven over §5, incl. retry cap + backoff + no-penalty transport
+transitions (table-driven over "Ticket state machine", incl. retry cap + backoff + no-penalty transport
 path); run state-machine transitions via `set_run_state` (control + terminal edges,
 illegal edge raises); reduction resolution (`accept_reduction`/`reject_reduction`
 settling a linked `needs_human` ticket, `requeue_needs_human` → `queued`);
@@ -662,4 +662,4 @@ accept/reject path. A "dry-run" GO/NO-GO test asserts a contract mismatch aborts
   the claim test asserts no double-claim under threads. Multi-process serve loops
   on one box are supported via row-level `dispatched` marking.
 - `run.state` transitions (running/paused/stopped/done/failed) and stopped-run
-  dispatch halting are specified in §4/§5 here (resolving the umbrella deferral).
+  dispatch halting are specified in "Database schema (DDL)" and "Ticket state machine" here (resolving the umbrella deferral).

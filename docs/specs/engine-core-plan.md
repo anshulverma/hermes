@@ -36,7 +36,7 @@ networked-mount path with a clear error.
 
 ## Slice 1 — DB schema + migrations
 
-**Deliverables** — `db/schema.sql` (§4 DDL), `db/migrate.py`
+**Deliverables** — `db/schema.sql` (see spec "Database schema (DDL)"), `db/migrate.py`
 (`apply_migrations(path)` idempotent, `connect(path)` with PRAGMAs + 0600).
 
 **Tests** — apply on empty file creates all tables + indexes; re-apply is a
@@ -48,7 +48,7 @@ no-op; `schema_migrations` records versions; file mode is 0600; WAL enabled.
 
 ## Slice 2 — Models + contracts
 
-**Deliverables** — `models.py` (dataclasses from §8/§6: `Run, Ticket, Attempt,
+**Deliverables** — `models.py` (dataclasses from spec "Interfaces" and "Contracts & envelopes": `Run, Ticket, Attempt,
 Result, HealthReport, Check, Driver, GoalEnvelope, Reduction, Finding, IssueQuery,
 Issue, Lease, CrewMember`); `contracts.py` (validator + `DISPATCH_ENVELOPE`,
 `GOAL_ENVELOPE`, `RESULT_OUTER` schemas + `validate_envelope`, `validate_result`).
@@ -58,14 +58,14 @@ unexpected key (`additionalProperties:false`), bad enum, nested `items`; envelop
 + result layering (outer + playbook sub-schema) accept/reject; `ContractError`
 carries a JSON path.
 
-**Acceptance** — spec §6 contract behavior fully covered; malformed docs raise
+**Acceptance** — spec "Contracts & envelopes" behavior fully covered; malformed docs raise
 `ContractError`, never pass.
 
 ---
 
 ## Slice 3 — Events
 
-**Deliverables** — `events.py` (`emit`, `since`, `tail`; the §7 `kind` set).
+**Deliverables** — `events.py` (`emit`, `since`, `tail`; the spec "Events" `kind` set).
 
 **Tests** — `emit` appends; `since(after_id)` returns ordered rows > id; `tail(n)`
 returns last n; `data` round-trips JSON.
@@ -104,9 +104,9 @@ produces each Result outcome deterministically.
 ## Slice 5 — Queue + state machine
 
 **Deliverables** — `queue.py` (`seed_tickets`, `claim_ticket` with
-`BEGIN IMMEDIATE`, `record_result` applying every §5 transition + `attempts` row +
+`BEGIN IMMEDIATE`, `record_result` applying every "Ticket state machine" transition + `attempts` row +
 `findings` insert + events, `requeue`/`requeue_transport`; `set_run_state` — the
-sole `runs.state` transitioner, applying the §5 run edges (running↔paused,
+sole `runs.state` transitioner, applying the "Ticket state machine" run edges (running↔paused,
 running|paused→stopped, running→done, running→failed) and raising on an illegal
 one; `accept_reduction`/`reject_reduction` — transition a `pending` reduction and
 settle each `needs_human` ticket it routed (`reduction_id` link) to `done`/`failed`;
@@ -114,7 +114,7 @@ settle each `needs_human` ticket it routed (`reduction_id` link) to `done`/`fail
 ticket back to `queued` with no `attempts` penalty; `park_ticket` — revert a
 just-claimed ticket `dispatched → parked` when its class is at capacity, no penalty).
 
-**Tests** (table-driven over §5) — each **ticket** transition: ok+verify
+**Tests** (table-driven over spec "Ticket state machine") — each **ticket** transition: ok+verify
 True→reducing; ok+verify False→needs_human; driver_failed→failed; infra_failed retry then
 cap→failed with backoff; transport→queued no penalty; concurrent `claim_ticket`
 from N threads yields N distinct tickets (atomicity); `tried_hosts` accumulates.
@@ -128,7 +128,7 @@ ticket, `accept_reduction`→ reduction `accepted` + ticket `done`;
 non-`pending` reduction raises; `requeue_needs_human`→ ticket `needs_human→queued`
 with unchanged `attempts`.
 
-**Acceptance** — every §5 ticket **and** run edge exercised, incl. reduction
+**Acceptance** — every spec "Ticket state machine" ticket **and** run edge exercised, incl. reduction
 accept/reject/requeue of `needs_human`; no double-claim under concurrency.
 
 ---
@@ -165,7 +165,7 @@ specifics); `agents/claude/agent.py` (`ClaudeAgent(Agent)`: `build_invocation` �
 `driver.command`; `parse_result`; `health_checks`); `transport.py`
 (`local_transport`, `ssh_transport`, `serve_once_for_host` — computes
 `payload_sha256` over the payload's canonical JSON and stamps it into the envelope,
-§6); wire `LocalSite.run_worker` to execute the run's configured `agent` over
+see spec "Contracts & envelopes"); wire `LocalSite.run_worker` to execute the run's configured `agent` over
 `local_transport` (`ClaudeAgent` by default, `MockAgent` when `HERMES_AGENT=mock`);
 the agent adapter recomputes `payload_sha256` and returns `contract_fail` on
 mismatch.
@@ -193,7 +193,7 @@ a `payload_sha256` mismatch is caught as `contract_fail`.
 **Deliverables** — `crew.py` (`add` = provision+health-gate, `list`, `drain`,
 `remove`, `heartbeat_sweep` =
 re-probe/update/down-requeue/renew/reclaim/re-admit/un-park — the un-park step
-calls `queue.unpark_ready` for any class that regained capacity, §9 spec).
+calls `queue.unpark_ready` for any class that regained capacity, see spec "Queue, dispatch, leases, crew, drivers").
 
 **Tests** — `add` admits a healthy host, rejects an unhealthy one listing failing
 checks; `heartbeat_sweep` marks a now-unreachable host `down` and requeues its
@@ -203,7 +203,7 @@ tickets waiting on that host's capacity** (a class parked while the host was `do
 returns to `queued` via `queue.unpark_ready` on the sweep that re-admits it), even
 when no lease expired.
 
-**Acceptance** — spec §7 health-gating + heartbeat behavior covered.
+**Acceptance** — spec "Crew: provisioning, health, add-a-host" health-gating + heartbeat behavior covered.
 
 ---
 
@@ -240,11 +240,11 @@ with zero Meta/SSH/real-claude dependency.
 ## Slice 10 — CLI
 
 **Deliverables** — `cli.py` + `commands/` (`run`, `run {pause|resume|stop}`,
-`reduction {accept|reject}`, `ticket requeue`, `serve --host` (worker loop, §10 —
+`reduction {accept|reject}`, `ticket requeue`, `serve --host` (worker loop, see spec "CLI (`hermes`)" —
 **not** `serve --api`, which is sub-project 3), `crew`, `status`, `show`,
 `--dry-run`), console entrypoint `hermes`; the control/reduction/requeue
 subcommands are thin wrappers over `queue.set_run_state`/`accept_reduction`/
-`reject_reduction`/`requeue_needs_human` (§9/§10).
+`reject_reduction`/`requeue_needs_human` (see spec "Queue, dispatch, leases, crew, drivers" and "CLI (`hermes`)").
 
 **Tests** — `run --dry-run` seeds+reports, no dispatch; `run` (local) reaches a
 terminal run; `run pause`/`resume`/`stop` change `runs.state` and `run resume` of a
@@ -254,7 +254,7 @@ returns a `needs_human` ticket to `queued`; `crew add` prints health +
 admits/refuses; `status` renders run/ticket/crew/lease/attention from `queue.db`;
 `show` prints envelope/result/attempts.
 
-**Acceptance** — spec §10 commands work against a temp `HERMES_HOME`.
+**Acceptance** — spec "CLI (`hermes`)" commands work against a temp `HERMES_HOME`.
 
 ---
 
@@ -267,7 +267,7 @@ scan); `queue.db` refuses a networked mount; 0600 enforced; attention events fir
 on `parked_ratio>0.5` / `all_crew_down` / `no_progress>1800s`; `verify=False`
 routes to `needs_human` end-to-end.
 
-**Acceptance** — all spec §13 acceptance criteria pass; `run_tests.sh` ALL GREEN.
+**Acceptance** — all spec "Acceptance criteria" pass; `run_tests.sh` ALL GREEN.
 
 ---
 

@@ -23,32 +23,32 @@ command is **`/dexter:solve`**.
 ## 1. Scope
 
 **In scope**
-- `playbooks/dexter/` — a `Playbook` (§8 of engine-core) implementing seed, the
+- `playbooks/dexter/` — a `Playbook` (see the "Interfaces" section of the engine-core spec) implementing seed, the
   solve-phase payload/result schemas, the `/dexter:solve` driver, the cross-host
-  `reduce` (cluster + best-effort bank via an injected `LearningSink`, §5),
-  independent `verify` (shape gate + duck-typed `recheck_fix`, §2.5), and
+  `reduce` (cluster + best-effort bank via an injected `LearningSink`, see "Learning-sink coupling (master side)"),
+  independent `verify` (shape gate + duck-typed `recheck_fix`, see "verify(run, ticket, result, site) → bool"), and
   definition-of-done. Uses the existing `claude` agent unchanged.
-- `sites/devserver/` — a `Site` (§8 of engine-core) with the exact `engine/site.py`
+- `sites/devserver/` — a `Site` (see the "Interfaces" section of the engine-core spec) with the exact `engine/site.py`
   signatures: SSH reach + idempotent provision (checkout, ensure `claude`+`dexter`
   installed, install no-ship guard), structured health, SSH transport with the
   guard dir prepended to the remote `PATH`, `cpu` resource class,
   `guarantees_no_ship`, optional `issue_source`, and the `recheck_fix` extension
   (delta D3).
-- Three small engine-side deltas (§1a): **D1** `--goals FILE`, **D2** adapter
+- Three small engine-side deltas (see "Engine deltas this sub-project requires"): **D1** `--goals FILE`, **D2** adapter
   registration in the CLI loader, **D3** the `recheck_fix` site extension.
 - Tests (unit + integration) that run the whole flow on a **`DexterLocalSite` +
-  `DexterMockAgent`** emitting dexter-shaped §2.3 results (§6) — no real dexter,
+  `DexterMockAgent`** emitting dexter-shaped "result_schema" results (see "Testing") — no real dexter,
   devservers, SSH, or Meta needed.
 
 **Out of scope**
 - The full `meta` site (buck2/testinfra as site methods) — dexter uses native
   box tooling, so it is unnecessary here.
-- Auto-landing (forbidden by construction; §7). Human lands after review.
+- Auto-landing (forbidden by construction; see "Safety"). Human lands after review.
 - The `mechanic`/`rigger` playbooks.
 
 **Runtime prerequisite (master side).** The Hermes master running this playbook
 needs the `dexter` plugin present so `reduce` can bank learnings via dexter's
-`kb.py`, and an `INVESTIGATIONS_DIR` to write to (§5). This coupling is acceptable
+`kb.py`, and an `INVESTIGATIONS_DIR` to write to (see "Learning-sink coupling (master side)"). This coupling is acceptable
 because the playbook is dexter-specific.
 
 ---
@@ -63,7 +63,7 @@ explicit delta so nothing is assumed:
 - **D1 — `hermes run … --goals FILE` (CLI + run.config seam).** `engine/cli.py`
   `cmd_run` hardcodes `run_config = {}`; there is no way to pass goals into a run.
   Add a `--goals PATH` argument to the `run` subparser and populate
-  `run_config["goals"]` (§2.1a). Nothing else in the engine changes — `seed`
+  `run_config["goals"]` (see "`--goals FILE` format + semantics (delta D1)"). Nothing else in the engine changes — `seed`
   reads `run.config`, which the queue already round-trips through `runs.config_json`.
 - **D2 — register the dexter adapters in the CLI loader.** `_load_playbook_site_agent`
   imports only `testkit.*` + `sites.local.site` and has a `# TODO: import
@@ -73,7 +73,7 @@ explicit delta so nothing is assumed:
 - **D3 — a devserver-site fix-recheck extension method (NOT core `Site`).** The
   core `Site` protocol has no primitive to re-run a repro or query a diff's CI
   signal, so `verify` cannot re-check a fix through the *generic* protocol. The
-  `devserver` site adds one **site-specific** method (`recheck_fix`, §2.5) that the
+  `devserver` site adds one **site-specific** method (`recheck_fix`, see "verify(run, ticket, result, site) → bool") that the
   dexter `verify` calls by duck-typing; when absent the playbook fails safe
   (returns `False` → `needs_human`). This keeps the core protocol untouched
   (DESIGN goal #6: Meta-internal specifics are deploy-time pluggable) and is the
@@ -109,7 +109,7 @@ control-plane API, or a test — is the source of truth):
 
 - **Explicit list** — `run.config["goals"]`. Accept both shapes: a `list[str]`
   (inline, e.g. from the API) used directly, or a `str` path to a file read with
-  the §2.1a format. The CLI delta D1 writes a `list[str]`.
+  the "`--goals FILE` format + semantics" format. The CLI delta D1 writes a `list[str]`.
 - **issue_source** — if `run.config.get("issue_query")` is set, call
   `site.issue_source(IssueQuery(**run.config["issue_query"]))`; each returned
   `Issue` becomes a goal (`goal = issue.title`, `issue_ref = issue.ref`, priority
@@ -120,7 +120,7 @@ Each `Ticket` is constructed with the exact `engine/models.py` fields:
 `id=f"{run.id}/solve-{i}"`, `run_id=run.id`, `phase="solve"`, `state="queued"`,
 `resource_req="cpu"`, `priority` (float, from the issue else `0.0`), `attempts=0`,
 `payload={"goal": <the investigation goal restated as a completion condition,
-§2.4>, "issue_ref": <str|null>, "context": <object>}`. There is **no** `goal`
+see "driver(solve) → Driver">, "issue_ref": <str|null>, "context": <object>}`. There is **no** `goal`
 field on `Ticket`; the goal lives in `payload["goal"]`, which
 `transport._build_envelope` lifts to `goal_envelope.goal` (it reads
 `payload.get("goal")`).
@@ -165,12 +165,12 @@ contract handed to the worker. **Important engine reality:** the master does
 `contracts.validate_result` exists but is called **only in tests** — no dispatch,
 queue, or agent code invokes it. `ClaudeAgent.parse_result` maps the worker's
 emitted JSON doc to a `Result`, taking `payload = doc["payload"]` on `outcome=="ok"`
-with **no** schema check. Therefore the §2.3 shape is enforced by the dexter
-`verify` (§2.5), which calls `contracts.validate_result(result_dict,
+with **no** schema check. Therefore the result_schema shape is enforced by the dexter
+`verify` (see "verify(run, ticket, result, site) → bool"), which calls `contracts.validate_result(result_dict,
 result_schema("solve"))` and fails a malformed payload to `needs_human`.
 
 The dexter-aware result payload (`Result.payload`, which becomes the `Finding.json`
-— see §2.6) that `/dexter:solve` must emit:
+— see "reduce(run, \"solve\", findings, site) → list[Reduction]") that `/dexter:solve` must emit:
 ```json
 { "type": "object",
   "required": ["reproduced", "root_cause", "fix", "knowledge_entry", "evidence_ref"],
@@ -203,7 +203,7 @@ The dexter-aware result payload (`Result.payload`, which becomes the `Finding.js
 `root_cause.signature` is the clustering key in `reduce`; it reuses dexter's own
 fingerprint so two hosts that reach the same cause collide deterministically.
 (`fix.diff_ref` replaces the earlier `diff_url` name for consistency with the
-site's `submit_for_review` return and the cluster schema in §2.6.)
+site's `submit_for_review` return and the cluster schema in "reduce(run, \"solve\", findings, site) → list[Reduction]".)
 
 ### 2.4 driver("solve") → Driver
 
@@ -223,7 +223,7 @@ the `/goal <goal>` prefix. The rendered prompt is therefore:
 ```
 
 `<goal>` = `goal_envelope.goal`, which `transport._build_envelope` lifts from
-`ticket.payload["goal"]` (§2.1). `/dexter:solve` runs and picks up the
+`ticket.payload["goal"]` (see "seed(run, site) → list[Ticket]"). `/dexter:solve` runs and picks up the
 investigation goal from the `/goal` context set in the same session.
 
 **Caveat (what actually reaches the worker):** only `payload["goal"]` is rendered
@@ -234,13 +234,13 @@ issue/site context must steer the investigation, `seed` must fold it into the
 
 The `goal` string doubles as the **completion condition**, mirroring dexter's DoD:
 *"a root cause is identified, a fix is published as a diff (not landed), the fix is
-verified, and a schema-valid knowledge entry (§2.3) is written."* dexter stops at a
-published diff; the guard blocks landing (§7). The invocation runs under
+verified, and a schema-valid knowledge entry (see "result_schema") is written."* dexter stops at a
+published diff; the guard blocks landing (see "Safety"). The invocation runs under
 `--permission-mode bypassPermissions` with no `--max-turns`; the wall-clock budget
 is `envelope["timeout_s"]` (from `run.config.get("timeout_s", 3600)`) enforced by
 the transport's `timeout` wrapper. The worker writes its result doc as JSON to
 stdout (which `serve-once` captures to `result.json`); `parse_result` reads the
-outer `Result` fields and takes the §2.3 doc as `payload`.
+outer `Result` fields and takes the result_schema doc as `payload`.
 
 ### 2.5 verify(run, ticket, result, site) → bool
 
@@ -249,19 +249,19 @@ time (not during `reduce`), on every `outcome=="ok"` result: `True` →
 `ok`-ticket transitions `running → reducing`; `False` → `running → needs_human`
 ("re-verify override", the only path by which an `ok` result does not reach
 `reducing`). The finding row is written by `record_result` **regardless** of the
-verify verdict (see §2.6 dedup consequence).
+verify verdict (see "reduce(run, \"solve\", findings, site) → list[Reduction]" dedup consequence).
 
 **What it does** (no-trust rule — do not trust `result.payload["fix"]["verified"]`):
 
 1. **Shape gate.** Reconstruct the outer result dict and call
    `contracts.validate_result(result_dict, self.result_schema("solve"))`. A payload
-   that violates §2.3 ⇒ return `False` (malformed success claim → `needs_human`).
-   This is where the §2.3 contract is actually enforced (§2.3).
+   that violates result_schema ⇒ return `False` (malformed success claim → `needs_human`).
+   This is where the result_schema contract is actually enforced (see "result_schema(solve)").
 2. **Independent fix re-check via the devserver-site extension (delta D3).** The
    core `Site` protocol (`engine/site.py`) exposes no primitive to re-run a repro
    or read a diff's CI signal, so `verify` cannot re-check through the *generic*
    protocol. It instead **duck-types** a devserver-site method
-   `recheck_fix(result_payload: dict) -> bool` (§3, D3): host-agnostic — it
+   `recheck_fix(result_payload: dict) -> bool` (see "The `devserver` site", D3): host-agnostic — it
    re-queries the published diff's CI signal (`result_payload["fix"]["diff_ref"]`)
    and/or spins the recorded minimal repro on a `discover_hosts()`-chosen box at
    `run.base_ref`, returning whether the fix independently holds. If the site does
@@ -273,22 +273,22 @@ verify verdict (see §2.6 dedup consequence).
 Return `True` iff the shape gate passes **and** the fix re-check confirms →
 `reducing`; else `False` → `needs_human` (integrity signal: dexter claimed a
 success the master could not confirm). Knowledge-entry validity is **not**
-re-checked here — the learning is validated only when banked in `reduce` (§2.6, via
+re-checked here — the learning is validated only when banked in `reduce` (see "reduce(run, \"solve\", findings, site) → list[Reduction]", via
 the injectable sink), so `verify` needs no dexter tooling on the master and the
-master's sole dexter coupling stays the single point in §5.
+master's sole dexter coupling stays the single point in "Learning-sink coupling (master side)".
 
 ### 2.6 reduce(run, "solve", findings, site) → list[Reduction]
 
 **When it runs (engine gating).** `dispatch._reduce_and_advance` reduces the
 `solve` phase **only** once it is fully settled: zero tickets in
 `queued|dispatched|running|parked` **and** zero in `needs_human`. So any
-verify-failed `needs_human` ticket (§2.5) blocks the whole phase from reducing
-until an operator clears it (§2.7). `reduce` runs exactly once per phase (guarded
+verify-failed `needs_human` ticket (see "verify(run, ticket, result, site) → bool") blocks the whole phase from reducing
+until an operator clears it (see "next_phase / is_done"). `reduce` runs exactly once per phase (guarded
 by `_phase_reduced`); it is not re-run after human accept/reject.
 
 **Finding shape (engine reality).** `record_result` inserts each `ok` result as a
 finding with **`kind="result"`** (hardcoded) and **`json` = the `Result.payload`**
-— i.e. `finding.json` *is* the §2.3 dexter doc. `queue.load_findings(run_id,
+— i.e. `finding.json` *is* the result_schema dexter doc. `queue.load_findings(run_id,
 "solve")` returns them as `Finding(run_id, ticket_id, kind, json)`, ordered by
 `findings.id` ascending. The cluster key is `finding.json["root_cause"]["signature"]`.
 
@@ -310,7 +310,7 @@ Cross-host synthesis:
    signal" to rank on) and list the **duplicates** (the other members with their
    `fix.diff_ref`).
 3. **Bank one consolidated learning** per cluster via the injectable **learning
-   sink** held on the playbook instance (`self.sink`, §5; default `DexterKbSink`
+   sink** held on the playbook instance (`self.sink`, see "Learning-sink coupling (master side)"; default `DexterKbSink`
    → dexter `kb.py` `validate` then `index` against `INVESTIGATIONS_DIR`; tests
    construct the playbook with a `FakeSink`). The sink is **best-effort**: any
    exception is caught and recorded as `learning_ref=null` +
@@ -355,20 +355,20 @@ Cross-host synthesis:
   `EchoPlaybook.is_done`, it does **not** itself inspect ticket states: the engine
   only consults `is_done` from `_reduce_and_advance` **after** the phase has fully
   settled to `done`/`failed` (no active, no `needs_human`, no `reducing`). Because
-  §2.6 routes members to `needs_human`, this settlement is reached only **after the
+  "reduce(run, \"solve\", findings, site) → list[Reduction]" routes members to `needs_human`, this settlement is reached only **after the
   human has accepted/rejected every cluster**; then `is_done` returns `True` and
   the queue transitions the run `running → done`. Learnings are already banked in
   `reduce`. (If `is_done` returned `False` here the engine would mark the run
   `failed` as "stuck", so it must return `True`.)
 
-**Blocking / operator caveat (engine reality).** A verify-failed ticket (§2.5)
+**Blocking / operator caveat (engine reality).** A verify-failed ticket (see "verify(run, ticket, result, site) → bool")
 enters `needs_human` with **no** `reduction_id` link. The only operator command
 that touches such a ticket is `hermes ticket requeue <id>`
 (`queue.requeue_needs_human` → back to `queued` for a fresh attempt);
 `reduction accept/reject` only settle reduction-linked `needs_human` tickets. There
 is **no** engine command to terminally abandon a re-verify `needs_human` ticket, so
 the phase stays blocked until that ticket is requeued and eventually reaches
-`reducing` or terminal-`failed`. This is an accepted limitation (see §9).
+`reducing` or terminal-`failed`. This is an accepted limitation (see "Open items (non-blocking)").
 
 ---
 
@@ -422,7 +422,7 @@ methods).
 
 **Extension method beyond the core protocol (delta D3):**
 - `recheck_fix(result_payload: dict) -> bool` — the independent fix re-check
-  `verify` duck-types (§2.5). Host-agnostic: re-queries the published diff's CI
+  `verify` duck-types (see "verify(run, ticket, result, site) → bool"). Host-agnostic: re-queries the published diff's CI
   signal via the internal tool (`result_payload["fix"]["diff_ref"]`) and/or spins
   the recorded minimal repro on a `discover_hosts()`-chosen box at the run's
   `base_ref`; returns whether the fix independently holds. This is **not** part of
@@ -449,8 +449,8 @@ seed ─┤ one ticket/goal (payload={goal,issue_ref,context}) ──▶ engine 
 serve ─▶ claim ticket, acquire cpu lease, devserver.run_worker over ssh:
            PATH=<guarddir>:$PATH claude -p "/goal <goal> /dexter:solve" \
              --permission-mode bypassPermissions
-         ─▶ dexter investigates → publishes diff (no land) → writes result.json (§2.3)
-record_result ─▶ writes finding(kind="result", json=payload); calls verify (§2.5):
+         ─▶ dexter investigates → publishes diff (no land) → writes result.json (result_schema)
+record_result ─▶ writes finding(kind="result", json=payload); calls verify (see "verify(run, ticket, result, site) → bool"):
                    pass ⇒ reducing;  fail ⇒ needs_human (blocks phase reduce)
 reduce (phase settled, nh==0) ─▶ fold latest finding/ticket; cluster by
           root_cause.signature; best-effort bank 1 learning/cluster (dexter kb);
@@ -477,7 +477,7 @@ defaults to `DexterKbSink()`. The module registers the default singleton
 `DexterPlaybook(sink=FakeSink())` and either register that instance or call
 `reduce` on it directly. This is the single point where the dexter playbook touches
 dexter tooling on the master; the `FakeSink` keeps `reduce` fully unit-testable
-without dexter installed. Banking is best-effort (§2.6): the sink never raises out
+without dexter installed. Banking is best-effort (see "reduce(run, \"solve\", findings, site) → list[Reduction]"): the sink never raises out
 of `reduce`.
 
 ---
@@ -489,20 +489,20 @@ and the spec must build to them:
 
 - The stock testkit `MockAgent` **echoes `envelope["payload"]`** as the `ok`
   result payload and its scenario table maps only to `(outcome,
-  termination_reason)` — it cannot emit an arbitrary §2.3 doc, and the ticket
-  payload is `payload_schema`-constrained to `{goal, issue_ref, context}` (§2.2).
+  termination_reason)` — it cannot emit an arbitrary result_schema doc, and the ticket
+  payload is `payload_schema`-constrained to `{goal, issue_ref, context}` (see "payload_schema(solve)").
   So the integration test supplies a thin **`DexterMockAgent`** (in the dexter
   sub-project's tests; still no real `claude`, SSH, or Meta) whose `parse_result`
-  returns a **§2.3-shaped payload** selected per ticket/goal from a scenario map,
+  returns a **result_schema-shaped payload** selected per ticket/goal from a scenario map,
   decoupled from the schema-constrained ticket payload.
 - The `local` site has **no** `recheck_fix` (delta D3), so `verify`'s fix re-check
-  fails safe (§2.5). To drive both branches, the test uses a `local`-site subclass
+  fails safe (see "verify(run, ticket, result, site) → bool"). To drive both branches, the test uses a `local`-site subclass
   (`DexterLocalSite`) that adds `recheck_fix(payload) -> bool` returning the
   per-scenario verdict — so a "fix holds" goal reaches `reducing` and a "fix does
   not hold" goal routes to `needs_human` — all on localhost.
 
 - **Unit** — `seed` from both a `run.config["goals"]` list, a goals-file path
-  (§2.1a: comment/blank filtering), and a mocked `issue_source`; `payload_schema`
+  (see "`--goals FILE` format + semantics": comment/blank filtering), and a mocked `issue_source`; `payload_schema`
   accept/reject (extra key rejected by `additionalProperties:false`);
   `result_schema` accept/reject via `contracts.validate_result`; `driver` shape
   (`command="/dexter:solve"`, `args={}`) and the rendered prompt
@@ -537,7 +537,7 @@ Inherits the engine invariant transitively along two enforcement layers:
    `failed`, `contract_fail`, no retry). `devserver.guarantees_no_ship()` returns
    `True` only because it installs + verifies the guard, so dispatch proceeds.
 2. **Runtime guard.** The worker runs with the guard dir prepended to `PATH`
-   (§3), so the shims shadow `git push` / `sl push|land` / `hg push` / `jf land` /
+   (see "The `devserver` site"), so the shims shadow `git push` / `sl push|land` / `hg push` / `jf land` /
    `arc land` and refuse with exit `97`; dexter runs under `bypassPermissions` with
    no `--max-turns` but **cannot land** (guard + submit-only). `LocalSite.run_worker`
    even self-defends (re-installs or refuses to run unguarded); `devserver`
@@ -545,7 +545,7 @@ Inherits the engine invariant transitively along two enforcement layers:
 
 `reduce` **never lands** — it only clusters, banks learnings, and flags diffs; a
 human lands the canonical diff out-of-band after accepting a cluster. `verify`
-re-checks every `ok` result independently (§2.5), failing safe to `needs_human`
+re-checks every `ok` result independently (see "verify(run, ticket, result, site) → bool"), failing safe to `needs_human`
 when it cannot confirm — so an unverifiable success is never silently admitted.
 
 ---
@@ -558,15 +558,15 @@ when it cannot confirm — so an unverifiable success is never silently admitted
    with learnings banked.
 2. Two hosts with the same `root_cause.signature` collapse into **one** cluster
    reduction (canonical + duplicate), with exactly **one** banked learning; a
-   ticket that produced two `ok` findings is counted **once** (fold dedup, §2.6).
+   ticket that produced two `ok` findings is counted **once** (fold dedup, see "reduce(run, \"solve\", findings, site) → list[Reduction]").
 3. A worker whose fix fails independent `verify` (shape gate or `recheck_fix`, or
    `recheck_fix` absent → fail-safe) is routed to `needs_human`, blocks the phase
    reduce, and is cleared only by `hermes ticket requeue` — never silently accepted.
-4. No-ship holds on both layers (§7): a site that cannot guarantee no-ship is
+4. No-ship holds on both layers (see "Safety"): a site that cannot guarantee no-ship is
    rejected at dispatch (`contract_fail`); an attempted land on a guarded worker is
    blocked (exit `97`); `reduce` lands nothing.
 5. The entire flow is exercised by `run_tests.sh` on `DexterLocalSite` +
-   `DexterMockAgent` (§6) with no dexter/devserver/Meta dependency.
+   `DexterMockAgent` (see "Testing") with no dexter/devserver/Meta dependency.
 
 ---
 
@@ -577,10 +577,10 @@ when it cannot confirm — so an unverifiable success is never silently admitted
   no command to give up on it and let the phase settle. A goal whose fix never
   re-verifies keeps the run blocked. If this bites, the engine (not this playbook)
   would need a `ticket abandon <id>` → terminal `failed` transition. Out of scope
-  here; noted so the operator understands the block (§2.7).
+  here; noted so the operator understands the block (see "next_phase / is_done").
 - **Stale finding on ok-then-failed tickets (protocol limit).** `reduce` gets no
   ticket-state access, so a ticket that returned `ok` once (finding written) then
-  went terminal-`failed` still contributes a folded finding to a cluster (§2.6).
+  went terminal-`failed` still contributes a folded finding to a cluster (see "reduce(run, \"solve\", findings, site) → list[Reduction]").
   Mitigated by the mandatory human review of every cluster (reject drops it); a
   clean fix would need the engine to pass ticket state (or filter stale findings)
   into `reduce`.
@@ -593,6 +593,6 @@ when it cannot confirm — so an unverifiable success is never silently admitted
   ticket outcomes, that's a control-plane/UI concern, not an engine state — revisit
   if needed.
 - `issue_source` schema for the internal dashboard; a `--config JSON` CLI flag for
-  `issue_query` (deferred; §2.1a) — both deferred to the `devserver` site build.
+  `issue_query` (deferred; see "`--goals FILE` format + semantics") — both deferred to the `devserver` site build.
 - Whether `sites/devserver` and a future `sites/meta` should share a `_meta_common`
   module now or later (both need SSH + guard + install primitives).

@@ -1,6 +1,6 @@
 # Hermes fleet integration harness (Docker) — spec
 
-Status: **draft**. Date: 2026-07-28. Parent: `docs/DESIGN.md` §12.
+Status: **draft**. Date: 2026-07-28. Parent: the "Testing strategy" section of `docs/DESIGN.md`.
 Depends on: engine-core (`ssh_transport`, crew, leases, dispatch, events).
 
 A development + CI integration harness that stands up **several worker nodes as
@@ -156,13 +156,13 @@ The harness can perturb the fleet mid-run and assert recovery:
   fleet for a realistic multi-host run to render.
 - **engine-core:** delivered as a new plan slice (see `engine-core-plan.md` — Slice
   12, "Fleet integration harness"), after dispatch/crew/leases/ssh_transport exist.
-- **web control plane:** `web-control-plane-plan.md` §10 e2e can run against the
+- **web control plane:** the "Testing strategy" section of `web-control-plane-plan.md` e2e can run against the
   fleet so the SPA is proven against real multi-host data, not just single-box.
 
 ## 9. Definition of done
 
 - `make fleet-test` (or `pytest -m docker`) brings the fleet up, runs the scenario
-  to convergence, asserts §6 + the §7 down-node recovery, and tears down — green,
+  to convergence, asserts the shared goal & convergence assertions (see "The shared goal & convergence assertions") + the down-node recovery (see "Failure injection"), and tears down — green,
   hermetic, no Meta/cloud/real-agent.
 - The `ssh` site has unit tests (command construction, health parsing; subprocess
   mocked) independent of Docker.

@@ -52,8 +52,8 @@ bump reflects the parked-state/lease-capacity cluster that earlier passes missed
 
 ## Cross-sub-project item to reconcile later (NOT a blocker)
 
-- **`hermes serve` verb collision**: engine-core §10 uses `hermes serve --host`
-  for the per-host worker loop; `DESIGN.md` §10 uses `hermes serve` for the
+- **`hermes serve` verb collision**: engine-core's "CLI" section uses `hermes serve --host`
+  for the per-host worker loop; `DESIGN.md`'s "Control plane & status" section uses `hermes serve` for the
   sub-project-3 FastAPI control-plane server (which mints `api_token`).
   Recommendation (deferred to sub-project 3): name the API server
   `hermes serve --api` / `hermes serve-api` and keep `hermes serve --host` for

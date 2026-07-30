@@ -12,7 +12,7 @@ for Hermes as it is **actually built today** (`engine/`, `server/`, `sites/`,
 without changing any engine methodology invariant.
 
 **Grounding note.** Every requirement below is anchored to code that exists now.
-Where a capability is missing, it is labeled an explicit **DELTA** (§7) — not
+Where a capability is missing, it is labeled an explicit **DELTA** (see the "Explicit DELTAS" section) — not
 assumed to exist. Nothing here is implemented by this spec; it is a build target.
 
 ---
@@ -22,22 +22,22 @@ assumed to exist. Nothing here is implemented by this spec; it is a build target
 **In scope**
 - **Operational logging** — a new stdlib-`logging`-based `engine/log.py`: levels,
   optional JSON formatter, context fields, env configuration; routing the existing
-  `print()` calls (63 in `engine/cli.py`, 1 in `server/app.py`) through it (§2).
+  `print()` calls (63 in `engine/cli.py`, 1 in `server/app.py`) through it (see "Logging & diagnostics").
 - **Configuration management** — consolidate and document the full env-var surface
-  (§3 table), add fail-fast startup validation, and a `hermes doctor` /
-  `hermes config check` command (§3).
+  (see "Configuration management"), add fail-fast startup validation, and a `hermes doctor` /
+  `hermes config check` command (see "Configuration management").
 - **Process lifecycle & deploy** — graceful SIGTERM shutdown for the long-running
   `hermes serve --api` (`engine/cli.py::cmd_serve_api`) and the per-host / master
   loops (`engine/dispatch.py::serve_loop`, `master_loop`); a control-plane
   container image + compose alongside `fleet/`; a service-unit example; documented
-  run topology and migrate-on-deploy (§4).
+  run topology and migrate-on-deploy (see "Process lifecycle & deploy").
 - **Data lifecycle** — retention for the append-only `events` and `attempts`
   tables; `hermes db prune|backup|vacuum`; WAL-aware backup/restore of `queue.db`
-  (§5).
+  (see "Data lifecycle").
 - **Packaging & release** — build/publish flow off the existing `pyproject.toml`
   (setuptools, console script `hermes=engine.cli:main`, `dev`/`server` extras),
   pinned constraints for the `server` extra, a refreshed `README.md` (currently
-  says "Design phase"), install/quickstart, and an operations runbook (§6).
+  says "Design phase"), install/quickstart, and an operations runbook (see "Packaging & release").
 
 **Out of scope (kept future/pluggable — infra that does not exist here)**
 - **Metrics-backend integration.** No Prometheus/StatsD/ODS exporter. The
@@ -47,22 +47,22 @@ assumed to exist. Nothing here is implemented by this spec; it is a build target
   built.
 - **Secrets manager.** The API bearer token stays a 0600 file at
   `$HERMES_HOME/api_token` (`server/auth.py`); no Vault/KMS integration. A
-  non-loopback deployment still relies on a trusted proxy (DESIGN §10).
+  non-loopback deployment still relies on a trusted proxy (see the "Control plane & status" section of the design doc).
 - **Meta-internal deploy specifics.** Meta-isms stay in the `meta`/`devserver`
   site adapters and their `HERMES_DEVSERVER_*` / `INVESTIGATIONS_DIR` / `DEXTER_KB_PY`
   env vars, injected at deploy time (DESIGN goal #6). This spec documents them but
   hardcodes none.
 - **Log rotation daemon.** `HERMES_LOG_FILE` writes a single append file; rotation
   is delegated to the OS (`logrotate`) or the container runtime, documented in the
-  runbook (§6), not implemented in-process.
+  runbook (see "Packaging & release"), not implemented in-process.
 - Any change to the ticket/run state machine, contracts, or the no-ship guard.
 
 **Non-goals**
 - The engine **core** (`engine/`) stays strictly stdlib-only at runtime
   (`pyproject.toml` `dependencies = []`). `logging` is stdlib, so `engine/log.py`
-  preserves this (engine-core §1 non-goal, AC5).
+  preserves this (see the "Scope" section of engine-core spec, AC5).
 - No new third-party runtime dependency for the CLI path. FastAPI/uvicorn stay
-  isolated to the `server` extra (DESIGN §14 "RESOLVED — FastAPI dependency").
+  isolated to the `server` extra (see the "Open questions & spikes" section of the design doc, "RESOLVED — FastAPI dependency").
 
 ---
 
@@ -73,7 +73,7 @@ assumed to exist. Nothing here is implemented by this spec; it is a build target
 Hermes already has **one** structured feed, and it is a *domain/audit* feed, not
 operational diagnostics:
 
-- **`events` table** (`engine/events.py`, DDL in engine-core §4; `EVENT_KINDS`
+- **`events` table** (`engine/events.py`, DDL in the "Database schema" section of engine-core; `EVENT_KINDS`
   frozenset of 24 kinds) — the append-only **domain/audit** record: what happened
   to runs/tickets/crew/leases/reductions, consumed by `hermes status`, the API
   (`GET /api/events`), and the websocket feed. **This stays exactly as is.** It is
@@ -101,7 +101,7 @@ This sub-project adds the **second, orthogonal** feed:
 - The existing `HERMES_DEBUG` env var (`engine/cli.py:740`, currently the *only*
   diagnostic knob — it toggles a `traceback.print_exc()` on a top-level CLI
   exception) is **subsumed**: `HERMES_DEBUG=1` becomes an alias for
-  `HERMES_LOG_LEVEL=DEBUG` (§2.4), and the top-level handler logs the exception via
+  `HERMES_LOG_LEVEL=DEBUG` (see "Env configuration"), and the top-level handler logs the exception via
   `logger.exception(...)` instead of `traceback.print_exc()`.
 
 ### 2.2 `engine/log.py` API (DELTA D1)
@@ -114,7 +114,7 @@ A small stdlib-only module:
 - `configure(*, level: str|None=None, fmt: str|None=None, file: str|None=None,
   context: dict|None=None) -> None` — idempotent one-time root configuration
   (guarded so repeated CLI/serve entry does not stack handlers). Reads env
-  defaults (§2.4) when args are omitted. Installs exactly one handler
+  defaults (see "Env configuration") when args are omitted. Installs exactly one handler
   (stderr, or a `FileHandler` at `file`), sets the level, and selects the
   formatter.
 - `bind(**fields) -> contextmanager` — pushes context fields (`run_id`,
@@ -127,7 +127,7 @@ Two formatters:
   bound fields omitted when unset. Human-readable for a terminal / `podman logs`.
 - **json** (`HERMES_LOG_FORMAT=json`) — one JSON object per line with keys
   `ts, level, logger, msg, run_id, ticket_id, host` plus any `extra`. Shaped for a
-  future log-shipper (§1 out-of-scope). Stdlib `json` only.
+  future log-shipper (out-of-scope for this sub-project). Stdlib `json` only.
 
 `configure()` is called once per process entry point: at the top of `main()` in
 `engine/cli.py` (covers `run`, `serve`, `serve-once`, all CLI commands) and inside
@@ -137,7 +137,7 @@ Two formatters:
 
 | Layer (module) | INFO | WARNING | ERROR/EXCEPTION | DEBUG |
 |---|---|---|---|---|
-| **master loop** (`engine/dispatch.py::master_loop`) | run start/finish, phase advance, reduce ran (n reductions) | attention conditions surfaced (parked ratio, no-progress, all-crew-down), a run marked `failed`/stuck | uncaught cycle exception (with stack) — but note `reduce` must still never raise (dexter §2.6) | per-cycle sweep summary, claim/reduce/advance decisions |
+| **master loop** (`engine/dispatch.py::master_loop`) | run start/finish, phase advance, reduce ran (n reductions) | attention conditions surfaced (parked ratio, no-progress, all-crew-down), a run marked `failed`/stuck | uncaught cycle exception (with stack) — but note `reduce` must still never raise (see the "reduce" section of dexter spec) | per-cycle sweep summary, claim/reduce/advance decisions |
 | **serve loop** (`engine/dispatch.py::serve_loop`, `transport.serve_once_for_host`) | ticket claimed/started/recorded, lease acquired, ticket parked (no lease) | envelope/contract validation NO-GO → requeue-with-penalty; transport error → no-penalty requeue + host→down | subprocess launch failure | argv built, envelope path, timeout wrapper used, `payload_sha256` |
 | **worker-runner** (`engine/cli.py::cmd_serve_once`) | one line: agent, timeout, exit code | non-zero worker exit | failed to read envelope / write result | full argv, stdout length |
 | **API** (`server/app.py`, `engine/cli.py::cmd_serve_api`) | server bind+port+home on start, token *location* (never value), graceful shutdown | 4xx that indicates operator error (unknown site/agent on `/api/crew`) | 5xx / unhandled endpoint exception; replace the raw `print(f"WebSocket error: {e}")` (`server/app.py:1327`) with `logger.exception` | per-request method+path+status, WS connect/disconnect, WS poll cursor |
@@ -154,7 +154,7 @@ verbose developer detail** (argv, digests, cursors).
 |---|---|---|
 | `HERMES_LOG_LEVEL` | Root `hermes` logger level (`DEBUG`/`INFO`/`WARNING`/`ERROR`). | `INFO` |
 | `HERMES_LOG_FORMAT` | `text` or `json`. | `text` |
-| `HERMES_LOG_FILE` | If set, append logs to this path instead of stderr. Must obey the same networked-FS / local-storage discipline as `HERMES_HOME`; defaults under `$HERMES_HOME/logs/` are natural but not required (see §5 note on the unused `logs/` dir). | unset (stderr) |
+| `HERMES_LOG_FILE` | If set, append logs to this path instead of stderr. Must obey the same networked-FS / local-storage discipline as `HERMES_HOME`; defaults under `$HERMES_HOME/logs/` are natural but not required (see the "Open items" section note on the unused `logs/` dir). | unset (stderr) |
 | `HERMES_DEBUG` | Back-compat alias: truthy ⇒ level `DEBUG`. Loses to an explicit `HERMES_LOG_LEVEL`. | unset |
 
 ### 2.5 HARD INVARIANT — never log the API token or secrets
@@ -166,7 +166,7 @@ Ties to `server/auth.py` and `server/app.py`:
   value. `rotate_token` logs "token rotated" with no value.
 - The websocket handler currently reads `?token=` and an `Authorization: Bearer`
   header (`server/app.py:1247`, `:1272`). Neither the query string nor the header
-  may be logged. The per-request DEBUG log (§2.3) logs **method + path with the
+  may be logged. The per-request DEBUG log (see "What each layer logs") logs **method + path with the
   query string stripped/redacted** so `?token=…` never lands in a log.
 - The token-bootstrap `<script>window.__HERMES_TOKEN__="…"` injection
   (`server/app.py:1366`) is response HTML, not a log; it must never be echoed to a
@@ -177,7 +177,7 @@ Ties to `server/auth.py` and `server/app.py`:
   secret keys: `token`, `api_token`, `authorized_key`, `identity`) is applied
   before any structured `extra` is logged, as defense in depth.
 
-This invariant is verified by a test (§8).
+This invariant is verified by a test (see "Testing strategy").
 
 ---
 
@@ -195,7 +195,7 @@ Every `HERMES_*` / `DEXTER_*` / `INVESTIGATIONS_DIR` reference across `engine/`,
 | `HERMES_SITE` | `engine/config.py` | Default site name when `--site` omitted. | `local` |
 | `HERMES_AGENT` | `engine/config.py`, `engine/cli.py`, `engine/agent.py`, `agents/claude/agent.py`, `testkit/mock_agent.py`, `fleet/*` | Worker-runtime adapter to load. | `claude` |
 | `HERMES_HEARTBEAT_S` | `engine/config.py`, `engine/dispatch.py` | Crew-health / lease-renew heartbeat + no-progress window (seconds). | `30` |
-| `HERMES_DEBUG` | `engine/cli.py` | Print tracebacks on CLI error (→ subsumed by `HERMES_LOG_LEVEL`, §2.1). | unset |
+| `HERMES_DEBUG` | `engine/cli.py` | Print tracebacks on CLI error (→ subsumed by `HERMES_LOG_LEVEL`, see "The two feeds" section). | unset |
 | `HERMES_BIND` | `engine/cli.py`, `server/app.py` | API bind address; non-loopback gates all GETs on the token. | `127.0.0.1` |
 | `HERMES_WS_POLL_S` | `server/app.py` | Websocket event-poll interval (seconds). | `1.0` |
 | `HERMES_WEB_DIST` | `server/app.py` | SPA `dist/` directory to serve. | `web/dist` |
@@ -220,7 +220,7 @@ Every `HERMES_*` / `DEXTER_*` / `INVESTIGATIONS_DIR` reference across `engine/`,
 | `INVESTIGATIONS_DIR` | `playbooks/dexter/sink.py` | Dexter runtime-data dir for banked learnings. | `""` |
 
 **Note on `<host>`-suffixed vars.** `HERMES_SSH_{PORT,USER,HOSTNAME,IDENTITY,RESOURCES}_<host>`
-are dynamic (per-host suffix); `hermes doctor` (§3.3) enumerates them per
+are dynamic (per-host suffix); `hermes doctor` (see "hermes doctor / hermes config check") enumerates them per
 configured host rather than as fixed names.
 
 ### 3.2 Consolidation (DELTA D2)
@@ -252,7 +252,7 @@ Reports:
   (never the value).
 - Resolved site/agent/heartbeat/bind/log settings, and every relevant
   `HERMES_*`/`DEXTER_*`/`INVESTIGATIONS_DIR` var with its effective value
-  (**secrets shown as `set`/`unset`, never the value** — ties to §2.5).
+  (**secrets shown as `set`/`unset`, never the value** — ties to the "HARD INVARIANT — never log the API token or secrets" section).
 - For the selected `--site`/`--agent`: whether the adapter registers/loads.
 - Server extra: whether `fastapi`/`uvicorn` import (so an operator learns *before*
   `serve --api` that the extra is missing — today `cmd_serve_api` only discovers
@@ -318,7 +318,7 @@ Requirements:
   renewed/reclaimed and none is left dangling, log a graceful-shutdown INFO line,
   close the DB connection, and exit `0`. A ticket already `dispatched`/`running` on
   a worker is left for the reclaim path (lease TTL / heartbeat down-requeue,
-  engine-core §9) — **no ticket is lost or double-run**, because the state machine
+  see the "Queue, dispatch, leases, crew, drivers" section of engine-core) — **no ticket is lost or double-run**, because the state machine
   already treats a host lost mid-run as a no-penalty requeue.
 - **API server.** `cmd_serve_api` lets uvicorn own SIGTERM (uvicorn drains
   in-flight requests and closes websockets). Hermes adds a startup/shutdown log
@@ -339,17 +339,17 @@ compose. There is **no** control-plane container and **no** service unit.
 
 Add, alongside `fleet/`:
 - **`fleet/Dockerfile.control-plane`** — an image that installs Hermes with the
-  `server` extra (`pip install -e '.[server]'`, or a wheel from §6) and runs
+  `server` extra (`pip install -e '.[server]'`, or a wheel from the "Packaging & release" section) and runs
   `hermes serve --api`. Unlike the worker image (which deliberately avoids
   `pip install` and uses `PYTHONPATH` + a thin wrapper to dodge flat-layout
   auto-discovery, `Dockerfile.worker:26-37`), the control plane installs the
   package properly so FastAPI/uvicorn resolve. It bind-mounts `HERMES_HOME` as a
   volume (queue.db + api_token must persist and stay on local, non-networked
-  storage — §3.4 guard) and exposes the API port (default 8080). Applies migrations
-  on start (§4.4).
+  storage — see the "Fail-fast startup validation" section guard) and exposes the API port (default 8080). Applies migrations
+  on start (see "Run topology & migrate-on-deploy").
 - **`fleet/docker-compose.control-plane.yml`** (or a merge into the existing
   compose) — brings up the control plane bound to `127.0.0.1` by default
-  (DESIGN §10), with `HERMES_BIND`, `HERMES_LOG_FORMAT=json`, and a persistent
+  (see the "Control plane & status" section of the design doc), with `HERMES_BIND`, `HERMES_LOG_FORMAT=json`, and a persistent
   `HERMES_HOME` volume. Documents the non-loopback path (bind `0.0.0.0` only behind
   a trusted proxy that supplies auth) as commented config, matching the auth model
   in `server/app.py` (`is_loopback`, GET-gating, token bootstrap disabled on
@@ -357,23 +357,23 @@ Add, alongside `fleet/`:
 
 ### 4.3 Service-unit example (DELTA D7)
 
-A documented **systemd** unit example (in the runbook, §6, and as a sample file
+A documented **systemd** unit example (in the runbook, see the "Refreshed README + quickstart + runbook" section, and as a sample file
 under `fleet/`) for running `hermes serve --api` and/or a per-host
 `hermes serve --host` as a managed service: `Type=simple`,
 `ExecStart=/usr/local/bin/hermes serve --api`, `Environment=HERMES_HOME=…
 HERMES_LOG_FORMAT=json`, `Restart=on-failure`, `TimeoutStopSec` long enough for
-the graceful-shutdown pass (§4.1), `KillSignal=SIGTERM`. Marked as an example, not
+the graceful-shutdown pass (see "Graceful shutdown (SIGTERM)"), `KillSignal=SIGTERM`. Marked as an example, not
 a Meta-specific deploy artifact.
 
 ### 4.4 Run topology & migrate-on-deploy
 
-Documented in the runbook (§6):
+Documented in the runbook (see the "Refreshed README + quickstart + runbook" section):
 - **Topology.** One **control-plane process** (`hermes serve --api`) + one
   **master loop** (`hermes run …` drives `master_loop`; on the `local` site it also
   runs in-process serve loops, `engine/cli.py:159`) + N **worker serve loops**
   (`hermes serve --host` on each remote box, or the in-process loops for `local`).
   All share **one `queue.db`** on the master host; workers are reached over the
-  site transport (SSH), holding **no** shared DB (matches DESIGN §15 "no shared
+  site transport (SSH), holding **no** shared DB (matches the "Future extension: federation" section of the design doc "no shared
   DB" and the fleet model).
 - **Migrate-on-deploy.** `engine/db/migrate.py::apply_migrations` is idempotent and
   additive-only; every process entry already calls it via `cli._connect()`, and the
@@ -389,10 +389,10 @@ Documented in the runbook (§6):
 
 Two tables grow without bound and are never trimmed today:
 - **`events`** (`engine/events.py`, append-only by design; `emit()` only inserts).
-- **`attempts`** (engine-core §4, append-only audit; one row per execution).
+- **`attempts`** (see the "Database schema" section of engine-core, append-only audit; one row per execution).
 
 `findings`/`reductions` also only grow but are semantically load-bearing (a
-reduction is never deleted, only `superseded` — DESIGN §5), so they are **retained
+reduction is never deleted, only `superseded` — see the "Data model" section of the design doc), so they are **retained
 by default** and out of routine pruning.
 
 ### 5.2 Retention + `hermes db` subcommand (DELTA D8)
@@ -401,7 +401,7 @@ A new `hermes db {prune|backup|vacuum}` CLI command group:
 
 - **`hermes db prune [--events-older-than DAYS] [--attempts-older-than DAYS]
   [--run R] [--dry-run]`** — delete `events` and/or `attempts` rows older than a
-  cutoff. **HARD SAFETY RULE (§9): never delete live/in-flight state.** The exact
+  cutoff. **HARD SAFETY RULE (see "Safety / invariants"): never delete live/in-flight state.** The exact
   eligibility predicate, per row (a row is deletable only if **every** clause below
   holds), where **terminal run** = state ∈ {`done`,`failed`,`stopped`} and
   **terminal ticket** = state ∈ {`done`,`failed`} (NOT `queued`/`dispatched`/
@@ -436,12 +436,12 @@ A new `hermes db {prune|backup|vacuum}` CLI command group:
     (e.g. 90 days) and configurable per invocation; no automatic/background pruning
     (operator-invoked or cron'd via the runbook).
   - Runs as one transaction and commits; WAL durability is automatic. Reclaiming
-    the freed pages is the follow-up `db vacuum` (which checkpoints, §5.3 note).
+    the freed pages is the follow-up `db vacuum` (which checkpoints, see "Backup / restore of queue.db" note).
   - Emits nothing to `events` (pruning is maintenance, not a domain event) but logs
     an INFO summary (rows deleted per table).
 - **`hermes db vacuum`** — run SQLite `VACUUM` to reclaim space after a prune
   (WAL-aware: checkpoint then vacuum). Documented as the follow-up to `prune`.
-- **`hermes db backup --out PATH`** — WAL-aware backup (§5.3).
+- **`hermes db backup --out PATH`** — WAL-aware backup (see "Backup / restore of queue.db").
 
 ### 5.3 Backup / restore of `queue.db` (WAL-aware)
 
@@ -452,7 +452,7 @@ A new `hermes db {prune|backup|vacuum}` CLI command group:
   (`sqlite3.Connection.backup(...)`, stdlib) to produce a single consistent
   `PATH` file safe to take while a master/serve loop is running — no need to stop
   the fleet. The backup file is written with mode 0600 (matching the source).
-- **Restore** is documented (runbook, §6): stop all Hermes processes, replace
+- **Restore** is documented (runbook, see "Refreshed README + quickstart + runbook"): stop all Hermes processes, replace
   `$HERMES_HOME/queue.db` with the backup (and remove any stale `-wal`/`-shm`),
   restart. `apply_migrations` on restart is a no-op if the backup is current.
 - The runbook also documents the alternative `VACUUM INTO` and the plain
@@ -516,7 +516,7 @@ setuptools.build_backend`, console script `hermes=engine.cli:main`):
     control plane never hits this path at all (`serve --api` → `cmd_serve_api`, no
     `_load_playbook_site_agent`).
 
-  Without D9 the `server` extra and the control-plane image cannot reliably
+  Without the setuptools fix the `server` extra and the control-plane image cannot reliably
   `pip install`, and a wheel-installed master cannot run any playbook.
 - **Versioning.** `version = "0.1.0"` in `pyproject.toml` is the single source;
   bump on release, tag `v<version>`.
@@ -547,11 +547,11 @@ the constraints file is the reproducible-deploy overlay.
   `hermes serve --api`, then `hermes doctor`.
 - **Operations runbook** (new `docs/RUNBOOK.md` — the one doc file this
   sub-project may create, since it is operator documentation, not a report):
-  deploy/upgrade steps (migrate-on-deploy, §4.4), the run topology (§4.4), starting
-  the control plane + workers, graceful shutdown/restart (§4.1), token
+  deploy/upgrade steps (migrate-on-deploy, see "Run topology & migrate-on-deploy"), the run topology (see "Run topology & migrate-on-deploy"), starting
+  the control plane + workers, graceful shutdown/restart (see "Graceful shutdown (SIGTERM)"), token
   rotation/loss recovery (`hermes serve --api --rotate-token`, and the
   non-loopback caveat), log configuration + rotation (`logrotate`), backup/restore
-  (§5.3), pruning/vacuum cadence (§5.2), and `hermes doctor` as the first
+  (see "Backup / restore of queue.db"), pruning/vacuum cadence (see "Retention + hermes db subcommand"), and `hermes doctor` as the first
   diagnostic step.
 
 ---
@@ -597,7 +597,7 @@ changes the engine state machine, contracts, or the no-ship guard.
 - **D9 — setuptools package discovery in `pyproject.toml`.** Add
   `[tool.setuptools.packages.find]` handling the flat layout's namespace-package
   gap (`sites/` has no `__init__.py`; children do) — recommended fix (A): add an
-  empty `sites/__init__.py` + `include`/`exclude` globs (§6.1); alternative (B):
+  empty `sites/__init__.py` + `include`/`exclude` globs (see "Build/publish flow"); alternative (B):
   `namespaces = true`. **Plus** make the two `testkit` imports in
   `_load_playbook_site_agent` (`cli.py:31-32`) conditional on `playbook==example`/
   `agent==mock` so a wheel can exclude `testkit` without breaking `hermes run
@@ -615,10 +615,10 @@ Everything is testable on one box with the existing `pytest` dev dep and
 `scripts/run_tests.sh`; no metrics backend, no real SSH, no Docker required.
 
 - **Logging (D1).** Use `pytest`'s `caplog` / a `logging` capture handler:
-  assert levels/records per layer (§2.3), that `configure()` is idempotent (no
+  assert levels/records per layer (see "What each layer logs"), that `configure()` is idempotent (no
   duplicate handlers), that text and JSON formatters produce the documented shape,
   and that `bind()` context fields (`run_id`/`ticket_id`/`host`) attach to records.
-  **Secret-redaction test (§2.5, §9):** drive a full `LocalSite` + `MockAgent`
+  **Secret-redaction test (see "HARD INVARIANT — never log the API token or secrets" and "Safety / invariants"):** drive a full `LocalSite` + `MockAgent`
   integration run *and* server startup + a websocket connect with `?token=`, and
   assert the captured log output contains **neither** the `api_token` value nor any
   `?token=`/identity/`HERMES_AUTHORIZED_KEY` value (grep the captured records).
@@ -660,30 +660,29 @@ Everything is testable on one box with the existing `pytest` dev dep and
 
 ## 9. Safety / invariants
 
-- **No secrets in logs (HARD, §2.5).** The API bearer token, `?token=` query
+- **No secrets in logs (HARD, see "HARD INVARIANT — never log the API token or secrets").** The API bearer token, `?token=` query
   values, SSH identities, and `HERMES_AUTHORIZED_KEY` never appear in any log line
   at any level; only *locations* / `set`/`unset` are logged. Enforced by the
   `redact` helper, query-string stripping in request logging, and a dedicated
-  test (§8). This preserves the `server/auth.py` posture (token is a 0600 file, no
+  test (see "Testing strategy"). This preserves the `server/auth.py` posture (token is a 0600 file, no
   value ever emitted).
 - **No-ship unaffected.** Nothing in this sub-project touches the PATH guard shims
   (`sites/*`, `fleet/Dockerfile.worker:39-54`, `engine/guard`), the
   `guarantees_no_ship`/`guard_installed` gates, or `Playbook.verify`. Operability
-  is observation + lifecycle only; the no-land-by-construction invariant (DESIGN
-  §11) holds untouched.
+  is observation + lifecycle only; the no-land-by-construction invariant (see the "Safety" section of the design doc) holds untouched.
 - **Stdlib-only engine.** `engine/log.py` uses only stdlib `logging`/`json`/
   `contextvars`; `hermes db`/`doctor`/config helpers use only stdlib
   (`sqlite3`, `os`, `argparse`). The engine-core runtime-third-party-free invariant
   (engine-core AC5) survives. FastAPI/uvicorn stay confined to the `server` extra
   and the control-plane image (D6/D10).
-- **Retention never deletes live/in-flight state (HARD, §5.2).** `hermes db prune`
+- **Retention never deletes live/in-flight state (HARD, see "Retention + hermes db subcommand").** `hermes db prune`
   deletes an `attempts` row or a ticket-scoped `events` row only when **both** its
   run is terminal (`done`/`failed`/`stopped`) **and** its ticket is terminal
   (`done`/`failed`) and the row is past the age cutoff (the exact per-row predicate
-  is pinned in §5.2, incl. the null-`ticket_id`/null-`run_id` cases); `attempts`
+  is pinned in the "Retention + hermes db subcommand" section, incl. the null-`ticket_id`/null-`run_id` cases); `attempts`
   with a null `ended_at` are never pruned. `findings`/`reductions` are retained;
   `runs`/`tickets`/`crew`/`leases` current state is never pruned. `queue.db` stays
-  local, non-networked (§3.4 guard) and 0600 (`migrate.connect`), including backup
+  local, non-networked (see the "Fail-fast startup validation" section guard) and 0600 (`migrate.connect`), including backup
   outputs.
 - **Additive, restartable, idempotent.** Migrations stay additive-only
   (`migrate.py`); graceful shutdown leaves a consistent, restartable DB; all
@@ -693,13 +692,13 @@ Everything is testable on one box with the existing `pytest` dev dep and
 
 ## 10. Acceptance criteria
 
-Each is testable on one box, infra-free (§8), and maps to a DELTA / HARD invariant.
+Each is testable on one box, infra-free (see "Testing strategy"), and maps to a DELTA / HARD invariant.
 
 1. **Logging (D1).** `configure()` is idempotent (no duplicate handlers on repeated
-   entry); text and JSON formatters emit the documented shapes (§2.2); `bind()`
+   entry); text and JSON formatters emit the documented shapes (see "engine/log.py API"); `bind()`
    attaches `run_id`/`ticket_id`/`host` to records; `HERMES_DEBUG=1` raises the
    level to `DEBUG` but loses to an explicit `HERMES_LOG_LEVEL`.
-2. **No secrets in logs (HARD, §2.5/§9).** A full `LocalSite`+`MockAgent` run plus
+2. **No secrets in logs (HARD, see "HARD INVARIANT — never log the API token or secrets" and "Safety / invariants").** A full `LocalSite`+`MockAgent` run plus
    server startup plus a WS connect with `?token=` produce log output containing
    **neither** the `api_token` value, the `?token=` value, an SSH identity path's
    contents, nor `HERMES_AUTHORIZED_KEY` — asserted by grepping captured records.
@@ -713,7 +712,7 @@ Each is testable on one box, infra-free (§8), and maps to a DELTA / HARD invari
    `attempts` row, no lease left dangling past the final housekeeping pass, and no
    ticket lost (a dispatched ticket remains reclaimable). On `local` the shared flag
    stops the in-process master + serve loops together.
-5. **Retention safety (D8, HARD, §5.2/§9).** `db prune` deletes an `attempts`/
+5. **Retention safety (D8, HARD, see "Retention + hermes db subcommand" and "Safety / invariants").** `db prune` deletes an `attempts`/
    ticket-scoped-`events` row only when its run AND ticket are both terminal and
    past the cutoff; it never touches a `stopped` run's still-`running` ticket, a
    non-terminal ticket, or a null-`ended_at` attempt; `--dry-run` deletes nothing.
@@ -727,7 +726,7 @@ Each is testable on one box, infra-free (§8), and maps to a DELTA / HARD invari
    `fastapi`/`uvicorn` from the pinned constraints.
 8. **Invariants preserved.** Engine core still imports zero third-party packages at
    runtime (engine-core AC5; `engine/log.py` is stdlib-only); the no-ship guard and
-   `Playbook.verify` are untouched (§9).
+   `Playbook.verify` are untouched (see "Safety / invariants").
 
 ---
 
@@ -736,10 +735,10 @@ Each is testable on one box, infra-free (§8), and maps to a DELTA / HARD invari
 - **In-process serve loops on `local`.** `hermes run --site local` runs master +
   serve loops in one process/thread (`cli.py:159`, `dispatch.py:218`); SIGTERM (D5)
   stops them together via the single process-global stop flag checked at both
-  `while` heads (`dispatch.py:81`, `:196`) — mechanism pinned in §4.1; only the
+  `while` heads (`dispatch.py:81`, `:196`) — mechanism pinned in the "Graceful shutdown (SIGTERM)" section; only the
   file/module home of the flag (`engine/shutdown.py` vs. a `dispatch` module-global)
   is left to implementation.
-- **The `logs/` dir.** engine-core §3 reserves `$HERMES_HOME/logs/` but nothing
+- **The `logs/` dir.** The "Runtime data layout" section of engine-core reserves `$HERMES_HOME/logs/` but nothing
   writes it today. `HERMES_LOG_FILE` (D1) makes it the natural default location if
   an operator opts into file logging; whether `configure()` should default the file
   there vs. stderr is left to implementation (spec default is stderr).
@@ -749,4 +748,4 @@ Each is testable on one box, infra-free (§8), and maps to a DELTA / HARD invari
   without an explicit operator cadence).
 - **Metrics export.** If a real metrics backend ever exists, the JSON log
   formatter (D1) and the existing `/api/runs/{id}/metrics` + `events` feed are the
-  seams to export from; not built here (§1 out-of-scope).
+  seams to export from; not built here (out-of-scope for this sub-project).

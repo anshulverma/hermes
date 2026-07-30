@@ -1,6 +1,6 @@
 # Hermes control plane (web) — incremental build plan
 
-Status: **draft**. Date: 2026-07-28. Parent: `docs/DESIGN.md` §10.
+Status: **draft**. Date: 2026-07-28. Parent: the "Control plane & status" section of `docs/DESIGN.md`.
 Depends on: engine-core (`docs/specs/engine-core.md`) + the FastAPI server (DESIGN
 sub-project 4). North-star reference: `web/prototype/` (the Claude Design import).
 
@@ -29,7 +29,7 @@ Every slice obeys all of these, or it does not land:
    wired, tested action (a real API call with a real effect). If the action can't
    be real yet, the control is not shown.
 3. **Full-stack per slice.** A slice = [engine capability if missing] → [API
-   endpoint] → [UI component] → [wired interaction], each with tests (§9).
+   endpoint] → [UI component] → [wired interaction], each with tests (see "Definition-of-done per slice").
 4. **Real fidelity to the design.** Use the `_ds` tokens + components verbatim;
    match the prototype's layout for the view being built.
 5. **Data that isn't real yet is not shown.** Metrics/resources/agent-usage
@@ -49,13 +49,13 @@ Every slice obeys all of these, or it does not land:
   `IconButton`, `Tooltip`, `EmptyState`, `Input`, `Badge`, `CrewBackdrop`, … so the
   app imports typed components instead of reading `window.DSNS`. Icons: bundle
   `lucide-react` instead of the CDN global.
-- **The data contract:** `window.HERMES` becomes the API response shapes (§5). A
+- **The data contract:** `window.HERMES` becomes the API response shapes (see "API surface"). A
   thin **normalization layer** (`web/src/api/`) maps engine values to UI values —
   notably ticket state `needs_human` ⇄ the prototype's `needs-human`, and derives
   the playbook-dependent `run.context` (mechanic=base+suite, rigger=model+metric,
   medic=incident+service) from the run's playbook + config.
 - **Auth:** the SPA is served by the FastAPI server and uses the bearer-token
-  model from DESIGN §10 (loopback bootstrap-injection; token in memory only).
+  model from the "Control plane & status" section of the design doc (loopback bootstrap-injection; token in memory only).
 
 ## 4. Architecture
 
@@ -68,7 +68,7 @@ web/                      # Vite + React + TS SPA (this plan)
     components/           # app-level composites (TopBar, drawers, dialogs)
     App.tsx  main.tsx
   prototype/              # the Claude Design import (reference only, not built)
-server/                   # FastAPI JSON API + websocket (DESIGN §10, sub-project 4)
+server/                   # FastAPI JSON API + websocket (see the "Control plane & status" section of the design doc, sub-project 4)
 engine/                   # data source (queue.db) — sub-project 1
 ```
 
@@ -104,7 +104,7 @@ Phase A can proceed in parallel with engine-core: A0 (app + DS scaffold) has **n
 backend dependency; A1 needs only engine-core Slice 1 (schema), not a real run.
 Each slice below names its engine-core dependency.
 
-## 7. Slices (each obeys §2 and the §9 DoD)
+## 7. Slices (each obeys "The everything works contract" and the "Definition-of-done per slice")
 
 **Phase A — real app skeleton (no features, but real).**
 - **A0. Vite+TS app + vendored `_ds`.** Scaffold `web/`; vendor `_ds` + typed
@@ -131,7 +131,7 @@ Each slice below names its engine-core dependency.
   `HealthBadge` from real `HealthReport`; host drawer (read-only) also renders the
   host's active lease (ticket id + remaining lease TTL) from `GET /api/leases`, or a
   truthful empty state when the host holds none. This is the sole consumer of
-  `GET /api/leases` and the view backing §10's fleet-wide-leases e2e assertion. Dep:
+  `GET /api/leases` and the view backing the "Testing strategy" fleet-wide-leases e2e assertion. Dep:
   engine-core Slice 8 (crew + health) — implies Slice 6 (leases).
 - **B5. Activity feed.** `GET /api/events?since=`; `EventRow` list + kind filter. Dep: engine-core Slice 9.
 - **B6. Findings.** `GET /api/runs/{id}/reductions`; finding cards with member
@@ -158,7 +158,7 @@ Each slice below names its engine-core dependency.
 - **D4. Findings review.** accept/reject a reduction → `POST /api/reductions/{id}/…`
   (members settle per engine semantics). Dep: engine-core Slice 5.
 - Auth is added with the first mutation (D1): loopback bind + bearer token, 401/4401
-  (DESIGN §10).
+  (see the "Control plane & status" section of the design doc).
 
 **Phase E — metrics & cost (gated on real instrumentation; ship a section only when
 its data is real).**
@@ -195,7 +195,7 @@ its data is real).**
    --api` over a real local run seeded with `MockAgent`) and asserts the real
    behavior end-to-end (no network mocks).
 5. **Fidelity:** the view visually matches `web/prototype/` for that screen.
-6. No mock data, no dead controls (§2).
+6. No mock data, no dead controls (see "The everything works contract").
 
 ## 10. Testing strategy
 
@@ -218,4 +218,4 @@ its data is real).**
   when Phase E starts.
 - Whether the server (sub-project 4) gets its own spec doc or is specified inline
   here; lean: fold the server's read/mutate/ws contract into this plan and keep
-  DESIGN §10 as the authority for auth/binding.
+  the "Control plane & status" section of the design doc as the authority for auth/binding.

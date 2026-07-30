@@ -16,7 +16,7 @@ guard, additive migrations).
 
 Conventions: paths are under `hermes/`. "GREEN" = `scripts/run_tests.sh` passes
 (pytest via `.venv`; `-m "not docker"` where Docker is absent). Commit after each
-slice. Section references (`§2.3`, `D1`…) point at the operability spec and live
+slice. Section references point at the operability spec and live
 **only in this doc**, never in code (see Global constraints).
 
 ---
@@ -47,7 +47,7 @@ slice. Section references (`§2.3`, `D1`…) point at the operability spec and l
   history* and drives `hermes status`, `GET /api/events`, and the WS feed. Logging
   (`engine/log.py`) is line-oriented process diagnostics, never read back, no schema,
   no transaction. **No duplication**: an operability slice must not move any queryable
-  state into logs, and must not stop emitting any existing event. Pruning (§5) emits
+  state into logs, and must not stop emitting any existing event. Pruning (see the "Data lifecycle" section) emits
   **no** event (maintenance is not a domain event) but logs an INFO summary.
 - **(c) Stdlib-only engine.** `engine/log.py`, the `db`/`doctor`/config helpers, and
   `engine/shutdown.py` import only stdlib (`logging`, `json`, `contextvars`,
@@ -55,7 +55,7 @@ slice. Section references (`§2.3`, `D1`…) point at the operability spec and l
   `tests/unit/test_invariants.py::test_engine_core_imports_only_stdlib` (AST-scans
   `engine/`) keeps passing unchanged. FastAPI/uvicorn stay confined to the `server`
   extra and the control-plane image.
-- **(d) Retention never deletes live/in-flight state (HARD, §5.2).** `hermes db
+- **(d) Retention never deletes live/in-flight state (HARD, see the "Retention + hermes db subcommand" section).** `hermes db
   prune` deletes an `attempts` row or a ticket-scoped `events` row only when its run
   AND its ticket are both terminal and the row is past the age cutoff; `attempts`
   with a null `ended_at` are never pruned; `findings`/`reductions` and all current
@@ -64,11 +64,11 @@ slice. Section references (`§2.3`, `D1`…) point at the operability spec and l
   (`sites/*`, `fleet/Dockerfile.worker:39-54`), `guarantees_no_ship`/
   `guard_installed`, or `Playbook.verify`. Slices that add a container/compose must
   keep the worker image's guard exactly as is.
-- **(f) Code stays self-contained — NO doc references in code.** No `§N`, `D<n>`,
-  `Slice N`, `docs/*` path, or "per the spec/plan" text in any comment, docstring,
+- **(f) Code stays self-contained — NO doc references in code.** No section references,
+  delta labels, slice numbers, `docs/*` path, or "per the spec/plan" text in any comment, docstring,
   string literal, log message, or identifier. Citations live only in this plan and
   the spec. (Log messages describe the process, e.g. `"graceful shutdown: stop
-  requested"` — not `"per §4.1"`.)
+  requested"` — not referencing spec sections.)
 - **No faked test data.** Tests drive the real engine writers (`queue.*`,
   `dispatch.*`, `events.emit`, `migrate.*`) against a temp `HERMES_HOME` via
   `testkit/fixtures.py`, and reuse the real one-commit-repo fixture pattern from
@@ -129,7 +129,7 @@ its pinned constraints). No behavior change to the running engine.
 - `engine/cli.py::_load_playbook_site_agent` (make the two `testkit` imports
   conditional).
 
-**Behavior to pin (§6.1, D9 exact).**
+**Behavior to pin (see the "Build/publish flow" section of the spec, D9 exact).**
 - **Fix the build backend (blocker, precedes discovery).** `pyproject.toml`
   currently has `build-backend = "setuptools.build_backend"` (line 24), a module
   that does not exist; change it to the canonical `build-backend =
@@ -203,7 +203,7 @@ through the logger; subsume `HERMES_DEBUG`; and prove no secret is ever logged.
 - `server/app.py` (call `log.configure()` in `create_app()`; replace the WS-error
   `print`; add a request-logging path that redacts the query string).
 
-**Behavior to pin (§2.1–2.5, D1).**
+**Behavior to pin (see sections "The two feeds" through "HARD INVARIANT — never log the API token or secrets", D1).**
 - `get_logger(name) -> logging.Logger` — namespaced child of the root `hermes`
   logger (`hermes.dispatch`, `hermes.transport`, `hermes.server`, …); never
   configures handlers.
@@ -266,7 +266,7 @@ module (deploy-time-pluggable). Pure refactor — no behavior change.
 `server/app.py` (switch inline `os.environ.get` to `config.*`);
 `engine/log.py::configure()` (read defaults via the new `config.log_*()` accessors).
 
-**Behavior to pin (§3.2, D2).**
+**Behavior to pin (see the "Consolidation" section, D2).**
 - Add typed accessors mirroring the existing `heartbeat_s()`/`site()`/`agent()`
   style: `bind() -> str` (default `127.0.0.1`), `ws_poll_s() -> float` (default
   `1.0`), `web_dist() -> str` (default `web/dist`), `log_level() -> str`,
@@ -277,7 +277,7 @@ module (deploy-time-pluggable). Pure refactor — no behavior change.
 - `engine/log.py::configure()` reads its three defaults from `config.log_level()/
   log_format()/log_file()` (folds the env reads into config; log.py still stdlib).
 - Add `KNOWN_VARS: dict[str, str]` (var name → one-line description) covering the
-  full §3.1 surface, incl. a note that `HERMES_SSH_{PORT,USER,HOSTNAME,IDENTITY,
+  full env-var surface from the "Full env-var surface" section, incl. a note that `HERMES_SSH_{PORT,USER,HOSTNAME,IDENTITY,
   RESOURCES}_<host>` are dynamic per-host suffixes. `config.py` does **not** read
   site vars — the registry is descriptive metadata for `doctor` only.
 
@@ -286,7 +286,7 @@ module (deploy-time-pluggable). Pure refactor — no behavior change.
   env value when set (`monkeypatch.setenv`), with correct type coercion
   (`ws_poll_s` float, `debug` bool truthiness).
 - `KNOWN_VARS` contains every non-dynamic `HERMES_*`/`DEXTER_*`/`INVESTIGATIONS_DIR`
-  name from §3.1 (assert the set membership) and each has a non-empty description.
+  name from the "Full env-var surface" section (assert the set membership) and each has a non-empty description.
 - Regression: `resolve_home`, `heartbeat_s`, `site`, `agent` unchanged;
   `test_server.py` and `test_cli.py` still green after the inline→`config` switch.
 
@@ -305,7 +305,7 @@ early, actionable `ConfigError` at process entry.
 **Files.** `engine/config.py` (add `validate_startup()`); `engine/cli.py::main()` and
 `server/app.py::create_app()` (call it at entry).
 
-**Behavior to pin (§3.4, D4).** `validate_startup(*, is_networked=None,
+**Behavior to pin (see the "Fail-fast startup validation" section, D4).** `validate_startup(*, is_networked=None,
 require_server=False)` runs the preconditions-to-running subset of `doctor`'s checks
 and raises `ConfigError` (already defined in `config.py`) on the first failure:
 - `resolve_home()` succeeds and passes the networked-FS guard (make the existing lazy
@@ -340,7 +340,7 @@ any hard problem. Mutates no state; prints no secret value.
 **Files.** `engine/cli.py` (`cmd_doctor` + `doctor` subparser and a `config check`
 alias). No engine-state writes.
 
-**Behavior to pin (§3.3, D3).** Reports:
+**Behavior to pin (see the "hermes doctor / hermes config check" section, D3).** Reports:
 - Resolved `HERMES_HOME` + whether it passed the networked-FS guard; the `queue.db`
   path + existence + file mode (expect 0600) + applied `schema_migrations`
   version(s); the `api_token` path + mode (**never** the value).
@@ -384,7 +384,7 @@ stopping **together** via one shared flag. The API path defers to uvicorn.
   `cmd_serve_api` does **not**).
 - `server/app.py` (FastAPI lifespan start/stop log lines only).
 
-**Behavior to pin (§4.1, D5 exact).**
+**Behavior to pin (see the "Graceful shutdown (SIGTERM)" section, D5 exact).**
 - `engine/shutdown.py` exposes a module-global `stop_event = threading.Event()`
   (created once at import, **never reassigned**) plus `install_handlers()` that
   registers a SIGTERM **and** SIGINT handler which does nothing but
@@ -454,7 +454,7 @@ backup, and a vacuum to reclaim space. Operator-invoked (no background pruning).
 **Files.** `engine/db/maintenance.py` (new — `prune`, `backup`, `vacuum` helpers,
 stdlib `sqlite3` only); `engine/cli.py` (`cmd_db` + `db` subparser group).
 
-**Behavior to pin (§5.2–5.3, D8 exact, HARD).**
+**Behavior to pin (see sections "Retention + hermes db subcommand" and "Backup / restore of queue.db", D8 exact, HARD).**
 - **`hermes db prune [--events-older-than DAYS] [--attempts-older-than DAYS]
   [--run R] [--dry-run]`** — one committed transaction (WAL durability automatic),
   per-row eligibility (deletable iff **every** clause holds), terminal run ∈
@@ -538,13 +538,13 @@ default) alongside the existing worker-only `fleet/`. Depends on D9 (installabil
 **Files.** `fleet/Dockerfile.control-plane` (new);
 `fleet/docker-compose.control-plane.yml` (new). Worker image + guard untouched.
 
-**Behavior to pin (§4.2, D6).**
+**Behavior to pin (see the "Control-plane container image + compose" section, D6).**
 - **`Dockerfile.control-plane`** — unlike `Dockerfile.worker` (which uses
   `PYTHONPATH` + a thin wrapper to dodge flat-layout discovery, `worker:26-37`), the
   control plane `pip install`s the package with the `server` extra (`pip install .[server]`
   or a built wheel from D10), so FastAPI/uvicorn resolve. Runs `hermes serve --api`.
   Bind-mounts `HERMES_HOME` as a volume (queue.db + api_token persist on local,
-  non-networked storage — the §3.4 guard). Exposes the API port (default 8080).
+  non-networked storage — the "Fail-fast startup validation" guard). Exposes the API port (default 8080).
   Migrations apply on start (every process entry calls `apply_migrations` via
   `cli._connect()`).
 - **`docker-compose.control-plane.yml`** — brings the control plane up bound to
@@ -581,7 +581,7 @@ deploy file.
 **Files.** `fleet/hermes-control-plane.service` (new sample unit); referenced from
 the runbook (D11, Slice 10).
 
-**Behavior to pin (§4.3, D7).** `Type=simple`,
+**Behavior to pin (see the "Service-unit example" section, D7).** `Type=simple`,
 `ExecStart=/usr/local/bin/hermes serve --api`, `Environment=HERMES_HOME=…
 HERMES_LOG_FORMAT=json`, `Restart=on-failure`, `KillSignal=SIGTERM`, and
 `TimeoutStopSec` comfortably above the final-housekeeping duration so SIGTERM's
@@ -609,7 +609,7 @@ the reproducible overlay. Depends on D6 (the image that consumes it).
 **Files.** `constraints.txt` (new, repo root); `fleet/Dockerfile.control-plane`
 (build step uses `-c constraints.txt`).
 
-**Behavior to pin (§6.2, D10).** Pin exact versions known to work together (resolve
+**Behavior to pin (see the "Pinned constraints for the server extra" section, D10).** Pin exact versions known to work together (resolve
 them against the current floor pins and the existing Starlette/httpx
 deprecation-warning already suppressed in `pyproject.toml`'s `filterwarnings`). The
 control-plane build runs `pip install .[server] -c constraints.txt` so deploys are
@@ -637,7 +637,7 @@ lands last so it can cite the finished commands.
 **Files.** `README.md` (rewrite Status + add install/quickstart); `docs/RUNBOOK.md`
 (new).
 
-**Behavior to pin (§6.3, D11).**
+**Behavior to pin (see the "Refreshed README + quickstart + runbook" section, D11).**
 - **README** — Status reflects what runs today; add a quickstart: create a venv,
   `pip install -e '.[dev,server]'`, `hermes run example --site local`,
   `hermes serve --api`, then `hermes doctor`.
@@ -660,7 +660,7 @@ no longer contains "Design phase" and does contain the quickstart commands
 deploy/topology/shutdown/backup-restore/prune/token-rotation/doctor.
 
 **DoD.** README reflects reality with a working quickstart; the runbook covers every
-operability lifecycle; `run_tests.sh` GREEN. All §10 acceptance criteria (AC1–AC8)
+operability lifecycle; `run_tests.sh` GREEN. All acceptance criteria from the "Acceptance criteria" section (AC1–AC8)
 are now covered across the slices.
 
 ---
@@ -702,7 +702,7 @@ run must provision, the real one-commit-repo fixture pattern from
 use `@pytest.mark.docker` and skip cleanly where Docker/podman is absent (mirroring
 `test_fleet_docker.py`); their non-Docker contracts are also asserted statically.
 
-## Deferred (not implemented here; recorded, per spec §1 out-of-scope / §11)
+## Deferred (not implemented here; recorded, per spec "Scope" out-of-scope and "Open items")
 
 - **Metrics-backend export** (Prometheus/StatsD/ODS). The JSON log formatter (D1),
   `GET /api/runs/{id}/metrics`, and the `events` feed are the seams; shipping is not
