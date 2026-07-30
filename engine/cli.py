@@ -3,6 +3,7 @@
 Thin wrappers over engine modules. Stdlib-only (argparse).
 """
 import argparse
+import importlib
 import json
 import logging
 import os
@@ -21,6 +22,44 @@ def _connect():
     db_path = home / "queue.db"
     migrate.apply_migrations(str(db_path))
     return migrate.connect(str(db_path))
+
+
+def _import_registration_modules():
+    """Import custom adapter modules from HERMES_{PLAYBOOK,SITE,AGENT}_MODULES.
+
+    Each module's import side-effect registers adapters via playbook.register(),
+    site.register(), or agent.register().
+
+    Raises:
+        config.ConfigError: If any listed module fails to import, naming the module
+                           and the underlying error.
+    """
+    # Import playbook modules
+    for module_path in config.playbook_modules():
+        try:
+            importlib.import_module(module_path)
+        except ImportError as e:
+            raise config.ConfigError(
+                f"Failed to import playbook module {module_path!r}: {e}"
+            ) from e
+
+    # Import site modules
+    for module_path in config.site_modules():
+        try:
+            importlib.import_module(module_path)
+        except ImportError as e:
+            raise config.ConfigError(
+                f"Failed to import site module {module_path!r}: {e}"
+            ) from e
+
+    # Import agent modules
+    for module_path in config.agent_modules():
+        try:
+            importlib.import_module(module_path)
+        except ImportError as e:
+            raise config.ConfigError(
+                f"Failed to import agent module {module_path!r}: {e}"
+            ) from e
 
 
 def _load_playbook_site_agent(args):
@@ -43,6 +82,9 @@ def _load_playbook_site_agent(args):
     ag_name = getattr(args, 'agent', None) or config.agent()
     if ag_name == "mock":
         import testkit.mock_agent
+
+    # Import custom adapter modules from env vars (after built-ins)
+    _import_registration_modules()
 
     pb = playbook.load(playbook_name) if playbook_name else None
     st = site.load(args.site)
@@ -554,6 +596,10 @@ def cmd_serve_once(args):
         import testkit.mock_agent  # noqa: F401  (registers "mock")
     else:
         import agents.claude  # noqa: F401  (registers "claude")
+
+    # Import custom agent modules from env vars
+    _import_registration_modules()
+
     try:
         ag = agent.load(agent_name)
     except KeyError as e:
@@ -712,6 +758,13 @@ def cmd_doctor(args):
             print(f"  {key}: set (redacted)")
 
     # 5. Site/agent adapter load check (if --site/--agent specified)
+    # Import custom adapter modules first
+    try:
+        _import_registration_modules()
+    except config.ConfigError as e:
+        print(f"  ERROR loading custom modules: {e}", file=sys.stderr)
+        problems.append(f"Custom modules: {e}")
+
     if hasattr(args, 'site') and args.site:
         print(f"\n=== Site Adapter: {args.site} ===")
         try:

@@ -35,7 +35,7 @@ def test_engine_core_imports_only_stdlib():
     stdlib_modules = {
         "__future__", "abc", "argparse", "ast", "asyncio", "base64", "collections",
         "contextlib", "contextvars", "copy", "csv", "dataclasses", "datetime", "decimal",
-        "email", "enum", "functools", "hashlib", "http", "io", "itertools",
+        "email", "enum", "functools", "hashlib", "http", "importlib", "io", "itertools",
         "json", "logging", "math", "os", "pathlib", "pickle", "platform",
         "pprint", "queue", "random", "re", "shutil", "signal", "socket", "sqlite3",
         "stat", "string", "subprocess", "sys", "tempfile", "textwrap", "threading",

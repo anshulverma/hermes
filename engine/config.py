@@ -136,6 +136,39 @@ def debug() -> bool:
     return val.lower() not in ('0', 'false', 'no', '')
 
 
+def playbook_modules() -> list[str]:
+    """Return HERMES_PLAYBOOK_MODULES from env as list of module paths (default: []).
+
+    Parses comma-separated module paths, stripping whitespace.
+    """
+    val = os.environ.get('HERMES_PLAYBOOK_MODULES', '')
+    if not val:
+        return []
+    return [m.strip() for m in val.split(',') if m.strip()]
+
+
+def site_modules() -> list[str]:
+    """Return HERMES_SITE_MODULES from env as list of module paths (default: []).
+
+    Parses comma-separated module paths, stripping whitespace.
+    """
+    val = os.environ.get('HERMES_SITE_MODULES', '')
+    if not val:
+        return []
+    return [m.strip() for m in val.split(',') if m.strip()]
+
+
+def agent_modules() -> list[str]:
+    """Return HERMES_AGENT_MODULES from env as list of module paths (default: []).
+
+    Parses comma-separated module paths, stripping whitespace.
+    """
+    val = os.environ.get('HERMES_AGENT_MODULES', '')
+    if not val:
+        return []
+    return [m.strip() for m in val.split(',') if m.strip()]
+
+
 def validate_startup(*, is_networked=None, require_server=False) -> None:
     """Validate startup preconditions.
 
@@ -232,4 +265,7 @@ KNOWN_VARS: dict[str, str] = {
     'HERMES_DEVSERVER_RECHECK_CMD': 'CI/repro re-check command for verify.',
     'DEXTER_KB_PY': 'Path to dexter kb.py for banking learnings (master-side).',
     'INVESTIGATIONS_DIR': 'Dexter runtime-data dir for banked learnings.',
+    'HERMES_PLAYBOOK_MODULES': 'Comma-separated custom playbook module paths to import for adapter registration.',
+    'HERMES_SITE_MODULES': 'Comma-separated custom site module paths to import for adapter registration.',
+    'HERMES_AGENT_MODULES': 'Comma-separated custom agent module paths to import for adapter registration.',
 }

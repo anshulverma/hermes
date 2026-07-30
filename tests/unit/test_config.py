@@ -309,6 +309,9 @@ def test_known_vars_contains_all_non_dynamic_vars():
         'HERMES_DEVSERVER_RECHECK_CMD',
         'DEXTER_KB_PY',
         'INVESTIGATIONS_DIR',
+        'HERMES_PLAYBOOK_MODULES',
+        'HERMES_SITE_MODULES',
+        'HERMES_AGENT_MODULES',
     }
 
     assert required_vars.issubset(set(KNOWN_VARS.keys())), \
