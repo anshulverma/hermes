@@ -43,13 +43,17 @@ export function Spinner({ size = 36, stroke = 4 }: SpinnerProps) {
 type LoadingOverlayProps = {
   label?: string;
   size?: number;
+  // Scrim color. Defaults to the page overlay (dark). Pass a surface-matched
+  // translucent color when overlaying a lighter surface (e.g. a drawer card) so
+  // the tint blends instead of looking like a black box.
+  scrim?: string;
 };
 
 /**
  * Full-cover, blurred loading overlay. Requires a `position: relative|absolute|fixed`
  * ancestor; it fills that box, centers the spinner, and blurs the content behind.
  */
-export function LoadingOverlay({ label, size = 40 }: LoadingOverlayProps) {
+export function LoadingOverlay({ label, size = 40, scrim = 'var(--surface-overlay)' }: LoadingOverlayProps) {
   return (
     <div
       role="status"
@@ -63,7 +67,7 @@ export function LoadingOverlay({ label, size = 40 }: LoadingOverlayProps) {
         alignItems: 'center',
         justifyContent: 'center',
         gap: 12,
-        background: 'var(--surface-overlay)',
+        background: scrim,
         backdropFilter: 'blur(var(--blur-overlay))',
         WebkitBackdropFilter: 'blur(var(--blur-overlay))',
       }}
@@ -73,5 +77,8 @@ export function LoadingOverlay({ label, size = 40 }: LoadingOverlayProps) {
     </div>
   );
 }
+
+/** A translucent scrim matched to the card surface — use over drawers/cards. */
+export const CARD_SCRIM = 'color-mix(in srgb, var(--surface-card) 72%, transparent)';
 
 export default Spinner;

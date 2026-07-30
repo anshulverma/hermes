@@ -8,6 +8,7 @@ import { fetchReductions, acceptReduction, rejectReduction } from '../api/client
 import type { Reduction } from '../api/client';
 import { deriveFindingStatus, normalizeReduction } from '../api/normalize';
 import { Card, Badge, StatusPill, Divider, EmptyState, Button } from '../ds';
+import { LoadingOverlay } from '../components/Spinner';
 
 type FindingsProps = {
   runId: string;
@@ -60,8 +61,8 @@ export default function Findings({ runId }: FindingsProps) {
 
   if (loading) {
     return (
-      <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)' }}>
-        Loading findings...
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        <LoadingOverlay label="Loading findings…" />
       </div>
     );
   }

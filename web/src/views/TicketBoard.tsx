@@ -116,43 +116,21 @@ function TicketLane({ lane, tickets, stateFilter, onStateFilter, onOpen, filteri
       >
         {rows.length ? (
           rows.map((t) => (
-            <div key={t.id} style={{ position: 'relative' }}>
-              <TicketCard
-                ticket={{
-                  id: t.id,
-                  subject: t.subject,
-                  phase: t.phase,
-                  attempts: t.attempts,
-                  elapsed_s: t.elapsed_s,
-                  resource_req: t.resource_req,
-                  host: t.host || undefined,
-                }}
-                onClick={() => onOpen(t)}
-                style={{ borderLeft: `2px solid ${hueOf(normalizeTicketState(t.state))}` }}
-              />
-              {/* Priority badge — clicks pass through to the card. */}
-              <span
-                title={`priority ${t.priority}`}
-                style={{
-                  position: 'absolute',
-                  top: 8,
-                  right: 8,
-                  pointerEvents: 'none',
-                  padding: '0 6px',
-                  height: 18,
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 11,
-                  color: 'var(--text-muted)',
-                  background: 'var(--wash-subtle)',
-                  border: '1px solid var(--border-hairline)',
-                  borderRadius: 'var(--radius-lg)',
-                }}
-              >
-                P{t.priority}
-              </span>
-            </div>
+            <TicketCard
+              key={t.id}
+              ticket={{
+                id: t.id,
+                subject: t.subject,
+                phase: t.phase,
+                attempts: t.attempts,
+                elapsed_s: t.elapsed_s,
+                resource_req: t.resource_req,
+                host: t.host || undefined,
+                priority: t.priority,
+              }}
+              onClick={() => onOpen(t)}
+              style={{ borderLeft: `2px solid ${hueOf(normalizeTicketState(t.state))}` }}
+            />
           ))
         ) : (
           <div

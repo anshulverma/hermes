@@ -486,8 +486,27 @@ describe('TicketDrawer', () => {
       expect(screen.getByText(/ValueError: boom/)).toBeInTheDocument();
     });
 
-    it('does not show an Output block when there is no detail', async () => {
-      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+    it('shows an explicit no-output note for a failure without captured detail', async () => {
+      const failed = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'failed' },
+        result: { ...mockTicketDetail.result, outcome: 'driver_failed', detail: null },
+        available_actions: ['retry'],
+      };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => failed });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Output')).toBeInTheDocument());
+      expect(screen.getByText(/no output/i)).toBeInTheDocument();
+    });
+
+    it('does not show an Output block for a done ticket', async () => {
+      const done = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'done' },
+        result: { ...mockTicketDetail.result, outcome: 'ok', detail: null },
+        available_actions: [],
+      };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => done });
       render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Goal')).toBeInTheDocument());
       expect(screen.queryByText('Output')).not.toBeInTheDocument();

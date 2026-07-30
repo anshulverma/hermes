@@ -21,7 +21,7 @@ import {
   AuthError,
 } from '../api/client';
 import { Drawer, StatusPill, Badge } from '../ds';
-import { LoadingOverlay } from './Spinner';
+import { LoadingOverlay, CARD_SCRIM } from './Spinner';
 import { normalizeTicketState, normalizeTicketDetail } from '../api/normalize';
 
 /** Epoch seconds → local "MMM D, HH:MM:SS"; empty for missing timestamps. */
@@ -160,7 +160,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
   return (
     <Drawer open={isOpen} fixed onClose={onClose} title={ticket.id} width="600px">
       <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 24, padding: '20px 24px', minHeight: 240 }}>
-        {loading && <LoadingOverlay label="Loading ticket…" />}
+        {loading && <LoadingOverlay label="Loading ticket…" scrim={CARD_SCRIM} />}
 
         {/* Board-level header */}
         <div style={{ display: 'flex', gap: 10 }}>
@@ -470,14 +470,26 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
               )}
             </div>
 
-            {/* Failure output — raw worker output / stderr / stack trace */}
-            {detail.result?.detail && (
+            {/* Failure output — raw worker output / stderr / stack trace. Shown for
+                any failed/needs-attention ticket so an absent capture reads as an
+                explicit note rather than nothing. */}
+            {(detail.result?.detail ||
+              detail.ticket.state === 'failed' ||
+              detail.ticket.state === 'needs-human') && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>Output</span>
-                <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-                  What the worker emitted before failing.
-                </span>
-                <pre style={preStyle}>{detail.result.detail}</pre>
+                {detail.result?.detail ? (
+                  <>
+                    <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                      What the worker emitted before failing.
+                    </span>
+                    <pre style={preStyle}>{detail.result.detail}</pre>
+                  </>
+                ) : (
+                  <span style={{ color: 'var(--text-muted)', fontSize: 12, fontStyle: 'italic' }}>
+                    The worker produced no output on stdout or stderr for this attempt.
+                  </span>
+                )}
               </div>
             )}
 

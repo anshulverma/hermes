@@ -10,6 +10,7 @@ import { fetchEvents, fetchEventKinds } from '../api/client';
 import type { Event } from '../api/client';
 import { useEventStream } from '../hooks/useEventStream';
 import { EmptyState } from '../ds';
+import { LoadingOverlay } from '../components/Spinner';
 
 type EventRowProps = {
   event: Event;
@@ -105,16 +106,8 @@ export default function ActivityFeed() {
 
   if (loading && events.length === 0) {
     return (
-      <div
-        style={{
-          flex: 1,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          color: 'var(--text-muted)',
-        }}
-      >
-        Loading events...
+      <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
+        <LoadingOverlay label="Loading events…" />
       </div>
     );
   }

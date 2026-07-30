@@ -172,6 +172,58 @@ def subprocess_result(returncode=0, stdout="", stderr=""):
     return cp
 
 
+def _claude_env():
+    """A minimal envelope for the real ClaudeAgent (no payload_sha256 -> skip the
+    integrity gate so we exercise the output-parsing path)."""
+    return {
+        "ticket_id": "r1/t-0", "run_id": "r1", "phase": "work",
+        "resource_req": "cpu", "base_ref": "main", "payload": {}, "timeout_s": 10,
+        "site_context": {},
+        "goal_envelope": {
+            "goal": "g",
+            "driver": {"command": "claude", "args": {}, "loop": None},
+            "done_contract": {"type": "object"},
+            "guardrails": {"no_ship": True},
+        },
+    }
+
+
+def test_local_transport_captures_unparseable_stdout_as_detail():
+    """Non-empty but unparseable worker stdout is kept as the failure detail."""
+    from engine import transport
+    from agents.claude.agent import ClaudeAgent
+
+    with mock.patch(
+        "engine.transport.subprocess.run",
+        side_effect=lambda argv, *a, **k: subprocess_result(
+            returncode=1, stdout="NOT JSON garbage output", stderr=""
+        ),
+    ):
+        result = transport.local_transport(_claude_env(), "localhost", ClaudeAgent())
+
+    assert result.outcome == "driver_failed"
+    assert result.termination_reason == "driver_error"
+    assert result.detail == "NOT JSON garbage output"
+
+
+def test_local_transport_captures_stderr_when_stdout_empty():
+    """When stdout is empty, the failure detail falls back to stderr (stack traces)."""
+    from engine import transport
+    from agents.claude.agent import ClaudeAgent
+
+    trace = "Traceback (most recent call last):\n  File x\nBoomError: kaboom"
+    with mock.patch(
+        "engine.transport.subprocess.run",
+        side_effect=lambda argv, *a, **k: subprocess_result(
+            returncode=1, stdout="", stderr=trace
+        ),
+    ):
+        result = transport.local_transport(_claude_env(), "localhost", ClaudeAgent())
+
+    assert result.outcome == "driver_failed"
+    assert result.detail == trace
+
+
 # --- ssh_transport -------------------------------------------------------
 
 def test_ssh_transport_builds_scp_ssh_scp_argv(mock_agent):

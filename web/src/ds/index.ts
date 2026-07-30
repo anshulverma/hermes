@@ -208,6 +208,8 @@ export type TicketCardProps = {
     elapsed_s?: number;
     resource_req?: string;
     host?: string;
+    priority?: number;
+    state?: string;
   };
   onClick?: () => void;
   style?: React.CSSProperties;
