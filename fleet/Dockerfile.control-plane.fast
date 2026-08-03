@@ -1,0 +1,14 @@
+# Hermes control plane — code-only incremental rebuild.
+#
+# Layers updated source onto an already-built control-plane image instead of
+# rebuilding from the base. The package is installed editable (`pip install -e`)
+# in the full image, so replacing the source tree is enough for code/UI changes —
+# no pip reinstall, no base-image pull, and a rebuild takes seconds.
+#
+# Use the full build (fleet/Dockerfile.control-plane) whenever dependencies
+# change; this file cannot pick up new packages.
+#   podman build -f fleet/Dockerfile.control-plane.fast -t hermes-control-plane .
+ARG BASE=localhost/hermes-control-plane:latest
+FROM ${BASE}
+
+COPY . /opt/hermes/

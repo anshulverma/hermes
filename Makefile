@@ -25,7 +25,7 @@ VOLUME ?= hermes-home
 PROXY  ?= with-proxy
 URL    := http://127.0.0.1:$(PORT)
 
-.PHONY: help web image up down restart status health logs shell url token clean
+.PHONY: help web image image-fast up down restart status health logs shell url token clean
 
 help: ## list targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort \
@@ -36,6 +36,9 @@ web: ## build the SPA (web/dist) that gets baked into the image
 
 image: web ## (re)build the control-plane image (SPA baked in)
 	$(PROXY) podman build --network=host -f fleet/Dockerfile.control-plane -t $(IMAGE) .
+
+image-fast: web ## rebuild code+SPA onto the existing image (seconds, no base pull; deps unchanged)
+	$(PROXY) podman build --network=host -f fleet/Dockerfile.control-plane.fast -t $(IMAGE) .
 
 up: ## start the containerized web UI on $(PORT) (builds the image if missing)
 	@podman image exists $(IMAGE) || $(MAKE) image
