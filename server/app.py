@@ -16,7 +16,12 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from engine import config
 from engine.db.migrate import connect
-from engine.queue import load_run, phase_ticket_counts, set_run_state
+from engine.queue import (
+    TERMINAL_RUN_STATES,
+    load_run,
+    phase_ticket_counts,
+    set_run_state,
+)
 from engine import log
 from server.auth import load_or_create_token
 
@@ -370,8 +375,23 @@ def create_app(bind: str | None = None) -> FastAPI:
         finally:
             conn.close()
 
-    def _available_actions(state: str, reduction_id: Optional[int]) -> list[str]:
-        """Derive available operator actions for a ticket state."""
+    def _available_actions(
+        state: str, reduction_id: Optional[int], run_state: Optional[str] = None
+    ) -> list[str]:
+        """Derive available operator actions for a ticket.
+
+        A terminal run never dispatches again, so the actions that would move a
+        ticket back to 'queued' are withheld (they would strand it) — mirroring
+        the engine's own guards. 'abandon' stays available so an operator can
+        still clear a stranded ticket.
+        """
+        actions = _base_actions(state, reduction_id)
+        if run_state in TERMINAL_RUN_STATES:
+            return [a for a in actions if a not in ("requeue", "retry")]
+        return actions
+
+    def _base_actions(state: str, reduction_id: Optional[int]) -> list[str]:
+        """Actions implied by the ticket's own state, ignoring its run."""
         if state == "needs_human":
             if reduction_id is None:
                 return ["requeue", "reprioritize", "abandon"]
@@ -420,6 +440,12 @@ def create_app(bind: str | None = None) -> FastAPI:
                 tid, run_id, phase, state, resource_req, priority,
                 attempts, worker_host, reduction_id, payload_json, created_at, updated_at
             ) = ticket_row
+
+            # The owning run's state gates which actions can still do anything.
+            run_state_row = conn.execute(
+                "SELECT state FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            run_state = run_state_row[0] if run_state_row else None
 
             # Parse payload
             payload = json.loads(payload_json)
@@ -604,8 +630,17 @@ def create_app(bind: str | None = None) -> FastAPI:
                         "json": json.loads(red_row[2]),
                     }
 
+            # A non-terminal ticket under a terminal run can never be claimed
+            # (dispatch only selects tickets whose run is running). Say so —
+            # this is the whole explanation for a ticket sitting in 'queued'.
+            if reason is None and run_state in TERMINAL_RUN_STATES and state not in ("done", "failed"):
+                reason = (
+                    f"Run {run_id!r} is {run_state}, so this ticket will never be "
+                    f"dispatched. Abandon it to clear it."
+                )
+
             # Get available actions
-            available_actions = _available_actions(state, reduction_id)
+            available_actions = _available_actions(state, reduction_id, run_state)
 
             return {
                 "ticket": ticket,
@@ -1448,10 +1483,13 @@ def create_app(bind: str | None = None) -> FastAPI:
             # source of truth), so an action the menu hides can never succeed.
             if action is not None:
                 srow = conn.execute(
-                    "SELECT state, reduction_id FROM tickets WHERE id=?", (id_value,)
+                    """SELECT t.state, t.reduction_id, r.state
+                       FROM tickets t LEFT JOIN runs r ON r.id = t.run_id
+                       WHERE t.id=?""",
+                    (id_value,),
                 ).fetchone()
-                state, reduction_id = srow
-                allowed = _available_actions(state, reduction_id)
+                state, reduction_id, run_state = srow
+                allowed = _available_actions(state, reduction_id, run_state)
                 if action not in allowed:
                     raise HTTPException(
                         status_code=409,

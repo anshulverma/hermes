@@ -33,9 +33,24 @@ _RUN_EDGES: dict[tuple[str, str], str] = {
 }
 
 
+# Runs in these states never dispatch again, so a ticket moved back to 'queued'
+# under one would be permanently unclaimable (``claim_ticket`` only selects
+# tickets whose run is 'running'). 'paused' is absent on purpose: it resumes.
+TERMINAL_RUN_STATES = frozenset({"done", "stopped", "failed"})
+
+
 def _now(now: Optional[float]) -> float:
     """Resolve a ``now`` argument, defaulting to wall-clock ."""
     return time.time() if now is None else now
+
+
+def _reject_if_run_terminal(run_id: str, run_state: str, ticket_id: str, action: str) -> None:
+    """Raise if the ticket's run can never dispatch again."""
+    if run_state in TERMINAL_RUN_STATES:
+        raise ValueError(
+            f"run {run_id!r} is {run_state!r} (terminal); cannot {action} "
+            f"ticket {ticket_id!r} — it would never be dispatched"
+        )
 
 
 def _backoff(attempts: int) -> float:
@@ -620,16 +635,21 @@ def requeue_needs_human(conn: sqlite3.Connection, ticket_id: str, now=None) -> N
 
     ``needs_human → queued`` as a fresh attempt: ``attempts`` UNCHANGED, the
     ticket is available immediately, ``worker_host`` and any ``reduction_id``
-    link cleared. Raises if the ticket is not in ``needs_human``.
+    link cleared. Raises if the ticket is not in ``needs_human``, or if its run
+    is terminal (the ticket would queue forever, never being dispatched).
     """
     now = _now(now)
     try:
         row = conn.execute(
-            "SELECT run_id, state FROM tickets WHERE id=?", (ticket_id,)
+            """SELECT t.run_id, t.state, r.state
+               FROM tickets t JOIN runs r ON r.id = t.run_id
+               WHERE t.id=?""",
+            (ticket_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"unknown ticket {ticket_id!r}")
-        run_id, state = row
+        run_id, state, run_state = row
+        _reject_if_run_terminal(run_id, run_state, ticket_id, "requeue")
         if state != "needs_human":
             raise ValueError(
                 f"ticket {ticket_id!r} is {state!r}, not 'needs_human'; "
@@ -702,16 +722,21 @@ def retry_ticket(conn: sqlite3.Connection, ticket_id: str, now=None) -> None:
     Transitions a ``failed`` ticket to ``queued`` (available immediately), clearing
     ``worker_host``, ``lease_id``, and ``reduction_id``. Attempts count is UNCHANGED
     (no penalty). Emits ``ticket_requeued``. Raises ``ValueError`` if the ticket is
-    not in ``failed`` state or unknown.
+    not in ``failed`` state, is unknown, or its run is terminal (the ticket would
+    queue forever, never being dispatched).
     """
     now = _now(now)
     try:
         row = conn.execute(
-            "SELECT run_id, state FROM tickets WHERE id=?", (ticket_id,)
+            """SELECT t.run_id, t.state, r.state
+               FROM tickets t JOIN runs r ON r.id = t.run_id
+               WHERE t.id=?""",
+            (ticket_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"unknown ticket {ticket_id!r}")
-        run_id, state = row
+        run_id, state, run_state = row
+        _reject_if_run_terminal(run_id, run_state, ticket_id, "retry")
 
         if state != "failed":
             raise ValueError(

@@ -756,6 +756,61 @@ def test_retry_ticket_raises_on_unknown(conn):
         queue.retry_ticket(conn, "r1/t-unknown", now=100.0)
 
 
+# --- never strand a ticket under a run that can no longer dispatch ---------
+#
+# claim_ticket only selects tickets whose run is 'running'. Moving a ticket back
+# to 'queued' under a terminal run would make it permanently unclaimable.
+
+@pytest.mark.parametrize("run_state", ["done", "stopped", "failed"])
+def test_retry_ticket_raises_when_run_terminal(conn, run_state):
+    from engine import queue
+
+    _mk_run(conn, "r1", state=run_state)
+    _mk_ticket(conn, "r1/t-0", state="failed", attempts=1)
+
+    with pytest.raises(ValueError):
+        queue.retry_ticket(conn, "r1/t-0", now=100.0)
+
+    assert _ticket_row(conn, "r1/t-0")["state"] == "failed"  # unchanged
+
+
+@pytest.mark.parametrize("run_state", ["done", "stopped", "failed"])
+def test_requeue_needs_human_raises_when_run_terminal(conn, run_state):
+    from engine import queue
+
+    _mk_run(conn, "r1", state=run_state)
+    _mk_ticket(conn, "r1/t-0", state="needs_human")
+
+    with pytest.raises(ValueError):
+        queue.requeue_needs_human(conn, "r1/t-0", now=100.0)
+
+    assert _ticket_row(conn, "r1/t-0")["state"] == "needs_human"  # unchanged
+
+
+def test_retry_ticket_allowed_when_run_paused(conn):
+    """A paused run is resumable, so requeueing is legitimate."""
+    from engine import queue
+
+    _mk_run(conn, "r1", state="paused")
+    _mk_ticket(conn, "r1/t-0", state="failed", attempts=1)
+
+    queue.retry_ticket(conn, "r1/t-0", now=100.0)
+
+    assert _ticket_row(conn, "r1/t-0")["state"] == "queued"
+
+
+def test_abandon_ticket_allowed_when_run_terminal(conn):
+    """Abandon stays available so an operator can clear a stranded ticket."""
+    from engine import queue
+
+    _mk_run(conn, "r1", state="done")
+    _mk_ticket(conn, "r1/t-0", state="queued")
+
+    queue.abandon_ticket(conn, "r1/t-0", now=100.0)
+
+    assert _ticket_row(conn, "r1/t-0")["state"] == "failed"
+
+
 def test_set_ticket_priority_updates_priority_and_emits(conn):
     from engine import queue
 

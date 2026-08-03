@@ -3528,6 +3528,99 @@ def test_ticket_detail_reason_abandoned(loopback_client: TestClient, temp_home: 
     assert "abandon" in data["reason"].lower()
 
 
+def _seed_run_and_ticket(conn, run_state: str, ticket_state: str, ticket_id: str = "r1/t-0"):
+    """Seed one run + one ticket in the given states."""
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', ?, 'work', 'main', '{}', 0, 0)""",
+        (run_state,),
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES (?, 'r1', 'work', ?, 'cpu', 0, 1, 0, '[]', '{"goal": "test"}', 0, 0)""",
+        (ticket_id, ticket_state),
+    )
+    conn.commit()
+
+
+def test_retry_endpoint_409_when_run_terminal(loopback_client: TestClient, temp_home: Path):
+    """Retrying under a terminal run would strand the ticket: 409, state unchanged."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    _seed_run_and_ticket(conn, run_state="done", ticket_state="failed")
+    conn.close()
+
+    response = loopback_client.post(
+        "/api/tickets/r1%2Ft-0/retry",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 409
+
+    conn = sqlite3.connect(db_path)
+    assert conn.execute("SELECT state FROM tickets WHERE id=?", ("r1/t-0",)).fetchone()[0] == "failed"
+    conn.close()
+
+
+def test_requeue_endpoint_409_when_run_terminal(loopback_client: TestClient, temp_home: Path):
+    """Requeueing a needs_human ticket under a terminal run is refused."""
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    _seed_run_and_ticket(conn, run_state="stopped", ticket_state="needs_human")
+    conn.close()
+
+    response = loopback_client.post(
+        "/api/tickets/r1%2Ft-0/requeue",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 409
+
+
+def test_available_actions_excludes_retry_for_terminal_run(loopback_client: TestClient, temp_home: Path):
+    """A failed ticket under a done run offers no retry (it could never run)."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    _seed_run_and_ticket(conn, run_state="done", ticket_state="failed")
+    conn.close()
+
+    data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
+    assert "retry" not in data["available_actions"]
+
+
+def test_stranded_queued_ticket_offers_abandon_and_explains(loopback_client: TestClient, temp_home: Path):
+    """A queued ticket under a terminal run is unclaimable: explain it, offer cleanup."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    _seed_run_and_ticket(conn, run_state="done", ticket_state="queued")
+    conn.close()
+
+    data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
+    # Abandon remains the escape hatch; requeue/retry are not offered.
+    assert "abandon" in data["available_actions"]
+    assert "retry" not in data["available_actions"]
+    assert "requeue" not in data["available_actions"]
+    # The reason must say WHY it is not being dispatched.
+    assert data["reason"] is not None
+    assert "done" in data["reason"] and "dispatch" in data["reason"].lower()
+
+
+def test_available_actions_unaffected_when_run_paused(loopback_client: TestClient, temp_home: Path):
+    """A paused run is resumable, so retry stays available."""
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    _seed_run_and_ticket(conn, run_state="paused", ticket_state="failed")
+    conn.close()
+
+    data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
+    assert "retry" in data["available_actions"]
+
+
 def test_ticket_detail_includes_failure_detail(loopback_client: TestClient, temp_home: Path):
     """GET /api/tickets/{id} surfaces the captured raw failure output (result + timeline)."""
     db_path = str(temp_home / "queue.db")
