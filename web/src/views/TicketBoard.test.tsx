@@ -186,4 +186,35 @@ describe('TicketBoard', () => {
       expect(screen.queryByText('Investigate issue #1')).not.toBeInTheDocument();
     });
   });
+
+  it('should refetch when liveTick changes', async () => {
+    const { rerender } = render(<TicketBoard runId="test-run" liveTick={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Investigate issue #1')).toBeInTheDocument();
+    });
+
+    const callsBefore = (mockFetch as any).mock.calls.length;
+
+    rerender(<TicketBoard runId="test-run" liveTick={1} />);
+
+    await waitFor(() => {
+      expect((mockFetch as any).mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+  });
+
+  it('should keep previously rendered tickets visible during a live refetch', async () => {
+    const { rerender } = render(<TicketBoard runId="test-run" liveTick={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Investigate issue #1')).toBeInTheDocument();
+    });
+
+    // Start a slow refetch (never resolves immediately)
+    mockFetch.mockImplementation(() => new Promise(() => {}));
+    rerender(<TicketBoard runId="test-run" liveTick={1} />);
+
+    // Tickets should still be on screen (no blanking spinner)
+    expect(screen.getByText('Investigate issue #1')).toBeInTheDocument();
+  });
 });

@@ -254,4 +254,45 @@ describe('Findings', () => {
       expect(screen.queryByText('Reject')).not.toBeInTheDocument();
     });
   });
+
+  it('should refetch when liveTick changes', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => mockReductions,
+    });
+
+    const { rerender } = render(<Findings runId="test-run" liveTick={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Null pointer in module X')).toBeInTheDocument();
+    });
+
+    const callsBefore = (mockFetch as any).mock.calls.length;
+
+    rerender(<Findings runId="test-run" liveTick={1} />);
+
+    await waitFor(() => {
+      expect((mockFetch as any).mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+  });
+
+  it('should keep previously rendered findings visible during a live refetch', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => mockReductions,
+    });
+
+    const { rerender } = render(<Findings runId="test-run" liveTick={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Null pointer in module X')).toBeInTheDocument();
+    });
+
+    // Start a slow refetch
+    mockFetch.mockImplementation(() => new Promise(() => {}));
+    rerender(<Findings runId="test-run" liveTick={1} />);
+
+    // Findings should still be on screen (no blanking spinner)
+    expect(screen.getByText('Null pointer in module X')).toBeInTheDocument();
+  });
 });

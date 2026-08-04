@@ -155,9 +155,10 @@ function TicketLane({ lane, tickets, stateFilter, onStateFilter, onOpen, filteri
 
 type TicketBoardProps = {
   runId: string;
+  liveTick?: number;
 };
 
-export default function TicketBoard({ runId }: TicketBoardProps) {
+export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -193,7 +194,7 @@ export default function TicketBoard({ runId }: TicketBoardProps) {
         setError(err.message);
         setLoading(false);
       });
-  }, [runId, stateFilter, phase, resource, search, refreshTick]);
+  }, [runId, stateFilter, phase, resource, search, refreshTick, liveTick]);
 
   const clearFilters = () => {
     setSearch('');

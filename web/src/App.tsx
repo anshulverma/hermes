@@ -15,6 +15,7 @@ import ActivityFeed from './views/ActivityFeed';
 import TokenLogin from './components/TokenLogin';
 import { useHealth, useRuns } from './hooks/useApi';
 import { useEventStream } from './hooks/useEventStream';
+import { useLiveTick, TICKET_EVENT_KINDS, CREW_EVENT_KINDS, FINDING_EVENT_KINDS } from './hooks/useLiveTick';
 import { EmptyState, CrewBackdrop } from './ds';
 import { LoadingOverlay } from './components/Spinner';
 import { fetchRun } from './api/client';
@@ -35,6 +36,11 @@ export default function App() {
   // WebSocket live event stream
   const { connected, lastEvent, authError } = useEventStream();
   const [authErrorDismissed, setAuthErrorDismissed] = useState(false);
+
+  // Per-domain live ticks derived from the shared event stream
+  const ticketLiveTick = useLiveTick(lastEvent, TICKET_EVENT_KINDS);
+  const crewLiveTick = useLiveTick(lastEvent, CREW_EVENT_KINDS);
+  const findingLiveTick = useLiveTick(lastEvent, FINDING_EVENT_KINDS);
 
   // Initialize lucide icons after mount
   useEffect(() => {
@@ -183,15 +189,15 @@ export default function App() {
         )}
 
         {!loading && !error && runDetail && view === 'board' && (
-          <TicketBoard runId={runDetail.id} />
+          <TicketBoard runId={runDetail.id} liveTick={ticketLiveTick} />
         )}
 
         {!loading && !error && view === 'crew' && (
-          <CrewPanel />
+          <CrewPanel liveTick={crewLiveTick} />
         )}
 
         {!loading && !error && runDetail && view === 'findings' && (
-          <Findings runId={runDetail.id} />
+          <Findings runId={runDetail.id} liveTick={findingLiveTick} />
         )}
 
         {!loading && !error && view === 'activity' && (

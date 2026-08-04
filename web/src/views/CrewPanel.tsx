@@ -12,7 +12,11 @@ import { LoadingOverlay } from '../components/Spinner';
 import CrewDrawer from '../components/CrewDrawer';
 import AddHostModal from '../components/AddHostModal';
 
-export default function CrewPanel() {
+type CrewPanelProps = {
+  liveTick?: number;
+};
+
+export default function CrewPanel({ liveTick }: CrewPanelProps) {
   const [crew, setCrew] = useState<CrewMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -34,9 +38,11 @@ export default function CrewPanel() {
 
   useEffect(() => {
     loadCrew();
-  }, []);
+  }, [liveTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (loading) {
+  // Only show the full-page spinner on the initial load (no data yet).
+  // Background live refetches must not blank the already-rendered crew list.
+  if (loading && crew.length === 0) {
     return (
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         <LoadingOverlay label="Loading crew…" />

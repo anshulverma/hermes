@@ -12,9 +12,10 @@ import { LoadingOverlay } from '../components/Spinner';
 
 type FindingsProps = {
   runId: string;
+  liveTick?: number;
 };
 
-export default function Findings({ runId }: FindingsProps) {
+export default function Findings({ runId, liveTick }: FindingsProps) {
   const [reductions, setReductions] = useState<Reduction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
@@ -31,7 +32,7 @@ export default function Findings({ runId }: FindingsProps) {
 
   useEffect(() => {
     loadReductions();
-  }, [runId]);
+  }, [runId, liveTick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleAccept = async (reductionId: number) => {
     setActionError(null);
@@ -59,7 +60,9 @@ export default function Findings({ runId }: FindingsProps) {
     }
   };
 
-  if (loading) {
+  // Only show the full-page spinner on the initial load (no data yet).
+  // Background live refetches must not blank the already-rendered findings list.
+  if (loading && reductions.length === 0) {
     return (
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         <LoadingOverlay label="Loading findings…" />

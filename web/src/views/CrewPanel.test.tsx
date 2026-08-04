@@ -218,4 +218,36 @@ describe('CrewPanel', () => {
     });
     expect(screen.getByText('Network error')).toBeInTheDocument();
   });
+
+  it('should refetch when liveTick changes', async () => {
+    const { rerender } = render(<CrewPanel liveTick={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('host-1')).toBeInTheDocument();
+    });
+
+    const callsBefore = (mockFetch as any).mock.calls.length;
+
+    rerender(<CrewPanel liveTick={1} />);
+
+    await waitFor(() => {
+      expect((mockFetch as any).mock.calls.length).toBeGreaterThan(callsBefore);
+    });
+  });
+
+  it('should keep previously rendered crew visible during a live refetch', async () => {
+    const { rerender } = render(<CrewPanel liveTick={0} />);
+
+    await waitFor(() => {
+      expect(screen.getByText('host-1')).toBeInTheDocument();
+    });
+
+    // Start a slow refetch
+    mockFetch.mockImplementation(() => new Promise(() => {}));
+    rerender(<CrewPanel liveTick={1} />);
+
+    // Crew list should still be visible (no blanking spinner)
+    expect(screen.getByText('host-1')).toBeInTheDocument();
+    expect(screen.getByText('host-2')).toBeInTheDocument();
+  });
 });
