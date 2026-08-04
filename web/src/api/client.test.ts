@@ -94,7 +94,7 @@ describe('API client', () => {
         state: 'running',
         phase: 'gather',
         base_ref: 'main',
-        config: { base: 'fbcode', suite: 'unit' },
+        config: { base: 'src', suite: 'unit' },
         created_at: '2026-07-29T10:00:00Z',
         updated_at: '2026-07-29T10:30:00Z',
         tickets: {

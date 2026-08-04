@@ -108,7 +108,9 @@ def _load_playbook_site_agent(args):
     # Import production modules unconditionally
     import sites.local.site
     import playbooks.dexter
+    import playbooks.research
     import sites.devserver.site
+    import sites.fan
     import agents.claude
     import agents.codex
 
@@ -801,6 +803,7 @@ def cmd_doctor(args):
             # Import production modules
             import sites.local.site
             import sites.devserver.site
+            import sites.fan
             st = site.load(args.site)
             print(f"  Loads: yes (name={st.name})")
         except KeyError as e:
@@ -825,6 +828,7 @@ def cmd_doctor(args):
         try:
             import sites.local.site
             import sites.devserver.site
+            import sites.fan
             # List registered sites
             from engine.site import _REGISTRY as site_registry
             for site_name in sorted(site_registry.keys()):

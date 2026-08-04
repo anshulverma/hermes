@@ -9,7 +9,7 @@ the concrete spec for this directory; the component names listed here are the on
 the JSON API will be wired to.
 
 **Vocabulary note:** the brief is site-agnostic, but the mock data is seeded with a
-Meta-flavored example (`fbcode//…`, `devgpu042`). Strip those for a neutral demo.
+Examples below use neutral placeholders (`src//…`, `worker-042`).
 
 ---
 
@@ -88,15 +88,15 @@ states, and the "attention" states: parked ratio > 50%, all crew down, no progre
 
 ### Mock data (generate realistic examples matching these shapes)
 ```
-run:      { id, playbook:"mechanic", site:"meta", base_ref:"a1b2c3d",
+run:      { id, playbook:"mechanic", site:"local", base_ref:"a1b2c3d",
             state:"running", phase:"diagnose", started_at, tickets:{total:214,
             done:96, running:12, parked:8, failed:3, queued:95} }
-ticket:   { id, run_id, phase, state, subject:"fbcode//foo:bar - testBaz",
-            resource_req:"gpu", host:"devgpu042", attempts:1, elapsed_s:83,
+ticket:   { id, run_id, phase, state, subject:"src//foo:bar - testBaz",
+            resource_req:"gpu", host:"worker-042", attempts:1, elapsed_s:83,
             priority:57 }
 finding:  { id, kind:"root_cause", title, category, member_ticket_ids:[...],
             fix_state:"diff_published", diff_url }
-crew:     { id:"devgpu042", site:"meta", state:"busy",
+crew:     { id:"worker-042", site:"local", state:"busy",
             resources:{gpu:8, cpu:96}, current_ticket:"t-1207",
             health:{ reachable:true, agent_ok:true, auth_ok:true,
                      workspace_ready:true, guard_installed:true, latency_ms:41 },

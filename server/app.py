@@ -68,7 +68,9 @@ def create_app(bind: str | None = None) -> FastAPI:
     # Import built-in adapters
     import sites.local.site  # noqa: F401
     import sites.devserver.site  # noqa: F401
+    import sites.fan  # noqa: F401
     import playbooks.dexter  # noqa: F401
+    import playbooks.research  # noqa: F401
     import agents.claude  # noqa: F401
 
     # Import custom adapter modules from env vars + local/ dir
