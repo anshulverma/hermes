@@ -11,6 +11,7 @@ from typing import Any, Optional
 # Event kinds the engine emits
 EVENT_KINDS = frozenset({
     "run_started", "run_paused", "run_resumed", "run_stopped", "run_done", "run_failed",
+    "run_reopened",
     "ticket_claimed", "ticket_started", "result_recorded", "ticket_requeued",
     "ticket_parked", "ticket_failed", "ticket_abandoned", "ticket_reprioritized",
     "needs_human", "phase_advanced",

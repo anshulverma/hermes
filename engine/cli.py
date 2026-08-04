@@ -270,22 +270,14 @@ def cmd_run(args):
 
 
 def cmd_run_control(args):
-    """hermes run {pause|resume|stop} <run_id>."""
+    """hermes run {pause|resume|stop|reopen} <run_id>."""
     action = args.action
     run_id = args.run_id
 
     conn = _connect()
 
-    # Map action to state
-    state_map = {
-        'pause': 'paused',
-        'resume': 'running',
-        'stop': 'stopped',
-    }
-    new_state = state_map[action]
-
     try:
-        queue.set_run_state(conn, run_id, new_state)
+        queue.apply_run_action(conn, run_id, action)
         final_state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
         print(f"Run {run_id}: {final_state}")
         conn.close()
@@ -921,7 +913,7 @@ def main(argv=None):
     # - run pause <run_id>
     # So we'll use a first positional arg to disambiguate
     run_parser = subparsers.add_parser('run', help='Run a playbook or control a run')
-    run_parser.add_argument('action_or_playbook', help='pause/resume/stop or playbook name')
+    run_parser.add_argument('action_or_playbook', help='pause/resume/stop/reopen or playbook name')
     run_parser.add_argument('run_id_or_site', nargs='?', help='Run ID (for control) or ignored')
     run_parser.add_argument('--site', help='Site name (for run playbook)')
     run_parser.add_argument('--agent', help='Agent name (default: HERMES_AGENT)')
@@ -1020,7 +1012,7 @@ def main(argv=None):
     try:
         if args.command == 'run':
             # Disambiguate: is first arg a control action or a playbook?
-            if args.action_or_playbook in ('pause', 'resume', 'stop'):
+            if args.action_or_playbook in ('pause', 'resume', 'stop', 'reopen'):
                 # run control
                 args.action = args.action_or_playbook
                 args.run_id = args.run_id_or_site

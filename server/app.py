@@ -18,6 +18,7 @@ from engine import config
 from engine.db.migrate import connect
 from engine.queue import (
     TERMINAL_RUN_STATES,
+    apply_run_action,
     load_run,
     phase_ticket_counts,
     set_run_state,
@@ -375,23 +376,12 @@ def create_app(bind: str | None = None) -> FastAPI:
         finally:
             conn.close()
 
-    def _available_actions(
-        state: str, reduction_id: Optional[int], run_state: Optional[str] = None
-    ) -> list[str]:
+    def _available_actions(state: str, reduction_id: Optional[int]) -> list[str]:
         """Derive available operator actions for a ticket.
 
-        A terminal run never dispatches again, so the actions that would move a
-        ticket back to 'queued' are withheld (they would strand it) — mirroring
-        the engine's own guards. 'abandon' stays available so an operator can
-        still clear a stranded ticket.
+        Purely ticket-scoped: requeue/retry stay available even when the run has
+        finished, because those reopen the run rather than stranding the ticket.
         """
-        actions = _base_actions(state, reduction_id)
-        if run_state in TERMINAL_RUN_STATES:
-            return [a for a in actions if a not in ("requeue", "retry")]
-        return actions
-
-    def _base_actions(state: str, reduction_id: Optional[int]) -> list[str]:
-        """Actions implied by the ticket's own state, ignoring its run."""
         if state == "needs_human":
             if reduction_id is None:
                 return ["requeue", "reprioritize", "abandon"]
@@ -635,12 +625,12 @@ def create_app(bind: str | None = None) -> FastAPI:
             # this is the whole explanation for a ticket sitting in 'queued'.
             if reason is None and run_state in TERMINAL_RUN_STATES and state not in ("done", "failed"):
                 reason = (
-                    f"Run {run_id!r} is {run_state}, so this ticket will never be "
-                    f"dispatched. Abandon it to clear it."
+                    f"Run {run_id!r} is {run_state}, so nothing is dispatching this "
+                    f"ticket. Reopen the run to pick it up again."
                 )
 
             # Get available actions
-            available_actions = _available_actions(state, reduction_id, run_state)
+            available_actions = _available_actions(state, reduction_id)
 
             return {
                 "ticket": ticket,
@@ -1483,13 +1473,10 @@ def create_app(bind: str | None = None) -> FastAPI:
             # source of truth), so an action the menu hides can never succeed.
             if action is not None:
                 srow = conn.execute(
-                    """SELECT t.state, t.reduction_id, r.state
-                       FROM tickets t LEFT JOIN runs r ON r.id = t.run_id
-                       WHERE t.id=?""",
-                    (id_value,),
+                    "SELECT state, reduction_id FROM tickets WHERE id=?", (id_value,)
                 ).fetchone()
-                state, reduction_id, run_state = srow
-                allowed = _available_actions(state, reduction_id, run_state)
+                state, reduction_id = srow
+                allowed = _available_actions(state, reduction_id)
                 if action not in allowed:
                     raise HTTPException(
                         status_code=409,
@@ -1522,7 +1509,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             table="run",
             id_value=run_id,
             exists_sql="SELECT 1 FROM runs WHERE id=?",
-            mutate_fn=lambda conn, rid: set_run_state(conn, rid, "paused"),
+            mutate_fn=lambda conn, rid: apply_run_action(conn, rid, "pause"),
             result_field="state",
             result_sql="SELECT state FROM runs WHERE id=?",
         )
@@ -1538,7 +1525,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             table="run",
             id_value=run_id,
             exists_sql="SELECT 1 FROM runs WHERE id=?",
-            mutate_fn=lambda conn, rid: set_run_state(conn, rid, "running"),
+            mutate_fn=lambda conn, rid: apply_run_action(conn, rid, "resume"),
             result_field="state",
             result_sql="SELECT state FROM runs WHERE id=?",
         )
@@ -1554,7 +1541,23 @@ def create_app(bind: str | None = None) -> FastAPI:
             table="run",
             id_value=run_id,
             exists_sql="SELECT 1 FROM runs WHERE id=?",
-            mutate_fn=lambda conn, rid: set_run_state(conn, rid, "stopped"),
+            mutate_fn=lambda conn, rid: apply_run_action(conn, rid, "stop"),
+            result_field="state",
+            result_sql="SELECT state FROM runs WHERE id=?",
+        )
+
+    @app.post("/api/runs/{run_id}/reopen")
+    def reopen_run(run_id: str, _: None = Depends(require_auth)) -> dict[str, Any]:
+        """Reopen a finished run (done/stopped/failed) so its tickets dispatch again.
+
+        Returns the run's new state on success.
+        404 if run unknown, 409 if the run is not finished.
+        """
+        return _guarded_transition(
+            table="run",
+            id_value=run_id,
+            exists_sql="SELECT 1 FROM runs WHERE id=?",
+            mutate_fn=lambda conn, rid: apply_run_action(conn, rid, "reopen"),
             result_field="state",
             result_sql="SELECT state FROM runs WHERE id=?",
         )

@@ -4,7 +4,7 @@
  */
 
 import { useState } from 'react';
-import { pauseRun, resumeRun, stopRun, AuthError } from '../api/client';
+import { pauseRun, resumeRun, stopRun, reopenRun, AuthError } from '../api/client';
 
 type RunControlProps = {
   runId: string;
@@ -22,7 +22,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
   const canResume = runState === 'paused';
   const canStop = runState === 'running' || runState === 'paused';
 
-  // Terminal states have no actions
+  // A finished run dispatches nothing; reopening puts it back to work.
   const isTerminal = ['done', 'stopped', 'failed'].includes(runState);
 
   async function handlePause() {
@@ -61,6 +61,24 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
     }
   }
 
+  async function handleReopen() {
+    setLoading(true);
+    setError(null);
+
+    try {
+      await reopenRun(runId);
+      onSuccess?.();
+    } catch (e: any) {
+      if (e instanceof AuthError) {
+        setError('Unauthorized: invalid or missing token');
+      } else {
+        setError(e.message);
+      }
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleStopConfirm() {
     setLoading(true);
     setError(null);
@@ -85,7 +103,34 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
   }
 
   if (isTerminal) {
-    return null; // No controls for terminal runs
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button
+            onClick={handleReopen}
+            disabled={loading}
+            title="Put this finished run back to running so its tickets dispatch again"
+            style={{
+              padding: '6px 12px',
+              fontSize: 13,
+              color: 'var(--text-primary)',
+              background: 'var(--wash-subtle)',
+              border: '1px solid var(--border-hairline)',
+              borderRadius: 'var(--radius-md)',
+              cursor: loading ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {loading ? 'Reopening...' : 'Reopen'}
+          </button>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Run is {runState} — reopen it to dispatch remaining tickets.
+          </span>
+        </div>
+        {error && (
+          <div style={{ fontSize: 13, color: 'var(--status-danger)' }}>{error}</div>
+        )}
+      </div>
+    );
   }
 
   return (

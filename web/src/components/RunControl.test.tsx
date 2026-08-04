@@ -53,10 +53,33 @@ describe('RunControl', () => {
       expect(screen.queryByRole('button', { name: /stop/i })).not.toBeInTheDocument();
     });
 
-    it('shows NO controls when run state is "failed" (terminal)', () => {
+    it('offers ONLY Reopen when run state is "failed" (terminal)', () => {
       render(<RunControl runId="run-001" runState="failed" onSuccess={vi.fn()} />);
 
-      expect(screen.queryByRole('button')).not.toBeInTheDocument();
+      // Lifecycle controls are gone, but a finished run can be put back to work.
+      expect(screen.queryByRole('button', { name: /pause/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /resume/i })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /^stop$/i })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /reopen/i })).toBeInTheDocument();
+    });
+
+    it('reopens a finished run and reports success', async () => {
+      const onSuccess = vi.fn();
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ state: 'running' }),
+      }) as any;
+
+      render(<RunControl runId="run-001" runState="done" onSuccess={onSuccess} />);
+      screen.getByRole('button', { name: /reopen/i }).click();
+
+      await waitFor(() => {
+        expect(fetch).toHaveBeenCalledWith(
+          '/api/runs/run-001/reopen',
+          expect.objectContaining({ method: 'POST' }),
+        );
+      });
+      await waitFor(() => expect(onSuccess).toHaveBeenCalled());
     });
   });
 

@@ -13,10 +13,24 @@
 #   make up               # start the UI (builds the image if needed) -> http://127.0.0.1:44102
 #   make status           # container state + health
 #   make logs             # follow logs
-#   make image            # (re)build the image after code/UI changes
-#   make image restart    # rebuild + restart
+#   make deploy           # rebuild code+SPA and restart (the everyday path)
 #   make up PORT=44105    # run on a different loopback port
 #   make down             # stop
+#
+# NETWORK vs OFFLINE targets
+# --------------------------
+# Targets marked [NET] reach the internet (pull a base image / install packages).
+# An AI agent's traffic is filtered in this environment and those pulls FAIL for
+# it, so [NET] targets are meant to be run BY A HUMAN (they use `with-proxy`).
+# Everything else is offline and safe for an agent to run.
+#
+#   [NET] image       — full rebuild; pulls the python base image. RUN THIS YOURSELF.
+#   [NET] deps        — install/refresh web dependencies (npm ci). RUN THIS YOURSELF.
+#         image-fast  — code+SPA onto the existing image (no pull) — agent-safe
+#         deploy      — image-fast + restart — agent-safe, the everyday path
+#
+# Use `make image` (human) after changing Python/npm DEPENDENCIES; `make deploy`
+# handles every code/UI change because the package is installed editable.
 
 PORT   ?= 44102
 IMAGE  ?= hermes-control-plane:latest
@@ -25,23 +39,32 @@ VOLUME ?= hermes-home
 PROXY  ?= with-proxy
 URL    := http://127.0.0.1:$(PORT)
 
-.PHONY: help web image image-fast up down restart status health logs shell url token clean
+.PHONY: help web deps image image-fast deploy up down restart status health logs shell url token clean
 
 help: ## list targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort \
-	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-9s\033[0m %s\n",$$1,$$2}'
+	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-11s\033[0m %s\n",$$1,$$2}'
 
-web: ## build the SPA (web/dist) that gets baked into the image
-	cd web && $(PROXY) npm run build
+web: ## build the SPA (web/dist) baked into the image (offline)
+	cd web && npm run build
 
-image: web ## (re)build the control-plane image (SPA baked in)
+deps: ## [NET — RUN THIS YOURSELF] install/refresh web dependencies
+	cd web && $(PROXY) npm ci
+
+image: web ## [NET — RUN THIS YOURSELF] full image rebuild (pulls the python base image)
 	$(PROXY) podman build --network=host -f fleet/Dockerfile.control-plane -t $(IMAGE) .
 
-image-fast: web ## rebuild code+SPA onto the existing image (seconds, no base pull; deps unchanged)
-	$(PROXY) podman build --network=host -f fleet/Dockerfile.control-plane.fast -t $(IMAGE) .
+image-fast: web ## rebuild code+SPA onto the existing image (offline; deps unchanged)
+	podman build --network=host -f fleet/Dockerfile.control-plane.fast -t $(IMAGE) .
 
-up: ## start the containerized web UI on $(PORT) (builds the image if missing)
-	@podman image exists $(IMAGE) || $(MAKE) image
+deploy: image-fast restart ## rebuild code+SPA and restart (offline; the everyday path)
+	@$(MAKE) --no-print-directory health
+
+up: ## start the containerized web UI on $(PORT) (offline; needs the image to exist)
+	@podman image exists $(IMAGE) || { \
+	  echo "No $(IMAGE) image yet. That first build pulls a base image, so run it yourself:"; \
+	  echo "    make image"; \
+	  exit 1; }
 	-@podman rm -f $(NAME) >/dev/null 2>&1 || true
 	podman run -d --network=host --name $(NAME) \
 	  -e HERMES_BIND=127.0.0.1 \

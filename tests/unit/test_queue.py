@@ -532,10 +532,10 @@ def test_set_run_state_legal_edges(conn, start, target, event):
 @pytest.mark.parametrize(
     "start,target",
     [
-        ("stopped", "running"),   # resume a terminal run
-        ("done", "running"),
-        ("failed", "running"),
+        # NB: terminal -> running is the legal "reopen" edge (covered separately).
         ("done", "paused"),
+        ("stopped", "paused"),
+        ("failed", "done"),
         ("paused", "done"),       # done only from running
         ("running", "running"),   # no-op is illegal
     ],
@@ -758,33 +758,73 @@ def test_retry_ticket_raises_on_unknown(conn):
 
 # --- never strand a ticket under a run that can no longer dispatch ---------
 #
-# claim_ticket only selects tickets whose run is 'running'. Moving a ticket back
-# to 'queued' under a terminal run would make it permanently unclaimable.
+# claim_ticket only selects tickets whose run is 'running'. Requeueing a ticket
+# under a terminal run would make it permanently unclaimable, so the operator's
+# intent ("run this again") is honoured by REOPENING the run.
 
 @pytest.mark.parametrize("run_state", ["done", "stopped", "failed"])
-def test_retry_ticket_raises_when_run_terminal(conn, run_state):
+def test_retry_ticket_reopens_terminal_run(conn, run_state):
     from engine import queue
 
     _mk_run(conn, "r1", state=run_state)
     _mk_ticket(conn, "r1/t-0", state="failed", attempts=1)
 
-    with pytest.raises(ValueError):
-        queue.retry_ticket(conn, "r1/t-0", now=100.0)
+    queue.retry_ticket(conn, "r1/t-0", now=100.0)
 
-    assert _ticket_row(conn, "r1/t-0")["state"] == "failed"  # unchanged
+    # The ticket is queued AND claimable, because its run is running again.
+    assert _ticket_row(conn, "r1/t-0")["state"] == "queued"
+    assert _run_state(conn, "r1") == "running"
+    assert "run_reopened" in _kinds(conn)
 
 
 @pytest.mark.parametrize("run_state", ["done", "stopped", "failed"])
-def test_requeue_needs_human_raises_when_run_terminal(conn, run_state):
+def test_requeue_needs_human_reopens_terminal_run(conn, run_state):
     from engine import queue
 
     _mk_run(conn, "r1", state=run_state)
     _mk_ticket(conn, "r1/t-0", state="needs_human")
 
-    with pytest.raises(ValueError):
-        queue.requeue_needs_human(conn, "r1/t-0", now=100.0)
+    queue.requeue_needs_human(conn, "r1/t-0", now=100.0)
 
-    assert _ticket_row(conn, "r1/t-0")["state"] == "needs_human"  # unchanged
+    assert _ticket_row(conn, "r1/t-0")["state"] == "queued"
+    assert _run_state(conn, "r1") == "running"
+    assert "run_reopened" in _kinds(conn)
+
+
+def test_retry_ticket_leaves_a_running_run_alone(conn):
+    """No spurious reopen event when the run is already running."""
+    from engine import queue
+
+    _mk_run(conn, "r1", state="running")
+    _mk_ticket(conn, "r1/t-0", state="failed", attempts=1)
+
+    queue.retry_ticket(conn, "r1/t-0", now=100.0)
+
+    assert _run_state(conn, "r1") == "running"
+    assert "run_reopened" not in _kinds(conn)
+
+
+def test_requeued_ticket_under_reopened_run_is_claimable(conn):
+    """End to end: the whole point is that the ticket can actually be claimed."""
+    from engine import queue
+
+    _mk_run(conn, "r1", state="done")
+    _mk_ticket(conn, "r1/t-0", state="failed", attempts=1)
+
+    queue.retry_ticket(conn, "r1/t-0", now=100.0)
+    claimed = queue.claim_ticket(conn, "host-A", {"cpu"}, now=101.0)
+
+    assert claimed is not None and claimed.id == "r1/t-0"
+
+
+def test_reopen_run_edge_allowed_from_each_terminal_state(conn):
+    from engine import queue
+
+    for i, state in enumerate(["done", "stopped", "failed"]):
+        run_id = f"r{i}"
+        _mk_run(conn, run_id, state=state)
+        queue.set_run_state(conn, run_id, "running", now=100.0)
+        assert _run_state(conn, run_id) == "running"
 
 
 def test_retry_ticket_allowed_when_run_paused(conn):

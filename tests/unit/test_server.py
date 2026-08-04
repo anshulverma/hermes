@@ -3544,8 +3544,8 @@ def _seed_run_and_ticket(conn, run_state: str, ticket_state: str, ticket_id: str
     conn.commit()
 
 
-def test_retry_endpoint_409_when_run_terminal(loopback_client: TestClient, temp_home: Path):
-    """Retrying under a terminal run would strand the ticket: 409, state unchanged."""
+def test_retry_endpoint_reopens_terminal_run(loopback_client: TestClient, temp_home: Path):
+    """Retrying a ticket in a finished run reopens the run so it can actually run."""
     from server.auth import read_token
 
     token = read_token(temp_home)
@@ -3558,67 +3558,75 @@ def test_retry_endpoint_409_when_run_terminal(loopback_client: TestClient, temp_
         "/api/tickets/r1%2Ft-0/retry",
         headers={"Authorization": f"Bearer {token}"},
     )
-    assert response.status_code == 409
+    assert response.status_code == 200
 
     conn = sqlite3.connect(db_path)
-    assert conn.execute("SELECT state FROM tickets WHERE id=?", ("r1/t-0",)).fetchone()[0] == "failed"
+    assert conn.execute("SELECT state FROM tickets WHERE id=?", ("r1/t-0",)).fetchone()[0] == "queued"
+    assert conn.execute("SELECT state FROM runs WHERE id='r1'").fetchone()[0] == "running"
     conn.close()
 
 
-def test_requeue_endpoint_409_when_run_terminal(loopback_client: TestClient, temp_home: Path):
-    """Requeueing a needs_human ticket under a terminal run is refused."""
-    from server.auth import read_token
-
-    token = read_token(temp_home)
-    db_path = str(temp_home / "queue.db")
-    conn = sqlite3.connect(db_path)
-    _seed_run_and_ticket(conn, run_state="stopped", ticket_state="needs_human")
-    conn.close()
-
-    response = loopback_client.post(
-        "/api/tickets/r1%2Ft-0/requeue",
-        headers={"Authorization": f"Bearer {token}"},
-    )
-    assert response.status_code == 409
-
-
-def test_available_actions_excludes_retry_for_terminal_run(loopback_client: TestClient, temp_home: Path):
-    """A failed ticket under a done run offers no retry (it could never run)."""
+def test_retry_available_for_failed_ticket_in_terminal_run(loopback_client: TestClient, temp_home: Path):
+    """Retry is offered (it reopens the run), not hidden."""
     db_path = str(temp_home / "queue.db")
     conn = sqlite3.connect(db_path)
     _seed_run_and_ticket(conn, run_state="done", ticket_state="failed")
     conn.close()
 
     data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
-    assert "retry" not in data["available_actions"]
+    assert "retry" in data["available_actions"]
 
 
-def test_stranded_queued_ticket_offers_abandon_and_explains(loopback_client: TestClient, temp_home: Path):
-    """A queued ticket under a terminal run is unclaimable: explain it, offer cleanup."""
+def test_stranded_queued_ticket_explains_and_points_at_reopen(loopback_client: TestClient, temp_home: Path):
+    """A queued ticket under a finished run says why nothing is dispatching it."""
     db_path = str(temp_home / "queue.db")
     conn = sqlite3.connect(db_path)
     _seed_run_and_ticket(conn, run_state="done", ticket_state="queued")
     conn.close()
 
     data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
-    # Abandon remains the escape hatch; requeue/retry are not offered.
-    assert "abandon" in data["available_actions"]
-    assert "retry" not in data["available_actions"]
-    assert "requeue" not in data["available_actions"]
-    # The reason must say WHY it is not being dispatched.
     assert data["reason"] is not None
-    assert "done" in data["reason"] and "dispatch" in data["reason"].lower()
+    assert "done" in data["reason"] and "reopen" in data["reason"].lower()
 
 
-def test_available_actions_unaffected_when_run_paused(loopback_client: TestClient, temp_home: Path):
-    """A paused run is resumable, so retry stays available."""
+def test_reopen_endpoint_puts_finished_run_back_to_running(loopback_client: TestClient, temp_home: Path):
+    from server.auth import read_token
+
+    token = read_token(temp_home)
     db_path = str(temp_home / "queue.db")
     conn = sqlite3.connect(db_path)
-    _seed_run_and_ticket(conn, run_state="paused", ticket_state="failed")
+    _seed_run_and_ticket(conn, run_state="done", ticket_state="queued")
     conn.close()
 
-    data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
-    assert "retry" in data["available_actions"]
+    response = loopback_client.post(
+        "/api/runs/r1/reopen", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+    assert response.json()["state"] == "running"
+
+
+def test_reopen_endpoint_409_when_run_not_finished(loopback_client: TestClient, temp_home: Path):
+    from server.auth import read_token
+
+    token = read_token(temp_home)
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    _seed_run_and_ticket(conn, run_state="running", ticket_state="queued")
+    conn.close()
+
+    response = loopback_client.post(
+        "/api/runs/r1/reopen", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 409
+
+
+def test_reopen_endpoint_requires_auth(loopback_client: TestClient, temp_home: Path):
+    db_path = str(temp_home / "queue.db")
+    conn = sqlite3.connect(db_path)
+    _seed_run_and_ticket(conn, run_state="done", ticket_state="queued")
+    conn.close()
+
+    assert loopback_client.post("/api/runs/r1/reopen").status_code == 401
 
 
 def test_ticket_detail_includes_failure_detail(loopback_client: TestClient, temp_home: Path):

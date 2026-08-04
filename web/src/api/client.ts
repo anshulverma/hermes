@@ -337,6 +337,13 @@ export async function stopRun(runId: string): Promise<RunControlResponse> {
   });
 }
 
+/** Put a finished run (done/stopped/failed) back to running so it dispatches again. */
+export async function reopenRun(runId: string): Promise<RunControlResponse> {
+  return fetchJSON<RunControlResponse>(`/api/runs/${runId}/reopen`, {
+    method: 'POST',
+  });
+}
+
 /**
  * Crew control endpoints (Phase D2b).
  */

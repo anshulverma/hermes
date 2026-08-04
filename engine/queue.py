@@ -30,12 +30,17 @@ _RUN_EDGES: dict[tuple[str, str], str] = {
     ("paused", "stopped"): "run_stopped",
     ("running", "done"): "run_done",
     ("running", "failed"): "run_failed",
+    # Reopen: an operator putting work back into a finished run.
+    ("done", "running"): "run_reopened",
+    ("stopped", "running"): "run_reopened",
+    ("failed", "running"): "run_reopened",
 }
 
 
-# Runs in these states never dispatch again, so a ticket moved back to 'queued'
-# under one would be permanently unclaimable (``claim_ticket`` only selects
-# tickets whose run is 'running'). 'paused' is absent on purpose: it resumes.
+# Runs in these states dispatch nothing, so a ticket moved back to 'queued' under
+# one would be unclaimable (``claim_ticket`` only selects tickets whose run is
+# 'running'). Requeueing therefore reopens the run. 'paused' is absent on
+# purpose: it already resumes, and a paused run's queue is intentionally held.
 TERMINAL_RUN_STATES = frozenset({"done", "stopped", "failed"})
 
 
@@ -44,13 +49,64 @@ def _now(now: Optional[float]) -> float:
     return time.time() if now is None else now
 
 
-def _reject_if_run_terminal(run_id: str, run_state: str, ticket_id: str, action: str) -> None:
-    """Raise if the ticket's run can never dispatch again."""
-    if run_state in TERMINAL_RUN_STATES:
+# Which current states each operator run-action is valid from, and what it moves
+# the run to. ``set_run_state`` validates the raw edge; this narrows it so
+# 'resume' keeps meaning un-pause now that terminal -> running is a legal reopen.
+RUN_ACTIONS: dict[str, tuple[frozenset[str], str]] = {
+    "pause": (frozenset({"running"}), "paused"),
+    "resume": (frozenset({"paused"}), "running"),
+    "stop": (frozenset({"running", "paused"}), "stopped"),
+    "reopen": (TERMINAL_RUN_STATES, "running"),
+}
+
+
+def apply_run_action(conn: sqlite3.Connection, run_id: str, action: str, now=None) -> str:
+    """Apply a named operator run-action, returning the run's new state.
+
+    Raises ``ValueError`` for an unknown run/action or an action that is not
+    valid from the run's current state (e.g. resuming a run that is not paused —
+    use 'reopen' to put a finished run back to work).
+    """
+    try:
+        allowed_from, target = RUN_ACTIONS[action]
+    except KeyError:
         raise ValueError(
-            f"run {run_id!r} is {run_state!r} (terminal); cannot {action} "
-            f"ticket {ticket_id!r} — it would never be dispatched"
+            f"unknown run action {action!r}; expected one of {sorted(RUN_ACTIONS)}"
+        ) from None
+
+    row = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"unknown run {run_id!r}")
+    current = row[0]
+    if current not in allowed_from:
+        raise ValueError(
+            f"cannot {action} run {run_id!r} in state {current!r}; "
+            f"{action} applies to {sorted(allowed_from)}"
         )
+
+    set_run_state(conn, run_id, target, now=now)
+    return target
+
+
+def _reopen_run_if_terminal_nocommit(
+    conn: sqlite3.Connection, run_id: str, run_state: str, now: float
+) -> None:
+    """Put a finished run back to 'running' so a requeued ticket can be claimed.
+
+    Requeueing a ticket into a run that dispatches nothing would strand it, so
+    the operator's intent is honoured by reopening the run. Caller owns the
+    transaction (no commit here).
+    """
+    if run_state not in TERMINAL_RUN_STATES:
+        return
+    conn.execute(
+        "UPDATE runs SET state='running', updated_at=? WHERE id=?", (now, run_id)
+    )
+    events.emit(
+        conn, "run_reopened", run_id=run_id,
+        message=f"{run_state} -> running",
+        data={"reason": "ticket_requeued"},
+    )
 
 
 def _backoff(attempts: int) -> float:
@@ -635,8 +691,8 @@ def requeue_needs_human(conn: sqlite3.Connection, ticket_id: str, now=None) -> N
 
     ``needs_human → queued`` as a fresh attempt: ``attempts`` UNCHANGED, the
     ticket is available immediately, ``worker_host`` and any ``reduction_id``
-    link cleared. Raises if the ticket is not in ``needs_human``, or if its run
-    is terminal (the ticket would queue forever, never being dispatched).
+    link cleared. Raises if the ticket is not in ``needs_human``. A finished run
+    is reopened so the requeued ticket is actually claimable.
     """
     now = _now(now)
     try:
@@ -649,12 +705,12 @@ def requeue_needs_human(conn: sqlite3.Connection, ticket_id: str, now=None) -> N
         if row is None:
             raise ValueError(f"unknown ticket {ticket_id!r}")
         run_id, state, run_state = row
-        _reject_if_run_terminal(run_id, run_state, ticket_id, "requeue")
         if state != "needs_human":
             raise ValueError(
                 f"ticket {ticket_id!r} is {state!r}, not 'needs_human'; "
                 f"cannot operator-requeue"
             )
+        _reopen_run_if_terminal_nocommit(conn, run_id, run_state, now)
         conn.execute(
             """UPDATE tickets SET state='queued', available_at=?,
                    worker_host=NULL, reduction_id=NULL, updated_at=?
@@ -722,8 +778,8 @@ def retry_ticket(conn: sqlite3.Connection, ticket_id: str, now=None) -> None:
     Transitions a ``failed`` ticket to ``queued`` (available immediately), clearing
     ``worker_host``, ``lease_id``, and ``reduction_id``. Attempts count is UNCHANGED
     (no penalty). Emits ``ticket_requeued``. Raises ``ValueError`` if the ticket is
-    not in ``failed`` state, is unknown, or its run is terminal (the ticket would
-    queue forever, never being dispatched).
+    not in ``failed`` state or is unknown. A finished run is reopened so the
+    retried ticket is actually claimable.
     """
     now = _now(now)
     try:
@@ -736,12 +792,13 @@ def retry_ticket(conn: sqlite3.Connection, ticket_id: str, now=None) -> None:
         if row is None:
             raise ValueError(f"unknown ticket {ticket_id!r}")
         run_id, state, run_state = row
-        _reject_if_run_terminal(run_id, run_state, ticket_id, "retry")
 
         if state != "failed":
             raise ValueError(
                 f"ticket {ticket_id!r} is {state!r}, not 'failed'; cannot retry"
             )
+
+        _reopen_run_if_terminal_nocommit(conn, run_id, run_state, now)
 
         conn.execute(
             """UPDATE tickets SET state='queued', available_at=?,
