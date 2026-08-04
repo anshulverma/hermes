@@ -83,8 +83,14 @@ status: ## container state + health
 	@podman ps --filter name=$(NAME) --format "table {{.Names}}\t{{.Status}}\t{{.Command}}" || true
 	@$(MAKE) --no-print-directory health
 
-health: ## check the API health endpoint
-	@curl -fsS -m 5 $(URL)/api/health && echo "  [OK $(URL)]" || echo "not responding on $(PORT)"
+health: ## check the API health endpoint (waits briefly for a starting server)
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+	  if curl -fsS -m 5 $(URL)/api/health 2>/dev/null; then \
+	    echo "  [OK $(URL)]"; exit 0; \
+	  fi; \
+	  sleep 1; \
+	done; \
+	echo "not responding on $(PORT)"; exit 1
 
 logs: ## follow container logs
 	podman logs -f $(NAME)
