@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import App from './App';
 import * as client from './api/client';
@@ -198,6 +198,62 @@ describe('App', () => {
 
     await waitFor(() => {
       expect(screen.getByText(/live updates unauthorized/i)).toBeInTheDocument();
+    });
+  });
+
+  describe('tab in the URL', () => {
+    function mockLoadedRun() {
+      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
+        status: 'ok',
+        version: '0.1.0',
+        home: '/tmp/hermes',
+      });
+      vi.spyOn(client, 'fetchRuns').mockResolvedValue([
+        {
+          id: 'run-001',
+          playbook: 'example',
+          site: 'local',
+          state: 'running',
+          phase: 'work',
+          base_ref: 'main',
+          created_at: '2026-07-29T10:00:00Z',
+          tickets: { queued: 5, running: 2, done: 10, failed: 1 },
+        },
+      ]);
+      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+      vi.spyOn(client, 'fetchCrew').mockResolvedValue([]);
+    }
+
+    afterEach(() => {
+      window.location.hash = '';
+    });
+
+    it('opens the tab named in the URL instead of the default (refresh restores it)', async () => {
+      window.location.hash = '#crew';
+      mockLoadedRun();
+
+      render(<App />);
+
+      // The Crew view renders; the default Run overview does not.
+      await waitFor(() => {
+        expect(screen.getByText(/no crew members/i)).toBeInTheDocument();
+      });
+      expect(screen.queryByText(/example run/i)).not.toBeInTheDocument();
+    });
+
+    it('writes the tab into the URL when a tab is clicked', async () => {
+      mockLoadedRun();
+
+      render(<App />);
+      await waitFor(() => {
+        expect(screen.getByText(/example run/i)).toBeInTheDocument();
+      });
+
+      screen.getByRole('button', { name: /^crew$/i }).click();
+
+      await waitFor(() => {
+        expect(window.location.hash).toBe('#crew');
+      });
     });
   });
 });

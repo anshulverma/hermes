@@ -20,15 +20,15 @@ import { LoadingOverlay } from './components/Spinner';
 import { fetchRun } from './api/client';
 import type { RunDetail } from './api/client';
 import { hasToken, isRemote } from './api/auth';
-
-type View = 'overview' | 'metrics' | 'board' | 'crew' | 'findings' | 'activity';
+import { useHashView } from './hooks/useHashView';
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(hasToken() || !isRemote());
 
   const { loading: healthLoading, error: healthError } = useHealth();
   const { data: runs, loading: runsLoading, error: runsError } = useRuns();
-  const [view, setView] = useState<View>('overview');
+  // The tab lives in the URL hash, so a refresh reopens the same tab.
+  const [view, setView] = useHashView();
   const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 

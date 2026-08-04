@@ -5,8 +5,7 @@
  */
 
 import LiveDot from './LiveDot';
-
-type View = 'overview' | 'metrics' | 'board' | 'crew' | 'findings' | 'activity';
+import type { View } from '../hooks/useHashView';
 
 type TopBarProps = {
   connected: boolean;
