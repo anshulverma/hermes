@@ -471,12 +471,13 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _item_label(item: dict) -> str:
-    """A short one-line name for an item: its id, plus its title when it fits."""
-    item_id = str(item.get("id", "?"))
-    title = _text(item.get("title"))
-    if title and title != item_id:
-        return _clip(f"{item_id} ({title})", _LABEL_MAX)
-    return _clip(item_id, _LABEL_MAX)
+    """A short one-line name for an item.
+
+    Just the id: a ticket title has to stay scannable at ~10-15 words, and
+    splicing the item's own title in pushed it past that and truncated it
+    mid-word. The full item title travels in the payload instead.
+    """
+    return _clip(str(item.get("id", "?")), _LABEL_MAX)
 
 
 def _research_title(item: dict) -> str:
