@@ -2,14 +2,18 @@
 
 TDD: written first.
 """
+import json as _json
+import re as _re
+
 import pytest
 
 from engine.models import Finding, Reduction, Result, Run, Ticket
 
 
 @pytest.fixture(autouse=True)
-def clean_env(monkeypatch):
-    """Keep host configuration out of the tests."""
+def clean_env(monkeypatch, tmp_path):
+    """Keep host configuration out of the tests and pin HERMES_HOME to tmp_path."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     for var in (
         "HERMES_RESEARCH_SOURCE",
         "HERMES_RESEARCH_AGENTS",
@@ -161,11 +165,12 @@ def test_seed_research_fans_items_across_agents(source):
     tickets = _playbook().seed(run, site=None)
 
     assert len(tickets) == 4
+    # Ids use monotonic numbers; the old item-id-in-the-id format is gone.
     assert [t.id for t in tickets] == [
-        f"{run.id}/research-one-claude",
-        f"{run.id}/research-one-codex",
-        f"{run.id}/research-two-claude",
-        f"{run.id}/research-two-codex",
+        f"{run.id}/1-claude",
+        f"{run.id}/2-codex",
+        f"{run.id}/3-claude",
+        f"{run.id}/4-codex",
     ]
     assert [t.resource_req for t in tickets] == [
         "agent:claude", "agent:codex", "agent:claude", "agent:codex",
@@ -236,7 +241,9 @@ def test_seed_merge_phases_route_to_the_first_configured_agent(source):
         },
     )])
     synth_tickets = pb.seed(synth_run, site=None)
-    assert [t.id for t in synth_tickets] == [f"{synth_run.id}/synthesize-one"]
+    assert len(synth_tickets) == 1
+    assert synth_tickets[0].id.endswith("-synthesize")
+    assert synth_tickets[0].id.startswith(f"{synth_run.id}/")
     assert synth_tickets[0].resource_req == "agent:codex"
 
     report_run = _run(config, phase="report", reductions=[Reduction(
@@ -247,7 +254,9 @@ def test_seed_merge_phases_route_to_the_first_configured_agent(source):
         },
     )])
     report_tickets = pb.seed(report_run, site=None)
-    assert [t.id for t in report_tickets] == [f"{report_run.id}/report-0"]
+    assert len(report_tickets) == 1
+    assert report_tickets[0].id.endswith("-report")
+    assert report_tickets[0].id.startswith(f"{report_run.id}/")
     assert report_tickets[0].resource_req == "agent:codex"
 
 
@@ -480,7 +489,8 @@ def test_reduce_research_partial_failure_still_synthesises(source):
     # And that reduction still seeds a synthesis ticket.
     synth_run = _run(config, phase="synthesize", reductions=reductions)
     synth_tickets = _playbook().seed(synth_run, site=None)
-    assert [t.id for t in synth_tickets] == [f"{run.id}/synthesize-one"]
+    assert len(synth_tickets) == 1
+    assert synth_tickets[0].id.endswith("-synthesize")
     assert "codex" in synth_tickets[0].payload["goal"]
 
 
@@ -608,3 +618,253 @@ def test_result_schema_is_uniform_across_phases():
     for phase in pb.phases:
         schema = pb.result_schema(phase)
         assert schema["required"] == ["answer"]
+
+
+# --- new short monotonic ticket ids (TDD: written before implementation) -----
+
+_NEW_ID_RE = _re.compile(
+    r"^[^/]+/\d+-(metamate|claude|codex|devmate|synthesize|report)$"
+)
+
+
+def _run_n(config=None, phase="research", reductions=None, run_id="run-1"):
+    """Helper: a Run with a run-N style id for new-format id assertions."""
+    return Run(
+        id=run_id,
+        playbook="research",
+        site="fan-claude",
+        base_ref="main",
+        config=config if config is not None else {},
+        phase=phase,
+        reductions=reductions or [],
+    )
+
+
+def test_seed_ids_match_new_short_format(source):
+    """Research ticket ids are <run>/<n>-<agent>, not <run>/research-<item>-<agent>."""
+    name, items = source
+    items.extend([
+        {"id": "one", "title": "One", "context": "first"},
+        {"id": "two", "title": "Two", "context": "second"},
+    ])
+    run = _run_n({"source": name, "agents": ["claude", "codex"]})
+
+    tickets = _playbook().seed(run, site=None)
+
+    assert len(tickets) == 4
+    for t in tickets:
+        assert _NEW_ID_RE.match(t.id), f"id {t.id!r} does not match new format"
+    nums = [int(t.id.split("/")[1].split("-")[0]) for t in tickets]
+    assert nums == sorted(nums), "ticket numbers must be strictly increasing"
+    assert len(set(nums)) == len(nums), "ticket numbers must be unique"
+
+
+def test_counter_continues_across_phases(source):
+    """Research seeds 1..N, synthesize N+1.., report after that — one run-wide counter."""
+    name, items = source
+    items.extend([
+        {"id": "a", "title": "A", "context": ""},
+        {"id": "b", "title": "B", "context": ""},
+    ])
+    config = {"source": name, "agents": ["claude"]}
+    pb = _playbook()
+    run = _run_n(config, run_id="run-42")
+
+    research_tickets = pb.seed(run, site=None)
+    assert len(research_tickets) == 2
+    r_nums = [int(t.id.split("/")[1].split("-")[0]) for t in research_tickets]
+    assert r_nums == [1, 2]
+
+    synth_run = _run_n(config, phase="synthesize", run_id="run-42", reductions=[
+        Reduction(kind="item_analyses", json={
+            "item": {"id": "a", "title": "A", "context": ""},
+            "analyses": [{"agent": "claude", "analysis": "text"}],
+            "succeeded_agents": ["claude"], "failed_agents": [], "status": "ok",
+        }),
+        Reduction(kind="item_analyses", json={
+            "item": {"id": "b", "title": "B", "context": ""},
+            "analyses": [{"agent": "claude", "analysis": "text"}],
+            "succeeded_agents": ["claude"], "failed_agents": [], "status": "ok",
+        }),
+    ])
+    synth_tickets = pb.seed(synth_run, site=None)
+    assert len(synth_tickets) == 2
+    s_nums = [int(t.id.split("/")[1].split("-")[0]) for t in synth_tickets]
+    assert s_nums == [3, 4], f"synthesize should continue from 3, got {s_nums}"
+
+    report_run = _run_n(config, phase="report", run_id="run-42", reductions=[Reduction(
+        kind="item_syntheses",
+        json={"syntheses": [{"ticket_id": "t", "item_id": "a", "synthesis": "text"}],
+              "item_count": 1},
+    )])
+    report_tickets = pb.seed(report_run, site=None)
+    assert len(report_tickets) == 1
+    r_num = int(report_tickets[0].id.split("/")[1].split("-")[0])
+    assert r_num == 5, f"report should be ticket 5, got {r_num}"
+
+
+def test_reduce_maps_ticket_to_item_via_sidecar_across_fresh_instances(source):
+    """A fresh playbook instance (no shared memory, simulating another process) maps
+    ticket ids to items correctly via the on-disk sidecar."""
+    name, items = source
+    items.extend([
+        {"id": "one", "title": "One", "context": "first"},
+        {"id": "two", "title": "Two", "context": "second"},
+    ])
+    config = {"source": name, "agents": ["claude"]}
+    run = _run(config)
+
+    # Instance 1 seeds, writing the sidecar.
+    pb1 = _playbook()
+    tickets = pb1.seed(run, site=None)
+    findings = [_finding(run, t.id, "answer text") for t in tickets]
+
+    # Instance 2: completely fresh (no _items_by_run cache).
+    pb2 = _playbook()
+    reductions = pb2.reduce(run, "research", findings, site=None)
+
+    assert [r.json["item"]["id"] for r in reductions] == ["one", "two"]
+    assert all(r.json["status"] == "ok" for r in reductions)
+
+
+def test_reduce_falls_back_to_regex_for_old_format_ids(source):
+    """Old-format ticket ids (run-X/research-<item>-<agent>) still map correctly via
+    the legacy regex fallback when no sidecar exists for the run."""
+    name, items = source
+    items.extend([{"id": "one", "title": "One", "context": "ctx"}])
+    config = {"source": name, "agents": ["claude", "codex"]}
+    run = _run(config)
+
+    # Create findings with old format ids — no seed, no sidecar.
+    findings = [
+        _finding(run, f"{run.id}/research-one-claude", "claude's take"),
+        _finding(run, f"{run.id}/research-one-codex", "codex's take"),
+    ]
+
+    reductions = _playbook().reduce(run, "research", findings, site=None)
+
+    assert len(reductions) == 1
+    assert reductions[0].json["item"]["id"] == "one"
+    assert reductions[0].json["status"] == "ok"
+    agents_that_answered = sorted(a["agent"] for a in reductions[0].json["analyses"])
+    assert agents_that_answered == ["claude", "codex"]
+
+
+def test_sidecar_lives_under_hermes_home_and_is_valid_json(source, tmp_path):
+    """The per-run ticket sidecar is a valid JSON file under HERMES_HOME, not /tmp."""
+    name, items = source
+    items.append({"id": "x", "title": "X", "context": ""})
+    run = _run_n({"source": name, "agents": ["claude"]})
+
+    _playbook().seed(run, site=None)
+
+    sidecar_files = list(tmp_path.rglob("tickets.json"))
+    assert sidecar_files, "sidecar not found under HERMES_HOME"
+    for f in sidecar_files:
+        data = _json.loads(f.read_text())
+        assert "next_number" in data
+        assert "tickets" in data
+        assert "items" in data
+
+
+def test_reseed_reuses_ids_when_the_source_is_unchanged(source):
+    """A restart that re-seeds the same phase must not renumber or double-count.
+
+    The ids are the stable handle for work already dispatched, so a second seed
+    of an unchanged phase returns exactly what the first one did and leaves the
+    counter alone.
+    """
+    name, items = source
+    items.extend([
+        {"id": "aaa", "title": "A", "context": ""},
+        {"id": "bbb", "title": "B", "context": ""},
+    ])
+    config = {"source": name, "agents": ["claude"]}
+    run = _run_n(config, run_id="run-9")
+
+    first = [t.id for t in _playbook().seed(run, site=None)]
+    second = [t.id for t in _playbook().seed(run, site=None)]
+
+    assert first == second, "a re-seed of an unchanged phase must reuse its ids"
+
+
+def test_reseed_with_a_shifted_source_keeps_the_ticket_item_map_truthful(source):
+    """The sidecar must describe the tickets seed actually returned.
+
+    An item source is a live query (a time window, a limit), so a restart can
+    legitimately answer with a different set. Whatever seed hands back, the map
+    has to agree with each ticket's payload — otherwise reduce credits one
+    item's analysis to another and the odd one out vanishes from the report.
+    """
+    name, items = source
+    items.extend([
+        {"id": "aaa", "title": "A", "context": ""},
+        {"id": "bbb", "title": "B", "context": ""},
+    ])
+    config = {"source": name, "agents": ["claude"]}
+    run = _run_n(config, run_id="run-9")
+
+    _playbook().seed(run, site=None)
+
+    # The master restarts; "bbb" has aged out of the window and "ccc" is new.
+    items[:] = [
+        {"id": "aaa", "title": "A", "context": ""},
+        {"id": "ccc", "title": "C", "context": ""},
+    ]
+    tickets = _playbook().seed(run, site=None)
+
+    from playbooks.research.playbook import _load_sidecar
+
+    mapping = _load_sidecar(run.id)["tickets"]
+    for t in tickets:
+        assert mapping[t.id] == t.payload["item"]["id"], (
+            f"{t.id} was seeded for {t.payload['item']['id']} "
+            f"but the sidecar maps it to {mapping[t.id]}"
+        )
+
+
+def test_reduce_after_a_shifted_reseed_credits_each_item_its_own_answer(source):
+    """End-to-end guard for the mis-mapping: every item keeps its own analysis."""
+    name, items = source
+    items.extend([
+        {"id": "aaa", "title": "A", "context": ""},
+        {"id": "bbb", "title": "B", "context": ""},
+    ])
+    config = {"source": name, "agents": ["claude"]}
+    run = _run_n(config, run_id="run-9")
+
+    _playbook().seed(run, site=None)
+    items[:] = [
+        {"id": "aaa", "title": "A", "context": ""},
+        {"id": "ccc", "title": "C", "context": ""},
+    ]
+    tickets = _playbook().seed(run, site=None)
+
+    findings = [
+        _finding(run, t.id, f"analysis of {t.payload['item']['id']}") for t in tickets
+    ]
+    reductions = _playbook().reduce(run, "research", findings, site=None)
+
+    got = {r.json["item"]["id"]: r.json["analyses"][0]["analysis"] for r in reductions}
+    assert got == {"aaa": "analysis of aaa", "ccc": "analysis of ccc"}
+
+
+def test_reseed_with_different_agents_does_not_reuse_mismatched_ids(source):
+    """A ticket id's suffix names its agent, and reduce reads the agent back out of
+    it — so ids may only be reused when the agents line up."""
+    name, items = source
+    items.append({"id": "aaa", "title": "A", "context": ""})
+    run_a = _run_n({"source": name, "agents": ["claude", "codex"]}, run_id="run-9")
+
+    _playbook().seed(run_a, site=None)
+
+    # The restart is configured with a different agent set of the same size.
+    run_b = _run_n({"source": name, "agents": ["claude", "devmate"]}, run_id="run-9")
+    tickets = _playbook().seed(run_b, site=None)
+
+    for t in tickets:
+        agent = t.id.rsplit("-", 1)[-1]
+        assert agent == t.payload["agent"], (
+            f"id {t.id!r} names agent {agent!r} but the ticket is for "
+            f"{t.payload['agent']!r}"
+        )
