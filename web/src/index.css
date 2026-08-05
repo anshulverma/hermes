@@ -1,15 +1,32 @@
 /* Base styles - defer to DS tokens */
-body {
-  margin: 0;
-  padding: 0;
-  /* No rubber-band overscroll: the shell is a fixed-height flex column, and
-     bouncing past the end visibly shifted the top bar. */
+
+/* The document itself must never scroll or bounce. This is an app shell: it is
+   exactly one viewport tall and every view scrolls inside its own pane, so any
+   movement of the document is movement of the top bar, which should be fixed.
+
+   overscroll-behavior has to be declared HERE, on the root element. Unlike
+   overflow, it is propagated to the viewport only from <html> -- setting it on
+   <body> looks right and does nothing, which is why the bar still rubber-banded
+   after the first attempt at this. `none` also stops a scroll pane that has hit
+   its end from chaining the leftover delta up into the viewport. */
+html {
+  height: 100%;
+  overflow: hidden;
   overscroll-behavior: none;
 }
 
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* height, not min-height: min-height lets the root grow past the viewport and
+   makes the document scrollable again, reintroducing exactly what the rules
+   above are for. */
 #root {
-  min-height: 100vh;
-  overscroll-behavior: none;
+  height: 100%;
 }
 
 /* Spinner rotation (used by components/Spinner.tsx). */
