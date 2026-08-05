@@ -124,6 +124,62 @@ def test_queue_db_created_with_0600(tmp_path, monkeypatch):
     assert mode == 0o600, f"Expected mode 0600, got {oct(mode)}"
 
 
+def test_no_hardcoded_tmp_paths():
+    """No source file under engine/, sites/, agents/, playbooks/, server/ contains /tmp/ literals.
+
+    This guards against re-introducing path scattering outside the runtime root.
+    Comments and docstrings are excluded from the check via AST string-node inspection.
+    """
+    test_dir = Path(__file__).parent
+    workspace = test_dir.parent.parent
+
+    source_dirs = [
+        workspace / "engine",
+        workspace / "sites",
+        workspace / "agents",
+        workspace / "playbooks",
+        workspace / "server",
+    ]
+
+    violations = []
+
+    for source_dir in source_dirs:
+        if not source_dir.exists():
+            continue
+        for pyfile in source_dir.rglob("*.py"):
+            if "__pycache__" in pyfile.parts:
+                continue
+            raw = pyfile.read_text(encoding="utf-8")
+            if "/tmp/" not in raw:
+                continue
+            # Parse the AST to check only non-comment, non-docstring string literals.
+            try:
+                tree = ast.parse(raw, filename=str(pyfile))
+            except SyntaxError:
+                continue
+            # Collect all string literals that contain /tmp/ and are NOT docstrings.
+            # A docstring is a Constant node that is the first statement of a
+            # Module, FunctionDef, AsyncFunctionDef, or ClassDef body.
+            docstring_nodes: set[int] = set()
+            for node in ast.walk(tree):
+                body = getattr(node, "body", [])
+                if body and isinstance(body[0], ast.Expr) and isinstance(
+                    getattr(body[0], "value", None), ast.Constant
+                ):
+                    docstring_nodes.add(id(body[0].value))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if "/tmp/" in node.value and id(node) not in docstring_nodes:
+                        violations.append(
+                            f"{pyfile.relative_to(workspace)}:{node.lineno}: {node.value!r}"
+                        )
+
+    if violations:
+        msg = ["Hardcoded /tmp/ path literals found (use config.state_dir() instead):"]
+        msg.extend(f"  {v}" for v in violations)
+        pytest.fail("\n".join(msg))
+
+
 def test_dexter_devserver_stdlib_only():
     """playbooks.dexter and sites.devserver import NO third-party packages.
 

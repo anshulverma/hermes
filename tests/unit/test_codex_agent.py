@@ -13,8 +13,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
-
 import pytest
 
 
@@ -81,8 +79,8 @@ def codex():
 
 @pytest.fixture
 def codex_agent(monkeypatch, tmp_path):
-    """A fresh adapter whose per-ticket answer files land in an isolated temp dir."""
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    """A fresh adapter whose per-ticket answer files land under a controlled HERMES_HOME."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     import agents.codex.agent as mod
     return mod.CodexAgent()
 

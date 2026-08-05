@@ -38,6 +38,31 @@ def is_loopback(bind: str | None) -> bool:
     return bind in ("127.0.0.1", "localhost", "::1")
 
 
+# A subject is a list-row heading, so it is one line and bounded even when the
+# text it is derived from is a multi-kilobyte prompt.
+SUBJECT_MAX_CHARS = 200
+
+
+def ticket_subject(payload: dict[str, Any]) -> str:
+    """The one-line heading for a ticket.
+
+    An explicit ``title`` is what the playbook wants shown. Payloads that do not
+    carry one fall back to the goal, whose first line is the closest thing to a
+    heading it has; either way the result is a single bounded line.
+    """
+    for key in ("title", "goal", "subject"):
+        value = payload.get(key)
+        if not isinstance(value, str):
+            continue
+        line = value.strip().splitlines()[0].strip() if value.strip() else ""
+        if not line:
+            continue
+        if len(line) > SUBJECT_MAX_CHARS:
+            line = line[: SUBJECT_MAX_CHARS - 1].rstrip() + "…"
+        return line
+    return "—"
+
+
 def create_app(bind: str | None = None) -> FastAPI:
     """Create the FastAPI application.
 
@@ -300,6 +325,11 @@ def create_app(bind: str | None = None) -> FastAPI:
 
         Returns tickets with: id, run_id, state, phase, subject, resource_req,
         host, attempts, elapsed_s, priority.
+
+        ``attempts`` is how many attempts the ticket actually recorded, counted
+        in one grouped join rather than a query per ticket. The ``attempts``
+        column on the ticket row is the infra-retry budget, which stays at zero
+        for a ticket that ran once and succeeded, so it is not what to report.
         """
         home = config.resolve_home()
         db_path = str(home / "queue.db")
@@ -314,32 +344,37 @@ def create_app(bind: str | None = None) -> FastAPI:
 
             # Build query with filters
             query = """
-                SELECT id, run_id, state, phase, resource_req, worker_host,
-                       attempts, priority, payload_json, updated_at
-                FROM tickets
-                WHERE run_id=?
+                SELECT t.id, t.run_id, t.state, t.phase, t.resource_req, t.worker_host,
+                       COALESCE(a.attempt_count, 0), t.priority, t.payload_json,
+                       t.updated_at
+                FROM tickets t
+                LEFT JOIN (
+                    SELECT ticket_id, COUNT(*) AS attempt_count
+                    FROM attempts GROUP BY ticket_id
+                ) a ON a.ticket_id = t.id
+                WHERE t.run_id=?
             """
             params: list[Any] = [run_id]
 
             if state:
-                query += " AND state=?"
+                query += " AND t.state=?"
                 params.append(state)
             if phase:
-                query += " AND phase=?"
+                query += " AND t.phase=?"
                 params.append(phase)
             if resource:
-                query += " AND resource_req=?"
+                query += " AND t.resource_req=?"
                 params.append(resource)
             if host:
-                query += " AND worker_host=?"
+                query += " AND t.worker_host=?"
                 params.append(host)
             if search:
-                query += " AND (id LIKE ? OR payload_json LIKE ?)"
+                query += " AND (t.id LIKE ? OR t.payload_json LIKE ?)"
                 search_pattern = f"%{search}%"
                 params.extend([search_pattern, search_pattern])
 
             # p0 is highest priority (lowest number first), matching claim order.
-            query += " ORDER BY priority ASC, id"
+            query += " ORDER BY t.priority ASC, t.id"
 
             rows = conn.execute(query, params).fetchall()
 
@@ -354,9 +389,8 @@ def create_app(bind: str | None = None) -> FastAPI:
                     payload_json, updated_at
                 ) = row
 
-                # Extract subject from payload
                 payload = json.loads(payload_json)
-                subject = payload.get("goal") or payload.get("subject") or "—"
+                subject = ticket_subject(payload)
 
                 # Compute elapsed_s
                 elapsed_s = int(now - updated_at) if updated_at else 0
@@ -412,6 +446,8 @@ def create_app(bind: str | None = None) -> FastAPI:
         - result: strict latest result (max id attempt) or null
         - attempt_timeline: all attempts ordered oldest→newest
         - evidence: non-null result_refs as {attempt, ref}
+        - finding: the ticket's latest banked finding doc or null
+        - answer: the finding's prose answer when it carries one, else null
         """
         home = config.resolve_home()
         db_path = str(home / "queue.db")
@@ -420,7 +456,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             # Get ticket
             ticket_row = conn.execute(
                 """SELECT id, run_id, phase, state, resource_req, priority,
-                          attempts, worker_host, reduction_id, payload_json, created_at, updated_at
+                          worker_host, reduction_id, payload_json, created_at, updated_at
                    FROM tickets WHERE id=?""",
                 (ticket_id,),
             ).fetchone()
@@ -430,7 +466,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
             (
                 tid, run_id, phase, state, resource_req, priority,
-                attempts, worker_host, reduction_id, payload_json, created_at, updated_at
+                worker_host, reduction_id, payload_json, created_at, updated_at
             ) = ticket_row
 
             # The owning run's state gates which actions can still do anything.
@@ -441,23 +477,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
             # Parse payload
             payload = json.loads(payload_json)
-            subject = payload.get("goal") or payload.get("subject") or "—"
-
-            # Build ticket object
-            ticket = {
-                "id": tid,
-                "run_id": run_id,
-                "phase": phase,
-                "state": state,
-                "resource_req": resource_req,
-                "priority": priority,
-                "attempts": attempts,
-                "host": worker_host,
-                "reduction_id": reduction_id,
-                "subject": subject,
-                "created_at": created_at,
-                "updated_at": updated_at,
-            }
+            subject = ticket_subject(payload)
 
             # Get all attempts (ordered by id for timeline)
             attempt_rows = conn.execute(
@@ -466,6 +486,24 @@ def create_app(bind: str | None = None) -> FastAPI:
                    FROM attempts WHERE ticket_id=? ORDER BY id""",
                 (ticket_id,),
             ).fetchall()
+
+            # Build ticket object. ``attempts`` is how many attempts were
+            # recorded — the ticket row's own column is the infra-retry budget,
+            # which stays at zero for a ticket that ran once and succeeded.
+            ticket = {
+                "id": tid,
+                "run_id": run_id,
+                "phase": phase,
+                "state": state,
+                "resource_req": resource_req,
+                "priority": priority,
+                "attempts": len(attempt_rows),
+                "host": worker_host,
+                "reduction_id": reduction_id,
+                "subject": subject,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
 
             # Build attempt_timeline
             attempt_timeline = []
@@ -514,6 +552,35 @@ def create_app(bind: str | None = None) -> FastAPI:
                         "attempt": attempt_num,
                         "ref": result_ref,
                     })
+
+            # Latest banked finding: what the agent actually returned on an 'ok'
+            # result. Retried tickets bank one row per success, so take the
+            # newest by id. ``answer`` is the prose form when the playbook's
+            # result doc carries one; structured docs keep answer null and are
+            # read from ``finding.json``.
+            finding = None
+            answer = None
+            finding_row = conn.execute(
+                """SELECT id, kind, json, created_at FROM findings
+                   WHERE ticket_id=? ORDER BY id DESC LIMIT 1""",
+                (ticket_id,),
+            ).fetchone()
+            if finding_row is not None:
+                try:
+                    finding_json = json.loads(finding_row[2])
+                except json.JSONDecodeError:
+                    finding_json = None
+                if finding_json is not None:
+                    finding = {
+                        "id": finding_row[0],
+                        "kind": finding_row[1],
+                        "created_at": finding_row[3],
+                        "json": finding_json,
+                    }
+                    if isinstance(finding_json, dict):
+                        prose = finding_json.get("answer")
+                        if isinstance(prose, str) and prose.strip():
+                            answer = prose
 
             # Get history (event stream for this ticket)
             history_rows = conn.execute(
@@ -640,6 +707,8 @@ def create_app(bind: str | None = None) -> FastAPI:
                 "result": result,
                 "attempt_timeline": attempt_timeline,
                 "evidence": evidence,
+                "finding": finding,
+                "answer": answer,
                 "history": history,
                 "reason": reason,
                 "reduction": reduction_summary,

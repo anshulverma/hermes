@@ -66,6 +66,7 @@ def test_apply_migrations_creates_all_indexes(tmp_path):
     expected_indexes = [
         'idx_attempts_ticket',
         'idx_events_stream',
+        'idx_events_ticket',
         'idx_findings_run',
         'idx_tickets_dispatch',
         'idx_tickets_resource',
@@ -257,7 +258,7 @@ def test_migration_v2_recorded_and_idempotent(tmp_path):
     versions = [row[0] for row in cursor.fetchall()]
     conn.close()
 
-    assert versions == [1, 2, 3], f"expected [1, 2, 3], got {versions}"
+    assert versions == [1, 2, 3, 4], f"expected [1, 2, 3, 4], got {versions}"
 
 
 def test_migration_v2_applies_on_legacy_v1_db(tmp_path):
@@ -279,6 +280,14 @@ def test_migration_v2_applies_on_legacy_v1_db(tmp_path):
              created_at REAL NOT NULL, updated_at REAL NOT NULL)"""
     )
     # A real v1 db also has attempts (migration 3 ALTERs it); include a minimal one.
+    # A real v1 db also has events (migration 4 indexes it); include a minimal one.
+    conn.execute(
+        """CREATE TABLE events (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             ts REAL NOT NULL, kind TEXT NOT NULL,
+             run_id TEXT, ticket_id TEXT, host TEXT,
+             message TEXT, data_json TEXT NOT NULL DEFAULT '{}')"""
+    )
     conn.execute(
         """CREATE TABLE attempts (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -306,7 +315,7 @@ def test_migration_v2_applies_on_legacy_v1_db(tmp_path):
     attempt_cols = {row[1] for row in cursor.fetchall()}
     assert "error_detail" in attempt_cols
     cursor.execute("SELECT version FROM schema_migrations ORDER BY version")
-    assert [r[0] for r in cursor.fetchall()] == [1, 2, 3]
+    assert [r[0] for r in cursor.fetchall()] == [1, 2, 3, 4]
     conn.close()
 
 

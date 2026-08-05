@@ -883,3 +883,86 @@ def test_load_playbook_site_agent_example_local_mock_regression():
     assert pb.name == 'example', "should load example playbook"
     assert st.name == 'local', "should load local site"
     assert ag.name == 'mock', "should load mock agent"
+
+
+# --- run id counter ----------------------------------------------------------
+
+class _StaleReadConn:
+    """A connection proxy whose FIRST read of the runs table sees nothing.
+
+    Everything else is delegated to the real connection, so the INSERT that
+    follows hits the real PRIMARY KEY and raises a real IntegrityError — the
+    same shape as losing a race to a concurrent creator.
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.served_stale = False
+        self.insert_calls = 0
+
+    def execute(self, sql, params=()):
+        normalized = " ".join(sql.split()).upper()
+        if normalized.startswith("SELECT ID FROM RUNS") and not self.served_stale:
+            self.served_stale = True
+            return self._conn.execute("SELECT id FROM runs WHERE 1=0")
+        if normalized.startswith("INSERT INTO RUNS"):
+            self.insert_calls += 1
+        return self._conn.execute(sql, params)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_create_run_ids_are_a_monotonic_counter():
+    """Sequential creates produce run-1, run-2, run-3 — short, not epoch stamps."""
+    from engine.cli import _create_run
+
+    with temp_hermes_home():
+        conn = _conn()
+        ids = [_create_run(conn, "example", "local", "main") for _ in range(3)]
+        assert ids == ["run-1", "run-2", "run-3"]
+        rows = conn.execute("SELECT id FROM runs ORDER BY rowid").fetchall()
+        assert [r[0] for r in rows] == ["run-1", "run-2", "run-3"]
+        conn.close()
+
+
+def test_create_run_ignores_legacy_epoch_ids_when_counting():
+    """A db holding legacy epoch-ms ids still yields a small, sane next counter."""
+    from engine.cli import _create_run
+
+    with temp_hermes_home():
+        conn = _conn()
+        now = time.time()
+        for legacy in ("run-1785942018138", "run-1785942018139", "dexter-20260101-000000"):
+            conn.execute(
+                """INSERT INTO runs (id, playbook, site, base_ref, config_json,
+                                     state, phase, created_at, updated_at)
+                   VALUES (?, 'example', 'local', 'main', '{}', 'done', NULL, ?, ?)""",
+                (legacy, now, now),
+            )
+        conn.commit()
+
+        assert _create_run(conn, "example", "local", "main") == "run-1"
+        assert _create_run(conn, "example", "local", "main") == "run-2"
+        conn.close()
+
+
+def test_create_run_retries_on_id_collision():
+    """A lost race (stale max → duplicate PRIMARY KEY) retries instead of raising."""
+    from engine.cli import _create_run
+
+    with temp_hermes_home():
+        conn = _conn()
+        assert _create_run(conn, "example", "local", "main") == "run-1"
+
+        # The next create reads a stale max (as if run-1 were not yet visible),
+        # so its first INSERT collides on the primary key.
+        proxy = _StaleReadConn(conn)
+        run_id = _create_run(proxy, "example", "local", "main")
+
+        assert proxy.served_stale, "the collision path must actually have been taken"
+        assert proxy.insert_calls == 2, "should have retried the insert once"
+        assert run_id == "run-2"
+        ids = [r[0] for r in conn.execute("SELECT id FROM runs ORDER BY id").fetchall()]
+        assert ids == ["run-1", "run-2"]
+        conn.close()

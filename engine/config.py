@@ -71,6 +71,26 @@ def resolve_home(is_networked=None) -> Path:
     return home
 
 
+def state_dir(*parts: str) -> Path:
+    """Single canonical location for all Hermes-created runtime files and scratch data.
+
+    Returns ``resolve_home().joinpath(*parts)``, creating the directory (and any
+    parents) with owner-only permissions (0o700). This is the sole substitute for
+    ``tempfile.gettempdir()`` and hardcoded ``/tmp`` paths: nothing Hermes creates
+    must land outside the runtime root.
+
+    Args:
+        *parts: Path components to join under the runtime root.
+
+    Returns:
+        The created Path.
+    """
+    path = resolve_home().joinpath(*parts)
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(0o700)
+    return path
+
+
 def heartbeat_s() -> int:
     """Return HERMES_HEARTBEAT_S from env (default: 30)."""
     return int(os.environ.get('HERMES_HEARTBEAT_S', '30'))

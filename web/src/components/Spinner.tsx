@@ -43,6 +43,10 @@ export function Spinner({ size = 36, stroke = 4 }: SpinnerProps) {
 type LoadingOverlayProps = {
   label?: string;
   size?: number;
+  // Skip the backdrop blur. Set this when the overlay sits inside a surface that
+  // is ALREADY behind a blurred scrim (a drawer/dialog): stacking two
+  // full-viewport backdrop-filter layers is an expensive repaint.
+  blur?: boolean;
   // Scrim color. Defaults to the page overlay (dark). Pass a surface-matched
   // translucent color when overlaying a lighter surface (e.g. a drawer card) so
   // the tint blends instead of looking like a black box.
@@ -53,7 +57,7 @@ type LoadingOverlayProps = {
  * Full-cover, blurred loading overlay. Requires a `position: relative|absolute|fixed`
  * ancestor; it fills that box, centers the spinner, and blurs the content behind.
  */
-export function LoadingOverlay({ label, size = 40, scrim = 'var(--surface-overlay)' }: LoadingOverlayProps) {
+export function LoadingOverlay({ label, size = 40, scrim = 'var(--surface-overlay)', blur = true }: LoadingOverlayProps) {
   return (
     <div
       role="status"
@@ -68,8 +72,12 @@ export function LoadingOverlay({ label, size = 40, scrim = 'var(--surface-overla
         justifyContent: 'center',
         gap: 12,
         background: scrim,
-        backdropFilter: 'blur(var(--blur-overlay))',
-        WebkitBackdropFilter: 'blur(var(--blur-overlay))',
+        ...(blur
+          ? {
+              backdropFilter: 'blur(var(--blur-overlay))',
+              WebkitBackdropFilter: 'blur(var(--blur-overlay))',
+            }
+          : {}),
       }}
     >
       <Spinner size={size} />

@@ -18,7 +18,7 @@ import time
 from dataclasses import replace
 from typing import Optional
 
-from engine import contracts, leases, queue
+from engine import config, contracts, leases, queue
 from engine.models import Result, Run, Ticket
 
 # The exit code GNU coreutils `timeout` uses when it kills the child.
@@ -180,11 +180,12 @@ def ssh_transport(host: str, ssh_opts=None, scp_opts=None, user=None):
     def _run(envelope: dict, agent) -> Result:
         ticket_id = envelope.get("ticket_id", "ticket")
         safe = ticket_id.replace("/", "_")
-        remote_dir = f"/tmp/hermes-{safe}"
+        # Remote path: shell-expanded by the remote shell so HERMES_HOME is honoured.
+        remote_dir = f"${{HERMES_HOME:-$HOME/.hermes}}/xfer/{safe}"
         remote_env = f"{remote_dir}/envelope.json"
         remote_result = f"{remote_dir}/result.json"
 
-        with tempfile.TemporaryDirectory(prefix="hermes-ssh-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="hermes-ssh-", dir=config.state_dir("tmp")) as tmp:
             local_env = os.path.join(tmp, "envelope.json")
             local_result = os.path.join(tmp, "result.json")
             with open(local_env, "w") as fh:

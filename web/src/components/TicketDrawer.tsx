@@ -1,14 +1,19 @@
 /**
  * TicketDrawer - full ticket detail drawer: live context + operator actions.
  *
- * Shows why a ticket is in its current state (derived reason banner), its
- * progress/state history, the flagging reduction when present, and the full
- * payload/result/attempt/evidence detail. Renders an actions menu strictly from
- * the server's available_actions so the UI and API agree on legality:
- * requeue / retry / abandon (confirm) / reprioritize / accept-reject reduction.
+ * Shows why a ticket is in its current state (derived reason banner), what the
+ * agent answered on success, its progress/state history, the flagging reduction
+ * when present, and the full payload/result/attempt/evidence detail. Renders an
+ * actions menu strictly from the server's available_actions so the UI and API
+ * agree on legality: requeue / retry / abandon (confirm) / reprioritize /
+ * accept-reject reduction.
+ *
+ * The header state comes from the freshly fetched detail (the board's prop is a
+ * snapshot that goes stale the moment an action lands), and bulky JSON blobs are
+ * serialised only while expanded so opening the drawer stays cheap.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Ticket, TicketDetail } from '../api/client';
 import {
   fetchTicketDetail,
@@ -40,6 +45,164 @@ const preStyle: React.CSSProperties = {
   maxHeight: 280,
   color: 'var(--text-secondary)',
 };
+
+const sectionTitleStyle: React.CSSProperties = {
+  color: 'var(--text-primary)',
+  fontSize: 14,
+  fontWeight: 600,
+};
+
+const captionStyle: React.CSSProperties = {
+  color: 'var(--text-muted)',
+  fontSize: 12,
+};
+
+/**
+ * A host filesystem path (result_ref / evidence_ref).
+ *
+ * These point at files on the worker host — the browser cannot open them, and
+ * the agent tool's traces behind them run to megabytes of internal debug output,
+ * so they are shown as plain monospace text with one-click copy instead of a
+ * hyperlink.
+ */
+function HostPathRef({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  async function copy() {
+    setCopyFailed(false);
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(path);
+        setCopied(true);
+        return;
+      }
+      throw new Error('clipboard unavailable');
+    } catch {
+      // Non-secure contexts have no async clipboard; fall back to the legacy
+      // command, and if that is missing too, say so rather than lying.
+      try {
+        const area = document.createElement('textarea');
+        area.value = path;
+        document.body.appendChild(area);
+        area.select();
+        const ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+        document.body.removeChild(area);
+        if (ok) {
+          setCopied(true);
+          return;
+        }
+      } catch {
+        // fall through to the failure note
+      }
+      setCopyFailed(true);
+    }
+  }
+
+  return (
+    <span style={{ display: 'inline-flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }}>
+      <code
+        style={{
+          fontSize: 11,
+          fontFamily: 'var(--font-mono)',
+          color: 'var(--text-secondary)',
+          background: 'var(--wash-subtle)',
+          border: '1px solid var(--border-hairline)',
+          borderRadius: 'var(--radius-sm)',
+          padding: '2px 6px',
+          wordBreak: 'break-all',
+        }}
+      >
+        {path}
+      </code>
+      <button
+        type="button"
+        aria-label="Copy host path"
+        title="Copy host path"
+        onClick={copy}
+        style={{
+          padding: '2px 8px',
+          fontSize: 11,
+          color: 'var(--text-primary)',
+          background: 'var(--wash-subtle)',
+          border: '1px solid var(--border-hairline)',
+          borderRadius: 'var(--radius-md)',
+          cursor: 'pointer',
+          flex: 'none',
+        }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </button>
+      {copyFailed && (
+        <span style={{ color: 'var(--status-attention)', fontSize: 11 }}>
+          Copy unavailable — select the path manually.
+        </span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * A JSON document behind a toggle.
+ *
+ * Serialising happens only while expanded (and is memoised), so a multi-kilobyte
+ * payload costs nothing until an operator asks for it.
+ */
+function CollapsibleJson({
+  id,
+  label,
+  caption,
+  value,
+  defaultOpen = false,
+}: {
+  id: string;
+  label: string;
+  caption?: string;
+  value: unknown;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const text = useMemo(() => (open ? JSON.stringify(value, null, 2) : ''), [open, value]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <button
+        type="button"
+        data-testid={`${id}-toggle`}
+        aria-expanded={open}
+        onClick={() => setOpen((prev) => !prev)}
+        style={{
+          ...sectionTitleStyle,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+          alignSelf: 'flex-start',
+          padding: 0,
+          background: 'none',
+          border: 'none',
+          cursor: 'pointer',
+        }}
+      >
+        <span aria-hidden="true" style={{ color: 'var(--text-muted)', fontSize: 11 }}>
+          {open ? '▾' : '▸'}
+        </span>
+        {label}
+      </button>
+      {caption && <span style={captionStyle}>{caption}</span>}
+      {open && (
+        <pre data-testid={`${id}-json`} style={preStyle}>
+          {text}
+        </pre>
+      )}
+    </div>
+  );
+}
 
 type TicketDrawerProps = {
   isOpen: boolean;
@@ -127,11 +290,22 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
     }
   }
 
+  // Serialising the reduction is cheap but happens on every render otherwise.
+  const reductionText = useMemo(
+    () => (detail?.reduction ? JSON.stringify(detail.reduction.json, null, 2) : ''),
+    [detail?.reduction],
+  );
+
   if (!ticket) {
     return null;
   }
 
-  const uiState = normalizeTicketState(ticket.state);
+  // The prop is the board's snapshot and goes stale the moment an action lands;
+  // the refetched detail is authoritative once it arrives.
+  const uiState = normalizeTicketState(detail?.ticket.state ?? ticket.state);
+
+  const answer = detail?.answer ?? null;
+  const finding = detail?.finding ?? null;
 
   const actions = detail?.available_actions ?? [];
   const reductionId = detail?.reduction?.id ?? detail?.ticket.reduction_id ?? null;
@@ -139,11 +313,11 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
   return (
     <Drawer open={isOpen} fixed onClose={onClose} title={ticket.id} width="600px">
       <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 24, padding: '20px 24px', minHeight: 240 }}>
-        {loading && <LoadingOverlay label="Loading ticket…" scrim={CARD_SCRIM} />}
+        {loading && <LoadingOverlay label="Loading ticket…" scrim={CARD_SCRIM} blur={false} />}
 
         {/* Board-level header */}
         <div style={{ display: 'flex', gap: 10 }}>
-          <StatusPill state={uiState} size="md" />
+          <StatusPill state={uiState} size="md" data-testid="ticket-state-pill" />
           <Badge variant="outline" tone="ok">
             {ticket.phase}
           </Badge>
@@ -332,6 +506,48 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
               </span>
             </div>
 
+            {/* Agent answer — what a successful run actually returned. The
+                prose form when the playbook produces one; the structured
+                finding document otherwise. Both stay reachable either way. */}
+            {answer && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <span style={sectionTitleStyle}>Answer</span>
+                <span style={captionStyle}>What the agent returned for this ticket.</span>
+                <div
+                  data-testid="ticket-answer"
+                  style={{
+                    background: 'var(--surface-card)',
+                    border: '1px solid var(--border-hairline)',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: 12,
+                    fontSize: 13,
+                    lineHeight: 1.5,
+                    color: 'var(--text-primary)',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    overflowY: 'auto',
+                    maxHeight: 360,
+                  }}
+                >
+                  {answer}
+                </div>
+              </div>
+            )}
+
+            {finding && (
+              <CollapsibleJson
+                id="finding"
+                label="Finding document"
+                caption={
+                  answer
+                    ? 'The full result document the agent banked, including the answer above.'
+                    : 'The result document the agent banked for this ticket.'
+                }
+                value={finding.json}
+                defaultOpen={!answer}
+              />
+            )}
+
             {/* Reduction summary (when flagged) */}
             {detail.reduction && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -365,31 +581,20 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                       maxHeight: 160,
                     }}
                   >
-                    {JSON.stringify(detail.reduction.json, null, 2)}
+                    {reductionText}
                   </pre>
                 </div>
               </div>
             )}
 
-            {/* Payload section */}
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>Payload</span>
-              <pre
-                style={{
-                  background: 'var(--surface-card)',
-                  border: '1px solid var(--border-hairline)',
-                  borderRadius: 'var(--radius-sm)',
-                  padding: 12,
-                  fontSize: 12,
-                  fontFamily: 'var(--font-mono)',
-                  overflow: 'auto',
-                  maxHeight: 200,
-                  color: 'var(--text-secondary)',
-                }}
-              >
-                {JSON.stringify(detail.payload, null, 2)}
-              </pre>
-            </div>
+            {/* Payload section — collapsed by default: it is multi-kilobyte
+                prose and serialising it on open is the drawer's biggest cost. */}
+            <CollapsibleJson
+              id="payload"
+              label="Payload"
+              caption="The goal envelope this ticket was dispatched with."
+              value={detail.payload}
+            />
 
             {/* Result section */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -426,17 +631,8 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                   </div>
                   {detail.result.result_ref && (
                     <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: 8 }}>
-                      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Ref:</span>
-                      <span
-                        style={{
-                          fontSize: 12,
-                          fontFamily: 'var(--font-mono)',
-                          color: 'var(--status-live)',
-                          wordBreak: 'break-all',
-                        }}
-                      >
-                        {detail.result.result_ref}
-                      </span>
+                      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Host path:</span>
+                      <HostPathRef path={detail.result.result_ref} />
                     </div>
                   )}
                   {detail.result.error_summary && (
@@ -576,7 +772,11 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
             {/* Evidence */}
             {detail.evidence.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <span style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 600 }}>Evidence</span>
+                <span style={sectionTitleStyle}>Evidence</span>
+                <span style={captionStyle}>
+                  Each ref is a host path on the worker, not a browser URL — copy it and open it
+                  there. These are the agent tool's internal traces and can run to many megabytes.
+                </span>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {detail.evidence.map((ev, idx) => (
                     <div
@@ -593,19 +793,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                       }}
                     >
                       <Badge variant="subtle">#{ev.attempt}</Badge>
-                      <a
-                        href={ev.ref}
-                        style={{
-                          color: 'var(--status-live)',
-                          fontFamily: 'var(--font-mono)',
-                          fontSize: 11,
-                          wordBreak: 'break-all',
-                        }}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        {ev.ref}
-                      </a>
+                      <HostPathRef path={ev.ref} />
                     </div>
                   ))}
                 </div>

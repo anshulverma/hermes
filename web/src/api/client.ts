@@ -162,6 +162,14 @@ export type TicketDetailResult = {
   detail: string | null;
 };
 
+// What the agent banked on a successful run: the playbook's result document.
+export type TicketFinding = {
+  id: number;
+  kind: string;
+  created_at: number;
+  json: Record<string, any>;
+};
+
 export type TicketHistoryEvent = {
   id: number;
   ts: number;
@@ -196,6 +204,10 @@ export type TicketDetail = {
   result: TicketDetailResult | null;
   attempt_timeline: TicketDetailAttempt[];
   evidence: Array<{ attempt: number; ref: string }>;
+  // The agent's own output for a successful run: the banked finding document
+  // and, when the playbook returns prose, its answer text.
+  finding: TicketFinding | null;
+  answer: string | null;
   // Progress/state context (enriched detail).
   history: TicketHistoryEvent[];
   reason: string | null;

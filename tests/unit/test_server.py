@@ -247,6 +247,171 @@ def test_tickets_endpoint_returns_tickets(client: TestClient, seeded_run: str, t
         assert t["priority"] == db_row[6]
 
 
+def _record_attempt(conn, ticket_id: str, attempt: int, outcome: str) -> None:
+    """Append one row to the append-only attempts audit table."""
+    import time
+    now = time.time()
+    conn.execute(
+        """INSERT INTO attempts
+           (ticket_id, phase, host, attempt, started_at, ended_at, outcome,
+            termination_reason, result_ref, error_summary)
+           VALUES (?, 'work', 'worker-1', ?, ?, ?, ?, ?, NULL, NULL)""",
+        (
+            ticket_id, attempt, now - 10, now, outcome,
+            "goal_met" if outcome == "ok" else "driver_error",
+        ),
+    )
+    conn.commit()
+
+
+def test_tickets_attempts_field_counts_recorded_attempts(
+    client: TestClient, seeded_run: str, temp_home: Path
+):
+    """The bulk list reports how many attempts actually ran, not the retry budget."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    ticket_ids = [
+        row[0] for row in conn.execute(
+            "SELECT id FROM tickets WHERE run_id=? ORDER BY id", (seeded_run,)
+        ).fetchall()
+    ]
+    assert len(ticket_ids) >= 3
+
+    # One ticket ran once and succeeded; another ran twice; the third never ran.
+    _record_attempt(conn, ticket_ids[0], 1, "ok")
+    _record_attempt(conn, ticket_ids[1], 1, "driver_failed")
+    _record_attempt(conn, ticket_ids[1], 2, "ok")
+
+    # The infra-retry budget column stays where the engine left it (zero): the
+    # API must not be reading it.
+    budgets = conn.execute(
+        "SELECT attempts FROM tickets WHERE run_id=?", (seeded_run,)
+    ).fetchall()
+    assert {b[0] for b in budgets} == {0}
+    conn.close()
+
+    tickets = client.get(f"/api/runs/{seeded_run}/tickets").json()
+    by_id = {t["id"]: t for t in tickets}
+
+    assert by_id[ticket_ids[0]]["attempts"] == 1
+    assert by_id[ticket_ids[1]]["attempts"] == 2
+    assert by_id[ticket_ids[2]]["attempts"] == 0
+
+
+def test_ticket_detail_attempts_field_counts_recorded_attempts(
+    client: TestClient, seeded_run: str, temp_home: Path
+):
+    """The detail endpoint agrees with its own attempt timeline."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    ticket_id = conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? ORDER BY id LIMIT 1", (seeded_run,)
+    ).fetchone()[0]
+    _record_attempt(conn, ticket_id, 1, "ok")
+    conn.close()
+
+    data = client.get(f"/api/tickets/{ticket_id}").json()
+    assert data["ticket"]["attempts"] == 1
+    assert len(data["attempt_timeline"]) == 1
+
+
+def test_ticket_detail_attempts_zero_without_attempts(
+    client: TestClient, seeded_run: str, temp_home: Path
+):
+    """A ticket that never ran reports zero attempts."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    ticket_id = conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? ORDER BY id LIMIT 1", (seeded_run,)
+    ).fetchone()[0]
+    conn.close()
+
+    data = client.get(f"/api/tickets/{ticket_id}").json()
+    assert data["ticket"]["attempts"] == 0
+
+
+def test_tickets_subject_prefers_payload_title(
+    client: TestClient, seeded_run: str, temp_home: Path
+):
+    """An explicit title wins over the goal, in both the list and the detail."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    ticket_id = conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? ORDER BY id LIMIT 1", (seeded_run,)
+    ).fetchone()[0]
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM tickets WHERE id=?", (ticket_id,)
+        ).fetchone()[0]
+    )
+    payload["title"] = "Research item widget-7 and report what it does"
+    payload["goal"] = "Do the thing.\n" + ("x" * 9000)
+    conn.execute(
+        "UPDATE tickets SET payload_json=? WHERE id=?",
+        (json.dumps(payload), ticket_id),
+    )
+    conn.commit()
+    conn.close()
+
+    listed = {
+        t["id"]: t for t in client.get(f"/api/runs/{seeded_run}/tickets").json()
+    }
+    assert listed[ticket_id]["subject"] == "Research item widget-7 and report what it does"
+
+    detail = client.get(f"/api/tickets/{ticket_id}").json()
+    assert detail["ticket"]["subject"] == "Research item widget-7 and report what it does"
+
+
+def test_tickets_subject_falls_back_to_a_capped_single_line_goal(
+    client: TestClient, seeded_run: str, temp_home: Path
+):
+    """Without a title the goal is still used, but never as kilobytes of prose."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    ticket_id = conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? ORDER BY id LIMIT 1", (seeded_run,)
+    ).fetchone()[0]
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM tickets WHERE id=?", (ticket_id,)
+        ).fetchone()[0]
+    )
+    payload.pop("title", None)
+    payload["goal"] = "Investigate the flaky cache " + ("blah " * 3000) + "\nsecond line"
+    conn.execute(
+        "UPDATE tickets SET payload_json=? WHERE id=?",
+        (json.dumps(payload), ticket_id),
+    )
+    conn.commit()
+    conn.close()
+
+    listed = {
+        t["id"]: t for t in client.get(f"/api/runs/{seeded_run}/tickets").json()
+    }
+    subject = listed[ticket_id]["subject"]
+    assert subject.startswith("Investigate the flaky cache")
+    assert "\n" not in subject
+    assert len(subject) <= 200
+
+    detail_subject = client.get(f"/api/tickets/{ticket_id}").json()["ticket"]["subject"]
+    assert detail_subject == subject
+
+
+def test_tickets_subject_placeholder_when_payload_has_neither(
+    client: TestClient, seeded_run: str, temp_home: Path
+):
+    """A payload with no title and no goal still yields the em-dash placeholder."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    ticket_id = conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? ORDER BY id LIMIT 1", (seeded_run,)
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE tickets SET payload_json=? WHERE id=?", ('{"other": 1}', ticket_id)
+    )
+    conn.commit()
+    conn.close()
+
+    listed = {
+        t["id"]: t for t in client.get(f"/api/runs/{seeded_run}/tickets").json()
+    }
+    assert listed[ticket_id]["subject"] == "—"
+
+
 def test_tickets_filter_by_state(client: TestClient, seeded_run: str, temp_home: Path):
     """GET /api/runs/{id}/tickets?state=queued filters by state."""
     response = client.get(f"/api/runs/{seeded_run}/tickets?state=queued")
@@ -3202,6 +3367,91 @@ def test_ticket_detail_available_actions_failed(loopback_client: TestClient, tem
     data = response.json()
     assert "available_actions" in data
     assert data["available_actions"] == ["retry"]
+
+
+def _seed_finding_ticket(temp_home: Path, state: str, finding_json: str | None) -> None:
+    """Seed run 'r1' + ticket 'r1/t-0' in ``state``, optionally with a finding row."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('r1', 'stub', 'stub', 'running', 'work', 'main', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, attempts,
+                                available_at, tried_hosts, payload_json, created_at, updated_at)
+           VALUES ('r1/t-0', 'r1', 'work', ?, 'cpu', 0, 1, 0, '[]', '{"goal": "test"}', 0, 0)""",
+        (state,),
+    )
+    if finding_json is not None:
+        conn.execute(
+            """INSERT INTO findings (run_id, ticket_id, kind, json, created_at)
+               VALUES ('r1', 'r1/t-0', 'result', ?, 100)""",
+            (finding_json,),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_ticket_detail_includes_finding_answer(loopback_client: TestClient, temp_home: Path):
+    """GET /api/tickets/{id} surfaces the finding doc and its answer prose."""
+    answer = "The consumer pool was pinned to one region; rebalancing restored 4200 msg/s."
+    _seed_finding_ticket(temp_home, "done", json.dumps({"answer": answer, "sources": 3}))
+
+    response = loopback_client.get("/api/tickets/r1%2Ft-0")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["answer"] == answer
+    assert data["finding"]["kind"] == "result"
+    assert data["finding"]["created_at"] == 100
+    assert data["finding"]["json"] == {"answer": answer, "sources": 3}
+
+
+def test_ticket_detail_finding_without_answer_prose(loopback_client: TestClient, temp_home: Path):
+    """A structured finding with no 'answer' string yields the doc and a null answer."""
+    doc = {"reproduced": True, "root_cause": {"signature": "off-by-one in cursor"}}
+    _seed_finding_ticket(temp_home, "done", json.dumps(doc))
+
+    response = loopback_client.get("/api/tickets/r1%2Ft-0")
+    assert response.status_code == 200
+
+    data = response.json()
+    assert data["answer"] is None
+    assert data["finding"]["json"] == doc
+
+
+def test_ticket_detail_returns_latest_finding(loopback_client: TestClient, temp_home: Path):
+    """With several findings (retried ticket), the newest one is returned."""
+    _seed_finding_ticket(temp_home, "done", json.dumps({"answer": "first pass"}))
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    conn.execute(
+        """INSERT INTO findings (run_id, ticket_id, kind, json, created_at)
+           VALUES ('r1', 'r1/t-0', 'result', ?, 200)""",
+        (json.dumps({"answer": "second pass"}),),
+    )
+    conn.commit()
+    conn.close()
+
+    data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
+    assert data["answer"] == "second pass"
+
+
+def test_ticket_detail_no_finding(loopback_client: TestClient, temp_home: Path):
+    """A ticket with no finding row reports null finding and null answer."""
+    _seed_finding_ticket(temp_home, "queued", None)
+
+    data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
+    assert data["finding"] is None
+    assert data["answer"] is None
+
+
+def test_ticket_detail_blank_answer_is_null(loopback_client: TestClient, temp_home: Path):
+    """A whitespace-only answer is reported as null, not as empty prose."""
+    _seed_finding_ticket(temp_home, "done", json.dumps({"answer": "   "}))
+
+    data = loopback_client.get("/api/tickets/r1%2Ft-0").json()
+    assert data["answer"] is None
+    assert data["finding"]["json"] == {"answer": "   "}
 
 
 # --- Ticket Control Endpoints (abandon / retry / priority) ---

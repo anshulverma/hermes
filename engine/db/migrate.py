@@ -112,6 +112,15 @@ def apply_migrations(path: str) -> None:
             """, (time.time(),))
             conn.commit()
 
+        # Migration 4: per-ticket event index (ALTER/CREATE statements).
+        if 4 not in applied_versions:
+            _apply_migration_4(conn)
+            cursor.execute("""
+                INSERT INTO schema_migrations (version, applied_at, description)
+                VALUES (4, ?, 'Add idx_events_ticket (per-ticket history lookups)')
+            """, (time.time(),))
+            conn.commit()
+
     finally:
         conn.close()
 
@@ -192,5 +201,16 @@ def _apply_migration_3(conn: sqlite3.Connection) -> None:
     """
     cursor = conn.cursor()
     for stmt in _parse_schema_by_version().get(3, []):
+        cursor.execute(stmt)
+    conn.commit()
+
+
+def _apply_migration_4(conn: sqlite3.Connection) -> None:
+    """
+    Apply migration 4: statements marked ``@migration 4`` in schema.sql
+    (adds the per-ticket events index used by the ticket detail history).
+    """
+    cursor = conn.cursor()
+    for stmt in _parse_schema_by_version().get(4, []):
         cursor.execute(stmt)
     conn.commit()

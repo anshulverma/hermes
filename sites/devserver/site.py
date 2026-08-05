@@ -18,6 +18,7 @@ import subprocess
 import tempfile
 import time
 
+from engine import config
 from engine import site as _site
 from engine import transport
 from engine.guard import GUARD_SHIMS, GUARD_BLOCK_EXIT, render_shim_script
@@ -67,14 +68,14 @@ class DevserverSite:
         )
 
         # 2. Ensure checkout at base_ref (idempotent: check current ref first, re-verify on 2nd call)
-        # Try git first, fall back to sl
-        workspace_dir = "/tmp/hermes-workspace"
-        workspace_dir_quoted = shlex.quote(workspace_dir)
+        # Try git first, fall back to sl.
+        # Remote shell expands ${HERMES_HOME:-$HOME/.hermes} when the command is sent via SSH.
+        workspace_dir = "${HERMES_HOME:-$HOME/.hermes}/workspaces/default"
         base_ref_quoted = shlex.quote(base_ref)
 
         # Check if workspace exists
         check_workspace = subprocess.run(
-            ["ssh", *ssh_opts, host, f"test -d {workspace_dir_quoted}"],
+            ["ssh", *ssh_opts, host, f"test -d {workspace_dir}"],
             capture_output=True,
             text=True,
         )
@@ -87,7 +88,7 @@ class DevserverSite:
                 repo_url_quoted = shlex.quote(repo_url)
                 subprocess.run(
                     ["ssh", *ssh_opts, host,
-                     f"git clone {repo_url_quoted} {workspace_dir_quoted}"],
+                     f"git clone {repo_url_quoted} {workspace_dir}"],
                     capture_output=True,
                     text=True,
                     check=True,  # Let clone failure raise for honest workspace_ready
@@ -96,7 +97,7 @@ class DevserverSite:
         # Ensure we're at the correct ref (idempotent: re-verify on 2nd call)
         subprocess.run(
             ["ssh", *ssh_opts, host,
-             f"cd {workspace_dir_quoted} && git checkout {base_ref_quoted}"],
+             f"cd {workspace_dir} && git checkout {base_ref_quoted}"],
             capture_output=True,
             text=True,
             check=True,  # Let checkout failure raise for honest workspace_ready
@@ -116,11 +117,11 @@ class DevserverSite:
         # 4. Install guard shims (always re-install for idempotence)
         self._install_guard(host)
 
-        # 5. Ensure dexter runtime dir exists
-        runtime_dir = "/tmp/hermes-dexter-runtime"
-        runtime_dir_quoted = shlex.quote(runtime_dir)
+        # 5. Ensure dexter runtime dir exists.
+        # Remote shell expands ${HERMES_HOME:-$HOME/.hermes} when the command is sent via SSH.
+        runtime_dir = "${HERMES_HOME:-$HOME/.hermes}/runtime/dexter"
         subprocess.run(
-            ["ssh", *ssh_opts, host, f"mkdir -p {runtime_dir_quoted}"],
+            ["ssh", *ssh_opts, host, f"mkdir -p {runtime_dir}"],
             capture_output=True,
             text=True,
             check=False,
@@ -129,15 +130,14 @@ class DevserverSite:
     def _install_guard(self, host: str) -> None:
         """Install no-ship guard shims over SSH (always re-install).
 
-        Guard dir is deployment-specific; use a standard location.
+        Guard dir is derived from _guard_dir() to keep install and probe in sync.
         """
-        guard_dir = f"/tmp/hermes-guard-{host}/bin"
-        guard_dir_quoted = shlex.quote(guard_dir)
+        guard_dir = self._guard_dir(host)
         ssh_opts = self._ssh_opts(host)
 
-        # Create guard dir
+        # Create guard dir.  No shlex.quote: remote shell expands ${HERMES_HOME:-$HOME/.hermes}.
         subprocess.run(
-            ["ssh", *ssh_opts, host, "mkdir", "-p", guard_dir_quoted],
+            ["ssh", *ssh_opts, host, "mkdir", "-p", guard_dir],
             capture_output=True,
             text=True,
             check=False,  # Don't fail if already exists
@@ -170,27 +170,35 @@ class DevserverSite:
             real_path = None
 
         script = render_shim_script(name, blocked, real_path)
+        # shim_path contains ${HERMES_HOME:-$HOME/.hermes} which must expand on the remote.
+        # guard_dir and name contain only safe chars (hostname/tool-name chars), so no
+        # shlex.quote is needed — quoting would prevent the variable from expanding.
         shim_path = f"{guard_dir}/{name}"
-        shim_path_quoted = shlex.quote(shim_path)
 
-        # Write shim via ssh (cat > file + chmod +x) with QUOTED paths
+        # Write shim via ssh (cat > file + chmod +x); remote shell expands the path.
         subprocess.run(
-            ["ssh", *ssh_opts, host, f"cat > {shim_path_quoted}"],
+            ["ssh", *ssh_opts, host, f"cat > {shim_path}"],
             input=script,
             capture_output=True,
             text=True,
             check=False,
         )
         subprocess.run(
-            ["ssh", *ssh_opts, host, "chmod", "+x", shim_path_quoted],
+            ["ssh", *ssh_opts, host, "chmod", "+x", shim_path],
             capture_output=True,
             text=True,
             check=False,
         )
 
     def _guard_dir(self, host: str) -> str:
-        """Return the remote guard dir path."""
-        return f"/tmp/hermes-guard-{host}/bin"
+        """Return the remote guard dir path.
+
+        Both _install_guard (which writes shims) and _guard_installed (which probes
+        them) call this method, so they are guaranteed to agree on the location.
+        The remote shell expands ${HERMES_HOME:-$HOME/.hermes} when the string is
+        embedded in an SSH command.
+        """
+        return f"${{HERMES_HOME:-$HOME/.hermes}}/guard/{host}/bin"
 
     def _guard_installed(self, host: str) -> bool:
         """Check if guard shims are actually present on the remote host (HONEST probe)."""
@@ -236,14 +244,14 @@ class DevserverSite:
             "ssh reachable" if reachable else "ssh unreachable",
         )
 
-        # Workspace ready: HONEST probe (check if checkout actually exists)
+        # Workspace ready: HONEST probe (check if checkout actually exists).
+        # Remote shell expands ${HERMES_HOME:-$HOME/.hermes} when sent via SSH.
         workspace_ready = False
         if reachable:
-            workspace_dir = "/tmp/hermes-workspace"
-            workspace_dir_quoted = shlex.quote(workspace_dir)
+            workspace_dir = "${HERMES_HOME:-$HOME/.hermes}/workspaces/default"
             try:
                 proc = subprocess.run(
-                    ["ssh", *self._ssh_opts(host), host, f"test -d {workspace_dir_quoted}"],
+                    ["ssh", *self._ssh_opts(host), host, f"test -d {workspace_dir}"],
                     capture_output=True,
                     text=True,
                     timeout=self.connect_timeout + 5,
@@ -323,11 +331,12 @@ class DevserverSite:
 
         ticket_id = envelope.get("ticket_id", "ticket")
         safe = ticket_id.replace("/", "_")
-        remote_dir = f"/tmp/hermes-{safe}"
+        # Remote path: shell-expanded by the remote shell so HERMES_HOME is honoured.
+        remote_dir = f"${{HERMES_HOME:-$HOME/.hermes}}/xfer/{safe}"
         remote_env = f"{remote_dir}/envelope.json"
         remote_result = f"{remote_dir}/result.json"
 
-        with tempfile.TemporaryDirectory(prefix="hermes-devserver-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="hermes-devserver-", dir=config.state_dir("tmp")) as tmp:
             local_env = os.path.join(tmp, "envelope.json")
             local_result = os.path.join(tmp, "result.json")
             with open(local_env, "w") as fh:
@@ -360,10 +369,12 @@ class DevserverSite:
             timeout_s = int(envelope.get("timeout_s", 3600))
             guard_dir = self._guard_dir(host)
 
-            # Build remote command as a shell string that exports PATH then runs serve-once
-            # CRITICAL: shlex.quote() all interpolated values (guard_dir, paths, timeout)
+            # Build remote command as a shell string that exports PATH then runs serve-once.
+            # guard_dir contains ${HERMES_HOME:-$HOME/.hermes} which must expand on the remote,
+            # so it is embedded unquoted.  remote_env/remote_result are shlex-quoted to prevent
+            # shell injection from malicious ticket_ids.
             remote_cmd = (
-                f'PATH={shlex.quote(guard_dir)}:$PATH hermes serve-once '
+                f'PATH={guard_dir}:$PATH hermes serve-once '
                 f'--envelope {shlex.quote(remote_env)} --result {shlex.quote(remote_result)} '
                 f'--timeout {shlex.quote(str(timeout_s))}'
             )

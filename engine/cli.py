@@ -7,6 +7,8 @@ import importlib
 import json
 import logging
 import os
+import re
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -161,19 +163,75 @@ def _load_goals_file(path):
     return goals
 
 
+# Run ids are a monotonic counter (``run-1``, ``run-2``, …) so that the ids they
+# prefix — ticket ids, transfer directories, log lines — stay readable.
+#
+# Only ids below this bound count as counter ids. The bound is far past any
+# plausible number of runs and far below any epoch timestamp, so run ids minted
+# by the earlier epoch-millisecond scheme are ignored rather than pinning the
+# counter to a thirteen-digit number for ever.
+_RUN_COUNTER_MAX = 1_000_000_000
+
+_RUN_COUNTER_RE = re.compile(r"^run-(0|[1-9][0-9]*)$")
+
+# A create only retries on a lost race, and each retry consumes the id that won,
+# so a handful of attempts covers far more concurrency than a master ever has.
+_RUN_CREATE_ATTEMPTS = 8
+
+
+def _next_run_number(conn):
+    """The next run counter: one past the highest counter id already stored.
+
+    Ids that are not counter ids (legacy epoch-millisecond stamps, hand-made
+    ids) are ignored, so a db holding them still counts from a small number.
+    """
+    highest = 0
+    for (row_id,) in conn.execute("SELECT id FROM runs WHERE id LIKE 'run-%'"):
+        match = _RUN_COUNTER_RE.match(row_id or "")
+        if not match:
+            continue
+        number = int(match.group(1))
+        if number < _RUN_COUNTER_MAX:
+            highest = max(highest, number)
+    return highest + 1
+
+
 def _create_run(conn, playbook_name, site_name, base_ref, run_config=None):
-    """Create a new run row and return its ID."""
-    run_id = f"run-{int(time.time() * 1000)}"
-    now = time.time()
-    conn.execute(
-        """INSERT INTO runs (id, playbook, site, base_ref, config_json, state,
-                             phase, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, ?)""",
-        (run_id, playbook_name, site_name, base_ref,
-         json.dumps(run_config or {}), now, now),
+    """Create a new run row and return its ID.
+
+    The number is derived and the row inserted inside one write transaction, so
+    a concurrent creator cannot read the same maximum. If one does win the race
+    anyway, its id is already committed, and the duplicate primary key sends us
+    round again against the new maximum.
+    """
+    config_json = json.dumps(run_config or {})
+    last_error = None
+    for _ in range(_RUN_CREATE_ATTEMPTS):
+        # BEGIN cannot nest; the caller hands over a connection with no work of
+        # its own in flight, so settling it is a no-op in practice.
+        if conn.in_transaction:
+            conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        run_id = f"run-{_next_run_number(conn)}"
+        now = time.time()
+        try:
+            conn.execute(
+                """INSERT INTO runs (id, playbook, site, base_ref, config_json, state,
+                                     phase, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 'running', NULL, ?, ?)""",
+                (run_id, playbook_name, site_name, base_ref, config_json, now, now),
+            )
+        except sqlite3.IntegrityError as exc:
+            conn.rollback()
+            if "runs.id" not in str(exc):
+                raise  # not a lost race; retrying would only repeat it
+            last_error = exc
+            continue
+        conn.commit()
+        return run_id
+    raise RuntimeError(
+        f"could not allocate a run id after {_RUN_CREATE_ATTEMPTS} attempts: {last_error}"
     )
-    conn.commit()
-    return run_id
 
 
 def cmd_run(args):

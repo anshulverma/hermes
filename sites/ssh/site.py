@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import time
 
+from engine import config
 from engine import site as _site
 from engine import transport
 from engine.models import Check, HealthReport, Issue, IssueQuery, Result
@@ -216,11 +217,12 @@ class SSHSite:
 
         ticket_id = envelope.get("ticket_id", "ticket")
         safe = ticket_id.replace("/", "_")
-        remote_dir = f"/tmp/hermes-{safe}"
+        # Remote path: shell-expanded by the remote shell so HERMES_HOME is honoured.
+        remote_dir = f"${{HERMES_HOME:-$HOME/.hermes}}/xfer/{safe}"
         remote_env = f"{remote_dir}/envelope.json"
         remote_result = f"{remote_dir}/result.json"
 
-        with tempfile.TemporaryDirectory(prefix="hermes-ssh-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="hermes-ssh-", dir=config.state_dir("tmp")) as tmp:
             local_env = os.path.join(tmp, "envelope.json")
             local_result = os.path.join(tmp, "result.json")
             with open(local_env, "w") as fh:

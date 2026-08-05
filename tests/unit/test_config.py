@@ -629,3 +629,50 @@ def test_validate_startup_main_integration():
         finally:
             os.environ.pop('HERMES_HOME', None)
             os.environ.pop('HERMES_LOG_LEVEL', None)
+
+
+# --- state_dir tests ---
+
+def test_state_dir_lands_under_hermes_home(tmp_path, monkeypatch):
+    """state_dir() creates the directory under HERMES_HOME."""
+    from engine.config import state_dir
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    result = state_dir("scratch", "test-agent")
+
+    assert result == tmp_path / "scratch" / "test-agent"
+    assert result.is_dir()
+
+
+def test_state_dir_mode_is_0700(tmp_path, monkeypatch):
+    """state_dir() creates directories with owner-only (0700) permissions."""
+    from engine.config import state_dir
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    result = state_dir("tmp")
+
+    mode = result.stat().st_mode & 0o777
+    assert mode == 0o700, f"Expected mode 0700, got {oct(mode)}"
+
+
+def test_state_dir_idempotent(tmp_path, monkeypatch):
+    """state_dir() is idempotent — calling it twice does not raise."""
+    from engine.config import state_dir
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    first = state_dir("scratch", "codex")
+    second = state_dir("scratch", "codex")
+
+    assert first == second
+    assert second.is_dir()
+
+
+def test_state_dir_returns_path_object(tmp_path, monkeypatch):
+    """state_dir() returns a Path object."""
+    from pathlib import Path
+    from engine.config import state_dir
+
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    result = state_dir("tmp")
+
+    assert isinstance(result, Path)

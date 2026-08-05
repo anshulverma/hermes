@@ -407,6 +407,37 @@ def test_record_result_appends_attempts_audit_row(conn):
     assert row[4] == 1.0 and row[5] == 2.0
 
 
+def test_attempts_column_is_the_infra_budget_not_the_attempt_count(conn):
+    """A successful run records an attempt but spends none of the retry budget.
+
+    The two numbers are deliberately different: ``tickets.attempts`` is what
+    MAX_INFRA_ATTEMPTS spends, so only an infra failure may move it.
+    """
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    t = _mk_ticket(conn, "r1/t-0", state="running")
+    pb = StubPlaybook()
+
+    queue.record_result(conn, t, "host-A", _ok_result(), 100.0, pb, StubSite())
+
+    recorded = conn.execute(
+        "SELECT COUNT(*) FROM attempts WHERE ticket_id='r1/t-0'"
+    ).fetchone()[0]
+    assert recorded == 1
+    assert _ticket_row(conn, "r1/t-0")["attempts"] == 0
+
+    # And the budget is still what terminates an infra-failing ticket.
+    budget_spent = queue.MAX_INFRA_ATTEMPTS
+    exhausted = _mk_ticket(conn, "r1/t-1", state="running", attempts=budget_spent)
+    queue.record_result(
+        conn, exhausted, "host-A", _fail_result("infra_failed", "transport_error"),
+        200.0, pb, StubSite(),
+    )
+    assert _ticket_row(conn, "r1/t-1")["state"] == "failed"
+    assert _ticket_row(conn, "r1/t-1")["attempts"] == budget_spent
+
+
 def test_record_result_inserts_finding_with_run_and_ticket_id(conn):
     from engine import queue
 

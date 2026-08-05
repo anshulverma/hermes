@@ -18,6 +18,11 @@ falling back to ``HERMES_RESEARCH_SOURCE``, ``HERMES_RESEARCH_AGENTS``
 ``config`` source, one ``claude`` agent, and at most five items. The limit matters
 because cost is items times agents.
 
+Every ticket carries a one-line ``title`` for operators to read and a ``goal``
+that instructs the agent and names, rather than inlines, the material it works
+from; that material travels in the payload's own keys (``item``, ``analyses``,
+``syntheses``).
+
 Every agent returns its prose under ``payload["answer"]``; the key is the same for
 all phases so the contract is uniform rather than per-phase.
 
@@ -54,9 +59,6 @@ _RESEARCH_ITEM_RE = re.compile(r"/research-(.+)-[^-/]+$")
 
 # Item id recovered from a synthesize ticket id (``<run>/synthesize-<item>``).
 _SYNTHESIZE_ITEM_RE = re.compile(r"/synthesize-(.+)$")
-
-# Keys the goal prose renders itself; every other item key is rendered generically.
-_RENDERED_KEYS = ("id", "title", "context")
 
 
 def _text(value: Any) -> str:
@@ -178,6 +180,7 @@ class ResearchPlaybook:
                     priority=float(len(tickets)),
                     attempts=0,
                     payload={
+                        "title": _research_title(item),
                         "goal": _research_goal(item),
                         "agent": agent,
                         "item": item,
@@ -205,6 +208,7 @@ class ResearchPlaybook:
                 priority=float(len(tickets)),
                 attempts=0,
                 payload={
+                    "title": _synthesize_title(item),
                     "goal": _synthesize_goal(item, analyses, failed_agents),
                     "item": item,
                     "analyses": analyses,
@@ -229,6 +233,7 @@ class ResearchPlaybook:
             priority=0.0,
             attempts=0,
             payload={
+                "title": _report_title(syntheses),
                 "goal": _report_goal(syntheses),
                 "syntheses": syntheses,
                 "summary": {"item_count": len(syntheses)},
@@ -242,9 +247,10 @@ class ResearchPlaybook:
         if phase == "research":
             return {
                 "type": "object",
-                "required": ["goal", "agent", "item"],
+                "required": ["title", "goal", "agent", "item"],
                 "additionalProperties": False,
                 "properties": {
+                    "title": {"type": "string"},
                     "goal": {"type": "string"},
                     "agent": {"type": "string"},
                     "item": {"type": "object"},
@@ -253,9 +259,10 @@ class ResearchPlaybook:
         if phase == "synthesize":
             return {
                 "type": "object",
-                "required": ["goal", "item", "analyses", "failed_agents"],
+                "required": ["title", "goal", "item", "analyses", "failed_agents"],
                 "additionalProperties": False,
                 "properties": {
+                    "title": {"type": "string"},
                     "goal": {"type": "string"},
                     "item": {"type": "object"},
                     "analyses": {"type": "array", "items": {"type": "object"}},
@@ -264,9 +271,10 @@ class ResearchPlaybook:
             }
         return {
             "type": "object",
-            "required": ["goal", "syntheses", "summary"],
+            "required": ["title", "goal", "syntheses", "summary"],
             "additionalProperties": False,
             "properties": {
+                "title": {"type": "string"},
                 "goal": {"type": "string"},
                 "syntheses": {"type": "array", "items": {"type": "object"}},
                 "summary": {"type": "object"},
@@ -439,29 +447,51 @@ class ResearchPlaybook:
         )
 
 
-# --- goal prose -----------------------------------------------------------
+# --- titles and goals -------------------------------------------------------
+#
+# A goal is an instruction: it says what to do and names the material, which
+# travels in the payload the ticket already carries. Inlining that material
+# would make the same bytes ride twice and bury the instruction, so the prose
+# below is deliberately short and every bounded fragment it interpolates is
+# capped.
 
-def _item_heading(item: dict) -> str:
-    """Render one item: its label, its extra keys, then its context block."""
-    lines = [f"Item {item.get('id', '?')}: {item.get('title', '')}"]
-    for key in sorted(item):
-        if key in _RENDERED_KEYS:
-            continue
-        value = item[key]
-        if isinstance(value, (str, int, float, bool)):
-            lines.append(f"{key}: {value}")
-    context = _text(item.get("context"))
-    if context:
-        lines.append("")
-        lines.append(context)
-    return "\n".join(lines)
+# Enough to identify an item in one line without letting a long title run away.
+_LABEL_MAX = 60
+
+# How many item ids a report goal enumerates before summarising the remainder.
+_REPORT_IDS_SHOWN = 10
+
+
+def _clip(text: str, limit: int) -> str:
+    """One line of at most ``limit`` characters, ellipsised when cut."""
+    line = " ".join(text.split())
+    if len(line) <= limit:
+        return line
+    return line[: limit - 1].rstrip() + "…"
+
+
+def _item_label(item: dict) -> str:
+    """A short one-line name for an item: its id, plus its title when it fits."""
+    item_id = str(item.get("id", "?"))
+    title = _text(item.get("title"))
+    if title and title != item_id:
+        return _clip(f"{item_id} ({title})", _LABEL_MAX)
+    return _clip(item_id, _LABEL_MAX)
+
+
+def _research_title(item: dict) -> str:
+    """The list heading for one agent's analysis of one item."""
+    return (
+        f"Research {_item_label(item)}: what it is, what it does, and which "
+        "parts it touches"
+    )
 
 
 def _research_goal(item: dict) -> str:
     """The per-agent analysis goal for one item."""
     return (
-        "Research one item and report what you find.\n\n"
-        f"{_item_heading(item)}\n\n"
+        f"Research {_item_label(item)} and report what you find. The item, "
+        "including its full context, is in this ticket's payload under `item`.\n\n"
         "Cover what the item is, what it does, which parts of the system it "
         "touches, and anything notable about it. Ground every claim in what you "
         "can actually read; say so plainly where the material does not tell you. "
@@ -469,40 +499,54 @@ def _research_goal(item: dict) -> str:
     )
 
 
+def _synthesize_title(item: dict) -> str:
+    """The list heading for the merge of one item's analyses."""
+    return (
+        f"Merge the independent analyses of {_item_label(item)} into one "
+        "agreed view"
+    )
+
+
 def _synthesize_goal(item: dict, analyses: list, failed_agents: list) -> str:
     """The merge goal for one item's independent analyses."""
-    blocks = "\n\n".join(
-        f"Analysis from {a.get('agent', '?')}:\n{a.get('analysis', '')}"
-        for a in analyses
-    )
     missing = (
-        f"\n\nNo analysis arrived from: {', '.join(failed_agents)}. Work with the "
-        "analyses you have and note the gap."
+        f" No analysis arrived from "
+        f"{_clip(', '.join(str(a) for a in failed_agents), _LABEL_MAX)}; work "
+        "with the ones you have and note the gap."
         if failed_agents else ""
     )
     return (
-        "Merge several independent analyses of one item into a single view.\n\n"
-        f"{_item_heading(item)}\n\n"
-        f"{blocks}{missing}\n\n"
+        f"Merge {len(analyses)} independent analyses of {_item_label(item)} into "
+        "a single view. The item is in this ticket's payload under `item` and the "
+        f"analyses to merge are under `analyses`.{missing}\n\n"
         "Produce one account of the item: where the analyses agree, where they "
         "disagree (and which reading the material supports), and what the item "
         "amounts to. Do not invent detail that no analysis reports."
     )
 
 
+def _report_title(syntheses: list) -> str:
+    """The list heading for the run's single report ticket."""
+    return (
+        f"Write the final report over {len(syntheses)} researched items, "
+        "grouped into themes with throughlines"
+    )
+
+
 def _report_goal(syntheses: list) -> str:
     """The final report goal over every per-item synthesis."""
-    blocks = "\n\n".join(
-        f"Synthesis for {s.get('item_id') or '?'}:\n{s.get('synthesis', '')}"
-        for s in syntheses
-    )
+    ids = [str(s.get("item_id") or "?") for s in syntheses]
+    shown = ", ".join(ids[:_REPORT_IDS_SHOWN])
+    remainder = len(ids) - _REPORT_IDS_SHOWN
+    if remainder > 0:
+        shown = f"{shown} and {remainder} more"
     return (
         f"Write one report over {len(syntheses)} researched items, from their "
-        "syntheses.\n\n"
-        f"{blocks}\n\n"
+        "syntheses. The syntheses are in this ticket's payload under "
+        f"`syntheses`, one per item: {_clip(shown, 400)}.\n\n"
         "Group the items into themes, state what each theme adds up to, and call "
         "out the throughlines and the loose ends. Every line must trace back to a "
-        "synthesis above; add nothing that is not there."
+        "synthesis in the payload; add nothing that is not there."
     )
 
 

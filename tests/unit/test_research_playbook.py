@@ -174,7 +174,8 @@ def test_seed_research_fans_items_across_agents(source):
     assert {t.state for t in tickets} == {"queued"}
     assert tickets[0].payload["agent"] == "claude"
     assert tickets[0].payload["item"]["id"] == "one"
-    assert "first" in tickets[0].payload["goal"]
+    assert tickets[0].payload["item"]["context"] == "first"
+    assert "one" in tickets[0].payload["goal"]
 
 
 def test_seed_research_defaults_to_the_config_source_and_one_agent():
@@ -286,6 +287,123 @@ def test_seeded_payloads_satisfy_their_phase_schema(source):
 
     for ticket in research + synth + report:
         contracts.validate(ticket.payload, pb.payload_schema(ticket.phase))
+
+
+# --- goal + title ---------------------------------------------------------
+
+# A goal is an instruction, not a document: the material it refers to travels
+# in the payload, so no phase's goal has any business being kilobytes long.
+GOAL_MAX_CHARS = 1500
+
+_BULK = (
+    "The item is a landed change to the queue module. It releases the lease as "
+    "soon as the ticket leaves running rather than at TTL expiry. "
+) * 40
+
+
+def _bulky_phase_tickets(source):
+    """Seed one ticket per phase from deliberately bulky material."""
+    name, items = source
+    items.extend(
+        {"id": f"item-{n}", "title": f"Item {n}", "context": _BULK} for n in range(5)
+    )
+    pb = _playbook()
+    config = {"source": name, "agents": ["claude", "codex"]}
+
+    research = pb.seed(_run(config), site=None)[0]
+    synthesize = pb.seed(_run(config, phase="synthesize", reductions=[Reduction(
+        kind="item_analyses",
+        json={
+            "item": {"id": "item-0", "title": "Item 0", "context": _BULK},
+            "analyses": [
+                {"agent": "claude", "analysis": _BULK},
+                {"agent": "codex", "analysis": _BULK},
+            ],
+            "succeeded_agents": ["claude", "codex"],
+            "failed_agents": [],
+            "status": "ok",
+        },
+    )]), site=None)[0]
+    report = pb.seed(_run(config, phase="report", reductions=[Reduction(
+        kind="item_syntheses",
+        json={
+            "syntheses": [
+                {
+                    "ticket_id": f"run-1/synthesize-item-{n}",
+                    "item_id": f"item-{n}",
+                    "synthesis": _BULK,
+                }
+                for n in range(5)
+            ],
+            "item_count": 5,
+        },
+    )]), site=None)[0]
+    return research, synthesize, report
+
+
+def test_every_seeded_ticket_carries_a_one_line_title(source):
+    """Each phase names itself in a title the UI can use as a heading."""
+    research, synthesize, report = _bulky_phase_tickets(source)
+
+    for ticket in (research, synthesize, report):
+        title = ticket.payload["title"]
+        assert title.strip(), f"{ticket.phase} seeded an empty title"
+        assert "\n" not in title
+        assert len(title) <= 120, f"{ticket.phase} title is {len(title)} chars"
+        assert 10 <= len(title.split()) <= 16, (
+            f"{ticket.phase} title is {len(title.split())} words: {title!r}"
+        )
+
+    # And each says what the ticket is for, naming its item.
+    assert "item-0" in research.payload["title"]
+    assert "item-0" in synthesize.payload["title"]
+    assert "5" in report.payload["title"]
+
+
+def test_goals_stay_short_and_still_name_their_item(source):
+    """Bulky material does not inflate the goal; the goal still identifies the item."""
+    research, synthesize, report = _bulky_phase_tickets(source)
+
+    for ticket in (research, synthesize, report):
+        goal = ticket.payload["goal"]
+        assert len(goal) < GOAL_MAX_CHARS, (
+            f"{ticket.phase} goal is {len(goal)} chars"
+        )
+        assert _BULK[:80] not in goal, f"{ticket.phase} goal inlines its material"
+
+    assert "item-0" in research.payload["goal"]
+    assert "item-0" in synthesize.payload["goal"]
+    assert "item-0" in report.payload["goal"]
+
+
+def test_the_material_the_goal_refers_to_is_still_in_the_payload(source):
+    """Shortening the prose moves the material, it does not drop it."""
+    research, synthesize, report = _bulky_phase_tickets(source)
+
+    assert research.payload["item"]["context"] == _BULK
+    assert synthesize.payload["item"]["context"] == _BULK
+    assert [a["analysis"] for a in synthesize.payload["analyses"]] == [_BULK, _BULK]
+    assert [s["synthesis"] for s in report.payload["syntheses"]] == [_BULK] * 5
+    assert report.payload["summary"] == {"item_count": 5}
+
+
+def test_synthesize_goal_names_the_agents_that_did_not_deliver(source):
+    """A missing analysis is stated in the instruction, not left to be inferred."""
+    name, items = source
+    items.append({"id": "one", "title": "One", "context": "ctx"})
+    config = {"source": name, "agents": ["claude", "codex"]}
+    ticket = _playbook().seed(_run(config, phase="synthesize", reductions=[Reduction(
+        kind="item_analyses",
+        json={
+            "item": {"id": "one", "title": "One", "context": "ctx"},
+            "analyses": [{"agent": "claude", "analysis": "text"}],
+            "succeeded_agents": ["claude"],
+            "failed_agents": ["codex"],
+            "status": "ok",
+        },
+    )]), site=None)[0]
+
+    assert "codex" in ticket.payload["goal"]
 
 
 # --- reduce ---------------------------------------------------------------

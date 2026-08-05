@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 from typing import Protocol
 
+from engine import config
+
 
 class LearningSink(Protocol):
     """Protocol for banking a learning from a cluster."""
@@ -85,12 +87,13 @@ class DexterKbSink:
             slug = self._build_slug(cluster)
             entry_doc = self._build_knowledge_entry(cluster, slug)
 
-            # Write to temp file
+            # Write to temp file under the runtime root so nothing lands in /tmp.
             with tempfile.NamedTemporaryFile(
                 mode='w',
                 suffix='.md',
                 delete=False,
-                encoding='utf-8'
+                encoding='utf-8',
+                dir=config.state_dir("tmp"),
             ) as f:
                 f.write(entry_doc)
                 entry_path = f.name

@@ -113,7 +113,7 @@ describe('TicketDrawer', () => {
     });
   });
 
-  it('should render payload fields', async () => {
+  it('should render payload fields once the payload is expanded', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => mockTicketDetail,
@@ -122,10 +122,11 @@ describe('TicketDrawer', () => {
     render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Fix bug in authentication flow/i)).toBeInTheDocument();
+      expect(screen.getByTestId('payload-toggle')).toBeInTheDocument();
     });
+    fireEvent.click(screen.getByTestId('payload-toggle'));
 
-    expect(screen.getByText(/payload/i)).toBeInTheDocument();
+    expect(screen.getByText(/Fix bug in authentication flow/i)).toBeInTheDocument();
   });
 
   it('should render latest result', async () => {
@@ -160,7 +161,7 @@ describe('TicketDrawer', () => {
     expect(screen.getByText('Attempt Timeline')).toBeInTheDocument();
   });
 
-  it('should render evidence links', async () => {
+  it('should render evidence refs as copyable host paths, not links', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => mockTicketDetail,
@@ -169,11 +170,12 @@ describe('TicketDrawer', () => {
     const { container } = render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
-      const link = container.querySelector('a[href="s3://results/ticket-1.json"]');
-      expect(link).toBeInTheDocument();
+      expect(screen.getByText('Evidence')).toBeInTheDocument();
     });
 
-    expect(screen.getByText('Evidence')).toBeInTheDocument();
+    // The path is shown as text, never as a dead hyperlink the browser cannot open.
+    expect(container.querySelector('a[href="s3://results/ticket-1.json"]')).toBeNull();
+    expect(screen.getAllByText('s3://results/ticket-1.json').length).toBeGreaterThan(0);
   });
 
   it('should show empty state when result is null', async () => {
@@ -510,6 +512,223 @@ describe('TicketDrawer', () => {
       render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Goal')).toBeInTheDocument());
       expect(screen.queryByText('Output')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Agent answer (successful tickets)', () => {
+    const LONG_ANSWER =
+      'The dequeue rate collapsed because the consumer pool was pinned to a single region. ' +
+      'Rebalancing across regions restored throughput to 4200 msg/s.';
+
+    const doneWithAnswer = {
+      ...mockTicketDetail,
+      ticket: { ...mockTicketDetail.ticket, state: 'done' },
+      result: { ...mockTicketDetail.result, outcome: 'ok', detail: null },
+      available_actions: [],
+      answer: LONG_ANSWER,
+      finding: {
+        id: 7,
+        kind: 'result',
+        created_at: 1722211320.0,
+        json: { answer: LONG_ANSWER },
+      },
+    };
+
+    it('shows the agent answer for a done ticket', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => doneWithAnswer });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByText('Answer')).toBeInTheDocument());
+      expect(screen.getByTestId('ticket-answer')).toHaveTextContent(
+        /Rebalancing across regions restored throughput to 4200 msg\/s\./,
+      );
+    });
+
+    it('renders a long answer as wrapped, scrollable text rather than a JSON blob', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => doneWithAnswer });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByTestId('ticket-answer')).toBeInTheDocument());
+      const answer = screen.getByTestId('ticket-answer');
+      expect(answer.style.whiteSpace).toBe('pre-wrap');
+      expect(answer.style.overflowY).toBe('auto');
+      expect(answer.style.maxHeight).not.toBe('');
+      // Prose, not a serialised object.
+      expect(answer.textContent).not.toContain('{');
+    });
+
+    it('keeps the full finding document reachable behind a toggle when an answer exists', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => doneWithAnswer });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByTestId('finding-toggle')).toBeInTheDocument());
+      expect(screen.queryByTestId('finding-json')).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('finding-toggle'));
+      expect(screen.getByTestId('finding-json')).toBeInTheDocument();
+    });
+
+    it('renders a structured finding that carries no answer prose', async () => {
+      const structured = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'done' },
+        result: { ...mockTicketDetail.result, outcome: 'ok', detail: null },
+        available_actions: [],
+        answer: null,
+        finding: {
+          id: 9,
+          kind: 'result',
+          created_at: 1722211320.0,
+          json: { reproduced: true, root_cause: { signature: 'off-by-one in cursor' } },
+        },
+      };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => structured });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByTestId('finding-json')).toBeInTheDocument());
+      expect(screen.getByTestId('finding-json')).toHaveTextContent(/off-by-one in cursor/);
+      expect(screen.queryByTestId('ticket-answer')).not.toBeInTheDocument();
+    });
+
+    it('shows no answer section when the ticket has no finding', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByText('Goal')).toBeInTheDocument());
+      expect(screen.queryByTestId('ticket-answer')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('finding-json')).not.toBeInTheDocument();
+    });
+
+    it('still shows failure diagnostics for a failed ticket that also has a finding', async () => {
+      const failed = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'failed' },
+        result: {
+          ...mockTicketDetail.result,
+          outcome: 'driver_failed',
+          detail: 'Traceback (most recent call last): ValueError: boom',
+        },
+        available_actions: ['retry'],
+        answer: 'stale answer from an earlier attempt',
+        finding: { id: 3, kind: 'result', created_at: 1.0, json: { answer: 'stale answer from an earlier attempt' } },
+      };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => failed });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByText('Output')).toBeInTheDocument());
+      expect(screen.getByText(/ValueError: boom/)).toBeInTheDocument();
+    });
+  });
+
+  describe('Header state freshness', () => {
+    it('renders the freshly fetched detail state, not the stale board prop', async () => {
+      const staleProp: Ticket = { ...mockTicket, state: 'failed' };
+      const fresh = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'queued' },
+        available_actions: ['reprioritize', 'abandon'],
+      };
+      mockFetch.mockResolvedValue({ ok: true, json: async () => fresh });
+
+      render(<TicketDrawer isOpen={true} ticket={staleProp} onClose={() => {}} />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId('ticket-state-pill')).toHaveTextContent('queued'),
+      );
+      expect(screen.getByTestId('ticket-state-pill')).not.toHaveTextContent('failed');
+    });
+
+    it('falls back to the prop state before the detail arrives', () => {
+      mockFetch.mockImplementation(() => new Promise(() => {}));
+      const staleProp: Ticket = { ...mockTicket, state: 'failed' };
+
+      render(<TicketDrawer isOpen={true} ticket={staleProp} onClose={() => {}} />);
+
+      expect(screen.getByTestId('ticket-state-pill')).toHaveTextContent('failed');
+    });
+
+    it('shows the queued state after a successful Retry without a manual refresh', async () => {
+      const failed = {
+        ...mockTicketDetail,
+        ticket: { ...mockTicketDetail.ticket, state: 'failed', reduction_id: null },
+        available_actions: ['retry'],
+      };
+      const requeued = {
+        ...failed,
+        ticket: { ...failed.ticket, state: 'queued' },
+        available_actions: ['reprioritize', 'abandon'],
+      };
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, json: async () => failed })
+        .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'queued' }) })
+        .mockResolvedValueOnce({ ok: true, json: async () => requeued });
+
+      render(<TicketDrawer isOpen={true} ticket={{ ...mockTicket, state: 'failed' }} onClose={() => {}} />);
+      await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
+      expect(screen.getByTestId('ticket-state-pill')).toHaveTextContent('failed');
+
+      fireEvent.click(screen.getByText('Retry'));
+
+      await waitFor(() =>
+        expect(screen.getByTestId('ticket-state-pill')).toHaveTextContent('queued'),
+      );
+    });
+  });
+
+  describe('Host path references', () => {
+    it('copies an evidence ref to the clipboard on click', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(globalThis.navigator, 'clipboard', {
+        value: { writeText },
+        configurable: true,
+      });
+
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByText('Evidence')).toBeInTheDocument());
+      const copyButtons = screen.getAllByRole('button', { name: /copy host path/i });
+      expect(copyButtons.length).toBeGreaterThan(0);
+
+      fireEvent.click(copyButtons[copyButtons.length - 1]);
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith('s3://results/ticket-1.json'));
+    });
+
+    it('labels the result ref as a host path and renders no hyperlink for it', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+      const { container } = render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByText('Result')).toBeInTheDocument());
+      expect(screen.getAllByText(/host path/i).length).toBeGreaterThan(0);
+      expect(container.querySelector('a')).toBeNull();
+    });
+  });
+
+  describe('Raw payload collapsing', () => {
+    it('does not render the raw payload until it is expanded', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByTestId('payload-toggle')).toBeInTheDocument());
+      expect(screen.queryByTestId('payload-json')).not.toBeInTheDocument();
+      expect(screen.queryByText(/done_contract/)).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('payload-toggle'));
+
+      expect(screen.getByTestId('payload-json')).toBeInTheDocument();
+      expect(screen.getByTestId('payload-json')).toHaveTextContent(/done_contract/);
+    });
+
+    it('collapses the raw payload again on a second click', async () => {
+      mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByTestId('payload-toggle')).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId('payload-toggle'));
+      expect(screen.getByTestId('payload-json')).toBeInTheDocument();
+
+      fireEvent.click(screen.getByTestId('payload-toggle'));
+      expect(screen.queryByTestId('payload-json')).not.toBeInTheDocument();
     });
   });
 });

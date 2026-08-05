@@ -18,12 +18,12 @@ import json
 import os
 import re
 import shutil
-import tempfile
 import time
 from typing import TYPE_CHECKING
 
 from agents._result_doc import parse_result_doc
 from engine import agent as _agent
+from engine import config
 from engine import contracts
 from engine.models import Check, Driver, Result
 
@@ -89,8 +89,8 @@ class CodexAgent:
         safe = (
             _UNSAFE_IN_FILENAME.sub("-", envelope.get("ticket_id", "ticket")) or "ticket"
         )
-        work_dir = os.path.join(tempfile.gettempdir(), _WORK_SUBDIR)
-        return os.path.join(work_dir, f"{safe}.out.txt")
+        work_dir = config.state_dir("scratch", "codex")
+        return str(work_dir / f"{safe}.out.txt")
 
     # --- result parsing -------------------------------------------------
 
