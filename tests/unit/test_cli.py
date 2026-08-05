@@ -40,7 +40,12 @@ def setup_testkit():
 # --- run --dry-run -------------------------------------------------------
 
 def test_run_dry_run_seeds_no_dispatch(setup_testkit, capsys):
-    """dry-run seeds tickets + prints report WITHOUT dispatching."""
+    """dry-run previews the real tickets, dispatches nothing, and persists nothing.
+
+    It seeds so it can print real ticket ids, then tears those tickets down and
+    leaves the run terminal: a surviving preview showed up as a 'running' run
+    whose queued tickets nothing would ever dispatch.
+    """
     with temp_hermes_home() as home:
         # Seed the canned issues in the default location for kind=bug
         issues_path = home / "issues" / "bug.json"
@@ -56,26 +61,19 @@ def test_run_dry_run_seeds_no_dispatch(setup_testkit, capsys):
 
         assert exit_code == 0, "dry-run should exit 0"
 
-        # Check the DB: run created, tickets seeded, no attempts
+        # The preview names the real tickets it WOULD seed...
+        out = capsys.readouterr().out
+        assert "dry-run mode" in out
+        assert out.count("(phase=") == 3, "EchoPlaybook seeds 3 tickets from canned issues"
+
+        # ...and leaves nothing behind that could look like pending work.
         conn = _conn()
-        runs = conn.execute("SELECT id, state FROM runs").fetchall()
-        assert len(runs) == 1
-        run_id, state = runs[0]
-        assert state == "running"
-
-        tickets = conn.execute("SELECT id, state FROM tickets WHERE run_id=?", (run_id,)).fetchall()
-        assert len(tickets) == 3, "EchoPlaybook seeds 3 tickets from canned issues"
-        for tid, tstate in tickets:
-            assert tstate == "queued"
-
-        attempts = conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
-        assert attempts == 0, "dry-run should not dispatch (no attempts)"
+        state = conn.execute("SELECT state FROM runs").fetchone()[0]
+        assert state == "stopped", "a preview must not be left in a live state"
+        assert conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
 
         conn.close()
-
-        # stdout should mention the seeded tickets
-        captured = capsys.readouterr()
-        assert "3" in captured.out or "tickets" in captured.out.lower()
 
 
 # --- run (local, no dry-run) --------------------------------------------
@@ -966,3 +964,53 @@ def test_create_run_retries_on_id_collision():
         ids = [r[0] for r in conn.execute("SELECT id FROM runs ORDER BY id").fetchall()]
         assert ids == ["run-1", "run-2"]
         conn.close()
+
+
+def test_dry_run_leaves_no_run_or_tickets_behind(setup_testkit, capsys):
+    """A dry run is a preview: it must not leave pending-looking work behind.
+
+    It has to seed to print real ticket ids, but if those rows survive, the board
+    shows a 'running' run whose queued tickets nothing will ever dispatch.
+    """
+    with temp_hermes_home() as home:
+        write_canned_issues(home / "issues" / "bug.json")
+        exit_code = main([
+            "run", "example", "--site", "local", "--agent", "mock", "--dry-run",
+        ])
+        assert exit_code == 0
+
+        out = capsys.readouterr().out
+        assert "dry-run mode" in out
+        assert "Seeded" in out  # it still previews the real ticket ids
+
+        conn = _conn()
+        try:
+            assert conn.execute(
+                "SELECT count(*) FROM runs WHERE state='running'"
+            ).fetchone()[0] == 0, "dry run left a live-looking run behind"
+            assert conn.execute("SELECT count(*) FROM tickets").fetchone()[0] == 0, \
+                "dry run left queued tickets nothing will ever dispatch"
+        finally:
+            conn.close()
+
+
+def test_dry_run_leaves_no_per_run_scratch_on_disk(setup_testkit, capsys):
+    """The teardown covers the run's state directory too, not just its rows.
+
+    Seeding can write per-run scratch under HERMES_HOME -- the research playbook
+    keeps its ticket sidecar there -- so this uses a playbook that really writes
+    one. A preview that cleans the database but leaves those directories
+    accretes one per invocation forever.
+    """
+    with temp_hermes_home() as home:
+        goals = home / "goals.txt"
+        goals.write_text("first thing\nsecond thing\n")
+        assert main([
+            "run", "research", "--site", "local", "--agent", "mock",
+            "--dry-run", "--goals", str(goals),
+        ]) == 0
+        assert "Seeded 2 tickets" in capsys.readouterr().out  # scratch really was written
+
+        runs_dir = home / "runs"
+        leftovers = [p.name for p in runs_dir.iterdir()] if runs_dir.exists() else []
+        assert leftovers == [], f"dry run left per-run scratch behind: {leftovers}"

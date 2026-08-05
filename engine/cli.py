@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import sys
 import time
@@ -234,6 +235,37 @@ def _create_run(conn, playbook_name, site_name, base_ref, run_config=None):
     )
 
 
+def _settle_dry_run(conn, run_id: str) -> None:
+    """Tear down everything a dry-run preview seeded.
+
+    The preview has to seed to print real ticket ids, but the tickets must not
+    survive: queued tickets under a live run are indistinguishable from work
+    waiting for a dispatcher, and nothing will ever claim these. The tickets go,
+    and the run is left in a terminal state as a record that a preview happened.
+    Deletes are explicit rather than relying on cascade, so this does not depend
+    on PRAGMA foreign_keys being on.
+
+    Seeding can also write per-run scratch under the runtime root (the research
+    playbook keeps its ticket sidecar there), so the run's state directory goes
+    too -- otherwise every preview leaves one behind forever.
+    """
+    queue.set_run_state(conn, run_id, "stopped")
+    conn.execute(
+        "DELETE FROM attempts WHERE ticket_id IN (SELECT id FROM tickets WHERE run_id=?)",
+        (run_id,),
+    )
+    conn.execute("DELETE FROM findings WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM leases WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM reductions WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM tickets WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM events WHERE run_id=?", (run_id,))
+    conn.commit()
+
+    # Best-effort: a preview that cannot clear its scratch is still a valid
+    # preview, and the rows -- the part that misleads the board -- are gone.
+    shutil.rmtree(config.state_dir("runs", run_id), ignore_errors=True)
+
+
 def cmd_run(args):
     """hermes run <playbook> --site <site> [--agent <agent>] [--dry-run] [--base-ref R] [--goals FILE]."""
     # Install SIGTERM/SIGINT handlers for graceful shutdown
@@ -277,11 +309,16 @@ def cmd_run(args):
     tickets = queue.seed_tickets(conn, run, pb, st)
 
     if args.dry_run:
-        # Dry-run: print report, no dispatch
+        # A dry run is a PREVIEW. It has to create the run and seed to show real
+        # ticket ids, but leaving those rows behind made every preview look like
+        # pending work: a 'running' run whose queued tickets nothing would ever
+        # dispatch. Report what WOULD be seeded, then discard the whole thing.
         print(f"Run {run_id} created (dry-run mode)")
         print(f"Seeded {len(tickets)} tickets:")
         for t in tickets:
             print(f"  {t.id} (phase={t.phase}, priority={t.priority})")
+        _settle_dry_run(conn, run_id)
+        print(f"Dry run: {run_id} settled, no tickets left queued")
         conn.close()
         return 0
 
