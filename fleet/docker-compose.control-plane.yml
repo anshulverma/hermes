@@ -31,7 +31,15 @@ services:
       HERMES_BIND: 0.0.0.0  # Bind to all interfaces inside container
       HERMES_LOG_FORMAT: json
     volumes:
-      # Named volume for persistent HERMES_HOME (queue.db + api_token)
+      # Named volume for persistent HERMES_HOME (queue.db + api_token).
+      #
+      # Right only when nothing ELSE on the host uses Hermes. A named volume
+      # lives under the container engine's storage, not in ~/.hermes, so a
+      # `hermes` CLI on the same host writes to a different home -- the UI then
+      # shows an empty board while runs pile up in the other database. If the
+      # CLI runs here too, bind-mount the real home instead:
+      #     - ${HOME}/.hermes:/hermes-home
+      # (The Makefile targets a workstation, so it does exactly that.)
       - hermes-home:/hermes-home
 
   # --- Non-loopback configuration (commented) ---

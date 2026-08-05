@@ -1,8 +1,14 @@
 # Hermes control plane + web UI — containerized service management.
 #
 # Everything runs in a container: the FastAPI control plane, the REST/WebSocket API,
-# and the web UI (the built SPA is baked into the image). Data (queue.db + api_token)
-# persists in the `hermes-home` podman volume. The server binds loopback on this host.
+# and the web UI (the built SPA is baked into the image). The server binds loopback
+# on this host.
+#
+# Data lives in ~/.hermes, bind-mounted in as /hermes-home, so the container and the
+# `hermes` CLI share ONE home. This used to be a podman named volume, which put the
+# data under ~/.local/share/containers/storage/volumes/ instead -- a second, invisible
+# home. The CLI wrote to ~/.hermes and the UI read the volume, so the board showed
+# "No active run" while runs sat in the database.
 #
 # Networking: this host's rootless podman has no bridge networking (netavark/nftables),
 # so the container uses --network=host and the server binds 127.0.0.1:$(PORT) directly.
@@ -38,7 +44,9 @@
 PORT   ?= 44102
 IMAGE  ?= hermes-control-plane:latest
 NAME   ?= hermes-control-plane
-VOLUME ?= hermes-home
+# The host's Hermes home, shared with the CLI. Honour HERMES_HOME if it is set,
+# so the container follows the same override everything else does.
+HOME_DIR ?= $(if $(HERMES_HOME),$(HERMES_HOME),$(HOME)/.hermes)
 PROXY  ?= with-proxy
 URL    := http://127.0.0.1:$(PORT)
 
@@ -82,13 +90,15 @@ up: ## start the containerized web UI on $(PORT) (offline; needs the image to ex
 	  echo "    make image"; \
 	  exit 1; }
 	-@podman rm -f $(NAME) >/dev/null 2>&1 || true
+	@mkdir -p $(HOME_DIR)
 	podman run -d --network=host --name $(NAME) \
 	  -e HERMES_BIND=127.0.0.1 \
-	  -v $(VOLUME):/hermes-home \
+	  -v $(HOME_DIR):/hermes-home \
 	  $(IMAGE) hermes serve --api --port $(PORT)
 	@echo "Hermes web UI (containerized) -> $(URL)  (loopback; token auto-injected)"
+	@echo "Serving $(HOME_DIR) — the same home the CLI writes to."
 
-down: ## stop + remove the container (data volume preserved)
+down: ## stop + remove the container (the home directory is untouched)
 	-podman rm -f $(NAME)
 
 restart: ## restart the container (reuses the current image)
@@ -118,8 +128,8 @@ url: ## print the web UI URL
 	@echo "$(URL)"
 
 token: ## where the API token lives / how to rotate it
-	@echo "Token: in the '$(VOLUME)' volume at /hermes-home/api_token (auto-injected on loopback)."
+	@echo "Token: $(HOME_DIR)/api_token (auto-injected on loopback)."
 	@echo "Rotate: podman exec $(NAME) hermes serve --api --rotate-token && $(MAKE) restart"
 
-clean: down ## stop + remove the image (data volume preserved; remove it with: podman volume rm $(VOLUME))
+clean: down ## stop + remove the image ($(HOME_DIR) is left alone)
 	-podman rmi $(IMAGE)

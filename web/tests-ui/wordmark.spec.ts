@@ -9,6 +9,15 @@
  */
 import { test, expect, type Page } from '@playwright/test';
 
+/**
+ * The "ermes" text.
+ *
+ * Qualified to `span` deliberately: the mark's svg is aria-hidden too, and it
+ * comes first, so a bare [aria-hidden="true"] selects the artwork instead of
+ * the text and every measurement below silently becomes nonsense.
+ */
+const TEXT = 'header span[aria-hidden="true"]';
+
 /** Where a viewBox x-coordinate lands on screen, in px. */
 async function inkX(page: Page, viewBoxX: number): Promise<number> {
   return page.evaluate((x) => {
@@ -39,7 +48,8 @@ test('the gap between the H and the "e" is a letter-space, not tile padding', as
   // x=23.5 is the outer edge of the H's right stem (centre 22, 3-wide stroke).
   const stemRight = await inkX(page, 23.5);
   const textLeft = await page.evaluate(
-    () => document.querySelector('header [aria-hidden="true"]')!.getBoundingClientRect().left,
+    (sel) => document.querySelector(sel)!.getBoundingClientRect().left,
+    TEXT,
   );
   const cap = await capHeight(page);
 
@@ -55,9 +65,9 @@ test('the mark sits on the text baseline', async ({ page }) => {
   // The H's feet are flush with the bottom of the cropped viewBox, so the svg's
   // bottom edge is the baseline. Compare against where the text's baseline
   // actually falls, measured from a zero-width range at its start.
-  const delta = await page.evaluate(() => {
+  const delta = await page.evaluate((sel) => {
     const svg = document.querySelector('header svg[viewBox]') as SVGSVGElement;
-    const text = document.querySelector('header [aria-hidden="true"]') as HTMLElement;
+    const text = document.querySelector(sel) as HTMLElement;
 
     // A one-character range gives the glyph box; its bottom is the descender
     // line, so use the parent's baseline via a probe element instead.
@@ -68,7 +78,7 @@ test('the mark sits on the text baseline', async ({ page }) => {
     probe.remove();
 
     return svg.getBoundingClientRect().bottom - baseline;
-  });
+  }, TEXT);
 
   // Sub-pixel rounding and hinting make exact equality wrong to demand.
   expect(Math.abs(delta)).toBeLessThan(1.5);
@@ -77,7 +87,8 @@ test('the mark sits on the text baseline', async ({ page }) => {
 test('the mark is cap-height, matching the letters beside it', async ({ page }) => {
   const cap = await capHeight(page);
   const fontSize = await page.evaluate(
-    () => parseFloat(getComputedStyle(document.querySelector('header [aria-hidden="true"]')!).fontSize),
+    (sel) => parseFloat(getComputedStyle(document.querySelector(sel)!).fontSize),
+    TEXT,
   );
 
   // Inter's cap height is 0.727em. Allow a little slack for the fallback stack.
