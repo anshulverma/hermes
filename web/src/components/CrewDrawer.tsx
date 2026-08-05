@@ -8,6 +8,7 @@ import { useState, useEffect } from 'react';
 import { fetchLeases, reprobeCrew, drainCrew, removeCrew, AuthError } from '../api/client';
 import type { CrewMember, Lease, HealthChecklist } from '../api/client';
 import { Drawer, EmptyState, HealthBadge, Badge, Button } from '../ds';
+import { TOPBAR_HEIGHT } from './TopBar';
 
 type CrewDrawerProps = {
   isOpen: boolean;
@@ -128,7 +129,7 @@ export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDra
   }
 
   return (
-    <Drawer open={isOpen} fixed onClose={onClose} title={`Host: ${host.id}`} width="500px">
+    <Drawer open={isOpen} fixed onClose={onClose} title={`Host: ${host.id}`} width="500px" style={{ top: TOPBAR_HEIGHT }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
         {/* Host info */}
         <section>

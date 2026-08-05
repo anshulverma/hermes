@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import TicketDrawer from './TicketDrawer';
+import { TOPBAR_HEIGHT } from './TopBar';
 import type { Ticket } from '../api/client';
 
 // Mock fetch
@@ -730,5 +731,21 @@ describe('TicketDrawer', () => {
       fireEvent.click(screen.getByTestId('payload-toggle'));
       expect(screen.queryByTestId('payload-json')).not.toBeInTheDocument();
     });
+  });
+});
+
+describe('Layout: clear of the app chrome', () => {
+  it('anchors the drawer below the top bar so its title is not hidden behind it', async () => {
+    // The content wrapper sets a z-index, creating a stacking context the
+    // drawer's own z-index cannot escape — so a drawer pinned to top:0 renders
+    // UNDER the (z-index 40) top bar. Offsetting by the bar height is what
+    // keeps the title visible.
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+    const panel = screen.getByRole('dialog');
+    expect(panel).toBeInTheDocument();
+    expect(panel.style.top).toBe(`${TOPBAR_HEIGHT}px`);
+    expect(TOPBAR_HEIGHT).toBeGreaterThan(0);
   });
 });

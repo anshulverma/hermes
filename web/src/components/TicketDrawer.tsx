@@ -26,6 +26,7 @@ import {
   AuthError,
 } from '../api/client';
 import { Drawer, StatusPill, Badge } from '../ds';
+import { TOPBAR_HEIGHT } from './TopBar';
 import { LoadingOverlay, CARD_SCRIM } from './Spinner';
 import { priorityColor } from './HermesTicketCard';
 import { normalizeTicketState, normalizeTicketDetail } from '../api/normalize';
@@ -311,7 +312,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
   const reductionId = detail?.reduction?.id ?? detail?.ticket.reduction_id ?? null;
 
   return (
-    <Drawer open={isOpen} fixed onClose={onClose} title={ticket.id} width="600px">
+    <Drawer open={isOpen} fixed onClose={onClose} title={ticket.id} width="600px" style={{ top: TOPBAR_HEIGHT }}>
       <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 24, padding: '20px 24px', minHeight: 240 }}>
         {loading && <LoadingOverlay label="Loading ticket…" scrim={CARD_SCRIM} blur={false} />}
 

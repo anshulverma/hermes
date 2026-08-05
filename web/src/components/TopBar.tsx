@@ -5,7 +5,18 @@
  */
 
 import LiveDot from './LiveDot';
+
 import type { View } from '../hooks/useHashView';
+
+/**
+ * Height of the app chrome, in px.
+ *
+ * Overlays anchor below this. The content wrapper sets a z-index, which creates
+ * a stacking context the drawer's own z-index cannot escape, so a drawer pinned
+ * to top:0 renders UNDER this bar however high its z-index is. Offsetting by the
+ * bar's height avoids the overlap entirely (and keeps the nav usable).
+ */
+export const TOPBAR_HEIGHT = 56;
 
 type TopBarProps = {
   connected: boolean;
@@ -27,7 +38,7 @@ export default function TopBar({ connected, view = 'overview', onViewChange }: T
         top: 0,
         zIndex: 40,
         flex: 'none',
-        height: 56,
+        height: TOPBAR_HEIGHT,
         display: 'flex',
         alignItems: 'center',
         gap: 24,
