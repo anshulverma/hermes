@@ -5,7 +5,9 @@ import TopBar from './TopBar';
 describe('TopBar', () => {
   it('should render Hermes title', () => {
     render(<TopBar connected={true} />);
-    expect(screen.getByText('Hermes')).toBeInTheDocument();
+    // The wordmark is the favicon mark standing in for the leading "H" plus
+    // "ermes", so it is found by its accessible name rather than raw text.
+    expect(screen.getByLabelText('Hermes')).toBeInTheDocument();
   });
 
   it('should show live indicator when connected', () => {

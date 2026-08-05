@@ -18,6 +18,41 @@ import type { View } from '../hooks/useHashView';
  */
 export const TOPBAR_HEIGHT = 56;
 
+/**
+ * The Hermes mark: the favicon artwork, standing in for the leading "H".
+ *
+ * Inlined rather than an <img src="/favicon.svg"> so it scales with the text and
+ * costs no extra request. Kept visually identical to public/favicon.svg.
+ */
+function HermesMark() {
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      width="18"
+      height="18"
+      aria-hidden="true"
+      focusable="false"
+      style={{ display: 'block', marginRight: 1 }}
+    >
+      <path
+        d="M6.5 10 l3.2 -2.2 M25.5 10 l-3.2 -2.2"
+        stroke="#863bff"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        fill="none"
+      />
+      <path
+        d="M10 8.5 V23.5 M22 8.5 V23.5"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        fill="none"
+      />
+      <path d="M10 16 H22" stroke="#863bff" strokeWidth="3" strokeLinecap="round" fill="none" />
+    </svg>
+  );
+}
+
 type TopBarProps = {
   connected: boolean;
   view?: View;
@@ -34,8 +69,10 @@ export default function TopBar({ connected, view = 'overview', onViewChange }: T
   return (
     <header
       style={{
-        position: 'sticky',
-        top: 0,
+        // Deliberately NOT sticky: the shell is a fixed-height flex column whose
+        // content pane does the scrolling, so this bar is already pinned. Sticky
+        // only let it drift when the page was overscrolled past its end.
+        position: 'relative',
         zIndex: 40,
         flex: 'none',
         height: TOPBAR_HEIGHT,
@@ -48,7 +85,13 @@ export default function TopBar({ connected, view = 'overview', onViewChange }: T
         borderBottom: '1px solid var(--border-hairline)',
       }}
     >
-      <span style={{ color: 'var(--text-primary)' }}>Hermes</span>
+      <span
+        aria-label="Hermes"
+        style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--text-primary)' }}
+      >
+        <HermesMark />
+        <span aria-hidden="true">ermes</span>
+      </span>
 
       {/* View nav tabs - Phase E1 adds "Metrics" */}
       <nav style={{ display: 'flex', gap: 4 }}>

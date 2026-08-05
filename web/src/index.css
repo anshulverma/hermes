@@ -2,10 +2,14 @@
 body {
   margin: 0;
   padding: 0;
+  /* No rubber-band overscroll: the shell is a fixed-height flex column, and
+     bouncing past the end visibly shifted the top bar. */
+  overscroll-behavior: none;
 }
 
 #root {
   min-height: 100vh;
+  overscroll-behavior: none;
 }
 
 /* Spinner rotation (used by components/Spinner.tsx). */
