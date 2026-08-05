@@ -26,8 +26,11 @@
 #
 #   [NET] image       — full rebuild; pulls the python base image. RUN THIS YOURSELF.
 #   [NET] deps        — install/refresh web dependencies (npm ci). RUN THIS YOURSELF.
+#   [NET] browser     — install Playwright + Chromium for UI tests. RUN THIS YOURSELF.
 #         image-fast  — code+SPA onto the existing image (no pull) — agent-safe
 #         deploy      — image-fast + restart — agent-safe, the everyday path
+#         ui-test     — run the real-browser UI tests (needs `make browser` once)
+#         shots       — write screenshots to web/screenshots/ — agent-safe
 #
 # Use `make image` (human) after changing Python/npm DEPENDENCIES; `make deploy`
 # handles every code/UI change because the package is installed editable.
@@ -39,7 +42,7 @@ VOLUME ?= hermes-home
 PROXY  ?= with-proxy
 URL    := http://127.0.0.1:$(PORT)
 
-.PHONY: help web deps image image-fast deploy up down restart status health logs shell url token clean
+.PHONY: help web deps browser ui-test shots image image-fast deploy up down restart status health logs shell url token clean
 
 help: ## list targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort \
@@ -50,6 +53,19 @@ web: ## build the SPA (web/dist) baked into the image (offline)
 
 deps: ## [NET — RUN THIS YOURSELF] install/refresh web dependencies
 	cd web && $(PROXY) npm ci
+
+browser: ## [NET — RUN THIS YOURSELF] install Playwright + Chromium for real-browser UI tests
+	cd web && $(PROXY) npm install --save-dev --no-audit --no-fund @playwright/test
+	cd web && $(PROXY) npx playwright install chromium
+	@echo
+	@echo "Chromium installed. Layout behaviour that jsdom cannot see (scrolling,"
+	@echo "overscroll, spacing) is now testable: 'make ui-test' and 'make shots'."
+
+ui-test: ## run the real-browser UI tests (needs `make browser` once; offline)
+	cd web && npx playwright test
+
+shots: ## screenshot every view into web/screenshots/ (needs `make browser`; offline)
+	cd web && npx playwright test --grep @shot
 
 image: web ## [NET — RUN THIS YOURSELF] full image rebuild (pulls the python base image)
 	$(PROXY) podman build --network=host -f fleet/Dockerfile.control-plane -t $(IMAGE) .

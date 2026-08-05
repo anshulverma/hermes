@@ -16,5 +16,8 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
+    // tests-ui/ belongs to Playwright: those specs drive a real browser and
+    // would fail under jsdom, which has no layout engine.
+    exclude: ['node_modules/**', 'dist/**', 'tests-ui/**'],
   },
 })

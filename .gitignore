@@ -4,6 +4,10 @@ __pycache__/
 .sdd-progress.md
 node_modules/
 web/dist/
+# Playwright: review artefacts and run output, not golden files.
+web/screenshots/
+web/test-results/
+web/playwright-report/
 .pytest_cache/
 /tmp/hermes-sdd/
 build/
