@@ -45,9 +45,14 @@ def source(config: dict) -> list[dict]: ...
 Each returned item is a dict with at least:
 - `id` — stable, filesystem/ticket-id safe, unique within the run (used in ticket ids)
 - `title` — short human label
-- `context` — the text block describing the item, embedded in the agent's prompt
+- `context` — the text block describing the item, inlined into the goal (capped at
+  `_CONTEXT_MAX`) and therefore the **only** material that reaches the model
 
-Extra keys are passed through untouched, so a source can carry whatever its report needs.
+Extra keys are passed through untouched, so a source can carry whatever its report needs —
+but only `context` is delivered. The ticket payload does not travel to the worker: the sole
+channel is the goal string in the dispatch envelope, which each agent adapter turns into its
+prompt. A key a source adds for its own later use is fine; a key it expects the model to read
+is not, and belongs in `context` instead.
 
 `sources.register(name, fn)` / `sources.load(name)`. A source module is discovered exactly like
 any other adapter: it is imported for its registration side-effect (built-ins by the CLI,

@@ -53,6 +53,14 @@ class MockAgent:
         ``local_transport`` runs cleanly end-to-end without depending on a
         missing ``mock-agent`` binary; ``parse_result`` supplies the actual
         deterministic ``Result`` from the scenario table.
+
+        NOT evidence of delivery. This argv carries nothing out of the
+        envelope, and ``_scenario_for`` reads ``envelope["payload"]`` in the
+        same process, so every test using this agent passes straight over the
+        question of what a real worker receives. A goal that pointed at payload
+        the worker never gets shipped under a green suite for exactly that
+        reason. What actually reaches the process is asserted against the REAL
+        adapters in ``tests/unit/test_goal_reaches_the_worker.py``.
         """
         return ["true"]
 

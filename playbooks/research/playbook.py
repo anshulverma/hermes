@@ -623,14 +623,31 @@ class ResearchPlaybook:
 
 # --- titles and goals -------------------------------------------------------
 #
-# A goal is an instruction: it says what to do and names the material, which
-# travels in the payload the ticket already carries. Inlining that material
-# would make the same bytes ride twice and bury the instruction, so the prose
-# below is deliberately short and every bounded fragment it interpolates is
-# capped.
+# A goal has to CARRY its material, not point at it.
+#
+# The ticket payload does not travel to the worker. The only channel to the
+# process is argv, and every adapter builds its prompt from
+# `goal_envelope.goal` plus the driver -- so whatever is not in the goal string
+# does not exist as far as the model is concerned. These goals used to say "the
+# item is in this ticket's payload under `item`", which was simply false: the
+# worker got an id and nothing to read.
+#
+# So the material is inlined, but bounded. Unbounded inlining is what the
+# pointer was overcorrecting for -- a goal is still an instruction, not a
+# document, and it is stored in tickets.payload_json and re-read every master
+# cycle. The caps below are load-bearing, not cosmetic.
 
 # Enough to identify an item in one line without letting a long title run away.
 _LABEL_MAX = 60
+
+# How much of an item's own material a goal carries. Generous enough for a real
+# summary, small enough that a pathological source cannot turn a goal into a
+# document.
+_CONTEXT_MAX = 4000
+
+# How much of one upstream answer (an analysis, a synthesis) a later phase's
+# goal carries. Lower than _CONTEXT_MAX because these are inlined N at a time.
+_ANSWER_MAX = 2000
 
 # How many item ids a report goal enumerates before summarising the remainder.
 _REPORT_IDS_SHOWN = 10
@@ -642,6 +659,22 @@ def _clip(text: str, limit: int) -> str:
     if len(line) <= limit:
         return line
     return line[: limit - 1].rstrip() + "…"
+
+
+def _block(text: Any, limit: int) -> str:
+    """A multi-line block of at most ``limit`` characters.
+
+    Unlike ``_clip`` this keeps line breaks: the material being carried is
+    prose the model has to read, and collapsing a structured summary onto one
+    line makes it markedly harder to follow. A cut is marked, so a truncated
+    block never reads as a complete one.
+    """
+    body = _text(text)
+    if not body:
+        return "(no material was provided for this item)"
+    if len(body) <= limit:
+        return body
+    return body[:limit].rstrip() + "\n… (truncated)"
 
 
 def _item_label(item: dict) -> str:
@@ -663,13 +696,14 @@ def _research_title(item: dict) -> str:
 
 
 def _research_goal(item: dict) -> str:
-    """The per-agent analysis goal for one item."""
+    """The per-agent analysis goal for one item, carrying the item's material."""
     return (
-        f"Research {_item_label(item)} and report what you find. The item, "
-        "including its full context, is in this ticket's payload under `item`.\n\n"
+        f"Research {_item_label(item)} and report what you find.\n\n"
+        f"--- the item ---\n{_block(item.get('context'), _CONTEXT_MAX)}\n"
+        "--- end of item ---\n\n"
         "Cover what the item is, what it does, which parts of the system it "
-        "touches, and anything notable about it. Ground every claim in what you "
-        "can actually read; say so plainly where the material does not tell you. "
+        "touches, and anything notable about it. Ground every claim in the "
+        "material above; say so plainly where it does not tell you. "
         "Do not modify, land or ship anything: this is read-only research."
     )
 
@@ -690,10 +724,16 @@ def _synthesize_goal(item: dict, analyses: list, failed_agents: list) -> str:
         "with the ones you have and note the gap."
         if failed_agents else ""
     )
+    rendered = "\n\n".join(
+        f"--- analysis {n} (from {a.get('agent', '?')}) ---\n"
+        f"{_block(a.get('analysis'), _ANSWER_MAX)}"
+        for n, a in enumerate(analyses, start=1)
+    )
     return (
         f"Merge {len(analyses)} independent analyses of {_item_label(item)} into "
-        "a single view. The item is in this ticket's payload under `item` and the "
-        f"analyses to merge are under `analyses`.{missing}\n\n"
+        f"a single view.{missing}\n\n"
+        f"--- the item ---\n{_block(item.get('context'), _CONTEXT_MAX)}\n"
+        f"--- end of item ---\n\n{rendered}\n\n"
         "Produce one account of the item: where the analyses agree, where they "
         "disagree (and which reading the material supports), and what the item "
         "amounts to. Do not invent detail that no analysis reports."
@@ -715,13 +755,16 @@ def _report_goal(syntheses: list) -> str:
     remainder = len(ids) - _REPORT_IDS_SHOWN
     if remainder > 0:
         shown = f"{shown} and {remainder} more"
+    rendered = "\n\n".join(
+        f"--- {s.get('item_id') or '?'} ---\n{_block(s.get('synthesis'), _ANSWER_MAX)}"
+        for s in syntheses
+    )
     return (
         f"Write one report over {len(syntheses)} researched items, from their "
-        "syntheses. The syntheses are in this ticket's payload under "
-        f"`syntheses`, one per item: {_clip(shown, 400)}.\n\n"
+        f"syntheses: {_clip(shown, 400)}.\n\n{rendered}\n\n"
         "Group the items into themes, state what each theme adds up to, and call "
         "out the throughlines and the loose ends. Every line must trace back to a "
-        "synthesis in the payload; add nothing that is not there."
+        "synthesis above; add nothing that is not there."
     )
 
 

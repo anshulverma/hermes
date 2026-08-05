@@ -300,9 +300,11 @@ def test_seeded_payloads_satisfy_their_phase_schema(source):
 
 # --- goal + title ---------------------------------------------------------
 
-# A goal is an instruction, not a document: the material it refers to travels
-# in the payload, so no phase's goal has any business being kilobytes long.
-GOAL_MAX_CHARS = 1500
+# Room for a phase's fixed prose around whatever material it inlines. The
+# material itself is capped by _CONTEXT_MAX / _ANSWER_MAX, so each phase's bound
+# is computed from those below rather than being one flat number: what matters
+# is that a goal stays BOUNDED as its input grows, not that it is short.
+GOAL_PROSE_SLACK = 1500
 
 _BULK = (
     "The item is a landed change to the queue module. It releases the lease as "
@@ -369,16 +371,34 @@ def test_every_seeded_ticket_carries_a_one_line_title(source):
     assert "5" in report.payload["title"]
 
 
-def test_goals_stay_short_and_still_name_their_item(source):
-    """Bulky material does not inflate the goal; the goal still identifies the item."""
+def test_goals_carry_their_material_and_stay_bounded(source):
+    """Every phase's goal inlines its material, capped, and still names its item.
+
+    Both halves are load-bearing. The goal is the ONLY thing that reaches the
+    worker -- the payload does not travel -- so a goal that merely points at its
+    material is telling the model to read something it will never see. But an
+    uncapped goal is stored in tickets.payload_json and re-read every master
+    cycle, so it has to stay bounded as the input grows.
+    """
+    from playbooks.research.playbook import _ANSWER_MAX, _CONTEXT_MAX
+
     research, synthesize, report = _bulky_phase_tickets(source)
 
-    for ticket in (research, synthesize, report):
+    # _bulky_phase_tickets: 5 items, 2 agents -> 2 analyses each, 5 syntheses.
+    bounds = [
+        (research, _CONTEXT_MAX + GOAL_PROSE_SLACK),
+        (synthesize, _CONTEXT_MAX + 2 * _ANSWER_MAX + GOAL_PROSE_SLACK),
+        (report, 5 * _ANSWER_MAX + GOAL_PROSE_SLACK),
+    ]
+    for ticket, bound in bounds:
         goal = ticket.payload["goal"]
-        assert len(goal) < GOAL_MAX_CHARS, (
-            f"{ticket.phase} goal is {len(goal)} chars"
+        assert _BULK[:80] in goal, (
+            f"{ticket.phase} goal does not carry its material -- the worker "
+            f"receives only the goal string, so this material never arrives"
         )
-        assert _BULK[:80] not in goal, f"{ticket.phase} goal inlines its material"
+        assert len(goal) < bound, (
+            f"{ticket.phase} goal is {len(goal)} chars, over its {bound} bound"
+        )
 
     assert "item-0" in research.payload["goal"]
     assert "item-0" in synthesize.payload["goal"]
