@@ -10,6 +10,19 @@ describe('TopBar', () => {
     expect(screen.getByLabelText('Hermes')).toBeInTheDocument();
   });
 
+  it('crops the mark to the artwork so no tile padding shows as a gap', () => {
+    const { container } = render(<TopBar connected={true} />);
+    const mark = container.querySelector('svg[viewBox]');
+    const [minX, , width] = mark!.getAttribute('viewBox')!.split(' ').map(Number);
+
+    // The favicon's own box (0 0 32 32) insets the artwork to leave room for the
+    // rounded tile behind it. Reuse it here and that padding renders as dead
+    // space between the "H" and the "e". The H stems live at x 8.5-23.5, and the
+    // wing ticks reach 5.6 and 26.4, so anything wider is padding.
+    expect(minX).toBeGreaterThanOrEqual(5.6);
+    expect(minX + width).toBeLessThanOrEqual(26.4);
+  });
+
   it('should show live indicator when connected', () => {
     render(<TopBar connected={true} />);
     expect(screen.getByText('live')).toBeInTheDocument();

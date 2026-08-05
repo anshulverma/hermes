@@ -22,17 +22,35 @@ export const TOPBAR_HEIGHT = 56;
  * The Hermes mark: the favicon artwork, standing in for the leading "H".
  *
  * Inlined rather than an <img src="/favicon.svg"> so it scales with the text and
- * costs no extra request. Kept visually identical to public/favicon.svg.
+ * costs no extra request.
+ *
+ * The paths are the favicon's, but NOT its viewBox. The favicon is a rounded
+ * tile, so its 0 0 32 32 box insets the artwork by ~8.5 units a side to leave
+ * room for the background — padding that, in a wordmark, renders as a visible
+ * gap between the "H" and the "e". This box is cropped to the artwork's real
+ * bounds: the H stems span x 8.5-23.5 (3-wide strokes, round caps) and y 7-25,
+ * and the wing ticks reach x 5.6 and 26.4, y 6.9. What is left either side of
+ * the stems is the wings' own 2.9 units, which reads as a normal letter gap.
+ *
+ * Sized in em off the cap height (Inter's is 0.727em) so the mark tracks the
+ * font rather than a hardcoded pixel size, and baseline-aligned rather than
+ * centred: the H's feet are flush with the bottom of the cropped box, so they
+ * land on the text baseline the way a real glyph would.
  */
+const CAP_EM = 0.727; // Inter cap height, in em
+const MARK_UNITS_W = 20.8;
+const MARK_UNITS_H = 18.1;
+const MARK_CAP_UNITS = 18; // the H stems, y 7 -> 25
+
 function HermesMark() {
   return (
     <svg
-      viewBox="0 0 32 32"
-      width="18"
-      height="18"
+      viewBox="5.6 6.9 20.8 18.1"
+      width={`${((MARK_UNITS_W / MARK_CAP_UNITS) * CAP_EM).toFixed(3)}em`}
+      height={`${((MARK_UNITS_H / MARK_CAP_UNITS) * CAP_EM).toFixed(3)}em`}
       aria-hidden="true"
       focusable="false"
-      style={{ display: 'block', marginRight: 1 }}
+      style={{ verticalAlign: 'baseline' }}
     >
       <path
         d="M6.5 10 l3.2 -2.2 M25.5 10 l-3.2 -2.2"
@@ -85,10 +103,9 @@ export default function TopBar({ connected, view = 'overview', onViewChange }: T
         borderBottom: '1px solid var(--border-hairline)',
       }}
     >
-      <span
-        aria-label="Hermes"
-        style={{ display: 'inline-flex', alignItems: 'center', color: 'var(--text-primary)' }}
-      >
+      {/* Plain inline layout, not flex: the mark is a stand-in glyph, so it has to
+          sit on the text baseline, and a flex container would strip that away. */}
+      <span aria-label="Hermes" style={{ color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>
         <HermesMark />
         <span aria-hidden="true">ermes</span>
       </span>
