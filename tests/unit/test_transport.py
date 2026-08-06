@@ -709,3 +709,131 @@ def test_serve_once_unexpected_envelope_exception_propagates(
             conn, "h1", local_site, mock_agent, run, BuggyPlaybook(), "main",
             now=1000.0,
         )
+
+
+# --- trace capture at result time ----------------------------------------
+
+class _TracingAgent:
+    """A minimal agent that also knows where its own trace lives."""
+
+    name = "tracing"
+
+    def build_invocation(self, envelope, driver):
+        return ["true"]
+
+    def parse_result(self, raw, envelope):
+        return Result(
+            outcome="ok", termination_reason="goal_met",
+            result_ref="claude:session:abc", error_summary=None,
+            started_at=1.0, ended_at=2.0, payload={"answer": "hi"}, evidence_ref=None,
+        )
+
+    def health_checks(self, host, site):
+        return []
+
+    def trace_source(self, result, envelope):
+        return "/somewhere/on/the/host.jsonl"
+
+
+class _UntracedAgent(_TracingAgent):
+    """The pre-existing agent shape: no trace_source at all."""
+
+    trace_source = None
+
+
+def _dispatch(conn, site, agent, playbook):
+    """Run one ticket through serve_once_for_host with subprocess stubbed out."""
+    from engine import transport
+
+    run = _mk_run(conn)
+    _mk_ticket(conn, payload={"scenario": "ok"})
+    _mk_crew(conn, host="h1", cpu=2)
+    with mock.patch("engine.transport.subprocess.run",
+                    side_effect=lambda argv, *a, **k: subprocess_result(returncode=0, stdout="")):
+        return transport.serve_once_for_host(
+            conn, "h1", site, agent, run, playbook, "main", now=1000.0
+        )
+
+
+def _latest_attempt_id(conn, ticket_id="r1/t-0"):
+    return conn.execute(
+        "SELECT id FROM attempts WHERE ticket_id=? ORDER BY id DESC LIMIT 1", (ticket_id,)
+    ).fetchone()[0]
+
+
+def test_serve_once_captures_the_trace_for_the_attempt_it_recorded(
+    conn, local_site, playbook, tmp_path, monkeypatch
+):
+    """The trace is named for the attempts row this dispatch appended, so the
+    control plane can go straight from an attempt to its transcript."""
+    from engine import transport, trace
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    seen = {}
+
+    def fetch_file(host, source, dest):
+        seen["host"], seen["source"] = host, source
+        Path(dest).write_text('{"type":"user"}\n')
+        return True
+
+    monkeypatch.setattr(local_site, "fetch_file", fetch_file, raising=False)
+
+    result = _dispatch(conn, local_site, _TracingAgent(), playbook)
+
+    assert result is not None and result.outcome == "ok"
+    assert trace.read("r1", _latest_attempt_id(conn)) == '{"type":"user"}\n'
+    assert seen == {"host": "h1", "source": "/somewhere/on/the/host.jsonl"}
+
+
+def test_a_trace_capture_that_blows_up_does_not_disturb_the_result(
+    conn, local_site, playbook, tmp_path, monkeypatch
+):
+    """Capture is evidence-gathering; it must never turn a good run bad."""
+    from engine import transport
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def fetch_file(host, source, dest):
+        raise OSError("the host went away mid-copy")
+
+    monkeypatch.setattr(local_site, "fetch_file", fetch_file, raising=False)
+
+    result = _dispatch(conn, local_site, _TracingAgent(), playbook)
+
+    assert result is not None and result.outcome == "ok"
+    state, _attempts, _lease = _ticket_state(conn, "r1/t-0")
+    assert state == "reducing"
+
+
+def test_an_agent_that_names_no_trace_dispatches_exactly_as_before(
+    conn, local_site, playbook, tmp_path, monkeypatch
+):
+    from engine import transport, trace
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    result = _dispatch(conn, local_site, _UntracedAgent(), playbook)
+
+    assert result is not None and result.outcome == "ok"
+    assert trace.read("r1", _latest_attempt_id(conn)) is None
+
+
+def test_capture_is_skipped_when_the_worker_produced_no_result(
+    conn, local_site, playbook, tmp_path, monkeypatch
+):
+    """A transport failure never reached a result, so there is nothing to trace."""
+    from engine import transport
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    calls = []
+
+    monkeypatch.setattr(local_site, "fetch_file",
+                        lambda *a, **k: calls.append(a) or True, raising=False)
+    monkeypatch.setattr(local_site, "run_worker",
+                        mock.Mock(side_effect=transport.TransportError("host lost")))
+
+    run = _mk_run(conn)
+    _mk_ticket(conn, payload={"scenario": "ok"})
+    _mk_crew(conn, host="h1", cpu=2)
+    result = transport.serve_once_for_host(
+        conn, "h1", local_site, _TracingAgent(), run, playbook, "main", now=1000.0
+    )
+
+    assert result is None
+    assert calls == []

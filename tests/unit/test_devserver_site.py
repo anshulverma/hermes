@@ -1123,3 +1123,68 @@ def test_recheck_fix_wiring_to_verify():
 
         mock_recheck.assert_called_once_with(result.payload)
         assert verdict is False, "Expected verify to return False when recheck_fix returns False"
+
+
+# --- fetch_file: bringing a trace back over scp --------------------------
+
+def _completed(returncode=0, stdout=""):
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+
+def test_fetch_file_resolves_the_glob_on_the_host_then_scps_the_exact_path(
+    devserver_site, tmp_path
+):
+    """A glob handed straight to scp copies several files onto one name, or
+    fails outright; so the host resolves it first and the newest match is sent."""
+    dest = tmp_path / "7.jsonl"
+    calls = []
+
+    def fake_run(argv, *a, **k):
+        calls.append(argv)
+        if argv[0] == "ssh":
+            return _completed(stdout="/home/u/.claude/projects/slug/abc.jsonl\n")
+        dest.write_text("trace\n")
+        return _completed()
+
+    with patch("sites.devserver.site.subprocess.run", side_effect=fake_run):
+        assert devserver_site.fetch_file("host1", "~/.claude/projects/*/abc.jsonl", dest) is True
+
+    assert calls[0][0] == "ssh"
+    assert "ls -1t ~/.claude/projects/*/abc.jsonl 2>/dev/null | head -1" in calls[0]
+    assert calls[1][0] == "scp"
+    assert "host1:/home/u/.claude/projects/slug/abc.jsonl" in calls[1]
+
+
+def test_fetch_file_reports_false_when_the_host_finds_nothing(devserver_site, tmp_path):
+    with patch("sites.devserver.site.subprocess.run",
+               side_effect=lambda *a, **k: _completed(stdout="\n")):
+        assert devserver_site.fetch_file("host1", "~/x/*.jsonl", tmp_path / "7.jsonl") is False
+
+
+def test_fetch_file_never_raises_transport_error(devserver_site, tmp_path):
+    """It runs after the result was recorded -- a missing trace must not requeue
+    a ticket that has already finished."""
+    with patch("sites.devserver.site.subprocess.run",
+               side_effect=subprocess.CalledProcessError(1, "scp")):
+        assert devserver_site.fetch_file("host1", "~/x/*.jsonl", tmp_path / "7.jsonl") is False
+
+
+def test_fetch_file_reports_false_when_scp_times_out(devserver_site, tmp_path):
+    def fake_run(argv, *a, **k):
+        if argv[0] == "ssh":
+            return _completed(stdout="/p/abc.jsonl\n")
+        raise subprocess.TimeoutExpired("scp", 30)
+
+    with patch("sites.devserver.site.subprocess.run", side_effect=fake_run):
+        assert devserver_site.fetch_file("host1", "~/x/*.jsonl", tmp_path / "7.jsonl") is False
+
+
+def test_fetch_file_reports_false_when_the_scp_wrote_nothing(devserver_site, tmp_path):
+    """scp exiting 0 without producing the file is still a miss."""
+    def fake_run(argv, *a, **k):
+        if argv[0] == "ssh":
+            return _completed(stdout="/p/abc.jsonl\n")
+        return _completed()
+
+    with patch("sites.devserver.site.subprocess.run", side_effect=fake_run):
+        assert devserver_site.fetch_file("host1", "~/x/*.jsonl", tmp_path / "7.jsonl") is False

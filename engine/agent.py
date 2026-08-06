@@ -17,7 +17,12 @@ if TYPE_CHECKING:  # avoid import cycle (site imports agent imports site)
 
 @runtime_checkable
 class Agent(Protocol):
-    """The agent interface. Signatures are load-bearing."""
+    """The agent interface. Signatures are load-bearing.
+
+    Optional capabilities an agent MAY also implement are declared separately
+    (see ``TraceSource``) and discovered by duck-typing, so that adding one never
+    un-conforms an existing adapter.
+    """
 
     name: str  # "claude" | "codex" | "mock"
 
@@ -26,6 +31,27 @@ class Agent(Protocol):
     def parse_result(self, raw: str, envelope: dict) -> Result: ...
 
     def health_checks(self, host: str, site: "Site") -> list[Check]: ...  # agent_ok, auth_ok
+
+
+@runtime_checkable
+class TraceSource(Protocol):
+    """OPTIONAL: an agent that can say where its own trace lives on the host.
+
+    A ``result_ref`` is opaque to the engine -- only the agent that minted it
+    knows whether it names a file and where. An agent implementing this lets
+    ``engine.trace`` pull the transcript back at result time, which is what makes
+    it readable in the control plane afterwards (see ``engine/trace.py``).
+
+    Return a host-side path, optionally a glob and optionally ``~``-relative, or
+    None when this result has no trace to fetch. **The string may be expanded by
+    a remote shell**, so an implementation must refuse a ref it cannot vouch for
+    rather than trying to escape it.
+
+    Not part of ``Agent``: an agent without it captures no traces and is in every
+    other way a complete agent.
+    """
+
+    def trace_source(self, result: Result, envelope: dict) -> str | None: ...
 
 
 # --- registry ------------------------------------------------------------

@@ -231,3 +231,73 @@ def _make_git_repo_and_provision(home, host):
     st = site.load("local")
     st.provision(host, "HEAD")
     return repo
+
+
+# --- fetch_file: how a trace gets off the host ---------------------------
+
+def test_fetch_file_copies_a_plain_path(local_site, tmp_path):
+    src = tmp_path / "trace.jsonl"
+    src.write_text('{"type":"user"}\n')
+    dest = tmp_path / "out" / "7.jsonl"
+    dest.parent.mkdir()
+
+    assert local_site.fetch_file("localhost", str(src), dest) is True
+    assert dest.read_text() == '{"type":"user"}\n'
+
+
+def test_fetch_file_resolves_a_glob(local_site, tmp_path):
+    proj = tmp_path / "projects" / "some-slug"
+    proj.mkdir(parents=True)
+    (proj / "abc.jsonl").write_text("found me\n")
+
+    dest = tmp_path / "7.jsonl"
+    assert local_site.fetch_file("localhost", str(tmp_path / "projects" / "*" / "abc.jsonl"), dest) is True
+    assert dest.read_text() == "found me\n"
+
+
+def test_fetch_file_takes_the_newest_of_several_matches(local_site, tmp_path):
+    import os
+    proj = tmp_path / "projects"
+    (proj / "a").mkdir(parents=True)
+    (proj / "b").mkdir(parents=True)
+    old, new = proj / "a" / "abc.jsonl", proj / "b" / "abc.jsonl"
+    old.write_text("old\n")
+    new.write_text("new\n")
+    os.utime(old, (1000, 1000))
+    os.utime(new, (2000, 2000))
+
+    dest = tmp_path / "7.jsonl"
+    local_site.fetch_file("localhost", str(proj / "*" / "abc.jsonl"), dest)
+    assert dest.read_text() == "new\n"
+
+
+def test_fetch_file_expands_a_tilde(local_site, tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude" / "t.jsonl").write_text("tilde\n")
+
+    dest = tmp_path / "7.jsonl"
+    assert local_site.fetch_file("localhost", "~/.claude/t.jsonl", dest) is True
+    assert dest.read_text() == "tilde\n"
+
+
+def test_fetch_file_reports_a_miss_rather_than_raising(local_site, tmp_path):
+    assert local_site.fetch_file("localhost", str(tmp_path / "nothing" / "*.jsonl"),
+                                 tmp_path / "7.jsonl") is False
+
+
+def test_fetch_file_declines_a_directory(local_site, tmp_path):
+    (tmp_path / "adir").mkdir()
+
+    assert local_site.fetch_file("localhost", str(tmp_path / "adir"),
+                                 tmp_path / "7.jsonl") is False
+
+
+def test_fetch_file_survives_an_unreadable_source(local_site, tmp_path):
+    src = tmp_path / "locked.jsonl"
+    src.write_text("secret")
+    src.chmod(0o000)
+    try:
+        assert local_site.fetch_file("localhost", str(src), tmp_path / "7.jsonl") is False
+    finally:
+        src.chmod(0o600)

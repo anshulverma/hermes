@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import time
 from typing import TYPE_CHECKING
@@ -26,6 +27,11 @@ if TYPE_CHECKING:  # avoid import cycle
 
 # Cap captured failure detail so a runaway worker can't bloat the db.
 _DETAIL_LIMIT = 16384
+
+# The result_ref shape that names a session transcript, and the only session-id
+# shape accepted out of it (see trace_source: this reaches a remote shell).
+_SESSION_PREFIX = "claude:session:"
+_SESSION_ID_OK = re.compile(r"\A[0-9a-fA-F][0-9a-fA-F-]{7,63}\Z")
 
 
 class ClaudeAgent:
@@ -229,6 +235,33 @@ class ClaudeAgent:
             evidence_ref=None,
             detail=detail,
         )
+
+    # --- trace ----------------------------------------------------------
+
+    def trace_source(self, result: Result, envelope: dict) -> str | None:
+        """Where this result's session transcript sits on the worker's host.
+
+        Claude Code writes one JSONL transcript per session, under
+        ``~/.claude/projects/<slug>/<session-id>.jsonl``, where ``<slug>`` is
+        derived from the worker's working directory. The master does not know
+        that directory -- the site chose it -- so the slug is left as a glob and
+        resolved on the host, where the answer actually is.
+
+        Only ``claude:session:`` refs name a file. ``claude:uuid:`` identifies a
+        message within a session, not a transcript, so there is nothing to fetch.
+
+        The returned string is expanded by a **remote shell** on an ssh site.
+        A session id that is not plainly a session id is therefore refused
+        outright rather than quoted or escaped: there is no legitimate ref this
+        rejects, and it is the difference between a glob and an injection.
+        """
+        ref = getattr(result, "result_ref", None)
+        if not isinstance(ref, str) or not ref.startswith(_SESSION_PREFIX):
+            return None
+        session_id = ref[len(_SESSION_PREFIX):]
+        if not _SESSION_ID_OK.match(session_id):
+            return None
+        return f"~/.claude/projects/*/{session_id}.jsonl"
 
     # --- health ---------------------------------------------------------
 

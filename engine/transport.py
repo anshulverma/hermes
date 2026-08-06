@@ -348,7 +348,34 @@ def serve_once_for_host(
         return None
 
     queue.record_result(conn, ticket, host, result, now, playbook, site)
+
+    # Pull the worker's own trace back while the host is still up and the agent
+    # tool has not yet pruned it. Strictly after record_result: the trace is
+    # named for the attempts row that call appended, and a result that was not
+    # recorded has nothing to hang a trace on. Best-effort by construction --
+    # engine.trace swallows everything (see its module docstring).
+    _capture_trace(conn, ticket, host, site, agent, result, envelope)
+
     return result
+
+
+def _capture_trace(conn, ticket, host, site, agent, result, envelope) -> None:
+    """Best-effort trace capture for the attempt just recorded. Never raises."""
+    from engine import trace
+
+    try:
+        row = conn.execute(
+            "SELECT id FROM attempts WHERE ticket_id=? ORDER BY id DESC LIMIT 1",
+            (ticket.id,),
+        ).fetchone()
+        if row is None:
+            return
+        trace.capture(
+            site=site, host=host, agent=agent, result=result, envelope=envelope,
+            run_id=ticket.run_id, attempt_id=row[0],
+        )
+    except Exception:  # a trace is never worth failing a recorded result over
+        pass
 
 
 def _build_envelope(ticket: Ticket, run: Run, playbook, base_ref: str, site,

@@ -424,6 +424,42 @@ class DevserverSite:
 
             return agent.parse_result(raw, envelope)
 
+    # --- file retrieval ----------------------------------------------------
+
+    def fetch_file(self, host: str, source: str, dest) -> bool:
+        """Copy one file back off a devserver over scp.
+
+        ``source`` is generally a glob (an agent naming its own trace rarely
+        knows the exact directory), so it is resolved on the host first and the
+        newest match scp'd by exact path. Handing a glob straight to scp would
+        either copy several files onto one destination or fail outright.
+
+        Unlike ``run_worker``, a failure here is never a TransportError: this
+        runs after a result has already been recorded, and a missing trace must
+        not requeue a ticket that has finished. Every failure returns False.
+        """
+        ssh_opts = self._ssh_opts(host)
+        scp_opts = self._scp_opts(host)
+
+        try:
+            # -1t: newest first. The glob is expanded by the remote shell.
+            listing = subprocess.run(
+                ["ssh", *ssh_opts, host, f"ls -1t {source} 2>/dev/null | head -1"],
+                capture_output=True, text=True, timeout=self.connect_timeout + 10,
+            )
+            remote_path = (listing.stdout or "").strip()
+            if listing.returncode != 0 or not remote_path:
+                return False
+
+            subprocess.run(
+                ["scp", *scp_opts, f"{host}:{remote_path}", str(dest)],
+                capture_output=True, text=True,
+                timeout=self.connect_timeout + 20, check=True,
+            )
+            return os.path.exists(dest)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return False
+
     # --- capabilities ----------------------------------------------------
 
     def resource_classes(self) -> list[str]:

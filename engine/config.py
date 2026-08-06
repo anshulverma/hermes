@@ -300,4 +300,5 @@ KNOWN_VARS: dict[str, str] = {
     'HERMES_SITE_MODULES': 'Comma-separated custom site module paths to import for adapter registration.',
     'HERMES_AGENT_MODULES': 'Comma-separated custom agent module paths to import for adapter registration.',
     'HERMES_LOCAL_DIR': 'Directory for zero-config local adapter auto-discovery (default: HERMES_HOME/local).',
+    'HERMES_TRACE_MAX_MB': 'Largest worker trace captured per attempt, in MB (default: 50). A trace over this is dropped, not truncated.',
 }

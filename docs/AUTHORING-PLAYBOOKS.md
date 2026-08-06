@@ -443,7 +443,39 @@ directory (default `~/.hermes/local/`) is **outside the repo** by design — goo
 Cross-reference: `docs/AUTHORING-PLAYBOOKS.md` for the main authoring steps,
 `docs/RUNBOOK.md` for operations.
 
-## 8. Where to go next
+## 8. Optional adapter capabilities
+
+Beyond the required Protocols, an adapter may implement extra methods the engine
+discovers by duck-typing. They are declared as separate Protocols so that adding
+one never un-conforms an existing adapter — an adapter without them is complete.
+
+### `agent.trace_source(result, envelope) -> str | None`
+
+Say where this result's own transcript lives **on the worker's host**, so the
+engine can capture it at result time (`engine/trace.py`) and the control plane
+can show it afterwards. Without it, a `result_ref` stays an opaque string the
+reader has to go hunting for.
+
+Return a host-side path, optionally a glob and optionally `~`-relative, or None
+when there is nothing to fetch. `ClaudeAgent` maps `claude:session:<id>` to
+`~/.claude/projects/*/<id>.jsonl` — the directory is a slug of the worker's cwd,
+which the master does not know, so the glob is resolved on the host.
+
+**The string may be expanded by a remote shell.** Refuse a ref you cannot vouch
+for rather than escaping it; `ClaudeAgent` accepts only a plain session id.
+
+### `site.fetch_file(host, source, dest) -> bool`
+
+Copy one file back off a worker host — the site owns the transport, so only it
+knows how. `LocalSite` globs and copies; `DevserverSite` resolves the glob over
+ssh and scps the newest match. Return False, never raise, for an ordinary miss.
+
+Both are best-effort: a trace is evidence *about* a result, never part of
+producing one, and `engine.trace` swallows every failure. A trace over
+`HERMES_TRACE_MAX_MB` (default 50) is dropped rather than truncated — half a
+transcript reads like a whole one.
+
+## 9. Where to go next
 
 - `docs/DESIGN.md` — the umbrella architecture (the four axes, the queue, the
   dispatch and reduction model, the safety invariants).

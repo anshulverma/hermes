@@ -322,3 +322,61 @@ def test_health_checks_returns_agent_and_auth(claude):
     names = {c.name for c in checks}
     assert "agent" in names
     assert "auth" in names
+
+
+# --- trace_source: pointing the engine at the session transcript ---------
+
+def _ok_result(ref):
+    from engine.models import Result
+    return Result(
+        outcome="ok", termination_reason="goal_met", result_ref=ref,
+        error_summary=None, started_at=1.0, ended_at=2.0,
+        payload={"answer": "x"}, evidence_ref=None,
+    )
+
+
+def test_trace_source_globs_the_projects_dir_for_the_session(claude):
+    """The transcript's directory is a slug of the worker's cwd, which the
+    master does not know — so the session id is globbed for instead."""
+    sid = "6a804cf1-1531-4bb0-8e64-a20f96136784"
+
+    source = claude.trace_source(_ok_result(f"claude:session:{sid}"), _envelope())
+
+    assert source == f"~/.claude/projects/*/{sid}.jsonl"
+
+
+def test_trace_source_declines_a_message_uuid(claude):
+    """claude:uuid: names a message, not a transcript file."""
+    assert claude.trace_source(
+        _ok_result("claude:uuid:6a804cf1-1531-4bb0-8e64-a20f96136784"), _envelope()
+    ) is None
+
+
+def test_trace_source_declines_when_there_is_no_ref(claude):
+    assert claude.trace_source(_ok_result(None), _envelope()) is None
+
+
+def test_trace_source_declines_a_foreign_ref(claude):
+    assert claude.trace_source(_ok_result("s3://results/x.json"), _envelope()) is None
+
+
+@pytest.mark.parametrize("hostile", [
+    "abc; rm -rf ~",
+    "../../../../etc/passwd",
+    "abc$(whoami)",
+    "abc*",
+    "abc`id`",
+    "abc/../def",
+    "abc'def",
+    "abc def",
+    "",
+])
+def test_trace_source_refuses_anything_not_a_session_id(claude, hostile):
+    """The source is expanded by a remote shell on an ssh site, so a ref that
+    is not plainly a session id is refused rather than escaped."""
+    assert claude.trace_source(_ok_result(f"claude:session:{hostile}"), _envelope()) is None
+
+
+def test_trace_source_never_raises(claude):
+    for ref in [None, "", "claude:session:", "claude:", ":::", "claude:session"]:
+        assert claude.trace_source(_ok_result(ref), _envelope()) is None

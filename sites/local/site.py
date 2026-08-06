@@ -181,6 +181,34 @@ class LocalSite:
         env["PATH"] = guard_dir + os.pathsep + env.get("PATH", "")
         return transport.local_transport(envelope, host, agent, env=env)
 
+    # --- file retrieval ---------------------------------------------------
+
+    def fetch_file(self, host: str, source: str, dest) -> bool:
+        """Copy one file off the host. Here the host *is* this box, so it is a copy.
+
+        ``source`` may be a glob and may start with ``~`` -- an agent naming its
+        own trace generally cannot know the exact directory (see
+        ``engine.trace``). When several files match, the newest wins: that is the
+        one belonging to the session that just finished.
+
+        Returns False rather than raising for every ordinary miss -- nothing
+        matched, the match is a directory, the file cannot be read. The caller
+        treats a missing trace as normal.
+        """
+        import glob as _glob
+        import shutil as _shutil
+
+        try:
+            matches = _glob.glob(os.path.expanduser(source))
+            files = [m for m in matches if os.path.isfile(m)]
+            if not files:
+                return False
+            newest = max(files, key=lambda p: os.stat(p).st_mtime)
+            _shutil.copyfile(newest, dest)
+            return True
+        except OSError:
+            return False
+
     # --- capabilities ---------------------------------------------------
 
     def resource_classes(self) -> list[str]:
