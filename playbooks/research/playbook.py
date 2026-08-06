@@ -18,6 +18,11 @@ falling back to ``HERMES_RESEARCH_SOURCE``, ``HERMES_RESEARCH_AGENTS``
 ``config`` source, one ``claude`` agent, and at most five items. The limit matters
 because cost is items times agents.
 
+``HERMES_RESEARCH_DRIVER`` optionally names a methodology command for the analysis
+phase (``/monk`` to review a diff, ``/dexter:solve`` to investigate a failure);
+unset, every phase is goal-only. See ``driver`` for why it is environment-only and
+why the merge phases never receive it.
+
 Every ticket carries a one-line ``title`` for operators to read and a ``goal``
 that instructs the agent and names, rather than inlines, the material it works
 from; that material travels in the payload's own keys (``item``, ``analyses``,
@@ -424,8 +429,26 @@ class ResearchPlaybook:
     # --- driver ---------------------------------------------------------
 
     def driver(self, phase: str) -> Driver:
-        """Return the phase driver: no methodology command, goal-only prompts."""
-        return Driver(command=None, args={}, loop=None)
+        """Return the phase driver — goal-only unless a methodology is configured.
+
+        ``HERMES_RESEARCH_DRIVER`` names a methodology command (``/monk``,
+        ``/dexter:solve``, …) for the *analysis* phase, so the same playbook can
+        review diffs, investigate failures or read code without an engine change:
+        the engine treats the command as opaque.
+
+        It is read from the environment rather than ``run.config`` because the
+        protocol hands this method a phase and nothing else, and a ``serve``
+        worker never calls ``seed`` — the environment is the one channel every
+        process in a fan-out shares.
+
+        Only the analysis phase gets it. ``synthesize`` and ``report`` fold prose
+        that is already in their goal; pointing a methodology at them would send
+        the worker off to redo the analysis instead of merging it.
+        """
+        if phase != self.phases[0]:
+            return Driver(command=None, args={}, loop=None)
+        command = _text(os.environ.get("HERMES_RESEARCH_DRIVER"))
+        return Driver(command=command or None, args={}, loop=None)
 
     # --- verify ---------------------------------------------------------
 
@@ -636,21 +659,67 @@ class ResearchPlaybook:
 # pointer was overcorrecting for -- a goal is still an instruction, not a
 # document, and it is stored in tickets.payload_json and re-read every master
 # cycle. The caps below are load-bearing, not cosmetic.
+#
+# And the goal has to FIT the channel that carries it. Agents deliver it as the
+# argument of a slash command, which has a hard length limit; over it the CLI
+# rejects the prompt before the model runs and -- worse -- reports that rejection
+# as a successful run whose "answer" is the error text. Per-section caps did not
+# prevent that, because they bound the material rather than the goal: the sum of
+# section caps plus the prose around them was already over the limit. So the
+# budget is now the goal's, and the sections are sized to fit inside it.
+#
+# The material absorbs the whole cut. Clipping the assembled string from the end
+# would take the closing instruction with it, and for the analysis phase that
+# sentence is the read-only guardrail.
 
 # Enough to identify an item in one line without letting a long title run away.
 _LABEL_MAX = 60
 
-# How much of an item's own material a goal carries. Generous enough for a real
-# summary, small enough that a pathological source cannot turn a goal into a
-# document.
-_CONTEXT_MAX = 4000
+# The whole goal's budget, in characters. Default 3600: Claude's ``/goal`` accepts
+# 4000, and the driver command the adapter appends shares that allowance.
+_GOAL_MAX = 3600
 
-# How much of one upstream answer (an analysis, a synthesis) a later phase's
-# goal carries. Lower than _CONTEXT_MAX because these are inlined N at a time.
+# Every material block keeps at least this much, so a goal with many blocks stays
+# legible rather than degenerating into a list of ellipses.
+_MATERIAL_MIN = 120
+
+# What a clipped material block ends with, so a cut never reads as a full stop.
+_TRUNCATION_MARK = "\n… (truncated)"
+
+# Ceilings per material kind. They cap a *single* block when the budget is roomy;
+# the budget, not these, is what binds when it is not.
+_CONTEXT_MAX = 4000
 _ANSWER_MAX = 2000
 
 # How many item ids a report goal enumerates before summarising the remainder.
 _REPORT_IDS_SHOWN = 10
+
+
+def goal_max() -> int:
+    """The character budget for a whole goal string.
+
+    ``HERMES_RESEARCH_GOAL_MAX`` overrides the default for an agent whose prompt
+    channel is more (or less) generous than Claude's.
+    """
+    try:
+        return int(os.environ.get("HERMES_RESEARCH_GOAL_MAX", _GOAL_MAX))
+    except (TypeError, ValueError):
+        return _GOAL_MAX
+
+
+def _share(fixed_len: int, count: int, ceiling: int) -> int:
+    """How many characters each of ``count`` material blocks may carry.
+
+    What the fixed prose does not use is divided evenly, then capped by the
+    block's own ceiling and floored at ``_MATERIAL_MIN`` so no block is squeezed
+    out entirely. The floor can push the total over budget only when the material
+    count is large enough that every block is already at the floor, which is the
+    case where truncating further would destroy the goal anyway.
+    """
+    if count <= 0:
+        return 0
+    remaining = goal_max() - fixed_len
+    return max(_MATERIAL_MIN, min(ceiling, remaining // count))
 
 
 def _clip(text: str, limit: int) -> str:
@@ -668,13 +737,17 @@ def _block(text: Any, limit: int) -> str:
     prose the model has to read, and collapsing a structured summary onto one
     line makes it markedly harder to follow. A cut is marked, so a truncated
     block never reads as a complete one.
+
+    The mark counts against ``limit`` rather than being appended past it -- the
+    caller is dividing a fixed budget between blocks, so a block that overran its
+    share by the length of its own mark put the assembled goal over budget.
     """
     body = _text(text)
     if not body:
         return "(no material was provided for this item)"
     if len(body) <= limit:
         return body
-    return body[:limit].rstrip() + "\n… (truncated)"
+    return body[: max(0, limit - len(_TRUNCATION_MARK))].rstrip() + _TRUNCATION_MARK
 
 
 def _item_label(item: dict) -> str:
@@ -697,15 +770,19 @@ def _research_title(item: dict) -> str:
 
 def _research_goal(item: dict) -> str:
     """The per-agent analysis goal for one item, carrying the item's material."""
-    return (
+    head = (
         f"Research {_item_label(item)} and report what you find.\n\n"
-        f"--- the item ---\n{_block(item.get('context'), _CONTEXT_MAX)}\n"
-        "--- end of item ---\n\n"
+        f"--- the item ---\n"
+    )
+    tail = (
+        "\n--- end of item ---\n\n"
         "Cover what the item is, what it does, which parts of the system it "
         "touches, and anything notable about it. Ground every claim in the "
         "material above; say so plainly where it does not tell you. "
         "Do not modify, land or ship anything: this is read-only research."
     )
+    cap = _share(len(head) + len(tail), 1, _CONTEXT_MAX)
+    return head + _block(item.get("context"), cap) + tail
 
 
 def _synthesize_title(item: dict) -> str:
@@ -724,19 +801,34 @@ def _synthesize_goal(item: dict, analyses: list, failed_agents: list) -> str:
         "with the ones you have and note the gap."
         if failed_agents else ""
     )
-    rendered = "\n\n".join(
-        f"--- analysis {n} (from {a.get('agent', '?')}) ---\n"
-        f"{_block(a.get('analysis'), _ANSWER_MAX)}"
-        for n, a in enumerate(analyses, start=1)
-    )
-    return (
+    head = (
         f"Merge {len(analyses)} independent analyses of {_item_label(item)} into "
-        f"a single view.{missing}\n\n"
-        f"--- the item ---\n{_block(item.get('context'), _CONTEXT_MAX)}\n"
-        f"--- end of item ---\n\n{rendered}\n\n"
-        "Produce one account of the item: where the analyses agree, where they "
+        f"a single view.{missing}\n\n--- the item ---\n"
+    )
+    labels = [
+        f"--- analysis {n} (from {a.get('agent', '?')}) ---\n"
+        for n, a in enumerate(analyses, start=1)
+    ]
+    tail = (
+        "\n\nProduce one account of the item: where the analyses agree, where they "
         "disagree (and which reading the material supports), and what the item "
         "amounts to. Do not invent detail that no analysis reports."
+    )
+
+    # The item's context and every analysis compete for one budget. `fixed` counts
+    # the prose the goal keeps whatever happens: the head, each analysis label,
+    # the separators between them, the end-of-item marker and the tail.
+    separators = "\n--- end of item ---\n\n" + "\n\n" * max(0, len(analyses) - 1)
+    fixed = len(head) + sum(map(len, labels)) + len(separators) + len(tail)
+    cap = _share(fixed, 1 + len(analyses), _ANSWER_MAX)
+
+    rendered = "\n\n".join(
+        label + _block(a.get("analysis"), cap)
+        for label, a in zip(labels, analyses)
+    )
+    return (
+        f"{head}{_block(item.get('context'), min(cap, _CONTEXT_MAX))}"
+        f"\n--- end of item ---\n\n{rendered}{tail}"
     )
 
 
@@ -755,17 +847,29 @@ def _report_goal(syntheses: list) -> str:
     remainder = len(ids) - _REPORT_IDS_SHOWN
     if remainder > 0:
         shown = f"{shown} and {remainder} more"
-    rendered = "\n\n".join(
-        f"--- {s.get('item_id') or '?'} ---\n{_block(s.get('synthesis'), _ANSWER_MAX)}"
-        for s in syntheses
-    )
-    return (
+    head = (
         f"Write one report over {len(syntheses)} researched items, from their "
-        f"syntheses: {_clip(shown, 400)}.\n\n{rendered}\n\n"
-        "Group the items into themes, state what each theme adds up to, and call "
+        f"syntheses: {_clip(shown, 400)}.\n\n"
+    )
+    labels = [f"--- {s.get('item_id') or '?'} ---\n" for s in syntheses]
+    tail = (
+        "\n\nGroup the items into themes, state what each theme adds up to, and call "
         "out the throughlines and the loose ends. Every line must trace back to a "
         "synthesis above; add nothing that is not there."
     )
+
+    fixed = (
+        len(head) + sum(map(len, labels))
+        + 2 * max(0, len(syntheses) - 1)  # the "\n\n" between syntheses
+        + len(tail)
+    )
+    cap = _share(fixed, len(syntheses), _ANSWER_MAX)
+
+    rendered = "\n\n".join(
+        label + _block(s.get("synthesis"), cap)
+        for label, s in zip(labels, syntheses)
+    )
+    return f"{head}{rendered}{tail}"
 
 
 # --- registration (import side-effect) -----------------------------------

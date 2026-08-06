@@ -18,6 +18,8 @@ def clean_env(monkeypatch, tmp_path):
         "HERMES_RESEARCH_SOURCE",
         "HERMES_RESEARCH_AGENTS",
         "HERMES_RESEARCH_LIMIT",
+        "HERMES_RESEARCH_DRIVER",
+        "HERMES_RESEARCH_GOAL_MAX",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -405,6 +407,65 @@ def test_goals_carry_their_material_and_stay_bounded(source):
     assert "item-0" in report.payload["goal"]
 
 
+def test_no_goal_outgrows_the_channel_that_carries_it(source):
+    """A goal that does not fit the worker's prompt channel is never delivered.
+
+    The goal reaches the worker as the argument of a slash command, and that
+    argument has a hard length limit. Over it, the CLI rejects the prompt before
+    the model runs -- and reports the rejection as a successful run whose "answer"
+    is the error text. Per-section caps did not prevent this: they bounded the
+    material, not the goal.
+    """
+    from playbooks.research.playbook import goal_max
+
+    research, synthesize, report = _bulky_phase_tickets(source)
+    for ticket in (research, synthesize, report):
+        goal = ticket.payload["goal"]
+        assert len(goal) <= goal_max(), (
+            f"{ticket.phase} goal is {len(goal)} chars, over the {goal_max()} "
+            f"the prompt channel accepts"
+        )
+
+
+def test_the_budget_is_configurable(source, monkeypatch):
+    """A different agent, a different channel limit."""
+    monkeypatch.setenv("HERMES_RESEARCH_GOAL_MAX", "1200")
+    for ticket in _bulky_phase_tickets(source):
+        assert len(ticket.payload["goal"]) <= 1200
+
+
+def test_the_instruction_survives_a_truncated_goal(source):
+    """Material is what gets cut, never the instruction wrapped around it.
+
+    Clipping the assembled string from the end would drop the closing sentence --
+    which for the analysis phase is the read-only guardrail.
+    """
+    research, synthesize, report = _bulky_phase_tickets(source)
+
+    assert "read-only research" in research.payload["goal"]
+    assert "Do not invent detail" in synthesize.payload["goal"]
+    assert "add nothing that is not there" in report.payload["goal"]
+
+
+def test_every_item_still_gets_a_share_of_a_crowded_goal(source):
+    """Twenty syntheses must not let the first few eat the whole budget."""
+    pb = _playbook()
+    syntheses = [
+        {"ticket_id": f"run-1/{n}-synthesize", "item_id": f"item-{n}",
+         "synthesis": _BULK}
+        for n in range(20)
+    ]
+    ticket = pb.seed(_run({"source": source[0]}, phase="report", reductions=[
+        Reduction(kind="item_syntheses",
+                  json={"syntheses": syntheses, "item_count": 20}),
+    ]), site=None)[0]
+
+    goal = ticket.payload["goal"]
+    for n in range(20):
+        assert f"--- item-{n} ---" in goal, f"item-{n} was squeezed out of the goal"
+    assert _BULK[:40] in goal
+
+
 def test_the_material_the_goal_refers_to_is_still_in_the_payload(source):
     """Shortening the prose moves the material, it does not drop it."""
     research, synthesize, report = _bulky_phase_tickets(source)
@@ -625,11 +686,34 @@ def test_is_done_only_with_a_real_report():
 
 
 def test_driver_is_goal_only():
-    """No methodology command: the prompt is the goal."""
+    """No methodology command by default: the prompt is the goal."""
     driver = _playbook().driver("research")
     assert driver.command is None
     assert driver.args == {}
     assert driver.loop is None
+
+
+def test_analysis_driver_comes_from_the_environment(monkeypatch):
+    """HERMES_RESEARCH_DRIVER names the methodology the analysis phase runs under."""
+    monkeypatch.setenv("HERMES_RESEARCH_DRIVER", "/monk")
+    driver = _playbook().driver("research")
+    assert driver.command == "/monk"
+    assert driver.args == {}
+    assert driver.loop is None
+
+
+def test_a_configured_driver_does_not_reach_the_merge_phases(monkeypatch):
+    """Only the analysis phase runs a methodology; merges are prose folds."""
+    monkeypatch.setenv("HERMES_RESEARCH_DRIVER", "/monk")
+    pb = _playbook()
+    for phase in ("synthesize", "report", "complete"):
+        assert pb.driver(phase).command is None
+
+
+def test_a_blank_driver_is_the_same_as_none(monkeypatch):
+    """Whitespace is not a command: an empty setting stays goal-only."""
+    monkeypatch.setenv("HERMES_RESEARCH_DRIVER", "   ")
+    assert _playbook().driver("research").command is None
 
 
 def test_result_schema_is_uniform_across_phases():
