@@ -749,3 +749,108 @@ describe('Layout: clear of the app chrome', () => {
     expect(TOPBAR_HEIGHT).toBeGreaterThan(0);
   });
 });
+
+describe('TicketDrawer — opening a captured trace', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  const withTrace = {
+    ...mockTicketDetail,
+    evidence: [
+      {
+        attempt: 2,
+        attempt_id: 12,
+        ref: 'claude:session:9b0e67d3-772f-45cf-85b3-e95832ad150d',
+        trace_bytes: 741553,
+      },
+    ],
+  };
+
+  it('makes a ref with a captured trace clickable, and says how big it is', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => withTrace });
+
+    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText('Evidence')).toBeInTheDocument());
+    expect(screen.getByTestId('open-trace-12')).toBeInTheDocument();
+    expect(screen.getByText(/724\.2 KB trace/)).toBeInTheDocument();
+  });
+
+  it('opens the trace modal on the ref, fetching that attempt', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => withTrace });
+
+    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByTestId('open-trace-12')).toBeInTheDocument());
+
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        attempt_id: 12, attempt: 2, ticket_id: 'test-run/t-0', run_id: 'test-run',
+        ref: 'claude:session:9b0e67d3', lines: 1, bytes: 10, unparsed: 0, counts: {},
+        records: [{ line: 0, kind: 'prompt', role: 'user', ts: null, title: '', text: 'the goal' }],
+      }),
+    });
+
+    fireEvent.click(screen.getByTestId('open-trace-12'));
+
+    await waitFor(() =>
+      expect(
+        mockFetch.mock.calls.some((c: any[]) => String(c[0]).includes('/api/attempts/12/trace')),
+      ).toBe(true),
+    );
+    expect(await screen.findByText('the goal')).toBeInTheDocument();
+  });
+
+  it('leaves a ref without a captured trace copy-only', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+
+    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText('Evidence')).toBeInTheDocument());
+    expect(screen.queryByTestId(/^open-trace-/)).toBeNull();
+    expect(screen.getAllByText('s3://results/ticket-1.json').length).toBeGreaterThan(0);
+  });
+
+  it('explains why older attempts are not openable', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+
+    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText('Evidence')).toBeInTheDocument());
+    expect(screen.getByText(/ran before that/)).toBeInTheDocument();
+  });
+});
+
+describe('TicketDrawer — the result ref matches the evidence ref', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it('makes the Result host path openable too when its trace was captured', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ...mockTicketDetail,
+        result: { ...mockTicketDetail.result, result_ref: 'claude:session:abc' },
+        evidence: [
+          { attempt: 2, attempt_id: 12, ref: 'claude:session:abc', trace_bytes: 4096 },
+        ],
+      }),
+    });
+
+    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+    await waitFor(() => expect(screen.getByTestId('open-trace-result-12')).toBeInTheDocument());
+    expect(screen.getByText('Trace:')).toBeInTheDocument();
+  });
+
+  it('leaves the Result host path copy-only when no trace was captured', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+
+    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+    await waitFor(() => expect(screen.getByText('Host path:')).toBeInTheDocument());
+    expect(screen.queryByTestId(/^open-trace-result-/)).toBeNull();
+  });
+});

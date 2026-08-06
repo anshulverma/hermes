@@ -203,7 +203,15 @@ export type TicketDetail = {
   payload: Record<string, any>;
   result: TicketDetailResult | null;
   attempt_timeline: TicketDetailAttempt[];
-  evidence: Array<{ attempt: number; ref: string }>;
+  // `attempt_id` is the attempts row a captured trace is named for; `trace_bytes`
+  // is null when no trace was captured (an older run, or an agent that cannot
+  // locate its own transcript) — the difference between "open it" and "can't".
+  evidence: Array<{
+    attempt: number;
+    attempt_id?: number;
+    ref: string;
+    trace_bytes?: number | null;
+  }>;
   // The agent's own output for a successful run: the banked finding document
   // and, when the playbook returns prose, its answer text.
   finding: TicketFinding | null;
@@ -217,6 +225,60 @@ export type TicketDetail = {
 
 export async function fetchTicketDetail(ticketId: string): Promise<TicketDetail> {
   return fetchJSON<TicketDetail>(`/api/tickets/${ticketId}`);
+}
+
+/**
+ * One record of a worker's trace: a prompt, an answer, a thought, a tool call,
+ * its result, or something the reader classified rather than dropped.
+ */
+export type TraceRecord = {
+  line: number;
+  kind:
+    | 'prompt'
+    | 'answer'
+    | 'thinking'
+    | 'tool_call'
+    | 'tool_result'
+    | 'attachment'
+    | 'meta'
+    | 'unparsed';
+  role: string | null;
+  ts: string | null;
+  title: string;
+  text: string;
+};
+
+export type AttemptTrace = {
+  attempt_id: number;
+  attempt: number;
+  ticket_id: string;
+  run_id: string;
+  ref: string | null;
+  records: TraceRecord[];
+  counts: Record<string, number>;
+  lines: number;
+  bytes: number;
+  unparsed: number;
+};
+
+export type AttemptTraceRaw = {
+  attempt_id: number;
+  attempt: number;
+  ticket_id: string;
+  run_id: string;
+  ref: string | null;
+  raw: string;
+  bytes: number;
+};
+
+/** The worker's transcript for one attempt, flattened into readable records. */
+export async function fetchAttemptTrace(attemptId: number): Promise<AttemptTrace> {
+  return fetchJSON<AttemptTrace>(`/api/attempts/${attemptId}/trace`);
+}
+
+/** The same transcript, exactly as captured. */
+export async function fetchAttemptTraceRaw(attemptId: number): Promise<AttemptTraceRaw> {
+  return fetchJSON<AttemptTraceRaw>(`/api/attempts/${attemptId}/trace?raw=1`);
 }
 
 export type HealthReport = {

@@ -30,6 +30,7 @@ import { TOPBAR_HEIGHT } from './TopBar';
 import { LoadingOverlay, CARD_SCRIM } from './Spinner';
 import { priorityColor } from './HermesTicketCard';
 import { normalizeTicketState, normalizeTicketDetail } from '../api/normalize';
+import TraceModal from './TraceModal';
 import { fmtTime, fmtDuration } from '../util/time';
 
 const preStyle: React.CSSProperties = {
@@ -58,13 +59,21 @@ const captionStyle: React.CSSProperties = {
   fontSize: 12,
 };
 
+/** Bytes of captured trace, for the note next to an openable ref. */
+function formatTraceBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /**
- * A host filesystem path (result_ref / evidence_ref).
+ * A host filesystem path (result_ref / evidence_ref) with no captured trace.
  *
- * These point at files on the worker host — the browser cannot open them, and
- * the agent tool's traces behind them run to megabytes of internal debug output,
- * so they are shown as plain monospace text with one-click copy instead of a
- * hyperlink.
+ * These point at files on the worker host, which the browser cannot open. When
+ * the engine managed to capture the trace behind a ref, the evidence list makes
+ * it a button that opens TraceModal instead; this is the fallback for the rest —
+ * older attempts, agents that cannot locate their own transcript, hosts that
+ * were already gone. Copy remains the only honest affordance for those.
  */
 function HostPathRef({ path }: { path: string }) {
   const [copied, setCopied] = useState(false);
@@ -236,6 +245,9 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmAbandon, setConfirmAbandon] = useState(false);
   const [priorityInput, setPriorityInput] = useState('');
+  // The attempt whose trace is open, or null. Attempt-scoped rather than
+  // ticket-scoped: a retried ticket has one trace per try.
+  const [traceAttemptId, setTraceAttemptId] = useState<number | null>(null);
 
   useEffect(() => {
     if (!isOpen || !ticket) {
@@ -312,6 +324,7 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
   const reductionId = detail?.reduction?.id ?? detail?.ticket.reduction_id ?? null;
 
   return (
+    <>
     <Drawer open={isOpen} fixed onClose={onClose} title={ticket.id} width="600px" style={{ top: TOPBAR_HEIGHT }}>
       <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 24, padding: '20px 24px', minHeight: 240 }}>
         {loading && <LoadingOverlay label="Loading ticket…" scrim={CARD_SCRIM} blur={false} />}
@@ -630,12 +643,46 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                       {detail.result.termination_reason}
                     </span>
                   </div>
-                  {detail.result.result_ref && (
-                    <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: 8 }}>
-                      <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Host path:</span>
-                      <HostPathRef path={detail.result.result_ref} />
-                    </div>
-                  )}
+                  {detail.result.result_ref && (() => {
+                    // The same ref shows here and under Evidence; it must behave
+                    // the same in both places rather than being a link in one.
+                    const traced = detail.evidence.find(
+                      (ev) => ev.ref === detail.result!.result_ref && ev.trace_bytes && ev.attempt_id != null,
+                    );
+                    return (
+                      <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: 8 }}>
+                        <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+                          {traced ? 'Trace:' : 'Host path:'}
+                        </span>
+                        {traced ? (
+                          <span>
+                            <button
+                              type="button"
+                              data-testid={`open-trace-result-${traced.attempt_id}`}
+                              onClick={() => setTraceAttemptId(traced.attempt_id!)}
+                              title="Open the full trace"
+                              style={{
+                                fontSize: 11,
+                                fontFamily: 'var(--font-mono)',
+                                color: 'var(--text-link, #6ea8fe)',
+                                background: 'var(--wash-subtle)',
+                                border: '1px solid var(--border-hairline)',
+                                borderRadius: 'var(--radius-sm)',
+                                padding: '2px 6px',
+                                cursor: 'pointer',
+                                wordBreak: 'break-all',
+                                textAlign: 'left',
+                              }}
+                            >
+                              {detail.result.result_ref}
+                            </button>
+                          </span>
+                        ) : (
+                          <HostPathRef path={detail.result.result_ref} />
+                        )}
+                      </div>
+                    );
+                  })()}
                   {detail.result.error_summary && (
                     <div style={{ display: 'grid', gridTemplateColumns: '100px 1fr', gap: 8 }}>
                       <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>Error:</span>
@@ -770,13 +817,16 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
               </div>
             )}
 
-            {/* Evidence */}
+            {/* Evidence. A ref whose trace was captured opens here; one whose
+                trace was not is still only a path on some host, so it stays
+                copy-only rather than pretending to be a link. */}
             {detail.evidence.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <span style={sectionTitleStyle}>Evidence</span>
                 <span style={captionStyle}>
-                  Each ref is a host path on the worker, not a browser URL — copy it and open it
-                  there. These are the agent tool's internal traces and can run to many megabytes.
+                  {detail.evidence.some((ev) => ev.trace_bytes)
+                    ? "Open a ref to read the worker's whole session. Refs without a captured trace are host paths, not browser URLs — copy those and open them there."
+                    : "Each ref is a host path on the worker, not a browser URL — copy it and open it there. Traces are captured from now on; these attempts ran before that."}
                 </span>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   {detail.evidence.map((ev, idx) => (
@@ -791,10 +841,39 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                         display: 'flex',
                         gap: 8,
                         alignItems: 'center',
+                        flexWrap: 'wrap',
                       }}
                     >
                       <Badge variant="subtle">#{ev.attempt}</Badge>
-                      <HostPathRef path={ev.ref} />
+                      {ev.trace_bytes && ev.attempt_id != null ? (
+                        <button
+                          type="button"
+                          data-testid={`open-trace-${ev.attempt_id}`}
+                          onClick={() => setTraceAttemptId(ev.attempt_id!)}
+                          title="Open the full trace"
+                          style={{
+                            fontSize: 11,
+                            fontFamily: 'var(--font-mono)',
+                            color: 'var(--text-link, #6ea8fe)',
+                            background: 'var(--wash-subtle)',
+                            border: '1px solid var(--border-hairline)',
+                            borderRadius: 'var(--radius-sm)',
+                            padding: '2px 6px',
+                            cursor: 'pointer',
+                            wordBreak: 'break-all',
+                            textAlign: 'left',
+                          }}
+                        >
+                          {ev.ref}
+                        </button>
+                      ) : (
+                        <HostPathRef path={ev.ref} />
+                      )}
+                      {ev.trace_bytes ? (
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                          {formatTraceBytes(ev.trace_bytes)} trace
+                        </span>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -804,5 +883,14 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
         )}
       </div>
     </Drawer>
+    {/* Outside the Drawer on purpose: nested inside it, the dialog inherits the
+        drawer's 600px positioned box and opens as a cramped panel over it
+        instead of as a full overlay. */}
+    <TraceModal
+      attemptId={traceAttemptId}
+      refLabel={detail?.evidence.find((ev) => ev.attempt_id === traceAttemptId)?.ref ?? null}
+      onClose={() => setTraceAttemptId(null)}
+    />
+    </>
   );
 }

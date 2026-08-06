@@ -24,6 +24,8 @@ from engine.queue import (
     set_run_state,
 )
 from engine import log
+from engine import trace
+from server import trace_view
 from server.auth import load_or_create_token
 
 
@@ -542,15 +544,21 @@ def create_app(bind: str | None = None) -> FastAPI:
                     "detail": error_detail,
                 }
 
-            # Build evidence (non-null result_refs)
+            # Build evidence (non-null result_refs). ``attempt_id`` is the
+            # attempts row, which is what a captured trace is named for;
+            # ``trace_bytes`` is non-null only when that trace is actually on
+            # disk, so the UI can offer to open it instead of guessing.
             evidence = []
             for i, row in enumerate(attempt_rows):
+                attempt_id = row[0]
+                attempt_num = row[1]
                 result_ref = row[7]  # result_ref column
-                attempt_num = row[1]  # attempt column
                 if result_ref is not None:
                     evidence.append({
                         "attempt": attempt_num,
+                        "attempt_id": attempt_id,
                         "ref": result_ref,
+                        "trace_bytes": trace.size(run_id, attempt_id),
                     })
 
             # Latest banked finding: what the agent actually returned on an 'ok'
@@ -716,6 +724,67 @@ def create_app(bind: str | None = None) -> FastAPI:
             }
         finally:
             conn.close()
+
+    @app.get("/api/attempts/{attempt_id}/trace")
+    def get_attempt_trace(
+        attempt_id: int,
+        raw: bool = Query(False),
+        _: None = Depends(require_auth_read),
+    ) -> dict[str, Any]:
+        """The worker's own transcript for one attempt.
+
+        Read from ``HERMES_HOME/runs/<run>/traces/<attempt>.jsonl``, which the
+        engine captured at result time (``engine.trace``). Nothing is fetched
+        from a host here -- by now the host may be gone and the agent tool may
+        have pruned its own state; the point of capturing early is that this
+        read is a local one.
+
+        ``raw=1`` returns the file exactly as captured. The default returns it
+        flattened into readable records (``server.trace_view``), which is the
+        same content classified, not a subset of it.
+
+        404 when the attempt is unknown, or when no trace was captured for it --
+        an older run, an agent that cannot name its trace, a host that was
+        already gone. The message says which.
+        """
+        home = config.resolve_home()
+        conn = connect(str(home / "queue.db"))
+        try:
+            row = conn.execute(
+                """SELECT a.ticket_id, a.attempt, a.result_ref, t.run_id
+                   FROM attempts a JOIN tickets t ON t.id = a.ticket_id
+                   WHERE a.id = ?""",
+                (attempt_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No attempt {attempt_id}")
+        ticket_id, attempt_num, result_ref, run_id = row
+
+        content = trace.read(run_id, attempt_id)
+        if content is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No trace was captured for attempt {attempt_num} of "
+                    f"{ticket_id}. Traces are captured when a result is recorded, "
+                    f"so runs from before that, and agents that cannot locate "
+                    f"their own transcript, do not have one."
+                ),
+            )
+
+        head = {
+            "attempt_id": attempt_id,
+            "attempt": attempt_num,
+            "ticket_id": ticket_id,
+            "run_id": run_id,
+            "ref": result_ref,
+        }
+        if raw:
+            return {**head, "raw": content, "bytes": len(content.encode("utf-8"))}
+        return {**head, **trace_view.normalize(content)}
 
     @app.get("/api/crew")
     def get_crew(_: None = Depends(require_auth_read)) -> list[dict[str, Any]]:

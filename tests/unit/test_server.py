@@ -4228,3 +4228,117 @@ def test_metrics_empty_run_aggregates(client: TestClient, temp_home: Path):
     # Verify buckets is still present (and empty)
     assert "buckets" in data
     assert data["buckets"] == []
+
+
+# --- attempt trace endpoint ----------------------------------------------
+
+def _attempt_with_trace(temp_home: Path, content: str = '{"type":"user","message":{"role":"user","content":"go"}}\n'):
+    """Insert a ticket + attempt and lay down a captured trace for it."""
+    from engine import trace
+
+    conn = connect(str(temp_home / "queue.db"))
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, base_ref, config_json, state,
+                             phase, created_at, updated_at)
+           VALUES ('r-t', 'example', 'local', 'main', '{}', 'running', 'work', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority,
+                                attempts, available_at, tried_hosts, payload_json,
+                                created_at, updated_at)
+           VALUES ('r-t/t-0', 'r-t', 'work', 'done', 'cpu', 0, 0, 0, '[]', '{}', 0, 0)"""
+    )
+    conn.execute(
+        """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at,
+                                 outcome, termination_reason, result_ref,
+                                 error_summary, error_detail)
+           VALUES ('r-t/t-0', 'work', 'h1', 1, 0, 1, 'ok', 'goal_met',
+                   'claude:session:abc', NULL, NULL)"""
+    )
+    conn.commit()
+    attempt_id = conn.execute(
+        "SELECT id FROM attempts WHERE ticket_id='r-t/t-0'"
+    ).fetchone()[0]
+    conn.close()
+
+    if content is not None:
+        path = trace.trace_path("r-t", attempt_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    return attempt_id
+
+
+def test_trace_endpoint_returns_readable_records(client: TestClient, temp_home: Path):
+    attempt_id = _attempt_with_trace(temp_home)
+
+    resp = client.get(f"/api/attempts/{attempt_id}/trace")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["attempt_id"] == attempt_id
+    assert body["ticket_id"] == "r-t/t-0"
+    assert body["run_id"] == "r-t"
+    assert body["ref"] == "claude:session:abc"
+    assert body["records"][0]["kind"] == "prompt"
+    assert body["records"][0]["text"] == "go"
+
+
+def test_trace_endpoint_raw_returns_the_bytes_as_captured(client: TestClient, temp_home: Path):
+    raw_text = '{"type":"user","message":{"role":"user","content":"go"}}\n'
+    attempt_id = _attempt_with_trace(temp_home, raw_text)
+
+    resp = client.get(f"/api/attempts/{attempt_id}/trace", params={"raw": "1"})
+
+    assert resp.status_code == 200
+    assert resp.json()["raw"] == raw_text
+
+
+def test_trace_endpoint_404s_for_an_unknown_attempt(client: TestClient, temp_home: Path):
+    resp = client.get("/api/attempts/999999/trace")
+
+    assert resp.status_code == 404
+    assert "999999" in resp.json()["detail"]
+
+
+def test_trace_endpoint_explains_an_attempt_that_has_no_trace(client: TestClient, temp_home: Path):
+    """A run from before capture existed is the common case; say so plainly."""
+    attempt_id = _attempt_with_trace(temp_home, content=None)
+
+    resp = client.get(f"/api/attempts/{attempt_id}/trace")
+
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert "No trace was captured" in detail
+    assert "r-t/t-0" in detail
+
+
+def test_trace_endpoint_cannot_be_walked_out_of_the_runs_directory(
+    client: TestClient, temp_home: Path
+):
+    """attempt_id composes a path; a non-numeric one must not reach the disk."""
+    resp = client.get("/api/attempts/..%2F..%2F..%2Fetc%2Fpasswd/trace")
+
+    assert resp.status_code in (404, 422)
+
+
+def test_ticket_evidence_says_whether_a_trace_is_there(client: TestClient, temp_home: Path):
+    attempt_id = _attempt_with_trace(temp_home, '{"type":"user","message":{"role":"user","content":"go"}}\n')
+
+    resp = client.get("/api/tickets/r-t/t-0")
+
+    assert resp.status_code == 200
+    evidence = resp.json()["evidence"]
+    assert len(evidence) == 1
+    assert evidence[0]["attempt_id"] == attempt_id
+    assert evidence[0]["ref"] == "claude:session:abc"
+    assert evidence[0]["trace_bytes"] > 0
+
+
+def test_ticket_evidence_reports_no_trace_as_null_not_zero(client: TestClient, temp_home: Path):
+    """Zero bytes and 'never captured' are different states; the UI must not
+    offer to open a trace that is not there."""
+    _attempt_with_trace(temp_home, content=None)
+
+    resp = client.get("/api/tickets/r-t/t-0")
+
+    assert resp.json()["evidence"][0]["trace_bytes"] is None
