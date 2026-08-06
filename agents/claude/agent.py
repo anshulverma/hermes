@@ -128,6 +128,21 @@ class ClaudeAgent:
                 detail=(raw or "")[:_DETAIL_LIMIT] or None,
             )
 
+        # A prompt claude refused to run (an over-long /goal, an unknown command)
+        # comes back as is_error:false / subtype:"success" carrying the rejection
+        # text in ``result`` — but with num_turns 0, because the model never ran.
+        # Zero turns is therefore never an answer, whatever ``result`` says; taking
+        # it at face value banks a CLI message as the worker's finding.
+        turns = doc.get("num_turns")
+        if isinstance(turns, int) and turns <= 0:
+            return self._failure(
+                "driver_error",
+                "claude returned 0 turns: the prompt was rejected before the "
+                "model ran",
+                now,
+                detail=(raw or "")[:_DETAIL_LIMIT] or None,
+            )
+
         answer = doc.get("result")
         if not isinstance(answer, str) or not answer.strip():
             return self._failure(

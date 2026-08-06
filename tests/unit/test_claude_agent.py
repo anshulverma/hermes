@@ -49,6 +49,7 @@ def _claude_stdout(
     uuid: str = "uuid-123",
     duration_ms: int = 1500,
     api_error_status=None,
+    num_turns: int = 1,
 ) -> str:
     """Build a realistic claude --output-format json stdout with preamble."""
     preamble = (
@@ -69,7 +70,7 @@ def _claude_stdout(
         "terminal_reason": None,
         "api_error_status": api_error_status,
         "permission_denials": [],
-        "num_turns": 1,
+        "num_turns": num_turns,
         "type": "result",
     }
     return preamble + json.dumps(envelope) + "\n"
@@ -150,6 +151,44 @@ def test_parse_result_is_error_true_is_driver_failed(claude):
     # raw stdout captured in detail
     assert result.detail is not None
     assert "is_error" in result.detail
+
+
+def test_parse_result_zero_turns_is_driver_failed(claude):
+    """A rejected prompt is a CLI message, not an answer.
+
+    Claude reports a prompt it refused to run (an over-long ``/goal``, an unknown
+    command) as ``is_error: false``, ``subtype: "success"`` — with ``num_turns: 0``
+    and no model usage, because the model never ran. Trusting ``result`` here
+    banks the rejection text as research.
+    """
+    env = _envelope()
+    stdout = _claude_stdout(
+        result="Goal condition is limited to 4000 characters (got 4378)",
+        num_turns=0,
+        duration_ms=17,
+    )
+    res = claude.parse_result(stdout, env)
+    assert res.outcome == "driver_failed"
+    assert res.termination_reason == "driver_error"
+    assert "0 turns" in res.error_summary
+    assert res.payload == {}
+    # The rejection text is the diagnosis; it must survive as detail.
+    assert "4000 characters" in (res.detail or "")
+
+
+def test_parse_result_one_turn_is_still_ok(claude):
+    """The gate is zero turns, not a turn count policy."""
+    res = claude.parse_result(_claude_stdout(result="PONG", num_turns=1), _envelope())
+    assert res.outcome == "ok"
+
+
+def test_parse_result_missing_num_turns_is_not_treated_as_zero(claude):
+    """An envelope without the field is an older CLI, not a refused prompt."""
+    stdout = _claude_stdout(result="PONG")
+    doc = json.loads(stdout.splitlines()[-1])
+    del doc["num_turns"]
+    raw = "Claude Code at Meta\n" + json.dumps(doc) + "\n"
+    assert claude.parse_result(raw, _envelope()).outcome == "ok"
 
 
 def test_parse_result_maps_worker_output(claude):
