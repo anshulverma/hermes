@@ -47,6 +47,14 @@ NAME   ?= hermes-control-plane
 # The host's Hermes home, shared with the CLI. Honour HERMES_HOME if it is set,
 # so the container follows the same override everything else does.
 HOME_DIR ?= $(if $(HERMES_HOME),$(HERMES_HOME),$(HOME)/.hermes)
+# Local adapter directory, mounted separately from the home. It usually sits inside
+# the home, but it does not have to -- and when it is a symlink to a checkout
+# elsewhere, the container cannot follow it out of the home's bind mount. Mounting
+# the resolved path and setting HERMES_LOCAL_DIR inside makes discovery work either way.
+LOCAL_DIR ?= $(if $(HERMES_LOCAL_DIR),$(HERMES_LOCAL_DIR),$(HOME_DIR)/local)
+# Mounted read-only, and only when it exists -- an absent directory must not become an
+# empty one that podman creates on the host.
+LOCAL_MOUNT := $(if $(wildcard $(LOCAL_DIR)/.),-e HERMES_LOCAL_DIR=/hermes-local -v $(LOCAL_DIR):/hermes-local:ro,)
 PROXY  ?= with-proxy
 URL    := http://127.0.0.1:$(PORT)
 
@@ -94,9 +102,11 @@ up: ## start the containerized web UI on $(PORT) (offline; needs the image to ex
 	podman run -d --network=host --name $(NAME) \
 	  -e HERMES_BIND=127.0.0.1 \
 	  -v $(HOME_DIR):/hermes-home \
+	  $(LOCAL_MOUNT) \
 	  $(IMAGE) hermes serve --api --port $(PORT)
 	@echo "Hermes web UI (containerized) -> $(URL)  (loopback; token auto-injected)"
 	@echo "Serving $(HOME_DIR) — the same home the CLI writes to."
+	@$(if $(LOCAL_MOUNT),echo "Local adapters from $(LOCAL_DIR) (read-only).",echo "No local adapter directory at $(LOCAL_DIR) — none loaded.")
 
 down: ## stop + remove the container (the home directory is untouched)
 	-podman rm -f $(NAME)
