@@ -27,6 +27,14 @@ _TIMEOUT_EXIT = 124
 # Cap captured stderr so a chatty/looping worker can't bloat the db.
 _DETAIL_LIMIT = 16384
 
+# The worker's wall-clock budget when a run does not set one (see _build_envelope).
+_DEFAULT_TIMEOUT_S = 3600
+
+# Added to a worker's budget to get its lease TTL: enough for a master sweep to
+# come round and for the result to be recorded, without leaving a truly dead
+# host's lease uncollectable for long.
+_LEASE_MARGIN_S = 600
+
 
 class TransportError(Exception):
     """Host-lost / unreachable transport failure.
@@ -42,6 +50,21 @@ class TransportError(Exception):
 
 def _now(now: Optional[float]) -> float:
     return time.time() if now is None else now
+
+
+def _timeout_s(run: Optional[Run]) -> int:
+    """The worker's wall-clock budget for this run."""
+    if run is None:
+        return _DEFAULT_TIMEOUT_S
+    try:
+        return int(run.config.get("timeout_s", _DEFAULT_TIMEOUT_S))
+    except (TypeError, ValueError):
+        return _DEFAULT_TIMEOUT_S
+
+
+def _lease_ttl(run: Optional[Run]) -> int:
+    """The lease TTL for one dispatch: the worker's budget plus a margin."""
+    return _timeout_s(run) + _LEASE_MARGIN_S
 
 
 def _driver_from_envelope(envelope: dict):
@@ -275,8 +298,14 @@ def serve_once_for_host(
     if ticket is None:
         return None
 
+    # The lease has to outlive the worker it covers. The worker's budget is the
+    # run's timeout_s; a lease shorter than that expires under a worker still
+    # legitimately running, and a concurrent master sweep then reclaims it and
+    # requeues the ticket elsewhere -- two workers on one ticket, and the slow
+    # one's result arriving against a ticket another host now owns. The margin
+    # covers the sweep interval and result recording.
     lease = leases.acquire(conn, ticket.run_id, ticket.resource_req, ticket.id,
-                           host, now=now)
+                           host, now=now, ttl_s=_lease_ttl(run))
     if lease is None:
         # Class at capacity: revert the claim to parked (no attempt penalty).
         queue.park_ticket(conn, ticket, now=now)
@@ -343,7 +372,7 @@ def _build_envelope(ticket: Ticket, run: Run, playbook, base_ref: str, site,
             f"refusing dispatch of {ticket.id!r} with guardrails.no_ship=true"
         )
 
-    timeout_s = run.config.get("timeout_s", 3600) if run is not None else 3600
+    timeout_s = _timeout_s(run)
 
     return {
         "ticket_id": ticket.id,

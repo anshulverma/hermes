@@ -403,6 +403,69 @@ def test_serve_once_end_to_end_claims_leases_runs_records(
     assert "result_recorded" in kinds
 
 
+def test_serve_once_lease_outlives_the_worker_it_covers(
+    conn, local_site, mock_agent, playbook
+):
+    """A lease must not expire while its worker is still inside its own budget.
+
+    The worker's wall-clock budget is the run's ``timeout_s``; the lease was taken
+    at a fixed 1800s default. A worker legitimately running for longer than that
+    had its lease reclaimed by a concurrent master sweep and its ticket requeued
+    to another host — two workers on one ticket, and the slow one's result
+    landing against a ticket someone else now owns.
+    """
+    from engine import transport
+
+    run = _mk_run(conn, config={"timeout_s": 3600})
+    _mk_ticket(conn, payload={"scenario": "ok"})
+    _mk_crew(conn, host="h1", cpu=2)
+
+    seen = {}
+
+    def fake_run(argv, *a, **k):
+        row = conn.execute(
+            "SELECT ttl_s, expires_at FROM leases WHERE ticket_id='r1/t-0'"
+        ).fetchone()
+        seen["ttl_s"], seen["expires_at"] = row
+        return subprocess_result(returncode=0, stdout="")
+
+    with mock.patch("engine.transport.subprocess.run", side_effect=fake_run):
+        transport.serve_once_for_host(
+            conn, "h1", local_site, mock_agent, run, playbook, "main", now=1000.0
+        )
+
+    assert seen["ttl_s"] > 3600, (
+        f"lease ttl {seen['ttl_s']}s does not cover a 3600s worker"
+    )
+    assert seen["expires_at"] > 1000.0 + 3600
+
+
+def test_serve_once_lease_tracks_a_short_timeout_too(
+    conn, local_site, mock_agent, playbook
+):
+    """The TTL follows the run's budget rather than being one fixed number."""
+    from engine import transport
+
+    run = _mk_run(conn, config={"timeout_s": 60})
+    _mk_ticket(conn, payload={"scenario": "ok"})
+    _mk_crew(conn, host="h1", cpu=2)
+
+    seen = {}
+
+    def fake_run(argv, *a, **k):
+        seen["ttl_s"] = conn.execute(
+            "SELECT ttl_s FROM leases WHERE ticket_id='r1/t-0'"
+        ).fetchone()[0]
+        return subprocess_result(returncode=0, stdout="")
+
+    with mock.patch("engine.transport.subprocess.run", side_effect=fake_run):
+        transport.serve_once_for_host(
+            conn, "h1", local_site, mock_agent, run, playbook, "main", now=1000.0
+        )
+
+    assert 60 < seen["ttl_s"] < 3600
+
+
 def test_serve_once_parks_at_capacity(conn, local_site, mock_agent, playbook):
     """acquire -> None (no crew capacity) parks the ticket, no dispatch, no penalty."""
     from engine import transport
