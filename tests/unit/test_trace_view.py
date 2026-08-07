@@ -199,3 +199,86 @@ def test_lines_and_bytes_describe_the_source():
 
     assert out["lines"] == 2
     assert out["bytes"] == len(raw.encode("utf-8"))
+
+
+# --- what only looks like a prompt ---------------------------------------
+
+def test_a_slash_command_is_the_prompt_unwrapped_from_its_tags():
+    """Hermes dispatches `/goal <condition>`. The transcript records the whole
+    XML-ish wrapper; the reader wants the instruction and the command name."""
+    raw = _lines({
+        "type": "user", "timestamp": "2026-08-05T09:00:00Z",
+        "message": {"role": "user", "content": (
+            "<command-name>/goal</command-name>\n"
+            "<command-message>goal</command-message>\n"
+            "<command-args>Write one report over 17 items</command-args>"
+        )},
+    })
+
+    out = trace_view.normalize(raw)
+
+    assert len(out["records"]) == 1
+    rec = out["records"][0]
+    assert rec["kind"] == "prompt"
+    assert rec["title"] == "/goal"
+    assert rec["text"] == "Write one report over 17 items"
+
+
+def test_a_command_with_no_args_keeps_its_whole_text():
+    out = trace_view.normalize(_lines({
+        "type": "user",
+        "message": {"role": "user", "content": "<command-name>/clear</command-name>"},
+    }))
+
+    rec = out["records"][0]
+    assert rec["kind"] == "prompt"
+    assert rec["title"] == "/clear"
+    assert "command-name" in rec["text"]
+
+
+def test_the_commands_own_stdout_is_not_a_second_prompt():
+    """`/goal` echoes what it set; the transcript files that echo as a user turn,
+    so it reads as the operator prompting twice."""
+    out = trace_view.normalize(_lines({
+        "type": "user",
+        "message": {"role": "user", "content": "<local-command-stdout>Goal set: do the thing</local-command-stdout>"},
+    }))
+
+    rec = out["records"][0]
+    assert rec["kind"] == "command_output"
+    assert "Goal set: do the thing" in rec["text"]
+
+
+def test_a_hook_injection_is_not_a_prompt():
+    """isMeta marks text the harness injected, not something a human typed."""
+    out = trace_view.normalize(_lines({
+        "type": "user", "isMeta": True,
+        "message": {"role": "user", "content": "A session-scoped Stop hook is now active"},
+    }))
+
+    assert out["records"][0]["kind"] == "meta"
+
+
+def test_a_real_prompt_is_still_a_prompt():
+    out = trace_view.normalize(_lines({
+        "type": "user",
+        "message": {"role": "user", "content": "just fix the flaky test"},
+    }))
+
+    assert out["records"][0]["kind"] == "prompt"
+    assert out["records"][0]["title"] == ""
+
+
+def test_the_three_shapes_together_leave_exactly_one_prompt():
+    """The case that made a real trace read as three prompts back to back."""
+    out = trace_view.normalize(_lines(
+        {"type": "user", "message": {"role": "user", "content":
+            "<command-name>/goal</command-name>\n<command-args>do it</command-args>"}},
+        {"type": "user", "message": {"role": "user", "content":
+            "<local-command-stdout>Goal set: do it</local-command-stdout>"}},
+        {"type": "user", "isMeta": True, "message": {"role": "user", "content": "hook active"}},
+    ))
+
+    assert out["counts"]["prompt"] == 1
+    assert out["counts"]["command_output"] == 1
+    assert out["counts"]["meta"] == 1

@@ -22,7 +22,14 @@ Stdlib-only.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
+
+# The wrappers a transcript uses around a dispatched slash command and its own
+# echoed output. Both arrive as user turns; only the first is a prompt.
+_COMMAND_NAME_RE = re.compile(r"<command-name>(.*?)</command-name>", re.S)
+_COMMAND_ARGS_RE = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+_STDOUT_RE = re.compile(r"<local-command-stdout>(.*?)</local-command-stdout>", re.S)
 
 # Content blocks that carry the session, mapped to the kind a reader sees.
 _BLOCK_KINDS = {
@@ -94,8 +101,9 @@ def _records_for(index: int, doc: dict) -> list[dict[str, Any]]:
         content = message.get("content")
 
         if isinstance(content, str):
-            kind = "prompt" if role == "user" else "answer"
-            return [_record(index, kind, role, ts, "", content)]
+            if role == "user":
+                return [_user_text(index, role, ts, content, is_meta=doc.get("isMeta") is True)]
+            return [_record(index, "answer", role, ts, "", content)]
 
         if isinstance(content, list):
             out = [r for r in (_block(index, role, ts, b) for b in content) if r]
@@ -111,6 +119,36 @@ def _records_for(index: int, doc: dict) -> list[dict[str, Any]]:
 
     # An unrecognized type is still evidence: keep it whole.
     return [_record(index, "meta", None, ts, str(rtype), _dump(doc))]
+
+
+def _user_text(index: int, role, ts, content: str, *, is_meta: bool) -> dict[str, Any]:
+    """Classify a user-role string, which is often not a prompt at all.
+
+    Three things arrive as user turns and only the first is one:
+
+    * the slash command that was dispatched -- the real instruction, wrapped in
+      ``<command-name>`` / ``<command-args>`` tags. Unwrapped here, so the reader
+      sees the goal and the command that carried it rather than the markup.
+    * that command's own stdout, echoed back. It restates the instruction, which
+      is why a trace reads as the operator prompting twice in a row.
+    * text the harness injected (hook notes, reminders), marked ``isMeta``.
+    """
+    if is_meta:
+        return _record(index, "meta", role, ts, "injected", content)
+
+    stdout = _STDOUT_RE.search(content)
+    if stdout:
+        return _record(index, "command_output", role, ts, "command output", stdout.group(1).strip())
+
+    name = _COMMAND_NAME_RE.search(content)
+    if name:
+        args = _COMMAND_ARGS_RE.search(content)
+        # Only substitute the args when there are some; a bare command carries
+        # its meaning in the tags, and dropping them would leave an empty record.
+        body = args.group(1).strip() if args and args.group(1).strip() else content
+        return _record(index, "prompt", role, ts, name.group(1).strip(), body)
+
+    return _record(index, "prompt", role, ts, "", content)
 
 
 def _block(index: int, role, ts, block) -> dict[str, Any] | None:
