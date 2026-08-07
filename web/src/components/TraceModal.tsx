@@ -21,6 +21,9 @@ import {
   type AttemptTrace,
   type TraceRecord,
 } from '../api/client';
+import JsonView from './JsonView';
+import Markdown from './Markdown';
+import { tryParseJson } from '../util/json';
 
 type TraceModalProps = {
   attemptId: number | null;
@@ -32,7 +35,18 @@ type TraceModalProps = {
 const CONVERSATION = new Set(['prompt', 'answer', 'thinking', 'tool_call', 'tool_result']);
 
 /** Which kinds start collapsed: everything that is volume rather than signal. */
-const COLLAPSED_BY_DEFAULT = new Set(['thinking', 'tool_call', 'tool_result', 'attachment', 'meta']);
+const COLLAPSED_BY_DEFAULT = new Set([
+  'thinking', 'tool_call', 'tool_result', 'attachment', 'command_output', 'meta',
+]);
+
+/**
+ * Bodies longer than this are clamped with a "show all", not given their own
+ * scrollbar. There is exactly one scrolling surface in this modal — nested
+ * scroll regions capture the wheel wherever the cursor happens to be, so
+ * getting down the trace means bottoming out every box on the way past.
+ */
+const CLAMP_LINES = 24;
+const CLAMP_PX = 360;
 
 const KIND_LABEL: Record<string, string> = {
   prompt: 'Prompt',
@@ -41,6 +55,7 @@ const KIND_LABEL: Record<string, string> = {
   tool_call: 'Tool',
   tool_result: 'Result',
   attachment: 'Attachment',
+  command_output: 'Command output',
   meta: 'Meta',
   unparsed: 'Unreadable',
 };
@@ -52,6 +67,7 @@ const KIND_TONE: Record<string, string> = {
   tool_call: 'var(--status-attention, #e3b341)',
   tool_result: 'var(--text-secondary)',
   attachment: 'var(--text-muted)',
+  command_output: 'var(--text-muted)',
   meta: 'var(--text-muted)',
   unparsed: 'var(--status-error, #f85149)',
 };
@@ -62,12 +78,56 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+/** Kinds the agent writes as prose; the rest is machine output. */
+const PROSE_KINDS = new Set(['prompt', 'answer', 'thinking']);
+
+const rawBodyStyle: React.CSSProperties = {
+  margin: 0,
+  fontSize: 11,
+  fontFamily: 'var(--font-mono)',
+  color: 'var(--text-secondary)',
+  whiteSpace: 'pre-wrap',
+  wordBreak: 'break-word',
+};
+
+/**
+ * One record's body, rendered as what it actually is.
+ *
+ * Tool calls and their results are serialised JSON, so they get the tree
+ * whatever their kind claims: a reader classifies by envelope, and a `meta`
+ * record carrying a JSON object is still better read as one. Prose kinds get
+ * markdown. Everything else (command output, unparsed lines) stays raw, which
+ * is the honest rendering for something we could not identify.
+ *
+ * Neither nested renderer scrolls or draws its own box: the parent clamps
+ * instead, because a body with its own scrollbar swallows the wheel and the
+ * modal only moves once that body bottoms out.
+ */
+function TraceBody({ record }: { record: TraceRecord }) {
+  const json = tryParseJson(record.text);
+  if (json) {
+    return <JsonView value={json.value} maxHeight={null} plain />;
+  }
+  if (PROSE_KINDS.has(record.kind)) {
+    return (
+      <Markdown maxHeight={null} fontSize={12}>
+        {record.text}
+      </Markdown>
+    );
+  }
+  return <pre style={rawBodyStyle}>{record.text}</pre>;
+}
+
 function TraceRow({ record, defaultOpen }: { record: TraceRecord; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [showAll, setShowAll] = useState(false);
   const label = KIND_LABEL[record.kind] ?? record.kind;
   const tone = KIND_TONE[record.kind] ?? 'var(--text-muted)';
   const lines = record.text ? record.text.split('\n').length : 0;
   const preview = (record.text || '').slice(0, 120).replace(/\s+/g, ' ').trim();
+  // Long bodies are clamped, never scrolled: a body with its own scrollbar
+  // swallows the wheel and the modal only moves once that body bottoms out.
+  const clamped = lines > CLAMP_LINES && !showAll;
 
   return (
     <div
@@ -129,24 +189,53 @@ function TraceRow({ record, defaultOpen }: { record: TraceRecord; defaultOpen: b
         </span>
       </button>
       {open && record.text && (
-        <pre
-          style={{
-            margin: '6px 0 0 18px',
-            padding: 8,
-            background: 'var(--wash-subtle)',
-            border: '1px solid var(--border-hairline)',
-            borderRadius: 'var(--radius-sm)',
-            fontSize: 11,
-            fontFamily: 'var(--font-mono)',
-            color: 'var(--text-secondary)',
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            maxHeight: 360,
-            overflow: 'auto',
-          }}
-        >
-          {record.text}
-        </pre>
+        <div style={{ position: 'relative', margin: '6px 0 0 18px' }}>
+          <div
+            data-testid={`trace-body-${record.line}-${record.kind}`}
+            style={{
+              padding: 8,
+              background: 'var(--wash-subtle)',
+              border: '1px solid var(--border-hairline)',
+              borderRadius: 'var(--radius-sm)',
+              ...(clamped ? { maxHeight: CLAMP_PX, overflow: 'hidden' } : {}),
+            }}
+          >
+            <TraceBody record={record} />
+          </div>
+          {clamped && (
+            <div
+              aria-hidden
+              style={{
+                position: 'absolute',
+                left: 1,
+                right: 1,
+                bottom: 1,
+                height: 48,
+                borderRadius: '0 0 var(--radius-sm) var(--radius-sm)',
+                background: 'linear-gradient(to bottom, transparent, var(--surface-card))',
+                pointerEvents: 'none',
+              }}
+            />
+          )}
+          {lines > CLAMP_LINES && (
+            <button
+              type="button"
+              onClick={() => setShowAll((v) => !v)}
+              style={{
+                marginTop: 4,
+                padding: '2px 8px',
+                fontSize: 11,
+                color: 'var(--text-primary)',
+                background: 'var(--wash-subtle)',
+                border: '1px solid var(--border-hairline)',
+                borderRadius: 'var(--radius-md)',
+                cursor: 'pointer',
+              }}
+            >
+              {showAll ? 'Show less' : `Show all ${lines} lines`}
+            </button>
+          )}
+        </div>
       )}
     </div>
   );
@@ -261,28 +350,30 @@ export default function TraceModal({ attemptId, refLabel, onClose }: TraceModalP
             </span>
           </div>
 
+          {/* The one scrolling surface. Both modes render inside it so the wheel
+              always drives the same thing, wherever the cursor is. */}
           {showRaw ? (
-            <pre
-              data-testid="trace-raw"
-              style={{
-                margin: 0,
-                padding: 8,
-                background: 'var(--wash-subtle)',
-                border: '1px solid var(--border-hairline)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: 11,
-                fontFamily: 'var(--font-mono)',
-                color: 'var(--text-secondary)',
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-all',
-                maxHeight: '65vh',
-                overflow: 'auto',
-              }}
-            >
-              {raw}
-            </pre>
+            <div data-testid="trace-scroll" style={{ maxHeight: '65vh', overflowY: 'auto' }}>
+              <pre
+                data-testid="trace-raw"
+                style={{
+                  margin: 0,
+                  padding: 8,
+                  background: 'var(--wash-subtle)',
+                  border: '1px solid var(--border-hairline)',
+                  borderRadius: 'var(--radius-sm)',
+                  fontSize: 11,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-secondary)',
+                  whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all',
+                }}
+              >
+                {raw}
+              </pre>
+            </div>
           ) : (
-            <div data-testid="trace-records" style={{ maxHeight: '65vh', overflow: 'auto' }}>
+            <div data-testid="trace-records" style={{ maxHeight: '65vh', overflowY: 'auto' }}>
               {conversation.length === 0 && (
                 <div style={{ padding: 12, color: 'var(--text-muted)', fontSize: 13 }}>
                   This trace has no conversation records — only bookkeeping. Use Raw to read it

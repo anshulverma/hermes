@@ -1,17 +1,23 @@
 /**
  * TicketBoard - kanban view with real tickets from API.
- * Phase B2: kanban columns, filters, search, drawer.
  * Ported from web/prototype/app/TicketBoard.jsx with REAL data.
+ *
+ * The open ticket lives in the URL hash (`#board?ticket=<id>`), not in local
+ * state alone, so a refresh reopens it and the address bar is a link worth
+ * sending. The board holds only the id; the ticket object is looked up in the
+ * loaded rows, and synthesised from the id when a filter is hiding it -- the
+ * modal refetches full detail by id either way.
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { fetchTickets } from '../api/client';
 import type { Ticket, TicketFilters } from '../api/client';
 import { normalizeTicketState } from '../api/normalize';
 import { Button, StatusPill, TICKET_STATES, TONES } from '../ds';
-import TicketDrawer from '../components/TicketDrawer';
+import TicketModal from '../components/TicketModal';
 import HermesTicketCard from '../components/HermesTicketCard';
 import { LoadingOverlay } from '../components/Spinner';
+import { useHashParam } from '../hooks/useHashView';
 
 // Lane definitions matching prototype
 const TICKET_LANES = [
@@ -28,11 +34,20 @@ type StateChipProps = {
   onClick: () => void;
 };
 
+/**
+ * One engine state within a lane, as a filter.
+ *
+ * Rendered only when it has tickets, and never on a lane that holds a single
+ * state: a chip reading `done 35` under a lane headed `done 35` is noise, and a
+ * row of zeroes reads as a legend rather than the filter it is.
+ */
 function StateChip({ state, count, active, onClick }: StateChipProps) {
   return (
     <button
+      data-testid={`state-chip-${state}`}
       onClick={onClick}
-      title={`Filter to ${state}`}
+      aria-pressed={active}
+      title={active ? `Stop filtering to ${state}` : `Filter this lane to ${state}`}
       style={{
         display: 'inline-flex',
         alignItems: 'center',
@@ -71,6 +86,17 @@ function TicketLane({ lane, tickets, stateFilter, onStateFilter, onOpen, filteri
   const states = lane.states.filter((s) => !stateFilter || s === stateFilter);
   const rows = tickets.filter((t) => states.includes(normalizeTicketState(t.state)));
 
+  const countOf = (s: string) =>
+    tickets.filter((t) => normalizeTicketState(t.state) === s).length;
+
+  // A chip has to earn its place: it must be able to filter to something, and
+  // it must say something the lane header does not. The active one stays even
+  // as it narrows its own lane to itself, or there would be no way back.
+  const chipStates =
+    lane.states.length < 2
+      ? []
+      : lane.states.filter((s) => countOf(s) > 0 || s === stateFilter);
+
   const hueOf = (st: string) => {
     const tone = (TICKET_STATES as any)?.[st]?.tone || 'neutral';
     return tone === 'neutral' ? 'rgba(255,255,255,0.28)' : (TONES as any)?.[tone]?.fg || 'rgba(255,255,255,0.28)';
@@ -94,11 +120,11 @@ function TicketLane({ lane, tickets, stateFilter, onStateFilter, onOpen, filteri
           </span>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-          {lane.states.map((s) => (
+          {chipStates.map((s) => (
             <StateChip
               key={s}
               state={s}
-              count={tickets.filter((t) => normalizeTicketState(t.state) === s).length}
+              count={countOf(s)}
               active={stateFilter === s}
               onClick={() => onStateFilter(stateFilter === s ? undefined : s)}
             />
@@ -169,10 +195,10 @@ export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
   const [resource, setResource] = useState('all resources');
   const [stateFilter, setStateFilter] = useState<string | undefined>(undefined);
 
-  // Drawer
-  const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
+  // The open ticket, addressed by the URL so a refresh reopens it.
+  const [openTicketId, setOpenTicketId] = useHashParam('ticket');
 
-  // Bumped after a drawer action mutates a ticket, to refetch the board.
+  // Bumped after a modal action mutates a ticket, to refetch the board.
   const [refreshTick, setRefreshTick] = useState(0);
 
   // Fetch tickets
@@ -195,6 +221,28 @@ export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
         setLoading(false);
       });
   }, [runId, stateFilter, phase, resource, search, refreshTick, liveTick]);
+
+  // The row the URL names. A ticket hidden by the current filters (or on a
+  // board that has not loaded yet) still opens: the id alone is enough for the
+  // modal, which fetches its own detail, so a stub carries it until the row
+  // arrives rather than showing nothing on a deep link.
+  const openTicket = useMemo<Ticket | null>(() => {
+    if (openTicketId === null) return null;
+    const found = tickets.find((t) => t.id === openTicketId);
+    if (found) return found;
+    return {
+      id: openTicketId,
+      run_id: runId,
+      state: 'queued',
+      phase: '',
+      subject: '',
+      resource_req: '',
+      host: null,
+      attempts: 0,
+      elapsed_s: 0,
+      priority: 0,
+    } as Ticket;
+  }, [openTicketId, tickets, runId]);
 
   const clearFilters = () => {
     setSearch('');
@@ -311,7 +359,7 @@ export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
                 tickets={tickets}
                 stateFilter={activeFilter}
                 onStateFilter={setStateFilter}
-                onOpen={setSelectedTicket}
+                onOpen={(t) => setOpenTicketId(t.id)}
                 filtering={filtering}
               />
             );
@@ -319,11 +367,11 @@ export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
         </div>
       </div>
 
-      {/* Ticket drawer */}
-      <TicketDrawer
-        isOpen={selectedTicket !== null}
-        ticket={selectedTicket}
-        onClose={() => setSelectedTicket(null)}
+      {/* Ticket detail */}
+      <TicketModal
+        isOpen={openTicketId !== null}
+        ticket={openTicket}
+        onClose={() => setOpenTicketId(null)}
         onActionSuccess={() => setRefreshTick((n) => n + 1)}
       />
     </div>

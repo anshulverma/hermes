@@ -218,3 +218,51 @@ describe('TicketBoard', () => {
     expect(screen.getByText('Investigate issue #1')).toBeInTheDocument();
   });
 });
+
+describe('TicketBoard — state chips earn their place', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockTickets });
+  });
+
+  it('shows a chip only for a state that has tickets', async () => {
+    render(<TicketBoard runId="test-run" />);
+    await waitFor(() => expect(screen.getByText('Investigate issue #1')).toBeInTheDocument());
+
+    // mockTickets has a queued one, so that chip is there...
+    expect(screen.getByTestId('state-chip-queued')).toBeInTheDocument();
+    // ...and nothing is dispatched or parked, so those chips are not.
+    expect(screen.queryByTestId('state-chip-dispatched')).toBeNull();
+    expect(screen.queryByTestId('state-chip-parked')).toBeNull();
+  });
+
+  it('gives a single-state lane no chip at all', async () => {
+    // `done` is its own lane: a chip there restates the header and its count.
+    render(<TicketBoard runId="test-run" />);
+    await waitFor(() => expect(screen.getByText('Investigate issue #1')).toBeInTheDocument());
+
+    expect(screen.queryByTestId('state-chip-done')).toBeNull();
+    // The lane header remains (as does every card's own status pill, hence All).
+    expect(screen.getAllByText('done').length).toBeGreaterThan(0);
+  });
+
+  it('says a chip filters, so it does not read as a legend', async () => {
+    render(<TicketBoard runId="test-run" />);
+    await waitFor(() => expect(screen.getByTestId('state-chip-queued')).toBeInTheDocument());
+
+    const chip = screen.getByTestId('state-chip-queued');
+    expect(chip.tagName).toBe('BUTTON');
+    expect(chip.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('keeps an active filter chip visible even as it narrows the lane', async () => {
+    render(<TicketBoard runId="test-run" />);
+    await waitFor(() => expect(screen.getByTestId('state-chip-queued')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('state-chip-queued'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('state-chip-queued').getAttribute('aria-pressed')).toBe('true'),
+    );
+  });
+});

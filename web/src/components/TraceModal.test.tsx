@@ -75,15 +75,16 @@ describe('TraceModal', () => {
     render(<TraceModal attemptId={12} onClose={() => {}} />);
     await screen.findByText('review D123');
 
-    // Collapsed records still show a one-line preview — what differs is whether
-    // the body is rendered.
-    const answer = screen.getByTestId('trace-record-1-answer');
-    const thinking = screen.getByTestId('trace-record-1-thinking');
-    const toolCall = screen.getByTestId('trace-record-2-tool_call');
+    // Collapsed records still show a one-line preview, and the body is rendered
+    // differently per kind (prose as markdown, the rest as text) — so the open
+    // state is read from the disclosure itself, not from what it happens to
+    // render.
+    const expanded = (testId: string) =>
+      screen.getByTestId(testId).querySelector('button')?.getAttribute('aria-expanded');
 
-    expect(answer.querySelector('pre')).not.toBeNull();
-    expect(thinking.querySelector('pre')).toBeNull();
-    expect(toolCall.querySelector('pre')).toBeNull();
+    expect(expanded('trace-record-1-answer')).toBe('true');
+    expect(expanded('trace-record-1-thinking')).toBe('false');
+    expect(expanded('trace-record-2-tool_call')).toBe('false');
   });
 
   it('expands a collapsed record when clicked', async () => {
@@ -147,5 +148,79 @@ describe('TraceModal', () => {
 
     await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
     expect(mockFetch.mock.calls[1][0]).toContain('/api/attempts/13/trace');
+  });
+});
+
+describe('TraceModal — one scrolling surface', () => {
+  const longText = Array.from({ length: 120 }, (_, i) => `line ${i}`).join('\n');
+
+  const bigTrace = {
+    ...trace,
+    records: [
+      { line: 0, kind: 'prompt', role: 'user', ts: null, title: '', text: longText },
+      { line: 1, kind: 'answer', role: 'assistant', ts: null, title: '', text: 'short answer' },
+    ],
+  };
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(() => respond(bigTrace));
+  });
+
+  it('gives record bodies no scrollbar of their own', async () => {
+    render(<TraceModal attemptId={12} onClose={() => {}} />);
+    await screen.findByTestId('trace-record-1-answer');
+
+    // A body that scrolls independently steals the wheel from the modal.
+    document.querySelectorAll('pre').forEach((pre) => {
+      expect((pre as HTMLElement).style.overflow).not.toBe('auto');
+      expect((pre as HTMLElement).style.overflow).not.toBe('scroll');
+    });
+  });
+
+  it('has exactly one scroll container', async () => {
+    render(<TraceModal attemptId={12} onClose={() => {}} />);
+    await screen.findByTestId('trace-records');
+
+    const scrollers = Array.from(document.querySelectorAll<HTMLElement>('*')).filter(
+      (el) => el.style.overflow === 'auto' || el.style.overflowY === 'auto',
+    );
+    expect(scrollers.length).toBe(1);
+  });
+
+  it('clamps a very long body instead of scrolling it, and can show all', async () => {
+    render(<TraceModal attemptId={12} onClose={() => {}} />);
+    await screen.findByTestId('trace-record-0-prompt');
+
+    const showAll = screen.getByRole('button', { name: /show all 120 lines/i });
+    const body = screen.getByTestId('trace-body-0-prompt');
+    expect(body.style.maxHeight).not.toBe('');
+
+    fireEvent.click(showAll);
+
+    expect(screen.getByTestId('trace-body-0-prompt').style.maxHeight).toBe('');
+  });
+
+  it('leaves a short body unclamped', async () => {
+    render(<TraceModal attemptId={12} onClose={() => {}} />);
+    await screen.findByTestId('trace-record-1-answer');
+
+    expect(screen.getByTestId('trace-body-1-answer').style.maxHeight).toBe('');
+    expect(screen.queryByRole('button', { name: /show all 1 line/i })).toBeNull();
+  });
+
+  it('does not give the raw view its own scrollbar either', async () => {
+    render(<TraceModal attemptId={12} onClose={() => {}} />);
+    await screen.findByTestId('trace-records');
+
+    mockFetch.mockImplementation(() => respond({ ...bigTrace, raw: longText }));
+    fireEvent.click(screen.getByText('Raw'));
+
+    const raw = await screen.findByTestId('trace-raw');
+    expect(raw.style.overflow).not.toBe('auto');
+    const scrollers = Array.from(document.querySelectorAll<HTMLElement>('*')).filter(
+      (el) => el.style.overflow === 'auto' || el.style.overflowY === 'auto',
+    );
+    expect(scrollers.length).toBe(1);
   });
 });

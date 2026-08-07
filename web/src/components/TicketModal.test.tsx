@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import TicketDrawer from './TicketDrawer';
-import { TOPBAR_HEIGHT } from './TopBar';
+import TicketModal from './TicketModal';
 import type { Ticket } from '../api/client';
 
 // Mock fetch
@@ -96,7 +95,7 @@ const mockTicketDetail = {
   available_actions: ['requeue', 'reprioritize', 'abandon'],
 };
 
-describe('TicketDrawer', () => {
+describe('TicketModal', () => {
   beforeEach(() => {
     mockFetch.mockClear();
   });
@@ -107,7 +106,7 @@ describe('TicketDrawer', () => {
       json: async () => mockTicketDetail,
     });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
       expect((mockFetch as any).mock.calls[0][0]).toBe('/api/tickets/test-run/t-0');
@@ -120,7 +119,7 @@ describe('TicketDrawer', () => {
       json: async () => mockTicketDetail,
     });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
       expect(screen.getByTestId('payload-toggle')).toBeInTheDocument();
@@ -136,7 +135,7 @@ describe('TicketDrawer', () => {
       json: async () => mockTicketDetail,
     });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
       const goals = screen.getAllByText('goal_met');
@@ -152,7 +151,7 @@ describe('TicketDrawer', () => {
       json: async () => mockTicketDetail,
     });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
       expect(screen.getByText('driver_failed')).toBeInTheDocument();
@@ -168,7 +167,7 @@ describe('TicketDrawer', () => {
       json: async () => mockTicketDetail,
     });
 
-    const { container } = render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    const { container } = render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
       expect(screen.getByText('Evidence')).toBeInTheDocument();
@@ -192,7 +191,7 @@ describe('TicketDrawer', () => {
       json: async () => detailNoResult,
     });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
       expect(screen.getByText(/no result yet/i)).toBeInTheDocument();
@@ -202,7 +201,7 @@ describe('TicketDrawer', () => {
   it('should show error state when fetch fails', async () => {
     mockFetch.mockRejectedValue(new Error('Network error'));
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => {
       expect(screen.getByText(/error/i)).toBeInTheDocument();
@@ -214,19 +213,19 @@ describe('TicketDrawer', () => {
       () => new Promise(() => {}),
     );
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
   });
 
   it('should not fetch when drawer is closed', () => {
-    render(<TicketDrawer isOpen={false} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={false} ticket={mockTicket} onClose={() => {}} />);
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it('should not fetch when ticket is null', () => {
-    render(<TicketDrawer isOpen={true} ticket={null} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={null} onClose={() => {}} />);
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -236,12 +235,12 @@ describe('TicketDrawer', () => {
     // leaves the panel permanently hidden. getByRole excludes aria-hidden nodes,
     // so this fails if `open` is not wired through.
     mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
     expect(screen.getByRole('dialog')).toBeInTheDocument();
   });
 
   it('keeps the DS drawer closed (dialog hidden) when isOpen is false', () => {
-    render(<TicketDrawer isOpen={false} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={false} ticket={mockTicket} onClose={() => {}} />);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
@@ -249,7 +248,7 @@ describe('TicketDrawer', () => {
     it('shows the derived reason when present', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => {
         expect(screen.getByText(/independent re-verify did not confirm/i)).toBeInTheDocument();
@@ -260,7 +259,7 @@ describe('TicketDrawer', () => {
       const noReason = { ...mockTicketDetail, reason: null };
       mockFetch.mockResolvedValue({ ok: true, json: async () => noReason });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => {
         expect(screen.getByText(/investigate issue/i)).toBeInTheDocument();
@@ -273,7 +272,7 @@ describe('TicketDrawer', () => {
     it('renders each history event kind', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => {
         expect(screen.getByText('History')).toBeInTheDocument();
@@ -287,7 +286,7 @@ describe('TicketDrawer', () => {
   describe('Actions menu (available_actions)', () => {
     it('renders Requeue for a guard-routed needs_human ticket', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Requeue')).toBeInTheDocument());
     });
 
@@ -299,7 +298,7 @@ describe('TicketDrawer', () => {
         available_actions: ['accept_reduction', 'reject_reduction', 'abandon'],
       };
       mockFetch.mockResolvedValue({ ok: true, json: async () => flagged });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByText('Accept')).toBeInTheDocument());
       expect(screen.getByText('Reject')).toBeInTheDocument();
@@ -314,7 +313,7 @@ describe('TicketDrawer', () => {
         available_actions: ['retry'],
       };
       mockFetch.mockResolvedValue({ ok: true, json: async () => failed });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
       expect(screen.queryByText('Requeue')).not.toBeInTheDocument();
@@ -332,7 +331,7 @@ describe('TicketDrawer', () => {
         .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'queued' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => requeued });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Requeue')).toBeInTheDocument());
       screen.getByText('Requeue').click();
 
@@ -356,7 +355,7 @@ describe('TicketDrawer', () => {
         .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'queued' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => failed });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
       screen.getByText('Retry').click();
 
@@ -374,7 +373,7 @@ describe('TicketDrawer', () => {
         .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'failed' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => mockTicketDetail });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Abandon')).toBeInTheDocument());
 
       // First click reveals a confirm; no POST yet.
@@ -403,7 +402,7 @@ describe('TicketDrawer', () => {
         .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'queued' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => queued });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Set priority')).toBeInTheDocument());
 
       const input = screen.getByLabelText('priority') as HTMLInputElement;
@@ -430,7 +429,7 @@ describe('TicketDrawer', () => {
         .mockResolvedValueOnce({ ok: true, json: async () => ({ review_state: 'accepted' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => flagged });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Accept')).toBeInTheDocument());
       screen.getByText('Accept').click();
 
@@ -451,7 +450,7 @@ describe('TicketDrawer', () => {
           json: async () => ({ detail: "action 'requeue' is not available for ticket in state 'queued'" }),
         });
 
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Requeue')).toBeInTheDocument());
       screen.getByText('Requeue').click();
 
@@ -464,7 +463,7 @@ describe('TicketDrawer', () => {
   describe('Detail enrichment', () => {
     it('labels the goal as "Goal" and shows created/priority meta', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Goal')).toBeInTheDocument());
       expect(screen.getByText('Created')).toBeInTheDocument();
       expect(screen.getByText('Priority')).toBeInTheDocument();
@@ -484,7 +483,7 @@ describe('TicketDrawer', () => {
         available_actions: ['retry'],
       };
       mockFetch.mockResolvedValue({ ok: true, json: async () => failed });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Output')).toBeInTheDocument());
       expect(screen.getByText(/ValueError: boom/)).toBeInTheDocument();
     });
@@ -497,7 +496,7 @@ describe('TicketDrawer', () => {
         available_actions: ['retry'],
       };
       mockFetch.mockResolvedValue({ ok: true, json: async () => failed });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Output')).toBeInTheDocument());
       expect(screen.getByText(/no output/i)).toBeInTheDocument();
     });
@@ -510,7 +509,7 @@ describe('TicketDrawer', () => {
         available_actions: [],
       };
       mockFetch.mockResolvedValue({ ok: true, json: async () => done });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Goal')).toBeInTheDocument());
       expect(screen.queryByText('Output')).not.toBeInTheDocument();
     });
@@ -537,7 +536,7 @@ describe('TicketDrawer', () => {
 
     it('shows the agent answer for a done ticket', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => doneWithAnswer });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByText('Answer')).toBeInTheDocument());
       expect(screen.getByTestId('ticket-answer')).toHaveTextContent(
@@ -545,22 +544,25 @@ describe('TicketDrawer', () => {
       );
     });
 
-    it('renders a long answer as wrapped, scrollable text rather than a JSON blob', async () => {
+    it('renders a long answer as readable prose, not a JSON blob', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => doneWithAnswer });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByTestId('ticket-answer')).toBeInTheDocument());
       const answer = screen.getByTestId('ticket-answer');
-      expect(answer.style.whiteSpace).toBe('pre-wrap');
-      expect(answer.style.overflowY).toBe('auto');
-      expect(answer.style.maxHeight).not.toBe('');
-      // Prose, not a serialised object.
-      expect(answer.textContent).not.toContain('{');
+      // Rendered prose, not a serialised object: markdown produces real block
+      // elements rather than one flat string of braces and quotes.
+      expect(answer.querySelector('p')).not.toBeNull();
+      expect(answer.textContent).toContain('Rebalancing across regions');
+      // And it does not scroll on its own: the dialog owns the one scroll
+      // surface, so a bounded box here would capture the wheel over it.
+      expect(answer.style.overflowY).not.toBe('auto');
+      expect(answer.style.maxHeight).toBe('');
     });
 
     it('keeps the full finding document reachable behind a toggle when an answer exists', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => doneWithAnswer });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByTestId('finding-toggle')).toBeInTheDocument());
       expect(screen.queryByTestId('finding-json')).not.toBeInTheDocument();
@@ -584,7 +586,7 @@ describe('TicketDrawer', () => {
         },
       };
       mockFetch.mockResolvedValue({ ok: true, json: async () => structured });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByTestId('finding-json')).toBeInTheDocument());
       expect(screen.getByTestId('finding-json')).toHaveTextContent(/off-by-one in cursor/);
@@ -593,7 +595,7 @@ describe('TicketDrawer', () => {
 
     it('shows no answer section when the ticket has no finding', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByText('Goal')).toBeInTheDocument());
       expect(screen.queryByTestId('ticket-answer')).not.toBeInTheDocument();
@@ -614,7 +616,7 @@ describe('TicketDrawer', () => {
         finding: { id: 3, kind: 'result', created_at: 1.0, json: { answer: 'stale answer from an earlier attempt' } },
       };
       mockFetch.mockResolvedValue({ ok: true, json: async () => failed });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByText('Output')).toBeInTheDocument());
       expect(screen.getByText(/ValueError: boom/)).toBeInTheDocument();
@@ -631,7 +633,7 @@ describe('TicketDrawer', () => {
       };
       mockFetch.mockResolvedValue({ ok: true, json: async () => fresh });
 
-      render(<TicketDrawer isOpen={true} ticket={staleProp} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={staleProp} onClose={() => {}} />);
 
       await waitFor(() =>
         expect(screen.getByTestId('ticket-state-pill')).toHaveTextContent('queued'),
@@ -643,7 +645,7 @@ describe('TicketDrawer', () => {
       mockFetch.mockImplementation(() => new Promise(() => {}));
       const staleProp: Ticket = { ...mockTicket, state: 'failed' };
 
-      render(<TicketDrawer isOpen={true} ticket={staleProp} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={staleProp} onClose={() => {}} />);
 
       expect(screen.getByTestId('ticket-state-pill')).toHaveTextContent('failed');
     });
@@ -664,7 +666,7 @@ describe('TicketDrawer', () => {
         .mockResolvedValueOnce({ ok: true, json: async () => ({ state: 'queued' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => requeued });
 
-      render(<TicketDrawer isOpen={true} ticket={{ ...mockTicket, state: 'failed' }} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={{ ...mockTicket, state: 'failed' }} onClose={() => {}} />);
       await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
       expect(screen.getByTestId('ticket-state-pill')).toHaveTextContent('failed');
 
@@ -685,7 +687,7 @@ describe('TicketDrawer', () => {
       });
 
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByText('Evidence')).toBeInTheDocument());
       const copyButtons = screen.getAllByRole('button', { name: /copy host path/i });
@@ -697,7 +699,7 @@ describe('TicketDrawer', () => {
 
     it('labels the result ref as a host path and renders no hyperlink for it', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-      const { container } = render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      const { container } = render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByText('Result')).toBeInTheDocument());
       expect(screen.getAllByText(/host path/i).length).toBeGreaterThan(0);
@@ -708,7 +710,7 @@ describe('TicketDrawer', () => {
   describe('Raw payload collapsing', () => {
     it('does not render the raw payload until it is expanded', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByTestId('payload-toggle')).toBeInTheDocument());
       expect(screen.queryByTestId('payload-json')).not.toBeInTheDocument();
@@ -722,7 +724,7 @@ describe('TicketDrawer', () => {
 
     it('collapses the raw payload again on a second click', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-      render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
       await waitFor(() => expect(screen.getByTestId('payload-toggle')).toBeInTheDocument());
       fireEvent.click(screen.getByTestId('payload-toggle'));
@@ -735,22 +737,39 @@ describe('TicketDrawer', () => {
 });
 
 describe('Layout: clear of the app chrome', () => {
-  it('anchors the drawer below the top bar so its title is not hidden behind it', async () => {
-    // The content wrapper sets a z-index, creating a stacking context the
-    // drawer's own z-index cannot escape — so a drawer pinned to top:0 renders
-    // UNDER the (z-index 40) top bar. Offsetting by the bar height is what
-    // keeps the title visible.
+  it('is a centred dialog, not a panel pinned to the top of the viewport', async () => {
+    // Why this is asserted at all: the content wrapper sets a z-index, creating
+    // a stacking context a child's own z-index cannot escape, so anything
+    // pinned to top:0 renders UNDER the (z-index 40) top bar. The old side
+    // drawer had to offset itself by the bar height to stay visible. A centred
+    // dialog sidesteps it by not reaching the top edge — but only while it
+    // stays centred, which is what this guards.
     mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     const panel = screen.getByRole('dialog');
     expect(panel).toBeInTheDocument();
-    expect(panel.style.top).toBe(`${TOPBAR_HEIGHT}px`);
-    expect(TOPBAR_HEIGHT).toBeGreaterThan(0);
+    expect(panel.style.top).not.toBe('0px');
+  });
+
+  it('scrolls as one surface', async () => {
+    // Nested scroll regions capture the wheel wherever the cursor is; getting
+    // down a ticket then means bottoming out every payload box on the way past.
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+    await waitFor(() => expect(screen.getByTestId('payload-toggle')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('payload-toggle'));
+
+    expect(screen.getByTestId('payload-json').style.overflow).not.toBe('auto');
+    const scrollers = Array.from(document.querySelectorAll<HTMLElement>('*')).filter(
+      (el) => el.style.overflow === 'auto' || el.style.overflowY === 'auto',
+    );
+    expect(scrollers.length).toBe(1);
   });
 });
 
-describe('TicketDrawer — opening a captured trace', () => {
+describe('TicketModal — opening a captured trace', () => {
   beforeEach(() => {
     mockFetch.mockReset();
   });
@@ -770,7 +789,7 @@ describe('TicketDrawer — opening a captured trace', () => {
   it('makes a ref with a captured trace clickable, and says how big it is', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => withTrace });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => expect(screen.getByText('Evidence')).toBeInTheDocument());
     expect(screen.getByTestId('open-trace-12')).toBeInTheDocument();
@@ -780,7 +799,7 @@ describe('TicketDrawer — opening a captured trace', () => {
   it('opens the trace modal on the ref, fetching that attempt', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => withTrace });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
     await waitFor(() => expect(screen.getByTestId('open-trace-12')).toBeInTheDocument());
 
     mockFetch.mockResolvedValue({
@@ -805,7 +824,7 @@ describe('TicketDrawer — opening a captured trace', () => {
   it('leaves a ref without a captured trace copy-only', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => expect(screen.getByText('Evidence')).toBeInTheDocument());
     expect(screen.queryByTestId(/^open-trace-/)).toBeNull();
@@ -815,14 +834,14 @@ describe('TicketDrawer — opening a captured trace', () => {
   it('explains why older attempts are not openable', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => expect(screen.getByText('Evidence')).toBeInTheDocument());
     expect(screen.getByText(/ran before that/)).toBeInTheDocument();
   });
 });
 
-describe('TicketDrawer — the result ref matches the evidence ref', () => {
+describe('TicketModal — the result ref matches the evidence ref', () => {
   beforeEach(() => {
     mockFetch.mockReset();
   });
@@ -839,7 +858,7 @@ describe('TicketDrawer — the result ref matches the evidence ref', () => {
       }),
     });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => expect(screen.getByTestId('open-trace-result-12')).toBeInTheDocument());
     expect(screen.getByText('Trace:')).toBeInTheDocument();
@@ -848,7 +867,7 @@ describe('TicketDrawer — the result ref matches the evidence ref', () => {
   it('leaves the Result host path copy-only when no trace was captured', async () => {
     mockFetch.mockResolvedValue({ ok: true, json: async () => mockTicketDetail });
 
-    render(<TicketDrawer isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+    render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
 
     await waitFor(() => expect(screen.getByText('Host path:')).toBeInTheDocument());
     expect(screen.queryByTestId(/^open-trace-result-/)).toBeNull();

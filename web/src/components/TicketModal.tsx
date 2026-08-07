@@ -1,5 +1,5 @@
 /**
- * TicketDrawer - full ticket detail drawer: live context + operator actions.
+ * TicketModal - full ticket detail: live context + operator actions.
  *
  * Shows why a ticket is in its current state (derived reason banner), what the
  * agent answered on success, its progress/state history, the flagging reduction
@@ -10,10 +10,14 @@
  *
  * The header state comes from the freshly fetched detail (the board's prop is a
  * snapshot that goes stale the moment an action lands), and bulky JSON blobs are
- * serialised only while expanded so opening the drawer stays cheap.
+ * serialised only while expanded so opening it stays cheap.
+ *
+ * A centred dialog rather than a side drawer: at 600px the drawer had to wrap
+ * every payload, attempt row and trace ref in a column narrower than the content
+ * it was showing, while two thirds of the screen sat behind a scrim.
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { Ticket, TicketDetail } from '../api/client';
 import {
   fetchTicketDetail,
@@ -25,12 +29,14 @@ import {
   rejectReduction,
   AuthError,
 } from '../api/client';
-import { Drawer, StatusPill, Badge } from '../ds';
-import { TOPBAR_HEIGHT } from './TopBar';
+import { Dialog, StatusPill, Badge } from '../ds';
+
 import { LoadingOverlay, CARD_SCRIM } from './Spinner';
 import { priorityColor } from './HermesTicketCard';
 import { normalizeTicketState, normalizeTicketDetail } from '../api/normalize';
 import TraceModal from './TraceModal';
+import JsonView from './JsonView';
+import Markdown from './Markdown';
 import { fmtTime, fmtDuration } from '../util/time';
 
 const preStyle: React.CSSProperties = {
@@ -43,8 +49,9 @@ const preStyle: React.CSSProperties = {
   fontFamily: 'var(--font-mono)',
   whiteSpace: 'pre-wrap',
   wordBreak: 'break-word',
-  overflow: 'auto',
-  maxHeight: 280,
+  // No maxHeight/overflow on purpose: these sit inside the dialog's single
+  // scroll surface, and a block that scrolls on its own captures the wheel
+  // whenever the cursor is over it. Everything here is already behind a toggle.
   color: 'var(--text-secondary)',
 };
 
@@ -161,8 +168,8 @@ function HostPathRef({ path }: { path: string }) {
 /**
  * A JSON document behind a toggle.
  *
- * Serialising happens only while expanded (and is memoised), so a multi-kilobyte
- * payload costs nothing until an operator asks for it.
+ * The tree mounts only while expanded, so a multi-kilobyte payload costs
+ * nothing until an operator asks for it.
  */
 function CollapsibleJson({
   id,
@@ -178,7 +185,6 @@ function CollapsibleJson({
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
-  const text = useMemo(() => (open ? JSON.stringify(value, null, 2) : ''), [open, value]);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -205,16 +211,14 @@ function CollapsibleJson({
         {label}
       </button>
       {caption && <span style={captionStyle}>{caption}</span>}
-      {open && (
-        <pre data-testid={`${id}-json`} style={preStyle}>
-          {text}
-        </pre>
-      )}
+      {/* maxHeight null: the dialog owns the one scroll surface (see the render
+          root), so a bounded box here would capture the wheel over it. */}
+      {open && <JsonView data-testid={`${id}-json`} value={value} maxHeight={null} />}
     </div>
   );
 }
 
-type TicketDrawerProps = {
+type TicketModalProps = {
   isOpen: boolean;
   ticket: Ticket | null;
   onClose: () => void;
@@ -236,7 +240,7 @@ const btnStyle = (tone: 'default' | 'danger' | 'primary', disabled: boolean): Re
   opacity: disabled ? 0.6 : 1,
 });
 
-export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess }: TicketDrawerProps) {
+export default function TicketModal({ isOpen, ticket, onClose, onActionSuccess }: TicketModalProps) {
   const [detail, setDetail] = useState<TicketDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -303,12 +307,6 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
     }
   }
 
-  // Serialising the reduction is cheap but happens on every render otherwise.
-  const reductionText = useMemo(
-    () => (detail?.reduction ? JSON.stringify(detail.reduction.json, null, 2) : ''),
-    [detail?.reduction],
-  );
-
   if (!ticket) {
     return null;
   }
@@ -325,16 +323,25 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
 
   return (
     <>
-    <Drawer open={isOpen} fixed onClose={onClose} title={ticket.id} width="600px" style={{ top: TOPBAR_HEIGHT }}>
-      <div style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 24, padding: '20px 24px', minHeight: 240 }}>
+    <Dialog open={isOpen} fixed onClose={onClose} title={ticket.id} width="min(1000px, 94vw)">
+      {/* The one scrolling surface: nested scroll regions capture the wheel
+          wherever the cursor is, so getting down the page means bottoming out
+          every box on the way past. */}
+      <div
+        data-testid="ticket-scroll"
+        style={{ position: 'relative', display: 'flex', flexDirection: 'column', gap: 24, padding: '4px 2px', minHeight: 240, maxHeight: '72vh', overflowY: 'auto' }}
+      >
         {loading && <LoadingOverlay label="Loading ticket…" scrim={CARD_SCRIM} blur={false} />}
 
-        {/* Board-level header */}
+        {/* Board-level header. Phase prefers the fetched detail: on a deep link
+            the board's row may not exist yet, so the prop is a stub. */}
         <div style={{ display: 'flex', gap: 10 }}>
           <StatusPill state={uiState} size="md" data-testid="ticket-state-pill" />
-          <Badge variant="outline" tone="ok">
-            {ticket.phase}
-          </Badge>
+          {(detail?.ticket.phase || ticket.phase) && (
+            <Badge variant="outline" tone="ok">
+              {detail?.ticket.phase || ticket.phase}
+            </Badge>
+          )}
         </div>
 
         {error && (
@@ -528,22 +535,18 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                 <span style={sectionTitleStyle}>Answer</span>
                 <span style={captionStyle}>What the agent returned for this ticket.</span>
                 <div
-                  data-testid="ticket-answer"
                   style={{
                     background: 'var(--surface-card)',
                     border: '1px solid var(--border-hairline)',
                     borderRadius: 'var(--radius-sm)',
                     padding: 12,
-                    fontSize: 13,
-                    lineHeight: 1.5,
-                    color: 'var(--text-primary)',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    overflowY: 'auto',
-                    maxHeight: 360,
                   }}
                 >
-                  {answer}
+                  {/* Agents write markdown; rendered flat it arrives as literal
+                      `##` and `- ` noise. */}
+                  <Markdown data-testid="ticket-answer" maxHeight={null}>
+                    {answer}
+                  </Markdown>
                 </div>
               </div>
             )}
@@ -585,18 +588,14 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
                       {detail.reduction.review_state}
                     </Badge>
                   </div>
-                  <pre
-                    style={{
-                      margin: 0,
-                      fontSize: 12,
-                      fontFamily: 'var(--font-mono)',
-                      color: 'var(--text-secondary)',
-                      overflow: 'auto',
-                      maxHeight: 160,
-                    }}
-                  >
-                    {reductionText}
-                  </pre>
+                  {/* plain: this already sits inside a card, and a second
+                      bordered box inside it reads as a nesting level. */}
+                  <JsonView
+                    data-testid="reduction-json"
+                    value={detail.reduction.json}
+                    maxHeight={null}
+                    plain
+                  />
                 </div>
               </div>
             )}
@@ -882,8 +881,8 @@ export default function TicketDrawer({ isOpen, ticket, onClose, onActionSuccess 
           </>
         )}
       </div>
-    </Drawer>
-    {/* Outside the Drawer on purpose: nested inside it, the dialog inherits the
+    </Dialog>
+    {/* Outside the ticket dialog on purpose: nested inside it, the trace dialog inherits the
         drawer's 600px positioned box and opens as a cramped panel over it
         instead of as a full overlay. */}
     <TraceModal
