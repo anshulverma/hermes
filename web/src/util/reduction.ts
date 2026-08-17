@@ -37,11 +37,37 @@ function isObject(v: Json): v is Record<string, Json> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/** The first markdown heading in a body of prose, if it opens with one. */
+/** How far into a body to look for a heading before giving up. */
+const HEADING_SCAN_LINES = 20;
+
+/**
+ * The first markdown heading near the top of a body of prose.
+ *
+ * Not just line one: a report routinely opens with a sentence of preamble and
+ * puts its heading below that, and looking only at the first line left the most
+ * valuable card in the list named after its own kind.
+ */
 function firstHeading(text: string): string | null {
-  const line = text.trimStart().split('\n', 1)[0] ?? '';
-  const m = /^#{1,6}\s+(.*\S)\s*$/.exec(line);
-  return m ? m[1].slice(0, HEADLINE_MAX) : null;
+  const lines = text.trimStart().split('\n', HEADING_SCAN_LINES);
+  for (const line of lines) {
+    const m = /^#{1,6}\s+(.*\S)\s*$/.exec(line.trim());
+    if (m) return m[1].slice(0, HEADLINE_MAX);
+  }
+  return null;
+}
+
+/**
+ * The opening sentence of a body of prose, when it is short enough to be a name.
+ *
+ * Last resort before falling back to the kind: a synthesis that opens "Merging
+ * the single analysis into one account." says more than "item_syntheses" does.
+ */
+function firstSentence(text: string): string | null {
+  const opening = text.trimStart().split('\n').find((l) => l.trim())?.trim();
+  if (!opening || opening.startsWith('#') || opening.startsWith('<')) return null;
+  const m = /^(.{10,160}?[.!?])(\s|$)/.exec(opening);
+  const candidate = m ? m[1] : opening;
+  return candidate.length <= HEADLINE_MAX ? candidate : null;
 }
 
 /**
@@ -65,11 +91,14 @@ export function reductionHeadline(json: Json, kind: string): string {
     }
   }
 
-  for (const value of Object.values(json)) {
-    if (typeof value === 'string' && value.length >= PROSE_MIN) {
-      const heading = firstHeading(value);
-      if (heading) return heading;
-    }
+  const bodies = reductionProse(json).map((p) => p.text);
+  for (const body of bodies) {
+    const heading = firstHeading(body);
+    if (heading) return heading;
+  }
+  for (const body of bodies) {
+    const sentence = firstSentence(body);
+    if (sentence) return sentence;
   }
 
   return kind;
@@ -167,4 +196,48 @@ export function awaitsDecision(reduction: {
   return reduction.member_tickets.some(
     (t) => t.state === 'needs-human' || t.state === 'needs_human',
   );
+}
+
+/**
+ * The key holding what this reduction *produced*, or null.
+ *
+ * A reduction document mixes what the agent was given with what it returned:
+ * `item_analyses` carries both the item (id, title, an 800-line context) and
+ * the analyses of it. Leading a card with the first is leading with hermes's own
+ * input, which teaches the reader nothing.
+ *
+ * The kind names the payload. `item_analyses` → `analyses`, `research_report` →
+ * `report`, `item_syntheses` → `syntheses`: true for every reduction kind the
+ * built-in playbooks emit. A kind that names nothing returns null, and the
+ * caller treats the whole document as content rather than guessing.
+ */
+export function primaryPath(json: Json, kind: string): string | null {
+  if (!isObject(json)) return null;
+  const tokens = String(kind).split(/[_\-.]/).filter(Boolean);
+  const candidates = [kind, tokens[tokens.length - 1]].filter(Boolean) as string[];
+  for (const key of candidates) {
+    if (key in json) return key;
+  }
+  return null;
+}
+
+/**
+ * Prose split into what the run produced and everything else.
+ *
+ * `primary` is the conclusion — what a reader came to learn. `secondary` is the
+ * material behind it, worth keeping but not worth leading with.
+ */
+export function splitProse(
+  json: Json,
+  kind: string,
+): { primary: Array<{ path: string; text: string }>; secondary: Array<{ path: string; text: string }> } {
+  const all = reductionProse(json);
+  const key = primaryPath(json, kind);
+  if (!key) return { primary: all, secondary: [] };
+  return {
+    primary: all.filter((p) => p.path === key || p.path.startsWith(`${key}[`) || p.path.startsWith(`${key}.`)),
+    secondary: all.filter(
+      (p) => !(p.path === key || p.path.startsWith(`${key}[`) || p.path.startsWith(`${key}.`)),
+    ),
+  };
 }

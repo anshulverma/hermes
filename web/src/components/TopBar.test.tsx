@@ -42,7 +42,7 @@ describe('TopBar', () => {
     expect(screen.getByText('Tickets')).toBeInTheDocument();
     expect(screen.getByText('Crew')).toBeInTheDocument();
     expect(screen.getByText('Outputs')).toBeInTheDocument();
-    expect(screen.getByText('Review')).toBeInTheDocument();
+    expect(screen.getByText('Needs you')).toBeInTheDocument();
     expect(screen.getByText('Activity')).toBeInTheDocument();
   });
 });

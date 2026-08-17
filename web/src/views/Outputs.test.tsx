@@ -91,7 +91,10 @@ describe('Outputs', () => {
     });
   });
 
-  it('should display real review_state for each reduction', async () => {
+  it('shows a decision that was made, and not the absence of one', async () => {
+    // `pending` is the permanent state of every output — nobody decides them.
+    // Printing it on all nineteen cards is noise; `accepted`/`rejected` mean
+    // somebody acted, which is worth seeing.
     mockFetch.mockResolvedValue({
       ok: true,
       json: async () => mockReductions,
@@ -100,13 +103,10 @@ describe('Outputs', () => {
     render(<Outputs runId="test-run" />);
 
     await waitFor(() => {
-      // Check for review state labels (pending/accepted/rejected)
-      // The exact rendering depends on StatusPill/Badge component
-      // We verify the states are present in the DOM
-      expect(screen.getByText('pending')).toBeInTheDocument();
       expect(screen.getByText('accepted')).toBeInTheDocument();
-      expect(screen.getByText('rejected')).toBeInTheDocument();
     });
+    expect(screen.getByText('rejected')).toBeInTheDocument();
+    expect(screen.queryByText('pending')).toBeNull();
   });
 
   it('should display member tickets with real states', async () => {

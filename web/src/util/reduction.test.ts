@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { reductionHeadline, reductionFacts, reductionProse, awaitsDecision } from './reduction';
+import {
+  reductionHeadline,
+  reductionFacts,
+  reductionProse,
+  awaitsDecision,
+  primaryPath,
+  splitProse,
+} from './reduction';
 
 // The four reduction shapes actually in the database. None of them has a
 // top-level `title`, which is the only thing the findings list used to render —
@@ -168,5 +175,105 @@ describe('awaitsDecision', () => {
     expect(
       awaitsDecision({ ...base, member_tickets: [{ id: 't', state: 'needs_human', phase: 'w' }] }),
     ).toBe(true);
+  });
+});
+
+describe('primaryPath — telling what the run produced from what it was given', () => {
+  it('takes the payload key from the kind', () => {
+    // A card that leads with `item.context` leads with the material hermes fed
+    // the agent, not with anything the agent concluded.
+    expect(primaryPath(itemAnalyses, 'item_analyses')).toBe('analyses');
+    expect(primaryPath(diffAnalyses, 'diff_analyses')).toBe('analyses');
+    expect(primaryPath(itemSyntheses, 'item_syntheses')).toBe('syntheses');
+    expect(primaryPath(researchReport, 'research_report')).toBe('report');
+  });
+
+  it('matches the whole kind when the document uses it verbatim', () => {
+    expect(primaryPath({ root_causes: ['x'] }, 'root_causes')).toBe('root_causes');
+  });
+
+  it('is null when the kind names nothing in the document', () => {
+    expect(primaryPath({ a: 1 }, 'something_else')).toBeNull();
+  });
+
+  it('survives a document that is not an object', () => {
+    expect(primaryPath(null as any, 'k')).toBeNull();
+  });
+});
+
+describe('splitProse — the conclusion first, the rest out of the way', () => {
+  it('separates what the agent produced from what it was given', () => {
+    const doc = {
+      item: { id: 'ITEM-1', title: 't', context: 'INPUT '.repeat(80) },
+      analyses: [{ agent: 'claude', analysis: 'CONCLUSION '.repeat(80) }],
+    };
+
+    const { primary, secondary } = splitProse(doc, 'item_analyses');
+
+    expect(primary.map((p) => p.path)).toEqual(['analyses[0].analysis']);
+    expect(secondary.map((p) => p.path)).toEqual(['item.context']);
+  });
+
+  it('keeps every agent analysis in the primary group', () => {
+    const doc = {
+      analyses: [
+        { agent: 'claude', analysis: 'a'.repeat(300) },
+        { agent: 'codex', analysis: 'b'.repeat(300) },
+      ],
+    };
+
+    expect(splitProse(doc, 'item_analyses').primary).toHaveLength(2);
+  });
+
+  it('puts everything in primary when the kind names nothing', () => {
+    const doc = { blob: 'x'.repeat(300) };
+
+    const { primary, secondary } = splitProse(doc, 'unknown_kind');
+
+    expect(primary).toHaveLength(1);
+    expect(secondary).toHaveLength(0);
+  });
+
+  it('loses nothing: every prose leaf lands in one group or the other', () => {
+    const doc = {
+      item: { context: 'i'.repeat(300) },
+      analyses: [{ analysis: 'a'.repeat(300) }],
+      notes: 'n'.repeat(300),
+    };
+
+    const { primary, secondary } = splitProse(doc, 'item_analyses');
+
+    expect(primary.length + secondary.length).toBe(reductionProse(doc).length);
+  });
+});
+
+describe('reductionHeadline — finding a name in prose', () => {
+  it('finds a heading that is not on the first line', () => {
+    // A real report opens with a sentence of preamble and only then a heading;
+    // looking at line 1 alone fell back to the bare kind, so the card that
+    // mattered most was the one that said least.
+    const doc = {
+      report: 'All 17 ledgers recovered and read.\n\n# Review batch: 17 diffs\n\nbody'.padEnd(300, '.'),
+    };
+
+    expect(reductionHeadline(doc, 'research_report')).toBe('Review batch: 17 diffs');
+  });
+
+  it('falls back to the opening sentence when there is no heading at all', () => {
+    const doc = { synthesis: `Merging the single analysis into one account. ${'x'.repeat(300)}` };
+
+    expect(reductionHeadline(doc, 'item_syntheses')).toBe(
+      'Merging the single analysis into one account.',
+    );
+  });
+
+  it('does not go hunting past the top of a long document', () => {
+    const body = `${'filler line\n'.repeat(200)}# Buried heading\n`;
+
+    expect(reductionHeadline({ report: body }, 'research_report')).not.toBe('Buried heading');
+  });
+
+  it('still falls back to the kind when prose yields nothing usable', () => {
+    expect(reductionHeadline({ blob: '#'.repeat(400) }, 'k')).toBe('k');
   });
 });

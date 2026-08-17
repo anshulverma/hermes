@@ -23,7 +23,7 @@ export const VIEWS = ['overview', 'metrics', 'board', 'crew', 'outputs', 'review
  * the reductions holding a ticket. Splitting it must not break a link someone
  * already has.
  */
-const VIEW_ALIASES: Record<string, View> = { findings: 'outputs' };
+const VIEW_ALIASES: Record<string, View> = { findings: 'outputs', 'needs-you': 'review' };
 
 export type View = (typeof VIEWS)[number];
 

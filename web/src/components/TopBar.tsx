@@ -223,7 +223,7 @@ export default function TopBar({
             transition: 'all 120ms ease-out',
           }}
         >
-          Review
+          Needs you
           {reviewCount != null && reviewCount > 0 && (
             <span
               data-testid="review-count"

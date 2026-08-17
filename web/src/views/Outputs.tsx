@@ -43,6 +43,19 @@ export default function Outputs({ runId, liveTick, onGoToReview }: OutputsProps)
 
   const waiting = reductions.filter(awaitsDecision).length;
 
+  // Most synthesised first. A pipeline banks its reductions in phase order, so
+  // the newest is the most aggregated: the report before the syntheses before
+  // the seventeen per-item analyses. Reading a run top-down should start with
+  // the thing that read the rest of it.
+  const ordered = [...reductions].sort((a, b) => b.id - a.id);
+
+  // What this run produced, by kind — so the shape of it is legible before
+  // scrolling through nineteen cards.
+  const byKind = ordered.reduce<Record<string, number>>((acc, r) => {
+    acc[r.kind] = (acc[r.kind] ?? 0) + 1;
+    return acc;
+  }, {});
+
   // Only blank the page on the first load; a live refetch must not wipe what is
   // already on screen.
   if (loading && reductions.length === 0) {
@@ -87,7 +100,9 @@ export default function Outputs({ runId, liveTick, onGoToReview }: OutputsProps)
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <h2 style={{ margin: 0, fontSize: 20, color: 'var(--text-primary)' }}>Outputs</h2>
         <span style={{ color: 'var(--text-muted)', fontSize: 14 }}>
-          {reductions.length} {reductions.length === 1 ? 'reduction' : 'reductions'}
+          {Object.entries(byKind)
+            .map(([kind, n]) => `${n} ${kind}`)
+            .join(' · ')}
         </span>
         {waiting > 0 && onGoToReview && (
           <button
@@ -110,7 +125,7 @@ export default function Outputs({ runId, liveTick, onGoToReview }: OutputsProps)
         )}
       </div>
 
-      {reductions.map((reduction) => (
+      {ordered.map((reduction) => (
         <ReductionCard key={reduction.id} reduction={reduction} />
       ))}
     </div>
