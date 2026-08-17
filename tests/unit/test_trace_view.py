@@ -282,3 +282,106 @@ def test_the_three_shapes_together_leave_exactly_one_prompt():
     assert out["counts"]["prompt"] == 1
     assert out["counts"]["command_output"] == 1
     assert out["counts"]["meta"] == 1
+
+
+# --- a trace that is not JSONL at all ------------------------------------
+
+def test_a_whole_file_json_document_is_one_record_not_one_per_line():
+    """Not every agent writes JSONL. One private adapter's trace is a single
+    pretty-printed JSON document; read line-by-line, a 2.5 MB file became
+    440,648 unparsed records -- enough to hang the window that renders them."""
+    doc = json.dumps({"session_id": "s1", "traces": [{"a": 1}, {"b": 2}]}, indent=2)
+
+    out = trace_view.normalize(doc)
+
+    assert len(out["records"]) == 1
+    assert out["records"][0]["kind"] == "document"
+    assert out["unparsed"] == 0
+    assert "session_id" in out["records"][0]["text"]
+
+
+def test_a_single_line_jsonl_record_is_still_a_record():
+    """A one-record JSONL file also parses as a whole; it must not be reclassified."""
+    out = trace_view.normalize(_lines({"type": "user", "message": {"role": "user", "content": "hi"}}))
+
+    assert out["records"][0]["kind"] == "prompt"
+
+
+def test_real_jsonl_is_never_taken_for_a_document():
+    out = trace_view.normalize(_lines(
+        {"type": "user", "message": {"role": "user", "content": "a"}},
+        {"type": "user", "message": {"role": "user", "content": "b"}},
+    ))
+
+    assert [r["kind"] for r in out["records"]] == ["prompt", "prompt"]
+
+
+def test_a_json_document_that_is_a_list_is_also_one_record():
+    out = trace_view.normalize(json.dumps([{"a": 1}, {"b": 2}], indent=2))
+
+    assert len(out["records"]) == 1
+    assert out["records"][0]["kind"] == "document"
+
+
+# --- a second agent's rollout format -------------------------------------
+
+def _codex(ptype, **payload):
+    return {"timestamp": "2026-08-04T22:49:41Z", "type": "response_item",
+            "payload": {"type": ptype, **payload}}
+
+
+def test_a_rollout_message_from_the_assistant_is_an_answer():
+    out = trace_view.normalize(_lines(_codex(
+        "message", role="assistant", content=[{"type": "output_text", "text": "done"}],
+    )))
+
+    rec = out["records"][0]
+    assert rec["kind"] == "answer"
+    assert rec["text"] == "done"
+
+
+def test_a_rollout_message_from_the_operator_is_a_prompt():
+    out = trace_view.normalize(_lines(_codex(
+        "message", role="user", content=[{"type": "input_text", "text": "review it"}],
+    )))
+
+    assert out["records"][0]["kind"] == "prompt"
+    assert out["records"][0]["text"] == "review it"
+
+
+def test_rollout_reasoning_is_thinking():
+    out = trace_view.normalize(_lines(_codex("reasoning", summary=[{"text": "planning"}])))
+
+    assert out["records"][0]["kind"] == "thinking"
+
+
+def test_rollout_tool_calls_and_their_output():
+    out = trace_view.normalize(_lines(
+        _codex("function_call", name="spawn_agent", arguments='{"x":1}'),
+        _codex("custom_tool_call", name="shell", input="ls"),
+        _codex("function_call_output", call_id="c1", output="ok"),
+        _codex("custom_tool_call_output", call_id="c2", output=[{"text": "listing"}]),
+    ))
+
+    assert [r["kind"] for r in out["records"]] == [
+        "tool_call", "tool_call", "tool_result", "tool_result",
+    ]
+    assert out["records"][0]["title"] == "spawn_agent"
+
+
+def test_rollout_bookkeeping_is_meta():
+    out = trace_view.normalize(_lines(
+        {"type": "event_msg", "payload": {"type": "token_count", "info": {}}},
+        {"type": "session_meta", "payload": {"id": "x"}},
+        {"type": "turn_context", "payload": {}},
+    ))
+
+    assert all(r["kind"] == "meta" for r in out["records"])
+
+
+def test_an_unrecognised_rollout_payload_is_kept_as_meta():
+    out = trace_view.normalize(_lines(_codex("something_new", data=1)))
+
+    rec = out["records"][0]
+    assert rec["kind"] == "meta"
+    assert "something_new" in rec["text"]

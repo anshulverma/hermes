@@ -241,6 +241,7 @@ export type TraceRecord = {
     | 'tool_result'
     | 'attachment'
     | 'command_output'
+    | 'document'
     | 'meta'
     | 'unparsed';
   role: string | null;

@@ -224,3 +224,28 @@ describe('TraceModal — one scrolling surface', () => {
     expect(scrollers.length).toBe(1);
   });
 });
+
+describe('TraceModal — a trace that is one document', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    mockFetch.mockImplementation(() =>
+      respond({
+        ...trace,
+        counts: { document: 1 },
+        records: [
+          { line: 0, kind: 'document', role: null, ts: null, title: 'trace document',
+            text: '{\n  "session_id": "s1"\n}' },
+        ],
+      }),
+    );
+  });
+
+  it('shows it rather than filing it under non-conversation', async () => {
+    // Not every agent writes JSONL; for one, this single record IS the trace.
+    render(<TraceModal attemptId={12} onClose={() => {}} />);
+
+    expect(await screen.findByTestId('trace-record-0-document')).toBeInTheDocument();
+    expect(screen.queryByText(/no conversation records/)).toBeNull();
+    expect(screen.queryByText(/non-conversation/)).toBeNull();
+  });
+});

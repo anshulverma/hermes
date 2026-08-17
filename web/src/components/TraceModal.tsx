@@ -32,7 +32,13 @@ type TraceModalProps = {
 };
 
 /** Kinds that are the conversation, in the order a reader meets them. */
-const CONVERSATION = new Set(['prompt', 'answer', 'thinking', 'tool_call', 'tool_result']);
+const CONVERSATION = new Set([
+  'prompt', 'answer', 'thinking', 'tool_call', 'tool_result',
+  // A trace that is one JSON document rather than JSONL has exactly one record,
+  // and it is the whole trace — folding it into "non-conversation" would hide
+  // everything behind a button.
+  'document',
+]);
 
 /** Which kinds start collapsed: everything that is volume rather than signal. */
 const COLLAPSED_BY_DEFAULT = new Set([
@@ -56,6 +62,7 @@ const KIND_LABEL: Record<string, string> = {
   tool_result: 'Result',
   attachment: 'Attachment',
   command_output: 'Command output',
+  document: 'Document',
   meta: 'Meta',
   unparsed: 'Unreadable',
 };
@@ -68,6 +75,7 @@ const KIND_TONE: Record<string, string> = {
   tool_result: 'var(--text-secondary)',
   attachment: 'var(--text-muted)',
   command_output: 'var(--text-muted)',
+  document: 'var(--status-info, #6ea8fe)',
   meta: 'var(--text-muted)',
   unparsed: 'var(--status-error, #f85149)',
 };

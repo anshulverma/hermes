@@ -43,6 +43,13 @@ _BLOCK_KINDS = {
 # Record types that are session bookkeeping rather than conversation.
 _META_TYPES = {"last-prompt", "queue-operation", "summary", "system"}
 
+# Line types of a rollout-style transcript, whose content is nested in `payload`
+# rather than in `message`. Only `response_item` carries conversation.
+_ROLLOUT_TYPES = {
+    "response_item", "event_msg", "session_meta", "turn_context", "world_state",
+    "inter_agent_communication_metadata",
+}
+
 
 def normalize(raw: str) -> dict[str, Any]:
     """Flatten a JSONL trace into ordered, classified records.
@@ -54,6 +61,17 @@ def normalize(raw: str) -> dict[str, Any]:
     records: list[dict[str, Any]] = []
     lines = 0
     unparsed = 0
+
+    whole = _whole_document(raw)
+    if whole is not None:
+        records.append(_record(0, "document", None, None, "trace document", whole))
+        return {
+            "records": records,
+            "counts": {"document": 1},
+            "lines": 1,
+            "bytes": len((raw or "").encode("utf-8")),
+            "unparsed": 0,
+        }
 
     for index, line in enumerate((raw or "").splitlines()):
         stripped = line.strip()
@@ -83,10 +101,38 @@ def normalize(raw: str) -> dict[str, Any]:
     }
 
 
+def _whole_document(raw: str) -> str | None:
+    """Pretty-printed JSON for a trace that is one document, not JSONL.
+
+    Not every agent writes JSONL: one writes a single pretty-printed object.
+    Read line-by-line that becomes one unparsed record per *line* -- 440,648 of
+    them for a 2.5 MB file, which is both useless and enough to sink whatever
+    renders it.
+
+    Only applies when the text spans more than one line, so a one-record JSONL
+    file (which also parses whole) keeps being read as the record it is.
+    """
+    text = (raw or "").strip()
+    if not text or "\n" not in text:
+        return None
+    try:
+        value = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(value, (dict, list)):
+        return None
+    return _dump(value)
+
+
 def _records_for(index: int, doc: dict) -> list[dict[str, Any]]:
     """The reader-facing records for one source line."""
     rtype = doc.get("type")
     ts = doc.get("timestamp") if isinstance(doc.get("timestamp"), str) else None
+
+    # A rollout-style line: the record is in `payload`, keyed by its own type.
+    payload = doc.get("payload")
+    if isinstance(payload, dict) and rtype in _ROLLOUT_TYPES:
+        return [_rollout(index, ts, rtype, payload)]
 
     if rtype == "attachment":
         att = doc.get("attachment")
@@ -119,6 +165,42 @@ def _records_for(index: int, doc: dict) -> list[dict[str, Any]]:
 
     # An unrecognized type is still evidence: keep it whole.
     return [_record(index, "meta", None, ts, str(rtype), _dump(doc))]
+
+
+def _rollout(index: int, ts, rtype: str, payload: dict) -> dict[str, Any]:
+    """One record of a rollout-style transcript, where the content is nested.
+
+    A second agent tool files its session as JSONL of
+    ``{timestamp, type, payload}``, with the conversation inside ``payload``
+    under its own ``type``. Same reader-facing kinds; different envelope.
+    """
+    ptype = payload.get("type")
+
+    if rtype != "response_item":
+        # Session/turn bookkeeping and event traffic.
+        return _record(index, "meta", None, ts, str(ptype or rtype), _dump(payload))
+
+    if ptype == "message":
+        role = payload.get("role") if isinstance(payload.get("role"), str) else None
+        kind = "answer" if role == "assistant" else "prompt"
+        return _record(index, kind, role, ts, "" if kind == "answer" else str(role or ""),
+                       _text(payload.get("content")))
+
+    if ptype == "reasoning":
+        summary = _text(payload.get("summary"))
+        return _record(index, "thinking", "assistant", ts, "",
+                       summary or _dump(payload.get("encrypted_content") and "<encrypted>"))
+
+    if ptype in ("function_call", "custom_tool_call"):
+        name = str(payload.get("name") or "tool")
+        body = payload.get("arguments") if "arguments" in payload else payload.get("input")
+        return _record(index, "tool_call", "assistant", ts, name, _dump(body))
+
+    if ptype in ("function_call_output", "custom_tool_call_output"):
+        return _record(index, "tool_result", None, ts, str(payload.get("call_id") or ""),
+                       _text(payload.get("output")))
+
+    return _record(index, "meta", None, ts, str(ptype or "response_item"), _dump(payload))
 
 
 def _user_text(index: int, role, ts, content: str, *, is_meta: bool) -> dict[str, Any]:
