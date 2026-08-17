@@ -39,6 +39,11 @@ _WORK_SUBDIR = "hermes-codex"
 # Characters unsafe in a single filename component are folded into "-".
 _UNSAFE_IN_FILENAME = re.compile(r"[^A-Za-z0-9._-]+")
 
+# The result_ref shape that names a rollout, and the only thread-id shape
+# accepted out of it (see trace_source: this reaches a remote shell).
+_THREAD_PREFIX = "codex:thread:"
+_THREAD_ID_OK = re.compile(r"\A[0-9a-fA-F][0-9a-fA-F-]{7,63}\Z")
+
 
 class CodexAgent:
     """OpenAI Codex agent adapter: ``codex exec … --json -o <file>``."""
@@ -243,6 +248,28 @@ class CodexAgent:
             evidence_ref=None,
             detail=detail,
         )
+
+    # --- trace ----------------------------------------------------------
+
+    def trace_source(self, result: Result, envelope: dict) -> str | None:
+        """Where this result's rollout transcript sits on the worker's host.
+
+        Codex files one rollout per thread under
+        ``~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<started-at>-<thread>.jsonl``.
+        The master knows neither the date directory nor the timestamp in the
+        name, so both are left as globs and resolved on the host.
+
+        The returned string is expanded by a **remote shell** on an ssh site, so
+        a thread id that is not plainly a thread id is refused rather than
+        escaped -- there is no legitimate ref this rejects.
+        """
+        ref = getattr(result, "result_ref", None)
+        if not isinstance(ref, str) or not ref.startswith(_THREAD_PREFIX):
+            return None
+        thread_id = ref[len(_THREAD_PREFIX):]
+        if not _THREAD_ID_OK.match(thread_id):
+            return None
+        return f"~/.codex/sessions/*/*/*/rollout-*-{thread_id}.jsonl"
 
     # --- health ---------------------------------------------------------
 

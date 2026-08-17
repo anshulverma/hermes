@@ -222,3 +222,43 @@ def test_a_broken_delegate_does_not_break_registration(monkeypatch):
     assert st.resource_classes() == ["agent:x"]
     with pytest.raises(ImportError):
         st.discover_hosts()
+
+
+# --- trace capture through the fan topology ------------------------------
+
+def test_fan_site_forwards_a_file_fetch_to_its_delegate(tmp_path):
+    """Multi-agent runs execute through fan sites. A fan site that does not
+    forward fetch_file captures no traces at all, and does it silently --
+    engine.trace cannot tell "this site cannot fetch" from "this class forgot
+    to delegate"."""
+    import sites.fan  # noqa: F401
+    from engine import site as _site
+
+    src = tmp_path / "trace.jsonl"
+    src.write_text('{"type":"user"}\n')
+    dest = tmp_path / "out.jsonl"
+
+    fan = _site.load("fan-claude")
+    assert fan.fetch_file("localhost", str(src), dest) is True
+    assert dest.read_text() == '{"type":"user"}\n'
+
+
+def test_fan_site_reports_a_miss_like_any_other_site(tmp_path):
+    import sites.fan  # noqa: F401
+    from engine import site as _site
+
+    fan = _site.load("fan-claude")
+    assert fan.fetch_file("localhost", str(tmp_path / "nothing-here-*.jsonl"),
+                          tmp_path / "out.jsonl") is False
+
+
+def test_fan_site_tolerates_a_delegate_that_cannot_fetch(tmp_path):
+    """fetch_file is optional on the Site protocol; a delegate without it makes
+    the fan site one that cannot fetch either, not one that explodes."""
+    from sites.fan.site import FanSite
+
+    class NoFetch:
+        name = "nofetch"
+
+    fan = FanSite("fan-x", "agent:x", delegate=NoFetch())
+    assert fan.fetch_file("h", "/tmp/x", tmp_path / "out") is False

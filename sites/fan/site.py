@@ -93,6 +93,21 @@ class FanSite:
     def run_worker(self, host: str, envelope: dict, agent) -> Result:
         return self._delegate.run_worker(host, envelope, agent)
 
+    def fetch_file(self, host: str, source: str, dest) -> bool:
+        """Forward the optional file fetch (see ``engine.site.FileFetcher``).
+
+        A fan site runs its workers through the delegate, so a worker's trace is
+        wherever the delegate can reach. Without this the whole fan topology --
+        which is how multi-agent runs actually execute -- would capture no
+        traces at all, silently: ``engine.trace`` treats a site with no
+        ``fetch_file`` as one that simply cannot, which is indistinguishable
+        from a delegation this class forgot.
+        """
+        fetch = getattr(self._delegate, "fetch_file", None)
+        if not callable(fetch):
+            return False
+        return fetch(host, source, dest)
+
     # --- capabilities ---------------------------------------------------
 
     def resource_classes(self) -> list[str]:

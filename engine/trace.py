@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Optional
 
 from engine import config, log
+from engine.models import Result
 
 # Traces are whole agent sessions and run to hundreds of KB routinely; a runaway
 # one should not quietly fill the home. Past this, the trace is dropped rather
@@ -160,6 +161,81 @@ def capture(*, site, host: str, agent, result, envelope: dict,
 
     logger.info(f"captured {written} bytes of trace for attempt {attempt_id}")
     return dest
+
+
+def backfill(conn, *, agents, site, run_id: Optional[str] = None,
+             dry_run: bool = False) -> dict:
+    """Capture traces for attempts that were recorded before capture existed.
+
+    Every run from before ``capture`` has an evidence ref and nothing behind it.
+    Where the worker's transcript is still on a host this master can reach, it
+    can be fetched late. Same two questions as ``capture``, asked afterwards.
+
+    An attempts row does not say which agent produced it, and deriving one from
+    the run is guesswork once a run fans across several. Refs are namespaced
+    instead (``claude:session:…``), so the owning adapter is the one that claims
+    the ref: each agent in ``agents`` is asked until one names a source.
+
+    Returns a report whose counts partition ``considered``:
+      * ``captured``  -- fetched and written now
+      * ``already``   -- a trace was already on disk, left alone
+      * ``missing``   -- claimed, but the transcript could not be fetched
+      * ``unclaimed`` -- no agent recognised the ref
+    ``dry_run`` fetches nothing and reports ``would_capture`` instead.
+    """
+    logger = log.get_logger("trace")
+    report = {"considered": 0, "captured": 0, "already": 0, "missing": 0,
+              "unclaimed": 0, "would_capture": 0}
+
+    sql = (
+        "SELECT a.id, a.ticket_id, a.host, a.result_ref, t.run_id "
+        "FROM attempts a JOIN tickets t ON t.id = a.ticket_id "
+        "WHERE a.result_ref IS NOT NULL"
+    )
+    params: tuple = ()
+    if run_id:
+        sql += " AND t.run_id = ?"
+        params = (run_id,)
+    sql += " ORDER BY a.id"
+
+    for attempt_id, ticket_id, host, ref, attempt_run in conn.execute(sql, params).fetchall():
+        report["considered"] += 1
+
+        if size(attempt_run, attempt_id) is not None:
+            report["already"] += 1
+            continue
+
+        # A Result carrying just enough for an agent to recognise its own ref.
+        stub = Result(
+            outcome="ok", termination_reason="goal_met", result_ref=ref,
+            error_summary=None, started_at=0.0, ended_at=0.0,
+            payload={}, evidence_ref=None,
+        )
+        envelope = {"ticket_id": ticket_id, "run_id": attempt_run}
+
+        owner = None
+        for candidate in agents:
+            if _ask_agent(candidate, stub, envelope, logger):
+                owner = candidate
+                break
+        if owner is None:
+            report["unclaimed"] += 1
+            continue
+
+        if dry_run:
+            report["would_capture"] += 1
+            continue
+
+        written = capture(
+            site=site, host=host, agent=owner, result=stub, envelope=envelope,
+            run_id=attempt_run, attempt_id=attempt_id,
+        )
+        if written is None:
+            report["missing"] += 1
+        else:
+            report["captured"] += 1
+
+    return report
 
 
 def _ask_agent(agent, result, envelope, logger) -> Optional[str]:

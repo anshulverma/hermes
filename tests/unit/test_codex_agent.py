@@ -363,3 +363,42 @@ def test_health_checks_agent_not_ok_when_binary_missing(monkeypatch):
     checks = agent.health_checks("localhost", site.load("local"))
     agent_check = next(c for c in checks if c.name == "agent")
     assert agent_check.ok is False
+
+
+# --- trace_source: pointing the engine at the rollout transcript ---------
+
+def _ok_result(ref):
+    from engine.models import Result
+    return Result(
+        outcome="ok", termination_reason="goal_met", result_ref=ref,
+        error_summary=None, started_at=1.0, ended_at=2.0,
+        payload={"answer": "x"}, evidence_ref=None,
+    )
+
+
+def test_trace_source_globs_the_rollout_for_the_thread(codex):
+    """Codex files a rollout under a dated directory whose name also carries a
+    timestamp -- neither of which the master knows, so both are globbed."""
+    tid = "019fd272-a8be-78f0-a43c-4247ec7b0064"
+
+    source = codex.trace_source(_ok_result(f"codex:thread:{tid}"), {})
+
+    assert source == f"~/.codex/sessions/*/*/*/rollout-*-{tid}.jsonl"
+
+
+def test_trace_source_declines_a_foreign_ref(codex):
+    assert codex.trace_source(_ok_result("claude:session:abc"), {}) is None
+    assert codex.trace_source(_ok_result(None), {}) is None
+
+
+@pytest.mark.parametrize("hostile", [
+    "abc; rm -rf ~", "../../etc/passwd", "abc$(id)", "abc*", "abc`id`", "a b", "",
+])
+def test_trace_source_refuses_anything_not_a_thread_id(codex, hostile):
+    """Expanded by a remote shell on an ssh site: refuse, do not escape."""
+    assert codex.trace_source(_ok_result(f"codex:thread:{hostile}"), {}) is None
+
+
+def test_trace_source_never_raises(codex):
+    for ref in [None, "", "codex:thread:", "codex:", ":::", "codex:thread"]:
+        assert codex.trace_source(_ok_result(ref), {}) is None
