@@ -9,6 +9,10 @@ import type { Reduction } from '../api/client';
 import { deriveFindingStatus, normalizeReduction } from '../api/normalize';
 import { Card, Badge, StatusPill, Divider, EmptyState, Button } from '../ds';
 import { LoadingOverlay } from '../components/Spinner';
+import JsonView from '../components/JsonView';
+import Clamp from '../components/Clamp';
+import Markdown from '../components/Markdown';
+import { reductionHeadline, reductionFacts, reductionProse } from '../util/reduction';
 
 type FindingsProps = {
   runId: string;
@@ -131,6 +135,8 @@ export default function Findings({ runId, liveTick }: FindingsProps) {
 
       {reductions.map((reduction) => {
         const status = deriveFindingStatus(reduction);
+        const facts = reductionFacts(reduction.json);
+        const prose = reductionProse(reduction.json);
 
         return (
           <Card key={reduction.id} padding="md">
@@ -167,7 +173,9 @@ export default function Findings({ runId, liveTick }: FindingsProps) {
                   )}
                 </div>
 
-                {/* Title from json */}
+                {/* A name derived from the document. Reductions carry no
+                    `title`, so rendering that key alone gave every card the
+                    same "Untitled reduction" and showed none of its content. */}
                 <span
                   style={{
                     color: 'var(--text-primary)',
@@ -175,10 +183,73 @@ export default function Findings({ runId, liveTick }: FindingsProps) {
                     lineHeight: '22px',
                   }}
                 >
-                  {reduction.json.title || 'Untitled reduction'}
+                  {reductionHeadline(reduction.json, reduction.kind)}
                 </span>
+
+                {/* What happened, from the document's own scalars. */}
+                {facts.length > 0 && (
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    {facts.map((f) => (
+                      <span key={f.key} style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                        <span style={{ fontFamily: 'var(--font-mono)' }}>{f.key}</span>{' '}
+                        <span style={{ color: 'var(--text-secondary)' }}>{f.value}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
+
+            {/* The content itself: the long string leaves, which is where an
+                agent's actual analysis, synthesis or report lives. */}
+            {prose.map((p) => (
+              <div key={p.path} style={{ marginTop: 12 }}>
+                <span
+                  style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11,
+                    color: 'var(--text-muted)',
+                  }}
+                >
+                  {p.path}
+                </span>
+                <div
+                  style={{
+                    marginTop: 4,
+                    padding: 10,
+                    background: 'var(--wash-subtle)',
+                    border: '1px solid var(--border-hairline)',
+                    borderRadius: 'var(--radius-sm)',
+                  }}
+                >
+                  {/* Clamped, not scrolled: an 800-line input context must not
+                      bury the analysis under it, and a scroll box here would
+                      take the wheel from the page. */}
+                  <Clamp text={p.text} data-testid={`finding-prose-${reduction.id}`}>
+                    <Markdown maxHeight={null} fontSize={12}>
+                      {p.text}
+                    </Markdown>
+                  </Clamp>
+                </div>
+              </div>
+            ))}
+
+            {/* The whole document, for anything the reading above did not
+                surface. Mounts only when opened. */}
+            <details style={{ marginTop: 12 }}>
+              <summary
+                style={{
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: 'var(--text-muted)',
+                }}
+              >
+                Full document
+              </summary>
+              <div style={{ marginTop: 8 }}>
+                <JsonView value={reduction.json} maxHeight={null} />
+              </div>
+            </details>
 
             {/* Member tickets */}
             {reduction.member_tickets.length > 0 && (
