@@ -21,15 +21,18 @@ import { LoadingOverlay } from './components/Spinner';
 import { fetchRun } from './api/client';
 import type { RunDetail } from './api/client';
 import { hasToken, isRemote } from './api/auth';
-import { useHashView } from './hooks/useHashView';
+import { useHashView, useHashParam } from './hooks/useHashView';
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(hasToken() || !isRemote());
 
   const { loading: healthLoading, error: healthError } = useHealth();
   const { data: runs, loading: runsLoading, error: runsError } = useRuns();
-  // The tab lives in the URL hash, so a refresh reopens the same tab.
+  // The tab lives in the URL hash, so a refresh reopens the same tab. So does
+  // the run being viewed: without it the console could only ever show runs[0],
+  // and every other run in the database was unreachable.
   const [view, setView] = useHashView();
+  const [selectedRunId, setSelectedRunId] = useHashParam('run');
   const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
@@ -58,12 +61,15 @@ export default function App() {
       .finally(() => setDetailLoading(false));
   }, []);
 
-  // Fetch run detail when we have a run (initial load)
+  // Fetch the run being viewed: the one named in the URL when it exists, else
+  // the newest. A URL naming a run that is gone falls back to the newest rather
+  // than leaving the console empty.
   useEffect(() => {
-    if (runs && runs.length > 0) {
-      refreshRunDetail(runs[0].id);
-    }
-  }, [runs, refreshRunDetail]);
+    if (!runs || runs.length === 0) return;
+    const named =
+      selectedRunId && runs.some((r) => r.id === selectedRunId) ? selectedRunId : runs[0].id;
+    refreshRunDetail(named);
+  }, [runs, selectedRunId, refreshRunDetail]);
 
   // Live refresh: when state-changing events arrive, re-fetch run detail
   useEffect(() => {
@@ -111,7 +117,14 @@ export default function App() {
     >
       <CrewBackdrop theme="graph" />
 
-      <TopBar connected={connected} view={view} onViewChange={setView} />
+      <TopBar
+        connected={connected}
+        view={view}
+        onViewChange={setView}
+        runs={runs ?? undefined}
+        selectedRunId={runDetail?.id ?? selectedRunId}
+        onRunChange={setSelectedRunId}
+      />
 
       <div
         style={{

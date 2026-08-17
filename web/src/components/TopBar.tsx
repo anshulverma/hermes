@@ -7,6 +7,7 @@
 import LiveDot from './LiveDot';
 
 import type { View } from '../hooks/useHashView';
+import type { Run } from '../api/client';
 
 /**
  * Height of the app chrome, in px.
@@ -75,9 +76,21 @@ type TopBarProps = {
   connected: boolean;
   view?: View;
   onViewChange?: (view: View) => void;
+  // Every run, newest first, and which one the console is showing. Optional so
+  // the bar still renders before the run list has loaded.
+  runs?: Run[];
+  selectedRunId?: string | null;
+  onRunChange?: (runId: string) => void;
 };
 
-export default function TopBar({ connected, view = 'overview', onViewChange }: TopBarProps) {
+export default function TopBar({
+  connected,
+  view = 'overview',
+  onViewChange,
+  runs,
+  selectedRunId,
+  onRunChange,
+}: TopBarProps) {
   const handleTabClick = (newView: View) => {
     if (onViewChange) {
       onViewChange(newView);
@@ -205,6 +218,33 @@ export default function TopBar({ connected, view = 'overview', onViewChange }: T
       </nav>
 
       <div style={{ flex: 1 }} />
+
+      {/* Which run every view below is about. Hidden when there is only one:
+          a picker with a single option is furniture, not a control. */}
+      {runs && runs.length > 1 && (
+        <select
+          data-testid="run-picker"
+          aria-label="Run"
+          value={selectedRunId ?? runs[0].id}
+          onChange={(e) => onRunChange?.(e.target.value)}
+          style={{
+            padding: '4px 8px',
+            fontSize: 12,
+            fontFamily: 'var(--font-mono)',
+            color: 'var(--text-secondary)',
+            background: 'var(--wash-subtle)',
+            border: '1px solid var(--border-hairline)',
+            borderRadius: 'var(--radius-md)',
+            maxWidth: 260,
+          }}
+        >
+          {runs.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.id} · {r.state}
+            </option>
+          ))}
+        </select>
+      )}
 
       <LiveDot connected={connected} />
     </header>

@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
 import TopBar from './TopBar';
 
 describe('TopBar', () => {
@@ -43,5 +43,52 @@ describe('TopBar', () => {
     expect(screen.getByText('Crew')).toBeInTheDocument();
     expect(screen.getByText('Findings')).toBeInTheDocument();
     expect(screen.getByText('Activity')).toBeInTheDocument();
+  });
+});
+
+describe('TopBar — choosing which run to look at', () => {
+  const runs = [
+    { id: 'run-5', playbook: 'research', site: 'local', state: 'done', phase: 'complete',
+      base_ref: 'main', created_at: '3', tickets: {} },
+    { id: 'run-4', playbook: 'research', site: 'local', state: 'done', phase: 'complete',
+      base_ref: 'main', created_at: '2', tickets: {} },
+    { id: 'run-3', playbook: 'research', site: 'local', state: 'stopped', phase: 'research',
+      base_ref: 'main', created_at: '1', tickets: {} },
+  ];
+
+  it('lists every run, not just the newest', () => {
+    // The console used to hardcode runs[0]; every other run was unreachable.
+    render(<TopBar connected runs={runs} selectedRunId="run-5" onRunChange={() => {}} />);
+
+    const picker = screen.getByTestId('run-picker') as HTMLSelectElement;
+    expect(Array.from(picker.options).map((o) => o.value)).toEqual(['run-5', 'run-4', 'run-3']);
+  });
+
+  it('shows which run is being viewed', () => {
+    render(<TopBar connected runs={runs} selectedRunId="run-4" onRunChange={() => {}} />);
+
+    expect((screen.getByTestId('run-picker') as HTMLSelectElement).value).toBe('run-4');
+  });
+
+  it('reports a change to its caller', () => {
+    const onRunChange = vi.fn();
+    render(<TopBar connected runs={runs} selectedRunId="run-5" onRunChange={onRunChange} />);
+
+    fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-3' } });
+
+    expect(onRunChange).toHaveBeenCalledWith('run-3');
+  });
+
+  it('stays out of the way when there is nothing to choose between', () => {
+    render(<TopBar connected runs={[runs[0]]} selectedRunId="run-5" onRunChange={() => {}} />);
+
+    expect(screen.queryByTestId('run-picker')).toBeNull();
+  });
+
+  it('renders without run props at all', () => {
+    render(<TopBar connected />);
+
+    expect(screen.getByLabelText('Hermes')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-picker')).toBeNull();
   });
 });
