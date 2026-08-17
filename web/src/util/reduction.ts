@@ -145,3 +145,26 @@ export function reductionProse(json: Json): Array<{ path: string; text: string }
   walk(json, '', 0);
   return out;
 }
+
+/**
+ * Whether this reduction is holding a ticket that needs a person.
+ *
+ * The accept/reject decision is not "do I like this conclusion" — it is how a
+ * `needs_human` ticket gets resolved: accept settles it to `done`, reject to
+ * `failed`. A reduction routing no ticket to a human therefore has no decision
+ * to make, and offering the buttons anyway implies an authority they do not
+ * have: they would flip a flag and move nothing.
+ *
+ * Both spellings of the state are accepted. The engine writes `needs_human` and
+ * the UI normalises to `needs-human`; a review queue that quietly empties itself
+ * over an underscore is the worst way this could fail.
+ */
+export function awaitsDecision(reduction: {
+  review_state: string;
+  member_tickets: Array<{ state: string; [k: string]: unknown }>;
+}): boolean {
+  if (reduction.review_state !== 'pending') return false;
+  return reduction.member_tickets.some(
+    (t) => t.state === 'needs-human' || t.state === 'needs_human',
+  );
+}

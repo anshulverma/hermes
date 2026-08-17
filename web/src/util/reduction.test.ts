@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { reductionHeadline, reductionFacts, reductionProse } from './reduction';
+import { reductionHeadline, reductionFacts, reductionProse, awaitsDecision } from './reduction';
 
 // The four reduction shapes actually in the database. None of them has a
 // top-level `title`, which is the only thing the findings list used to render —
@@ -128,5 +128,45 @@ describe('reductionProse', () => {
     let deep: any = { text: 'y'.repeat(400) };
     for (let i = 0; i < 50; i++) deep = { nested: deep };
     expect(() => reductionProse(deep)).not.toThrow();
+  });
+});
+
+describe('awaitsDecision', () => {
+  const base = {
+    id: 1, run_id: 'r', phase: 'work', kind: 'k', review_state: 'pending',
+    json: {}, member_ticket_ids: [], member_tickets: [],
+  };
+
+  it('is true only when a pending reduction is holding a ticket for a human', () => {
+    expect(
+      awaitsDecision({
+        ...base,
+        member_tickets: [{ id: 't1', state: 'needs-human', phase: 'work' }],
+      }),
+    ).toBe(true);
+  });
+
+  it('is false when the reduction gates nothing', () => {
+    // Every reduction a research run emits is an output, not a decision: it
+    // routes no ticket to a human, so accepting it would settle nothing.
+    expect(awaitsDecision(base)).toBe(false);
+    expect(
+      awaitsDecision({ ...base, member_tickets: [{ id: 't1', state: 'done', phase: 'work' }] }),
+    ).toBe(false);
+  });
+
+  it('is false once the decision has been made', () => {
+    const held = [{ id: 't1', state: 'needs-human', phase: 'work' }];
+    expect(awaitsDecision({ ...base, review_state: 'accepted', member_tickets: held })).toBe(false);
+    expect(awaitsDecision({ ...base, review_state: 'rejected', member_tickets: held })).toBe(false);
+    expect(awaitsDecision({ ...base, review_state: 'superseded', member_tickets: held })).toBe(false);
+  });
+
+  it('accepts either spelling of the state', () => {
+    // The engine says needs_human; the UI normalises to needs-human. A queue
+    // that silently empties because of an underscore is the worst failure here.
+    expect(
+      awaitsDecision({ ...base, member_tickets: [{ id: 't', state: 'needs_human', phase: 'w' }] }),
+    ).toBe(true);
   });
 });

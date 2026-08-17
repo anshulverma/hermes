@@ -10,7 +10,11 @@ import RunOverview from './views/RunOverview';
 import MetricsView from './views/MetricsView';
 import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
-import Findings from './views/Findings';
+import Outputs from './views/Outputs';
+import { fetchReductions } from './api/client';
+import { normalizeReduction } from './api/normalize';
+import { awaitsDecision } from './util/reduction';
+import Review from './views/Review';
 import ActivityFeed from './views/ActivityFeed';
 import TokenLogin from './components/TokenLogin';
 import { useHealth, useRuns } from './hooks/useApi';
@@ -35,6 +39,9 @@ export default function App() {
   const [selectedRunId, setSelectedRunId] = useHashParam('run');
   const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  // How many reductions are holding a ticket for a human. Lives here, not in
+  // the Review view, because the nav has to show it before you go looking.
+  const [reviewCount, setReviewCount] = useState<number | null>(null);
 
   // WebSocket live event stream
   const { connected, lastEvent, authError } = useEventStream();
@@ -70,6 +77,27 @@ export default function App() {
       selectedRunId && runs.some((r) => r.id === selectedRunId) ? selectedRunId : runs[0].id;
     refreshRunDetail(named);
   }, [runs, selectedRunId, refreshRunDetail]);
+
+  // The review queue's size, refreshed with the run and on finding events.
+  useEffect(() => {
+    const runId = runDetail?.id;
+    if (!runId) {
+      setReviewCount(null);
+      return;
+    }
+    let cancelled = false;
+    fetchReductions(runId)
+      .then((rs) => {
+        if (!cancelled) setReviewCount(rs.map(normalizeReduction).filter(awaitsDecision).length);
+      })
+      .catch(() => {
+        // A count is an affordance, not information the console depends on.
+        if (!cancelled) setReviewCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [runDetail?.id, findingLiveTick]);
 
   // Live refresh: when state-changing events arrive, re-fetch run detail
   useEffect(() => {
@@ -124,6 +152,7 @@ export default function App() {
         runs={runs ?? undefined}
         selectedRunId={runDetail?.id ?? selectedRunId}
         onRunChange={setSelectedRunId}
+        reviewCount={reviewCount}
       />
 
       <div
@@ -209,8 +238,20 @@ export default function App() {
           <CrewPanel liveTick={crewLiveTick} />
         )}
 
-        {!loading && !error && runDetail && view === 'findings' && (
-          <Findings runId={runDetail.id} liveTick={findingLiveTick} />
+        {!loading && !error && runDetail && view === 'outputs' && (
+          <Outputs
+            runId={runDetail.id}
+            liveTick={findingLiveTick}
+            onGoToReview={() => setView('review')}
+          />
+        )}
+
+        {!loading && !error && runDetail && view === 'review' && (
+          <Review
+            runId={runDetail.id}
+            liveTick={findingLiveTick}
+            onGoToOutputs={() => setView('outputs')}
+          />
         )}
 
         {!loading && !error && view === 'activity' && (

@@ -56,10 +56,20 @@ describe('useHashView', () => {
   it('follows browser back/forward (hashchange)', () => {
     const { result } = renderHook(() => useHashView());
     act(() => {
+      setHash('#crew');
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(result.current[0]).toBe('crew');
+  });
+
+  it('still honours #findings, which was one page before it was split', () => {
+    // Splitting a page must not break a link someone already has.
+    const { result } = renderHook(() => useHashView());
+    act(() => {
       setHash('#findings');
       window.dispatchEvent(new HashChangeEvent('hashchange'));
     });
-    expect(result.current[0]).toBe('findings');
+    expect(result.current[0]).toBe('outputs');
   });
 
   it('normalises a hash that does not name the tab on screen', () => {

@@ -81,6 +81,8 @@ type TopBarProps = {
   runs?: Run[];
   selectedRunId?: string | null;
   onRunChange?: (runId: string) => void;
+  /** How many reductions are holding a ticket for a human, if known. */
+  reviewCount?: number | null;
 };
 
 export default function TopBar({
@@ -90,6 +92,7 @@ export default function TopBar({
   runs,
   selectedRunId,
   onRunChange,
+  reviewCount,
 }: TopBarProps) {
   const handleTabClick = (newView: View) => {
     if (onViewChange) {
@@ -186,19 +189,57 @@ export default function TopBar({
           Crew
         </button>
         <button
-          onClick={() => handleTabClick('findings')}
+          onClick={() => handleTabClick('outputs')}
           style={{
             padding: '6px 12px',
             fontSize: 13,
-            color: view === 'findings' ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: view === 'findings' ? 'var(--wash-subtle)' : 'transparent',
+            color: view === 'outputs' ? 'var(--text-primary)' : 'var(--text-muted)',
+            background: view === 'outputs' ? 'var(--wash-subtle)' : 'transparent',
             border: 'none',
             borderRadius: 'var(--radius-md)',
             cursor: 'pointer',
             transition: 'all 120ms ease-out',
           }}
         >
-          Findings
+          Outputs
+        </button>
+        {/* Review keeps its place in the nav whether or not the queue has
+            anything: a tab that comes and goes is a tab nobody learns. The
+            count is what tells you there is something to do. */}
+        <button
+          onClick={() => handleTabClick('review')}
+          data-testid="tab-review"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            padding: '6px 12px',
+            fontSize: 13,
+            color: view === 'review' ? 'var(--text-primary)' : 'var(--text-muted)',
+            background: view === 'review' ? 'var(--wash-subtle)' : 'transparent',
+            border: 'none',
+            borderRadius: 'var(--radius-md)',
+            cursor: 'pointer',
+            transition: 'all 120ms ease-out',
+          }}
+        >
+          Review
+          {reviewCount != null && reviewCount > 0 && (
+            <span
+              data-testid="review-count"
+              style={{
+                padding: '0 6px',
+                fontSize: 11,
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--status-attention, #e3b341)',
+                background: 'var(--wash-subtle)',
+                border: '1px solid var(--border-hairline)',
+                borderRadius: 'var(--radius-lg)',
+              }}
+            >
+              {reviewCount}
+            </span>
+          )}
         </button>
         <button
           onClick={() => handleTabClick('activity')}

@@ -33,7 +33,7 @@ describe('TopBar', () => {
     expect(screen.getByText('offline')).toBeInTheDocument();
   });
 
-  it('should render Run, Metrics, Tickets, Crew, Findings, and Activity tabs (Phase E1)', () => {
+  it('should render Run, Metrics, Tickets, Crew, Outputs, Review and Activity tabs', () => {
     render(<TopBar connected={true} />);
 
     // All main tabs should be present (Phase E1 adds Metrics)
@@ -41,7 +41,8 @@ describe('TopBar', () => {
     expect(screen.getByText('Metrics')).toBeInTheDocument();
     expect(screen.getByText('Tickets')).toBeInTheDocument();
     expect(screen.getByText('Crew')).toBeInTheDocument();
-    expect(screen.getByText('Findings')).toBeInTheDocument();
+    expect(screen.getByText('Outputs')).toBeInTheDocument();
+    expect(screen.getByText('Review')).toBeInTheDocument();
     expect(screen.getByText('Activity')).toBeInTheDocument();
   });
 });
@@ -90,5 +91,26 @@ describe('TopBar — choosing which run to look at', () => {
 
     expect(screen.getByLabelText('Hermes')).toBeInTheDocument();
     expect(screen.queryByTestId('run-picker')).toBeNull();
+  });
+});
+
+describe('TopBar — the review queue is visible before you go looking', () => {
+  it('shows how many decisions are waiting', () => {
+    render(<TopBar connected reviewCount={3} />);
+
+    expect(screen.getByTestId('review-count')).toHaveTextContent('3');
+  });
+
+  it('shows no badge when nothing is waiting', () => {
+    render(<TopBar connected reviewCount={0} />);
+
+    expect(screen.getByTestId('tab-review')).toBeInTheDocument();
+    expect(screen.queryByTestId('review-count')).toBeNull();
+  });
+
+  it('shows no badge before the count is known', () => {
+    render(<TopBar connected reviewCount={null} />);
+
+    expect(screen.queryByTestId('review-count')).toBeNull();
   });
 });

@@ -14,7 +14,16 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-export const VIEWS = ['overview', 'metrics', 'board', 'crew', 'findings', 'activity'] as const;
+export const VIEWS = ['overview', 'metrics', 'board', 'crew', 'outputs', 'review', 'activity'] as const;
+
+/**
+ * Slugs that used to name a view, mapped to what replaced them.
+ *
+ * `findings` was one page doing two jobs — reading a run's output and deciding
+ * the reductions holding a ticket. Splitting it must not break a link someone
+ * already has.
+ */
+const VIEW_ALIASES: Record<string, View> = { findings: 'outputs' };
 
 export type View = (typeof VIEWS)[number];
 
@@ -31,7 +40,8 @@ function splitHash(hash: string): { slug: string; query: string } {
 /** Read a view out of a raw hash, falling back to the default when unrecognised. */
 export function parseViewHash(hash: string): View {
   const { slug } = splitHash(hash);
-  return (VIEWS as readonly string[]).includes(slug) ? (slug as View) : DEFAULT_VIEW;
+  if ((VIEWS as readonly string[]).includes(slug)) return slug as View;
+  return VIEW_ALIASES[slug] ?? DEFAULT_VIEW;
 }
 
 /** Read one parameter out of a raw hash, or null when it is not there. */
@@ -122,7 +132,9 @@ export function useHashParam(key: string): [string | null, (value: string | null
       const params = new URLSearchParams(query);
       if (next === null || next === '') params.delete(key);
       else params.set(key, next);
-      const view = (VIEWS as readonly string[]).includes(slug) ? slug : DEFAULT_VIEW;
+      const view = (VIEWS as readonly string[]).includes(slug)
+        ? slug
+        : (VIEW_ALIASES[slug] ?? DEFAULT_VIEW);
       const target = buildHash(view, Object.fromEntries(params));
       if (raw !== target) window.location.hash = target.slice(1);
     },

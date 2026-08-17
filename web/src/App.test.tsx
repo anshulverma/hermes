@@ -42,6 +42,10 @@ describe('App', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
+    // App reads the review queue's size for the nav badge. Auto-mocked to
+    // undefined otherwise, which is not a promise.
+    vi.mocked(client.fetchReductions).mockResolvedValue([]);
+
     // Default mock for useEventStream (no authError)
     vi.spyOn(useEventStreamModule, 'useEventStream').mockReturnValue({
       connected: true,

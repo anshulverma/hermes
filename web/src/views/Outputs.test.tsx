@@ -1,11 +1,11 @@
 /**
- * Tests for Findings view.
+ * Tests for Outputs view.
  * Phase B6: rendering reductions with real review_state + member tickets.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
-import Findings from './Findings';
+import Outputs from './Outputs';
 
 // Mock fetch
 const mockFetch = vi.fn();
@@ -55,7 +55,7 @@ const mockReductions = [
   },
 ];
 
-describe('Findings', () => {
+describe('Outputs', () => {
   beforeEach(() => {
     mockFetch.mockClear();
   });
@@ -66,7 +66,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    render(<Findings runId="test-run" />);
+    render(<Outputs runId="test-run" />);
 
     await waitFor(() => {
       // Should render reduction titles
@@ -82,7 +82,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    render(<Findings runId="test-run" />);
+    render(<Outputs runId="test-run" />);
 
     await waitFor(() => {
       expect(screen.getByText('duplicate_root_cause')).toBeInTheDocument();
@@ -97,7 +97,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    render(<Findings runId="test-run" />);
+    render(<Outputs runId="test-run" />);
 
     await waitFor(() => {
       // Check for review state labels (pending/accepted/rejected)
@@ -115,7 +115,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    render(<Findings runId="test-run" />);
+    render(<Outputs runId="test-run" />);
 
     await waitFor(() => {
       // Should show member ticket IDs
@@ -136,7 +136,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    render(<Findings runId="test-run" />);
+    render(<Outputs runId="test-run" />);
 
     await waitFor(() => {
       // First reduction: pending + needs-human member -> "needs human" status (StatusPill uses space)
@@ -162,11 +162,11 @@ describe('Findings', () => {
       json: async () => [],
     });
 
-    render(<Findings runId="test-run" />);
+    render(<Outputs runId="test-run" />);
 
     await waitFor(() => {
       // Should show empty state
-      expect(screen.getByText(/no findings/i)).toBeInTheDocument();
+      expect(screen.getByText(/no outputs yet/i)).toBeInTheDocument();
     });
   });
 
@@ -176,7 +176,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    render(<Findings runId="test-run" />);
+    render(<Outputs runId="test-run" />);
 
     await waitFor(() => {
       // First reduction has 2 member tickets
@@ -193,7 +193,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    render(<Findings runId="test-run-123" />);
+    render(<Outputs runId="test-run-123" />);
 
     await waitFor(() => {
       expect((mockFetch as any).mock.calls[0][0]).toBe('/api/runs/test-run-123/reductions');
@@ -202,57 +202,17 @@ describe('Findings', () => {
 
   // --- Phase D4: Accept/Reject actions ---
 
-  it('should show Accept and Reject buttons only for pending reductions', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => mockReductions,
-    });
+  it('offers no accept/reject: this page decides nothing', async () => {
+    // Those buttons settle a needs_human ticket. A reduction holding no such
+    // ticket has no decision in it, so offering them here implies an authority
+    // they do not have — they would flip a flag and move nothing.
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockReductions });
+    render(<Outputs runId="test-run" />);
 
-    render(<Findings runId="test-run" />);
+    await waitFor(() => expect(screen.getByText('Outputs')).toBeInTheDocument());
 
-    await waitFor(() => {
-      // Should show Accept/Reject buttons (only pending reductions have them)
-      const acceptButtons = screen.queryAllByText('Accept');
-      const rejectButtons = screen.queryAllByText('Reject');
-
-      // Only reduction 1 is pending, so should have 1 Accept and 1 Reject button
-      expect(acceptButtons.length).toBe(1);
-      expect(rejectButtons.length).toBe(1);
-    });
-  });
-
-  it('should NOT show Accept/Reject buttons for accepted reductions', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => [mockReductions[1]], // accepted reduction
-    });
-
-    render(<Findings runId="test-run" />);
-
-    await waitFor(() => {
-      // Verify reduction is shown
-      expect(screen.getByText('Timeout in CI')).toBeInTheDocument();
-      // But no action buttons
-      expect(screen.queryByText('Accept')).not.toBeInTheDocument();
-      expect(screen.queryByText('Reject')).not.toBeInTheDocument();
-    });
-  });
-
-  it('should NOT show Accept/Reject buttons for rejected reductions', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => [mockReductions[2]], // rejected reduction
-    });
-
-    render(<Findings runId="test-run" />);
-
-    await waitFor(() => {
-      // Verify reduction is shown
-      expect(screen.getByText('Missing env var')).toBeInTheDocument();
-      // But no action buttons
-      expect(screen.queryByText('Accept')).not.toBeInTheDocument();
-      expect(screen.queryByText('Reject')).not.toBeInTheDocument();
-    });
+    expect(screen.queryByRole('button', { name: /accept/i })).toBeNull();
+    expect(screen.queryByRole('button', { name: /reject/i })).toBeNull();
   });
 
   it('should refetch when liveTick changes', async () => {
@@ -261,7 +221,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    const { rerender } = render(<Findings runId="test-run" liveTick={0} />);
+    const { rerender } = render(<Outputs runId="test-run" liveTick={0} />);
 
     await waitFor(() => {
       expect(screen.getByText('Null pointer in module X')).toBeInTheDocument();
@@ -269,7 +229,7 @@ describe('Findings', () => {
 
     const callsBefore = (mockFetch as any).mock.calls.length;
 
-    rerender(<Findings runId="test-run" liveTick={1} />);
+    rerender(<Outputs runId="test-run" liveTick={1} />);
 
     await waitFor(() => {
       expect((mockFetch as any).mock.calls.length).toBeGreaterThan(callsBefore);
@@ -282,7 +242,7 @@ describe('Findings', () => {
       json: async () => mockReductions,
     });
 
-    const { rerender } = render(<Findings runId="test-run" liveTick={0} />);
+    const { rerender } = render(<Outputs runId="test-run" liveTick={0} />);
 
     await waitFor(() => {
       expect(screen.getByText('Null pointer in module X')).toBeInTheDocument();
@@ -290,9 +250,9 @@ describe('Findings', () => {
 
     // Start a slow refetch
     mockFetch.mockImplementation(() => new Promise(() => {}));
-    rerender(<Findings runId="test-run" liveTick={1} />);
+    rerender(<Outputs runId="test-run" liveTick={1} />);
 
-    // Findings should still be on screen (no blanking spinner)
+    // Outputs should still be on screen (no blanking spinner)
     expect(screen.getByText('Null pointer in module X')).toBeInTheDocument();
   });
 });
