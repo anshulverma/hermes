@@ -321,3 +321,96 @@ def test_doctor_server_extra_missing(setup_adapters, capsys):
     # Instead, we'll skip this test or mock it.
     # For now, we'll mark it as a design note that the implementation should check.
     pytest.skip("Requires server deps to be uninstalled; covered by integration tests")
+
+
+# --- a built-in that is not installed here ----------------------------------
+#
+# `testkit` is a dev-only package: it is deliberately absent from the deployed
+# control-plane image. doctor imported it in the same `try` as the real agents,
+# so inside the container the ImportError aborted the block and doctor printed
+# an empty agent list under an ERROR — while the server process, importing the
+# same adapters its own way, had them all registered. The diagnostic contradicted
+# the thing it was diagnosing.
+
+def _fail_import_of(missing: str):
+    """An import_module that raises for one module and works for the rest."""
+    import importlib
+
+    real = importlib.import_module
+
+    def fake(name, *a, **k):
+        if name == missing:
+            raise ModuleNotFoundError(f"No module named {missing.split('.')[0]!r}")
+        return real(name, *a, **k)
+
+    return fake
+
+
+def test_a_missing_dev_only_package_does_not_hide_the_agents_that_loaded(
+    setup_adapters, capsys, monkeypatch
+):
+    from unittest import mock
+
+    with temp_hermes_home() as home:
+        migrate.apply_migrations(str(Path(home) / "queue.db"))
+        with mock.patch("engine.cli.importlib.import_module",
+                        side_effect=_fail_import_of("testkit.mock_agent")):
+            main(["doctor"])
+        out = capsys.readouterr().out
+
+    agents_section = out.split("=== Registered Agent Adapters ===")[1]
+    assert "claude: registered" in agents_section
+
+
+def test_a_missing_dev_only_package_is_a_note_not_an_error(
+    setup_adapters, capsys, monkeypatch
+):
+    from unittest import mock
+
+    with temp_hermes_home() as home:
+        migrate.apply_migrations(str(Path(home) / "queue.db"))
+        with mock.patch("engine.cli.importlib.import_module",
+                        side_effect=_fail_import_of("testkit.mock_agent")):
+            code = main(["doctor"])
+        captured = capsys.readouterr()
+
+    # Not installed here is normal for a deployed image, so it must not be an
+    # ERROR, and must not fail the check.
+    assert code == 0
+    assert "ERROR loading agent modules" not in captured.err
+    assert "testkit.mock_agent" in captured.out
+    assert "not available" in captured.out
+
+
+def test_a_missing_site_module_does_not_hide_the_sites_that_loaded(
+    setup_adapters, capsys, monkeypatch
+):
+    from unittest import mock
+
+    with temp_hermes_home() as home:
+        migrate.apply_migrations(str(Path(home) / "queue.db"))
+        with mock.patch("engine.cli.importlib.import_module",
+                        side_effect=_fail_import_of("sites.devserver.site")):
+            main(["doctor"])
+        out = capsys.readouterr().out
+
+    sites_section = out.split("=== Registered Site Adapters ===")[1]
+    assert "local: registered" in sites_section
+
+
+def test_naming_one_agent_still_resolves_when_a_dev_package_is_missing(
+    setup_adapters, capsys, monkeypatch
+):
+    """`doctor --agent claude` used to raise ImportError out of doctor entirely:
+    only KeyError was caught, and the dev-only import ran first."""
+    from unittest import mock
+
+    with temp_hermes_home() as home:
+        migrate.apply_migrations(str(Path(home) / "queue.db"))
+        with mock.patch("engine.cli.importlib.import_module",
+                        side_effect=_fail_import_of("testkit.mock_agent")):
+            code = main(["doctor", "--agent", "claude"])
+        out = capsys.readouterr().out
+
+    assert code == 0
+    assert "Loads: yes (name=claude)" in out

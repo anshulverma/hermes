@@ -27,6 +27,102 @@ def _connect():
     return migrate.connect(str(db_path))
 
 
+def cmd_trace_backfill(args) -> int:
+    """Capture traces for attempts recorded before capture existed.
+
+    Fetches through one site -- the local one unless told otherwise -- so it
+    only reaches hosts whose filesystem this master shares. An attempt on a host
+    it cannot reach is reported as missing, not as an error: the transcript is
+    simply not here.
+    """
+    from engine import trace as _trace
+
+    _import_registration_modules()
+    missing = _import_builtin_adapters(_BUILTIN_AGENT_MODULES + _BUILTIN_SITE_MODULES)
+    for note in missing:
+        print(f"  not available: {note}")
+
+    from engine.agent import _REGISTRY as agent_registry
+
+    site_name = getattr(args, 'site', None) or 'local'
+    try:
+        st = site.load(site_name)
+    except KeyError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if not callable(getattr(st, 'fetch_file', None)):
+        print(f"ERROR: site {site_name!r} cannot fetch files, so no trace can be "
+              f"retrieved through it.", file=sys.stderr)
+        return 1
+
+    conn = _connect()
+    try:
+        report = _trace.backfill(
+            conn,
+            agents=list(agent_registry.values()),
+            site=st,
+            run_id=getattr(args, 'run', None),
+            dry_run=bool(getattr(args, 'dry_run', False)),
+        )
+    finally:
+        conn.close()
+
+    if report["considered"] == 0:
+        print("No attempts with an evidence ref.")
+        return 0
+
+    if args.dry_run:
+        print(f"Would capture {report['would_capture']} of {report['considered']} "
+              f"attempts ({report['already']} already captured, "
+              f"{report['unclaimed']} with a ref no agent recognises).")
+        return 0
+
+    print(f"Considered {report['considered']} attempts with an evidence ref:")
+    print(f"  captured:  {report['captured']}")
+    print(f"  already:   {report['already']}")
+    print(f"  missing:   {report['missing']}  (transcript no longer on a reachable host)")
+    print(f"  unclaimed: {report['unclaimed']}  (no agent recognises the ref)")
+    return 0
+
+
+# The built-in adapters `doctor` loads before listing the registries.
+# `testkit` is dev-only and deliberately absent from the deployed control-plane
+# image, so failing to import it there is normal, not a fault.
+_BUILTIN_SITE_MODULES = ("sites.local.site", "sites.devserver.site", "sites.fan")
+_BUILTIN_AGENT_MODULES = ("agents.claude", "agents.codex", "testkit.mock_agent")
+
+
+def _import_builtin_adapters(modules) -> list[str]:
+    """Import each built-in adapter module independently.
+
+    Returns ``"<module>: <reason>"`` for those that did not import.
+
+    Independently, because importing them as one block means a single absent
+    module hides every adapter that *did* register. That is what made
+    `hermes doctor` report an empty agent list inside the container while the
+    server process, importing the same adapters its own way, had all of them --
+    the diagnostic contradicting the thing it was diagnosing.
+    """
+    missing: list[str] = []
+    for name in modules:
+        try:
+            importlib.import_module(name)
+        except Exception as exc:
+            missing.append(f"{name}: {exc}")
+    return missing
+
+
+def _print_registry(title: str, registry: dict, missing: list[str]) -> None:
+    """Print a registry section: what registered, then what was not available."""
+    print(f"\n=== {title} ===")
+    for name in sorted(registry):
+        print(f"  {name}: registered")
+    if not registry:
+        print("  (none registered)")
+    for note in missing:
+        print(f"  not available: {note}")
+
+
 def _import_registration_modules():
     """Import custom adapter modules from HERMES_{PLAYBOOK,SITE,AGENT}_MODULES.
 
@@ -892,13 +988,15 @@ def cmd_doctor(args):
         print(f"  ERROR loading custom modules: {e}", file=sys.stderr)
         problems.append(f"Custom modules: {e}")
 
+    # Built-ins are imported for their registration side-effect, tolerantly: a
+    # module missing here (dev-only testkit in a deployed image) is reported
+    # alongside the registry rather than replacing it.
+    missing_sites = _import_builtin_adapters(_BUILTIN_SITE_MODULES)
+    missing_agents = _import_builtin_adapters(_BUILTIN_AGENT_MODULES)
+
     if hasattr(args, 'site') and args.site:
         print(f"\n=== Site Adapter: {args.site} ===")
         try:
-            # Import production modules
-            import sites.local.site
-            import sites.devserver.site
-            import sites.fan
             st = site.load(args.site)
             print(f"  Loads: yes (name={st.name})")
         except KeyError as e:
@@ -908,40 +1006,20 @@ def cmd_doctor(args):
     if hasattr(args, 'agent') and args.agent:
         print(f"\n=== Agent Adapter: {args.agent} ===")
         try:
-            # Import production modules
-            import agents.claude
-            import testkit.mock_agent
             ag = agent.load(args.agent)
             print(f"  Loads: yes (name={ag.name})")
         except KeyError as e:
             print(f"  ERROR: {e}", file=sys.stderr)
             problems.append(f"Agent {args.agent}: unresolvable")
 
-    # If no specific site/agent, check that registered adapters load
+    # If no specific site/agent, list what is actually registered.
     if not (hasattr(args, 'site') and args.site):
-        print("\n=== Registered Site Adapters ===")
-        try:
-            import sites.local.site
-            import sites.devserver.site
-            import sites.fan
-            # List registered sites
-            from engine.site import _REGISTRY as site_registry
-            for site_name in sorted(site_registry.keys()):
-                print(f"  {site_name}: registered")
-        except Exception as e:
-            print(f"  ERROR loading site modules: {e}", file=sys.stderr)
+        from engine.site import _REGISTRY as site_registry
+        _print_registry("Registered Site Adapters", site_registry, missing_sites)
 
     if not (hasattr(args, 'agent') and args.agent):
-        print("\n=== Registered Agent Adapters ===")
-        try:
-            import agents.claude
-            import testkit.mock_agent
-            # List registered agents
-            from engine.agent import _REGISTRY as agent_registry
-            for agent_name in sorted(agent_registry.keys()):
-                print(f"  {agent_name}: registered")
-        except Exception as e:
-            print(f"  ERROR loading agent modules: {e}", file=sys.stderr)
+        from engine.agent import _REGISTRY as agent_registry
+        _print_registry("Registered Agent Adapters", agent_registry, missing_agents)
 
     # 6. Server extra check (fastapi/uvicorn)
     print("\n=== Server Extra ===")
@@ -1100,6 +1178,18 @@ def main(argv=None):
 
     db_vacuum = db_subparsers.add_parser('vacuum', help='Vacuum database to reclaim space')
 
+    trace_parser = subparsers.add_parser('trace', help='Worker trace maintenance')
+    trace_subparsers = trace_parser.add_subparsers(dest='trace_action')
+
+    trace_backfill = trace_subparsers.add_parser(
+        'backfill',
+        help='Capture traces for attempts recorded before capture existed',
+    )
+    trace_backfill.add_argument('--run', help='Restrict to a specific run ID')
+    trace_backfill.add_argument('--site', help='Site to fetch through (default: the local site)')
+    trace_backfill.add_argument('--dry-run', action='store_true',
+                                help='Report what would be captured, fetching nothing')
+
     # Parse
     args = parser.parse_args(argv)
 
@@ -1148,6 +1238,9 @@ def main(argv=None):
                 return cmd_doctor(args)
         elif args.command == 'db':
             return maintenance.cmd_db(args)
+        elif args.command == 'trace':
+            if args.trace_action == 'backfill':
+                return cmd_trace_backfill(args)
     except Exception as e:
         logger = log.get_logger("cli")
         # Use logger.exception when config.debug() is set (includes traceback),
