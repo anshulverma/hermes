@@ -24,7 +24,15 @@ import { Card, Badge, StatusPill, Divider } from '../ds';
 import JsonView from './JsonView';
 import Markdown from './Markdown';
 import Clamp from './Clamp';
-import { reductionHeadline, reductionFacts, splitProse } from '../util/reduction';
+import ProseOutline from './ProseOutline';
+import ItemRows from './ItemRows';
+import {
+  reductionHeadline,
+  reductionFacts,
+  splitProse,
+  primaryItems,
+  factTone,
+} from '../util/reduction';
 
 type ReductionCardProps = {
   reduction: Reduction;
@@ -36,6 +44,9 @@ export default function ReductionCard({ reduction, actions }: ReductionCardProps
   const status = deriveFindingStatus(reduction);
   const facts = reductionFacts(reduction.json);
   const { primary, secondary } = splitProse(reduction.json, reduction.kind);
+  // A payload that is a list of per-item write-ups reads as rows; a payload
+  // that is one body reads as its own outline. Both beat a wall of markdown.
+  const items = primaryItems(reduction.json, reduction.kind);
 
   return (
     <Card padding="md">
@@ -45,12 +56,27 @@ export default function ReductionCard({ reduction, actions }: ReductionCardProps
             {reduction.kind}
           </Badge>
           {/* The scalars, inline: what happened, in a line rather than a block. */}
-          {facts.slice(0, 4).map((f) => (
-            <span key={f.key} style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-              <span style={{ fontFamily: 'var(--font-mono)' }}>{f.key}</span>{' '}
-              <span style={{ color: 'var(--text-secondary)' }}>{f.value}</span>
-            </span>
-          ))}
+          {facts.slice(0, 4).map((f) => {
+            const tone = factTone(f.key, f.value);
+            return (
+              <span key={f.key} style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                <span style={{ fontFamily: 'var(--font-mono)' }}>{f.key}</span>{' '}
+                <span
+                  style={{
+                    color:
+                      tone === 'danger'
+                        ? 'var(--status-danger, #f85149)'
+                        : tone === 'ok'
+                          ? 'var(--status-ok, #7ee787)'
+                          : 'var(--text-secondary)',
+                    fontWeight: tone ? 600 : 400,
+                  }}
+                >
+                  {f.value}
+                </span>
+              </span>
+            );
+          })}
           <span
             style={{
               marginLeft: 'auto',
@@ -79,40 +105,17 @@ export default function ReductionCard({ reduction, actions }: ReductionCardProps
       </div>
 
       {/* What the run concluded — the only thing above the fold. */}
-      {primary.map((p) => (
-        <div key={p.path} style={{ marginTop: 12 }}>
-          {primary.length > 1 && (
-            <span
-              style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}
-            >
-              {p.path}
-            </span>
-          )}
-          <div
-            style={{
-              marginTop: 4,
-              padding: 10,
-              background: 'var(--wash-subtle)',
-              border: '1px solid var(--border-hairline)',
-              borderRadius: 'var(--radius-sm)',
-            }}
-          >
-            {/* Clamped short: a card is a glance, and the whole thing is one
-                click away. Clamped rather than scrolled, so it does not take
-                the wheel from the page. */}
-            <Clamp
-              text={p.text}
-              lines={10}
-              height={200}
-              data-testid={`finding-prose-${reduction.id}`}
-            >
-              <Markdown maxHeight={null} fontSize={12}>
-                {p.text}
-              </Markdown>
-            </Clamp>
-          </div>
+      {items.length > 0 ? (
+        <div style={{ marginTop: 8 }}>
+          <ItemRows items={items} testId={`finding-items-${reduction.id}`} />
         </div>
-      ))}
+      ) : (
+        primary.map((p) => (
+          <div key={p.path} style={{ marginTop: 8 }}>
+            <ProseOutline text={p.text} testId={`finding-prose-${reduction.id}`} />
+          </div>
+        ))
+      )}
 
       {/* Everything the reader did not come for: the material the agent was
           given, the tickets rolled up, and the document as banked. One

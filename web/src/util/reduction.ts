@@ -241,3 +241,56 @@ export function splitProse(
     ),
   };
 }
+
+/**
+ * A list payload as one labelled entry per element.
+ *
+ * `syntheses` holds one write-up per item, `analyses` one per agent. Rendered
+ * as prose they stack into a card as seventeen documents — more reading than
+ * the run was meant to save. As rows they are scannable.
+ *
+ * The label is whatever distinguishes the entries: the item they are about, or
+ * the agent that wrote them. Entries with no prose in them are not rows.
+ */
+export function primaryItems(
+  json: Json,
+  kind: string,
+): Array<{ id: string; label: string; text: string }> {
+  const key = primaryPath(json, kind);
+  if (!key || !isObject(json)) return [];
+  const value = json[key];
+  if (!Array.isArray(value)) return [];
+
+  const out: Array<{ id: string; label: string; text: string }> = [];
+  value.forEach((entry, i) => {
+    if (!isObject(entry)) return;
+    const text = Object.values(entry).find(
+      (v) => typeof v === 'string' && v.length >= PROSE_MIN,
+    ) as string | undefined;
+    if (!text) return;
+    const label =
+      [entry.item_id, entry.agent, entry.id, entry.ticket_id].find(
+        (v) => typeof v === 'string' && v,
+      ) ?? `${key}[${i}]`;
+    out.push({ id: `${key}-${i}`, label: String(label), text });
+  });
+  return out;
+}
+
+/**
+ * The tone a fact deserves, or null for the ones that carry no judgement.
+ *
+ * Colour is only applied where the document *states* a condition: an agent that
+ * failed, a status that is not ok. It is deliberately not inferred from prose —
+ * in real syntheses the words "blocking" and "clean" appear as ordinary
+ * adjectives ("the blocking window is bounded by a lease", "not a clean kill"),
+ * so matching on them paints working diffs red and failed checks green. A wrong
+ * colour in a review tool is worse than none: it is read as a verdict.
+ */
+export function factTone(key: string, value: string): 'ok' | 'danger' | null {
+  const empty = !value || /^0\b/.test(value);
+  if (/fail|error/i.test(key)) return empty ? null : 'danger';
+  if (key === 'status') return /^(ok|success|passed|clean)$/i.test(value) ? 'ok' : 'danger';
+  if (/^succeeded/i.test(key)) return empty ? null : 'ok';
+  return null;
+}

@@ -6,6 +6,8 @@ import {
   awaitsDecision,
   primaryPath,
   splitProse,
+  primaryItems,
+  factTone,
 } from './reduction';
 
 // The four reduction shapes actually in the database. None of them has a
@@ -275,5 +277,71 @@ describe('reductionHeadline — finding a name in prose', () => {
 
   it('still falls back to the kind when prose yields nothing usable', () => {
     expect(reductionHeadline({ blob: '#'.repeat(400) }, 'k')).toBe('k');
+  });
+});
+
+describe('primaryItems — a per-item payload as rows', () => {
+  it('turns a list payload into one labelled entry per element', () => {
+    const doc = {
+      syntheses: [
+        { item_id: 'ITEM-1', ticket_id: 'r/t-1', synthesis: 'a'.repeat(300) },
+        { item_id: 'ITEM-2', ticket_id: 'r/t-2', synthesis: 'b'.repeat(300) },
+      ],
+    };
+
+    const items = primaryItems(doc, 'item_syntheses');
+
+    expect(items).toHaveLength(2);
+    expect(items[0].label).toBe('ITEM-1');
+    expect(items[0].text).toContain('a');
+  });
+
+  it('labels by agent when that is what distinguishes the entries', () => {
+    const doc = {
+      analyses: [
+        { agent: 'claude', analysis: 'a'.repeat(300) },
+        { agent: 'codex', analysis: 'b'.repeat(300) },
+      ],
+    };
+
+    expect(primaryItems(doc, 'item_analyses').map((i) => i.label)).toEqual(['claude', 'codex']);
+  });
+
+  it('is empty when the payload is a single body rather than a list', () => {
+    expect(primaryItems({ report: 'x'.repeat(300) }, 'research_report')).toEqual([]);
+  });
+
+  it('is empty when the kind names nothing', () => {
+    expect(primaryItems({ a: 1 }, 'unknown')).toEqual([]);
+  });
+
+  it('skips entries that carry no prose', () => {
+    const doc = { syntheses: [{ item_id: 'ITEM-1', synthesis: '' }, { item_id: 'ITEM-2' }] };
+    expect(primaryItems(doc, 'item_syntheses')).toEqual([]);
+  });
+});
+
+describe('factTone — colour only where the data actually says something', () => {
+  it('flags a failure as a failure', () => {
+    expect(factTone('failed_agents', 'claude')).toBe('danger');
+    expect(factTone('status', 'error')).toBe('danger');
+  });
+
+  it('marks a clean status as clean', () => {
+    expect(factTone('status', 'ok')).toBe('ok');
+    expect(factTone('succeeded_agents', 'claude')).toBe('ok');
+  });
+
+  it('says nothing about a fact that carries no judgement', () => {
+    // Inventing a colour for `item_count` or a ticket id would be decoration
+    // pretending to be information.
+    expect(factTone('item_count', '17')).toBeNull();
+    expect(factTone('ticket_id', 'run-5/35-report')).toBeNull();
+    expect(factTone('item.id', 'ITEM-1')).toBeNull();
+  });
+
+  it('does not call an empty failure list a failure', () => {
+    expect(factTone('failed_agents', '')).toBeNull();
+    expect(factTone('failed_agents', '0 items')).toBeNull();
   });
 });
