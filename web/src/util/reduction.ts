@@ -252,29 +252,80 @@ export function splitProse(
  * The label is whatever distinguishes the entries: the item they are about, or
  * the agent that wrote them. Entries with no prose in them are not rows.
  */
+/** Entry keys that identify or classify rather than carry the write-up. */
+const LABEL_KEYS = new Set(['item_id', 'ticket_id', 'agent', 'id', 'verdict', 'headline']);
+
+/** Worst first. An unstated verdict sorts last: it is not a good outcome. */
+const VERDICT_ORDER: Record<string, number> = {
+  blocking: 0,
+  'needs-discussion': 1,
+  clean: 2,
+};
+
+/**
+ * The colour a stated verdict earns, or null when none was stated.
+ *
+ * Only the closed vocabulary the playbook asks for maps to a colour. Anything
+ * else — including an agent's own invention — stays uncoloured, because in a
+ * review tool a colour is read as a verdict.
+ */
+export function verdictTone(verdict: unknown): 'danger' | 'attention' | 'ok' | null {
+  if (verdict === 'blocking') return 'danger';
+  if (verdict === 'needs-discussion') return 'attention';
+  if (verdict === 'clean') return 'ok';
+  return null;
+}
+
 export function primaryItems(
   json: Json,
   kind: string,
-): Array<{ id: string; label: string; text: string }> {
+): Array<{ id: string; label: string; text: string; verdict: string | null; headline: string | null }> {
   const key = primaryPath(json, kind);
   if (!key || !isObject(json)) return [];
   const value = json[key];
   if (!Array.isArray(value)) return [];
 
-  const out: Array<{ id: string; label: string; text: string }> = [];
+  const out: Array<{
+    id: string;
+    label: string;
+    text: string;
+    verdict: string | null;
+    headline: string | null;
+  }> = [];
   value.forEach((entry, i) => {
     if (!isObject(entry)) return;
-    const text = Object.values(entry).find(
-      (v) => typeof v === 'string' && v.length >= PROSE_MIN,
-    ) as string | undefined;
+    // The longest string in the entry is its body. Deliberately not gated on
+    // PROSE_MIN: that floor decides which leaf of a document counts as content,
+    // and applying it per entry drops exactly the concise write-ups the verdict
+    // contract asks agents for.
+    const text = Object.entries(entry)
+      .filter(([k, v]) => typeof v === 'string' && v.trim() && !LABEL_KEYS.has(k))
+      .map(([, v]) => v as string)
+      .sort((a, b) => b.length - a.length)[0];
     if (!text) return;
     const label =
       [entry.item_id, entry.agent, entry.id, entry.ticket_id].find(
         (v) => typeof v === 'string' && v,
       ) ?? `${key}[${i}]`;
-    out.push({ id: `${key}-${i}`, label: String(label), text });
+    out.push({
+      id: `${key}-${i}`,
+      label: String(label),
+      text,
+      verdict: typeof entry.verdict === 'string' ? entry.verdict : null,
+      headline: typeof entry.headline === 'string' ? entry.headline : null,
+    });
   });
-  return out;
+
+  // Worst first, stable within a band, so the three items that need a person
+  // are not buried under fourteen that do not.
+  return out
+    .map((row, i) => ({ row, i }))
+    .sort((a, b) => {
+      const ra = VERDICT_ORDER[a.row.verdict ?? ''] ?? 3;
+      const rb = VERDICT_ORDER[b.row.verdict ?? ''] ?? 3;
+      return ra === rb ? a.i - b.i : ra - rb;
+    })
+    .map(({ row }) => row);
 }
 
 /**

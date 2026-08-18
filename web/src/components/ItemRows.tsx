@@ -11,8 +11,50 @@
 import { useState } from 'react';
 import ProseOutline from './ProseOutline';
 import { firstLine } from '../util/prose';
+import { verdictTone } from '../util/reduction';
 
-export type Item = { id: string; label: string; text: string };
+export type Item = {
+  id: string;
+  label: string;
+  text: string;
+  verdict?: string | null;
+  headline?: string | null;
+};
+
+const TONE_COLOR: Record<string, string> = {
+  danger: 'var(--status-danger, #f85149)',
+  attention: 'var(--status-attention, #e3b341)',
+  ok: 'var(--status-ok, #7ee787)',
+};
+
+/**
+ * The verdict the agent stated, or a plain note that it stated none.
+ *
+ * "unstated" is deliberately visible rather than blank or green: an item nobody
+ * judged is a real outcome, and letting it read as clean is the failure this
+ * whole contract exists to avoid.
+ */
+function Verdict({ verdict }: { verdict?: string | null }) {
+  const tone = verdictTone(verdict);
+  return (
+    <span
+      data-testid={`verdict-${verdict ?? 'unstated'}`}
+      style={{
+        flex: 'none',
+        minWidth: 96,
+        padding: '1px 6px',
+        fontSize: 10,
+        fontWeight: tone ? 600 : 400,
+        textAlign: 'center',
+        color: tone ? TONE_COLOR[tone] : 'var(--text-muted)',
+        border: `1px solid ${tone ? TONE_COLOR[tone] : 'var(--border-hairline)'}`,
+        borderRadius: 'var(--radius-lg)',
+      }}
+    >
+      {verdict ?? 'unstated'}
+    </span>
+  );
+}
 
 export default function ItemRows({ items, testId }: { items: Item[]; testId?: string }) {
   const [open, setOpen] = useState<string | null>(null);
@@ -48,6 +90,7 @@ export default function ItemRows({ items, testId }: { items: Item[]; testId?: st
               <span aria-hidden style={{ color: 'var(--text-muted)', fontSize: 10, width: 10 }}>
                 {isOpen ? '▾' : '▸'}
               </span>
+              <Verdict verdict={item.verdict} />
               <span
                 style={{
                   fontFamily: 'var(--font-mono)',
@@ -67,7 +110,9 @@ export default function ItemRows({ items, testId }: { items: Item[]; testId?: st
                   whiteSpace: 'nowrap',
                 }}
               >
-                {firstLine(item.text)}
+                {/* The agent's own one-liner when it wrote one; otherwise the
+                    write-up's first heading. */}
+                {item.headline || firstLine(item.text)}
               </span>
               <span
                 style={{

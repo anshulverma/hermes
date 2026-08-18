@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 from engine import config as _config
 from engine import playbook as _playbook
 from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
+from playbooks.research import verdict as _verdict
 from playbooks.research import sources
 
 if TYPE_CHECKING:  # avoid import cycle
@@ -546,7 +547,13 @@ class ResearchPlaybook:
             for agent in agents:
                 text = answer_by_item_agent.get((item_id, agent), "")
                 if text:
-                    analyses.append({"agent": agent, "analysis": text})
+                    stated = _verdict.parse(text)
+                    analyses.append({
+                        "agent": agent,
+                        "analysis": _verdict.strip(text),
+                        "verdict": stated.get("verdict") if stated else None,
+                        "headline": stated.get("headline") if stated else None,
+                    })
                     succeeded.append(agent)
                 else:
                     failed.append(agent)
@@ -590,16 +597,30 @@ class ResearchPlaybook:
                 if match:
                     item_id = match.group(1)
 
+            stated = _verdict.parse(text)
             syntheses.append({
                 "ticket_id": finding.ticket_id,
                 "item_id": item_id,
-                "synthesis": text,
+                "synthesis": _verdict.strip(text),
+                "verdict": stated.get("verdict") if stated else None,
+                "headline": stated.get("headline") if stated else None,
             })
         if not syntheses:
             return []
+        # The shape of the batch, so a reader sees it without opening
+        # seventeen write-ups. `unstated` is counted rather than hidden: an
+        # item nobody judged is a real outcome, not a missing value.
+        counts = {word: 0 for word in _verdict.VERDICTS}
+        counts["unstated"] = 0
+        for entry in syntheses:
+            counts[entry["verdict"] or "unstated"] += 1
         return [Reduction(
             kind="item_syntheses",
-            json={"syntheses": syntheses, "item_count": len(syntheses)},
+            json={
+                "syntheses": syntheses,
+                "item_count": len(syntheses),
+                "verdict_counts": counts,
+            },
         )]
 
     @staticmethod
@@ -780,6 +801,7 @@ def _research_goal(item: dict) -> str:
         "touches, and anything notable about it. Ground every claim in the "
         "material above; say so plainly where it does not tell you. "
         "Do not modify, land or ship anything: this is read-only research."
+        + _verdict.instruction()
     )
     cap = _share(len(head) + len(tail), 1, _CONTEXT_MAX)
     return head + _block(item.get("context"), cap) + tail
@@ -813,6 +835,7 @@ def _synthesize_goal(item: dict, analyses: list, failed_agents: list) -> str:
         "\n\nProduce one account of the item: where the analyses agree, where they "
         "disagree (and which reading the material supports), and what the item "
         "amounts to. Do not invent detail that no analysis reports."
+        + _verdict.instruction()
     )
 
     # The item's context and every analysis compete for one budget. `fixed` counts

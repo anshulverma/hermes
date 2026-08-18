@@ -32,6 +32,7 @@ import {
   splitProse,
   primaryItems,
   factTone,
+  verdictTone,
 } from '../util/reduction';
 
 type ReductionCardProps = {
@@ -47,6 +48,12 @@ export default function ReductionCard({ reduction, actions }: ReductionCardProps
   // A payload that is a list of per-item write-ups reads as rows; a payload
   // that is one body reads as its own outline. Both beat a wall of markdown.
   const items = primaryItems(reduction.json, reduction.kind);
+  // The shape of the batch in one line, when the playbook counted it.
+  const counts = (reduction.json as Record<string, unknown>)?.verdict_counts;
+  const verdictCounts =
+    counts && typeof counts === 'object' && !Array.isArray(counts)
+      ? (counts as Record<string, number>)
+      : null;
 
   return (
     <Card padding="md">
@@ -103,6 +110,39 @@ export default function ReductionCard({ reduction, actions }: ReductionCardProps
         </span>
 
       </div>
+
+      {verdictCounts && (
+        <div
+          data-testid={`verdict-summary-${reduction.id}`}
+          style={{ display: 'flex', gap: 10, marginTop: 8, flexWrap: 'wrap' }}
+        >
+          {Object.entries(verdictCounts)
+            .filter(([, n]) => n > 0)
+            .map(([word, n]) => {
+              const tone = verdictTone(word);
+              return (
+                <span key={word} style={{ fontSize: 12 }}>
+                  <span
+                    style={{
+                      fontWeight: 700,
+                      color:
+                        tone === 'danger'
+                          ? 'var(--status-danger, #f85149)'
+                          : tone === 'attention'
+                            ? 'var(--status-attention, #e3b341)'
+                            : tone === 'ok'
+                              ? 'var(--status-ok, #7ee787)'
+                              : 'var(--text-muted)',
+                    }}
+                  >
+                    {n}
+                  </span>{' '}
+                  <span style={{ color: 'var(--text-muted)' }}>{word}</span>
+                </span>
+              );
+            })}
+        </div>
+      )}
 
       {/* What the run concluded — the only thing above the fold. */}
       {items.length > 0 ? (

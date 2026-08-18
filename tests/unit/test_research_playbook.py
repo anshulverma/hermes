@@ -565,7 +565,14 @@ def test_reduce_research_partial_failure_still_synthesises(source):
     assert doc["status"] == "ok"
     assert doc["succeeded_agents"] == ["claude"]
     assert doc["failed_agents"] == ["codex"]
-    assert doc["analyses"] == [{"agent": "claude", "analysis": "claude's analysis"}]
+    # An analysis now carries the verdict it stated, or None when it stated
+    # none — this answer has no verdict block, so None is the honest record.
+    assert doc["analyses"] == [{
+        "agent": "claude",
+        "analysis": "claude's analysis",
+        "verdict": None,
+        "headline": None,
+    }]
 
     # And that reduction still seeds a synthesis ticket.
     synth_run = _run(config, phase="synthesize", reductions=reductions)

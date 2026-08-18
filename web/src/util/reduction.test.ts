@@ -8,6 +8,7 @@ import {
   splitProse,
   primaryItems,
   factTone,
+  verdictTone,
 } from './reduction';
 
 // The four reduction shapes actually in the database. None of them has a
@@ -343,5 +344,95 @@ describe('factTone — colour only where the data actually says something', () =
   it('does not call an empty failure list a failure', () => {
     expect(factTone('failed_agents', '')).toBeNull();
     expect(factTone('failed_agents', '0 items')).toBeNull();
+  });
+});
+
+describe('primaryItems — carrying a stated verdict to the row', () => {
+  it('carries the verdict and headline a synthesis stated', () => {
+    const doc = {
+      syntheses: [
+        { item_id: 'ITEM-1', synthesis: 'a'.repeat(300), verdict: 'blocking', headline: 'Tier leaks' },
+      ],
+    };
+
+    const [row] = primaryItems(doc, 'item_syntheses');
+
+    expect(row.verdict).toBe('blocking');
+    expect(row.headline).toBe('Tier leaks');
+  });
+
+  it('reports an unstated verdict as unstated, not as clean', () => {
+    const doc = { syntheses: [{ item_id: 'ITEM-1', synthesis: 'a'.repeat(300), verdict: null }] };
+
+    expect(primaryItems(doc, 'item_syntheses')[0].verdict).toBeNull();
+  });
+
+  it('sorts worst first, so the three that matter are not below fourteen that do not', () => {
+    const doc = {
+      syntheses: [
+        { item_id: 'A', synthesis: 'a'.repeat(300), verdict: 'clean' },
+        { item_id: 'B', synthesis: 'b'.repeat(300), verdict: null },
+        { item_id: 'C', synthesis: 'c'.repeat(300), verdict: 'blocking' },
+        { item_id: 'D', synthesis: 'd'.repeat(300), verdict: 'needs-discussion' },
+      ],
+    };
+
+    expect(primaryItems(doc, 'item_syntheses').map((r) => r.label)).toEqual(['C', 'D', 'A', 'B']);
+  });
+
+  it('keeps the given order when nothing stated a verdict', () => {
+    const doc = {
+      syntheses: [
+        { item_id: 'A', synthesis: 'a'.repeat(300) },
+        { item_id: 'B', synthesis: 'b'.repeat(300) },
+      ],
+    };
+
+    expect(primaryItems(doc, 'item_syntheses').map((r) => r.label)).toEqual(['A', 'B']);
+  });
+});
+
+describe('verdictTone', () => {
+  it('maps the vocabulary to severity', () => {
+    expect(verdictTone('blocking')).toBe('danger');
+    expect(verdictTone('needs-discussion')).toBe('attention');
+    expect(verdictTone('clean')).toBe('ok');
+  });
+
+  it('gives an unstated verdict no colour at all', () => {
+    expect(verdictTone(null)).toBeNull();
+    expect(verdictTone('whatever-the-agent-invented')).toBeNull();
+  });
+});
+
+describe('primaryItems — a short write-up is still a write-up', () => {
+  it('keeps an entry whose prose is brief', () => {
+    // The 200-character floor is for deciding which leaf of a document is
+    // content. Applied to per-item entries it silently drops exactly the
+    // concise answers the verdict contract is trying to encourage.
+    const doc = {
+      syntheses: [{ item_id: 'ITEM-1', synthesis: 'Nothing to raise.', verdict: 'clean' }],
+    };
+
+    const rows = primaryItems(doc, 'item_syntheses');
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].text).toBe('Nothing to raise.');
+  });
+
+  it('picks the body over the labels around it', () => {
+    const doc = {
+      syntheses: [
+        { item_id: 'ITEM-1', ticket_id: 'r/t-1', verdict: 'clean', synthesis: 'The body.' },
+      ],
+    };
+
+    expect(primaryItems(doc, 'item_syntheses')[0].text).toBe('The body.');
+  });
+
+  it('still drops an entry with no prose at all', () => {
+    const doc = { syntheses: [{ item_id: 'ITEM-1', verdict: 'clean' }] };
+
+    expect(primaryItems(doc, 'item_syntheses')).toEqual([]);
   });
 });
