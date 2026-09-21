@@ -715,8 +715,8 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     assert set(s) == {
         "turn", "opening", "queue", "delegation", "pending_action", "last_speaker",
         "closed", "verdict", "current_role", "current_turn", "dropped_delegation",
-        "rechecks", "pre_edit_digest", "charge", "artifact", "revised", "roster",
-        "max_turns",
+        "rechecks", "pre_edit_digest", "artifact_digest", "charge", "artifact",
+        "revised", "roster", "max_turns",
     }
     assert s["turn"] == 1
     assert s["opening"] == list(cast.SENIORITY)
@@ -726,7 +726,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     assert s["last_speaker"] == "owner"
     assert s["max_turns"] == 30
     assert s["queue"] == [] and s["rechecks"] == [] and s["roster"] == {}
-    assert s["pre_edit_digest"] == ""
+    assert s["pre_edit_digest"] == "" and s["artifact_digest"] == ""
     assert s["delegation"] is None and s["pending_action"] is None
     assert s["dropped_delegation"] is None and s["current_role"] is None
     assert s["closed"] is False and s["verdict"] == "" and s["current_turn"] == 0
@@ -1352,6 +1352,7 @@ def test_seed_open_is_a_zero_ticket_bootstrap(artifact):
     s = pb._state(run)
     assert s["charge"] == "Decide whether to fund the migration."
     assert s["artifact"] == str(artifact)
+    assert s["artifact_digest"] == thread.digest(artifact)
     assert s["revised"] == str(thread.revised_path(run.id, str(artifact)))
     assert s["max_turns"] == 30
 
@@ -2333,6 +2334,75 @@ def test_reduce_decision_names_a_failed_recheck():
     text = thread.path(run.id).read_text()
     assert "turn 05" in text
     assert "DID NOT APPLY" in text
+
+
+def test_reduce_decision_names_an_original_artifact_that_changed(artifact):
+    """Criterion 6, first half: the original is promised inviolate. Re-check it.
+
+    In a live run the promise is one sentence of prose against a worker running
+    `--permission-mode bypassPermissions`; both test layers pass only because
+    their doubles cannot write. So the master re-hashes the original at the
+    decision, symmetrically with the junior-IC re-check, and names a mismatch.
+    """
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="open")
+    pb.seed(run, _NamedSite("local"))
+    s = pb._state(run)
+    s["current_role"] = "chair"
+
+    # ... mid-run, something writes the file the committee was told not to touch.
+    artifact.write_text("# Proposal\n\nShip the thing, and also this.\n", encoding="utf-8")
+
+    reductions = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )
+
+    red = reductions[0]
+    assert red.json["artifact_intact"] is False
+    assert "CHANGED DURING THE REVIEW" in red.json["verdict"]
+    assert str(artifact) in red.json["verdict"]
+    # ... and a human reading only thread.md learns it too.
+    assert "CHANGED DURING THE REVIEW" in thread.path(run.id).read_text()
+
+
+def test_reduce_decision_says_nothing_when_the_original_is_untouched(artifact):
+    """The healthy path: no line, and `artifact_intact` records the fact."""
+    pb = _committee()
+    run = _run(phase="open")
+    pb.seed(run, _NamedSite("local"))
+    pb._state(run)["current_role"] = "chair"
+
+    reductions = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )
+
+    assert reductions[0].json["artifact_intact"] is True
+    assert "CHANGED DURING THE REVIEW" not in reductions[0].json["verdict"]
+
+
+def test_reduce_decision_names_a_deleted_original(artifact):
+    """An original that vanished is a change like any other, not a crash.
+
+    `digest` of an absent file is "", which is not the snapshot, so the
+    comparison already catches it -- and reduce must never raise.
+    """
+    pb = _committee()
+    run = _run(phase="open")
+    pb.seed(run, _NamedSite("local"))
+    pb._state(run)["current_role"] = "chair"
+    artifact.unlink()
+
+    reductions = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )
+
+    assert reductions[0].json["artifact_intact"] is False
+    assert reductions[0].json["error"] is None
 
 
 def test_reduce_decision_names_a_dropped_delegation():

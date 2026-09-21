@@ -430,9 +430,11 @@ def test_full_conversation_reaches_done_with_no_human(
     assert committee._SIMULATION in decisions[0][1]
     assert "not an approval, not a sign-off" in decisions[0][1]
 
-    # criterion 6: the original is untouched and no revised copy was ever made.
+    # criterion 6: the original is untouched and no revised copy was ever made --
+    # asserted here, and re-checked by the PRODUCT at the decision.
     assert thread.digest(artifact) == original
     assert not thread.revised_path(run_id, str(artifact)).exists()
+    assert _reduction_for(conn, run_id, "decision")["artifact_intact"] is True
 
     # criterion 8: nothing ever waited on a human.
     reductions = _reductions(conn, run_id)

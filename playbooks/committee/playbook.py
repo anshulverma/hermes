@@ -160,6 +160,12 @@ class CommitteePlaybook:
                 # against the original, so a second edit that changed nothing
                 # still fails its re-check (spec 7).
                 "pre_edit_digest": "",
+                # the ORIGINAL's sha256 as `open` found it. Criterion 6 promises
+                # that file is inviolate, and in a live run the only thing
+                # holding it is one sentence of prose against a worker running
+                # --permission-mode bypassPermissions. reduce("decision")
+                # re-hashes it, exactly the way a junior-IC edit is re-hashed.
+                "artifact_digest": "",
                 "charge": "",
                 "artifact": "",
                 "revised": "",
@@ -268,6 +274,7 @@ class CommitteePlaybook:
             # again; the second clip is a no-op on an already-short line.
             s["charge"] = cast._clip(charge or DEFAULT_CHARGE, cast.CHARGE_MAX)
             s["artifact"] = artifact
+            s["artifact_digest"] = thread.digest(artifact)
             s["revised"] = str(thread.revised_path(run.id, artifact))
             s["max_turns"] = max_turns
             s["roster"] = {
@@ -571,12 +578,29 @@ class CommitteePlaybook:
         # (spec 5.3). The assembled text below is what a human reads.
         s["verdict"] = body
 
+        # The other half of criterion 6, and the half nothing else re-checks: the
+        # ORIGINAL is promised inviolate, and in a live run that promise is one
+        # sentence of prose against a worker running bypassPermissions. Symmetric
+        # with the junior-IC re-check above -- snapshot at `open`, compare here,
+        # and name a mismatch the way a failed re-check is named. `None` means
+        # "no artifact resolved", which only a state that never ran `open` sees.
+        intact = None
+        if s["artifact"]:
+            intact = bool(s["artifact_digest"]) and (
+                thread.digest(s["artifact"]) == s["artifact_digest"]
+            )
+
         parts = [body or _NO_DECISION]
         for check in s["rechecks"]:
             state = "APPLIED" if check["verified"] else "DID NOT APPLY"
             parts.append(
                 f"- re-check of turn {check['turn']:02d} (junior_ic): {state} "
                 f"— delegated: {check['action']}"
+            )
+        if intact is False:
+            parts.append(
+                "- re-check of the original artifact: CHANGED DURING THE REVIEW "
+                f"— it was to be left untouched: {s['artifact']}"
             )
         if s["dropped_delegation"]:
             parts.append(
@@ -598,6 +622,7 @@ class CommitteePlaybook:
             "verdict": text if body else "",
             "delivered": bool(body),
             "rechecks": [dict(check) for check in s["rechecks"]],
+            "artifact_intact": intact,
             "dropped_delegation": s["dropped_delegation"],
             "error": "; ".join(errors) or None,
         })]

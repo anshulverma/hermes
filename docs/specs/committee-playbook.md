@@ -107,6 +107,11 @@ Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
   its SHA-256 move — and records `verified: true|false` on that turn's reduction, which the
   decision repeats when it failed.
 
+The original is re-checked too, and symmetrically: `open` snapshots its SHA-256 and the decision
+re-hashes it, recording `artifact_intact: true|false` and naming a mismatch in the verdict text.
+Every worker runs under `--permission-mode bypassPermissions`, so without that check the only thing
+holding "the original is never mutated" in a live run is the goal's prose.
+
 ## Running it
 
 There is no `hermes` console script in this repo's `.venv`: `pip install -e '.[dev,server]'` to
