@@ -76,7 +76,12 @@ def _latest_answer(findings: list[Finding] | None) -> str:
     """
     answer = ""
     for finding in findings or ():
-        value = (finding.json or {}).get("answer")
+        # `finding.json` is whatever went into the column. A truthy non-dict --
+        # a list, a bare string -- would make `(x or {}).get` an AttributeError
+        # out of reduce, which abandons the run `running` with no terminal
+        # state. Guard on the type, the way playbooks/dexter/playbook.py:253-260
+        # does, rather than on truthiness.
+        value = finding.json.get("answer") if isinstance(finding.json, dict) else None
         if isinstance(value, str) and value.strip():
             answer = value
     return answer

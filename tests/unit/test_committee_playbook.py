@@ -1750,6 +1750,46 @@ def test_reduce_never_raises_when_the_thread_cannot_be_written():
     assert s["queue"] == ["manager"]
 
 
+def test_reduce_never_raises_on_a_finding_whose_json_is_not_a_dict():
+    """A truthy non-dict under `finding.json` must not raise out of reduce.
+
+    `(["x"] or {})` is the list, so `.get` is an AttributeError -- out of reduce,
+    out of engine/dispatch.py:305, and the run is abandoned `running` with no
+    terminal state and no event. A non-dict carries no answer, which is the same
+    thing as a turn that delivered nothing.
+    """
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t03-pm")
+    s = pb._state(run)
+    s.update(current_role="pm", current_turn=3, opening=[])
+
+    findings = [
+        Finding(run_id=run.id, ticket_id=f"{run.id}/t03-pm", kind="result", json=["x"]),
+        Finding(run_id=run.id, ticket_id=f"{run.id}/t03-pm", kind="result", json="prose"),
+        Finding(run_id=run.id, ticket_id=f"{run.id}/t03-pm", kind="result", json=None),
+        Finding(run_id=run.id, ticket_id=f"{run.id}/t03-pm", kind="result", json=7),
+    ]
+    reductions = pb.reduce(run, "t03-pm", findings, _NamedSite("local"))
+
+    assert len(reductions) == 1
+    assert reductions[0].json["delivered"] is False
+    assert reductions[0].json["error"] is None
+    assert thread.NO_TURN in thread.path(run.id).read_text()
+
+    # A real answer alongside the junk still wins: the fold skips, never stops.
+    s["current_turn"] = 4
+    salvaged = pb.reduce(
+        run,
+        "t04-pm",
+        [findings[0], _finding(run, f"{run.id}/t04-pm", "Two concerns.")],
+        _NamedSite("local"),
+    )
+    assert salvaged[0].json["delivered"] is True
+    assert "Two concerns." in thread.path(run.id).read_text()
+
+
 # --- reduce: the independent re-check of a junior-IC edit (spec 7) --------
 
 
