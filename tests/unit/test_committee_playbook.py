@@ -771,7 +771,10 @@ def _drive(script, max_turns=30):
 
     `script` maps a phase name to the block its speaker emits, or is a callable
     (phase, state) -> block. A `_ok: False` key models a turn whose worker
-    produced no finding. Returns (pb, run, state, phases_seen, speakers).
+    produced no finding. Returns (pb, run, state, phases_seen, speakers,
+    delivered) -- `speakers` is who next_phase MINTED and `delivered` is whether
+    that worker produced anything, parallel lists: which turns were answered
+    depends on both.
     """
     pb = _committee()
     run = _run()
@@ -779,6 +782,7 @@ def _drive(script, max_turns=30):
     s["max_turns"] = max_turns
     seen = ["open"]
     speakers = []
+    delivered = []
     while True:
         nxt = pb.next_phase(run)
         if nxt is None:
@@ -790,19 +794,21 @@ def _drive(script, max_turns=30):
         if nxt == "decision":
             s["verdict"] = "approve"  # what reduce("decision") will set
             speakers.append("chair")
+            delivered.append(True)
             continue
         # the turn number reduce() reads must match the name next_phase minted
         assert nxt == f"t{s['current_turn']:02d}-{s['current_role']}"
         speakers.append(s["current_role"])
         block = script(nxt, s) if callable(script) else dict(script.get(nxt, {}))
-        # a turn whose worker produced no finding contributes nothing to the
-        # gates; next_phase still advances past it
-        if block.get("_ok", True):
-            _apply_block(s, s["current_role"], block)
-    return pb, run, s, seen, speakers
+        delivered.append(bool(block.get("_ok", True)))
+        # The product's gates, including what a turn with no finding does to the
+        # machine. `_drive` transcribes none of that -- deleting a gate from
+        # _apply_block turns every layer below RED.
+        _apply_block(s, s["current_role"], block, delivered=delivered[-1])
+    return pb, run, s, seen, speakers, delivered
 
 
-def check_invariants(s, seen, speakers, max_turns=30):
+def check_invariants(s, seen, speakers, max_turns=30, delivered=None):
     """Every property the model asserted on every run it drove."""
     assert len(seen) == len(set(seen)), "duplicate phase name"
     assert seen[-1] == "decision", f"did not end at decision: {seen[-1]}"
@@ -817,12 +823,19 @@ def check_invariants(s, seen, speakers, max_turns=30):
     # clears it unconditionally -- so assert the property that actually discriminates.
     if s["dropped_delegation"]:
         assert s["turn"] > s["max_turns"], "a delegation was dropped with turns to spare"
-    # every reviewer turn is answered by the owner, unless the cap cut it off
     body = speakers[:-1]  # drop the chair
+    said = (delivered or [True] * len(speakers))[:-1]
     for i, who in enumerate(body):
-        if who in _REVIEWERS and i + 1 < len(body):
+        if i + 1 >= len(body):
+            break  # a trailing reviewer is the documented cap cut-off
+        if who in _REVIEWERS and said[i]:
+            # every reviewer turn that delivered is answered by the owner
             assert body[i + 1] == "owner", f"reviewer {who} at {i} unanswered by {body[i+1]}"
-        # a trailing reviewer is the documented cap cut-off
+        if not said[i]:
+            # ... and a turn that delivered nothing is answered by NOBODY. Its
+            # thread entry is the NO_TURN stub, and the owner sent to reply to
+            # it either hallucinates an answer or burns the turn.
+            assert body[i + 1] != "owner", f"the owner was sent to answer silence at {i}"
 
 
 # --- the seven regressions from spec 11, each a defect caught in hardening ---
@@ -831,7 +844,7 @@ def check_invariants(s, seen, speakers, max_turns=30):
 def test_regression_turn_01_is_the_first_opening_reviewer():
     # 1: with last_speaker=None the owner-reply rule fires first and mints t01-owner,
     # an owner reply to an empty thread -- the turn the `open` bootstrap exists to delete.
-    _, _, _, seen, sp = _drive({})
+    _, _, _, seen, sp, ok = _drive({})
 
     assert seen[1] == "t01-senior_director", seen[1]
     assert sp[0] == "senior_director", f"turn 01 speaker is {sp[0]}, expected first reviewer"
@@ -845,12 +858,12 @@ def test_regression_the_decision_phase_is_seeded_as_the_chair():
     # truthful about who is speaking. _reduce_turn attributes a turn off current_role
     # and fails closed when it is wrong, so a stale role is a real defect.
     # t14-owner, not t02: a close before the opening round drains is ignored.
-    _, _, closed_state, closed_seen, _ = _drive({"t14-owner": {"close": True}})
+    _, _, closed_state, closed_seen, _, _ = _drive({"t14-owner": {"close": True}})
     assert closed_state["closed"] is True
     assert closed_seen[-1] == "decision"
     assert closed_state["current_role"] == "chair"
 
-    _, _, capped_state, capped_seen, _ = _drive(lambda phase, s: {}, max_turns=3)
+    _, _, capped_state, capped_seen, _, _ = _drive(lambda phase, s: {}, max_turns=3)
     assert capped_seen[-1] == "decision", capped_seen
     assert capped_state["current_role"] == "chair"
 
@@ -859,17 +872,20 @@ def test_regression_a_turn_with_no_finding_still_advances_the_counter():
     # 3: the counter advances in next_phase, not reduce. Advanced in reduce it would
     # stall on a failed turn and re-emit that phase name, which _phase_reduced
     # (engine/dispatch.py:311-321) reads as "already reduced" -- a silent deadlock.
-    _, _, s, seen, sp = _drive({
+    # Two silent turns back to back. Neither is answered -- a turn that said
+    # nothing is answered by nobody -- and the counter walks past both onto a
+    # new phase name each time.
+    _, _, s, seen, sp, ok = _drive({
         "t03-manager": {"_ok": False, "request_floor": True},
-        "t04-owner": {"_ok": False, "close": True},
+        "t04-tpm": {"_ok": False, "close": True},
     })
-    check_invariants(s, seen, sp)
+    check_invariants(s, seen, sp, delivered=ok)
 
-    assert seen[4] == "t04-owner" and seen[5] == "t05-tpm", seen[:8]
+    assert seen[3:6] == ["t03-manager", "t04-tpm", "t05-pm"], seen[:8]
     assert len(seen) == len(set(seen))
     assert s["queue"] == [], "a floor request from a turn with no finding was honoured"
     assert s["closed"] is False, "a close from a turn with no finding was honoured"
-    assert max(int(p[1:3]) for p in seen if p.startswith("t")) == 14
+    assert max(int(p[1:3]) for p in seen if p.startswith("t")) == 12
 
 
 def test_regression_next_phase_returns_none_at_decision_so_is_done_is_reachable():
@@ -893,11 +909,11 @@ def test_regression_next_phase_returns_none_at_decision_so_is_done_is_reachable(
 def test_regression_the_floor_queue_is_entered_after_the_opening_round():
     # 5: once `opening` drains, rule 5 must actually pop the queue -- an early exit to
     # decision would silently discard every floor request the committee made.
-    _, _, s, seen, sp = _drive({
+    _, _, s, seen, sp, ok = _drive({
         "t01-senior_director": {"request_floor": True},
         "t05-tpm": {"request_floor": True},
     })
-    check_invariants(s, seen, sp)
+    check_invariants(s, seen, sp, delivered=ok)
 
     assert s["queue"] == []
     assert seen[15] == "t15-senior_director" and seen[17] == "t17-tpm", seen[14:]
@@ -912,10 +928,10 @@ def test_regression_a_delegation_is_consumed_exactly_once_and_never_lost():
     # "make this change and we're done" dropped the edit on the floor. What catches it
     # across the driven runs is check_invariants' dropped_delegation clause: a
     # delegation dropped with turns still on the clock.
-    _, _, once, once_seen, once_sp = _drive(
+    _, _, once, once_seen, once_sp, once_ok = _drive(
         {"t02-owner": {"delegate": True, "action": "tighten the risk section"}}
     )
-    check_invariants(once, once_seen, once_sp)
+    check_invariants(once, once_seen, once_sp, delivered=once_ok)
     assert once_seen[3] == "t03-junior_ic", once_seen[:5]
     assert once_sp.count("junior_ic") == 1, f"delegation consumed more than once: {once_sp}"
     assert once["pending_action"] == "tighten the risk section"
@@ -923,10 +939,10 @@ def test_regression_a_delegation_is_consumed_exactly_once_and_never_lost():
         "junior_ic wrongly triggered an owner reply"
 
     # Both signals on one turn, at the first turn a close is actually honoured.
-    _, _, both, both_seen, both_sp = _drive(
+    _, _, both, both_seen, both_sp, both_ok = _drive(
         {"t14-owner": {"close": True, "delegate": True, "action": "x"}}
     )
-    check_invariants(both, both_seen, both_sp)
+    check_invariants(both, both_seen, both_sp, delivered=both_ok)
     assert both_sp.count("junior_ic") == 1, f"the delegated edit was dropped: {both_sp}"
     assert both_seen[-3:] == ["t14-owner", "t15-junior_ic", "decision"], both_seen[-4:]
     assert both["closed"] is True
@@ -935,7 +951,7 @@ def test_regression_a_delegation_is_consumed_exactly_once_and_never_lost():
     # turn the edit still happens. With `<` the delegation is dropped one turn
     # early and the committee spends that turn on another reviewer instead --
     # a change no other case in this file can see.
-    _, _, just, just_seen, _ = _drive(
+    _, _, just, just_seen, _, _ = _drive(
         {"t02-owner": {"delegate": True, "action": "just in time"}}, max_turns=3
     )
     assert just_seen == [
@@ -943,10 +959,10 @@ def test_regression_a_delegation_is_consumed_exactly_once_and_never_lost():
     ], just_seen
     assert just["dropped_delegation"] is None
 
-    _, _, capped, capped_seen, capped_sp = _drive(
+    _, _, capped, capped_seen, capped_sp, capped_ok = _drive(
         {"t02-owner": {"delegate": True, "action": "too late"}}, max_turns=2
     )
-    check_invariants(capped, capped_seen, capped_sp, max_turns=2)
+    check_invariants(capped, capped_seen, capped_sp, max_turns=2, delivered=capped_ok)
     assert "junior_ic" not in capped_sp, "the cap did not stop the edit"
     assert capped["delegation"] is None
     assert capped["dropped_delegation"] == "too late", \
@@ -957,9 +973,9 @@ def test_regression_no_phase_repeats_and_the_cap_holds_across_a_full_run():
     # 7: a repeated phase name deadlocks the run silently (engine/dispatch.py:311-321)
     # and an NN above the cap breaks acceptance criterion 5.
     for max_turns in (1, 2, 3, 5, 8, 13, 30):
-        _, _, s, seen, sp = _drive(lambda phase, st: {"request_floor": True},
+        _, _, s, seen, sp, ok = _drive(lambda phase, st: {"request_floor": True},
                                    max_turns=max_turns)
-        check_invariants(s, seen, sp, max_turns=max_turns)
+        check_invariants(s, seen, sp, max_turns=max_turns, delivered=ok)
         nums = [int(p[1:3]) for p in seen if p.startswith("t")]
         assert len(seen) == len(set(seen)), f"max_turns={max_turns}: {seen}"
         assert not nums or max(nums) <= max_turns, f"max_turns={max_turns}: {seen}"
@@ -970,7 +986,7 @@ def test_regression_no_phase_repeats_and_the_cap_holds_across_a_full_run():
 
 def test_the_default_run_is_t01_through_t14_then_the_decision():
     """7 reviewers + 7 owner replies, no delegations, empty queue: highest NN is 14."""
-    _, _, _, seen, _ = _drive({})
+    _, _, _, seen, _, _ = _drive({})
 
     assert seen == [
         "open",
@@ -987,8 +1003,8 @@ def test_the_default_run_is_t01_through_t14_then_the_decision():
 
 def test_max_turns_thirty_mints_t30_and_never_t31():
     """_turn post-increments: turn==30 mints t30 and leaves 31, which routes to decision."""
-    _, _, s, seen, sp = _drive(lambda phase, st: {"request_floor": True}, max_turns=30)
-    check_invariants(s, seen, sp, max_turns=30)
+    _, _, s, seen, sp, ok = _drive(lambda phase, st: {"request_floor": True}, max_turns=30)
+    check_invariants(s, seen, sp, max_turns=30, delivered=ok)
 
     nums = [int(p[1:3]) for p in seen if p.startswith("t")]
     assert max(nums) == 30
@@ -1025,8 +1041,8 @@ def test_every_three_turn_prefix_of_the_block_vocabulary_holds():
             return dict(c[index]) if 0 <= index < len(c) else {}
 
         try:
-            _, _, s, seen, sp = _drive(script)
-            check_invariants(s, seen, sp)
+            _, _, s, seen, sp, ok = _drive(script)
+            check_invariants(s, seen, sp, delivered=ok)
         except AssertionError as exc:
             raise AssertionError(f"combo={combo}: {exc}") from exc
         checked += 1
@@ -1054,8 +1070,8 @@ def test_seeded_fuzz_over_random_blocks_and_random_caps():
             return block
 
         try:
-            _, _, s, seen, sp = _drive(script, max_turns=max_turns)
-            check_invariants(s, seen, sp, max_turns=max_turns)
+            _, _, s, seen, sp, ok = _drive(script, max_turns=max_turns)
+            check_invariants(s, seen, sp, max_turns=max_turns, delivered=ok)
         except AssertionError as exc:
             raise AssertionError(
                 f"seed-iter {iteration} max_turns={max_turns}: {exc}"
@@ -1808,8 +1824,8 @@ def test_reduce_refuses_a_close_before_the_opening_round_drains():
 
 def test_an_early_close_does_not_shorten_the_committee():
     """The whole machine, not just the gate: t02's close leaves the round intact."""
-    _, _, s, seen, sp = _drive({"t02-owner": {"close": True}})
-    check_invariants(s, seen, sp)
+    _, _, s, seen, sp, ok = _drive({"t02-owner": {"close": True}})
+    check_invariants(s, seen, sp, delivered=ok)
 
     assert s["closed"] is False
     assert seen[-2:] == ["t14-owner", "decision"], seen
@@ -1900,6 +1916,48 @@ def test_reduce_writes_the_no_turn_stub_when_no_finding_arrived():
     assert reductions[0].json["action"] is None
     assert reductions[0].json["error"] is None
     assert s["queue"] == []
+
+
+def test_reduce_does_not_send_the_owner_to_answer_a_turn_that_said_nothing():
+    """A failed reviewer turn leaves the NO_TURN stub; nobody replies to it.
+
+    Observed live: t01 failed, the thread carried the stub, and t02 was still
+    minted as an owner reply. `driver_failed` is terminal on first occurrence
+    with no retry, so any single worker hiccup produces this. The owner's floor
+    text says "Answer the member who spoke last"; a real model reading
+    `_(no turn delivered …)_` hallucinates a reply or burns the turn.
+
+    Driven through the real next_phase/reduce pair, not a hand-built state dict:
+    what is under test is exactly the handover between them.
+    """
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="open")
+    phase = pb.next_phase(run)
+    assert phase == "t01-senior_director"
+    run.phase = phase
+    s = pb._state(run)
+    assert s["last_speaker"] == "senior_director"  # what _turn recorded
+
+    pb.reduce(run, phase, [], _NamedSite("local"))  # the worker produced nothing
+
+    assert thread.NO_TURN in thread.path(run.id).read_text()
+    assert s["last_speaker"] == cast.OWNER
+    assert pb.next_phase(run) == "t02-manager", "the owner was sent to answer silence"
+
+    # The comparison arm: a turn that DID deliver is answered, as always.
+    other = _committee()
+    other_run = _run(phase="open")
+    other_phase = other.next_phase(other_run)
+    other_run.phase = other_phase
+    other.reduce(
+        other_run,
+        other_phase,
+        [_finding(other_run, f"{other_run.id}/{other_phase}", "Two questions.")],
+        _NamedSite("local"),
+    )
+    assert other.next_phase(other_run) == "t02-owner"
 
 
 def test_reduce_records_a_block_only_answer_as_delivered_not_as_a_failure():

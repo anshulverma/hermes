@@ -16,7 +16,10 @@ a revised copy.
 - **open** — zero tickets. `seed` resolves configuration, builds the cast, writes the thread header
   (charge, artifact path, roster) and returns `[]`. No worker runs.
 - **t{NN}-{role}** — one ticket, one speaker: the opening round in seniority order, the owner's
-  reply after every reviewer turn, then whoever asked for the floor, FIFO.
+  reply after every *delivered* reviewer turn, then whoever asked for the floor, FIFO. A turn whose
+  worker produced nothing is answered by nobody — its thread entry is the `NO_TURN` stub, and
+  sending the owner to reply to it yields a hallucinated answer or a burnt turn — so the next
+  speaker after a failed turn is the next reviewer.
 - **decision** — one ticket for the chair. Terminal.
 
 One speaker per phase is a rule, not a habit: two would race for the thread file, and a repeated

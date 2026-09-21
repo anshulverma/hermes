@@ -45,14 +45,25 @@ DEFAULT_CHARGE = "Decide whether to approve this proposal."
 _SIGNALS_ONLY = "_(the speaker sent signals only, no prose)_"
 
 
-def _apply_block(s: dict, role: str, block: dict) -> None:
-    """The gates of spec 5.4, applied to one speaker's parsed hermes-turn block.
+def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> None:
+    """The gates of spec 5.4, applied to one settled turn.
 
-    Enforced, not advisory — and there is exactly ONE copy of them. Task 7's
-    ``reduce`` calls this after parsing an answer, and the state-machine tests
-    drive it through ``_drive``. A second transcription in the tests would let
-    the product's gates rot while every test layer stayed green.
+    Enforced, not advisory, and there is exactly ONE copy of them: ``reduce``
+    calls this after parsing an answer, and the state-machine tests drive it
+    through ``_drive``.
+
+    ``delivered`` is False for a turn whose worker produced no finding.
+    ``driver_failed`` is terminal on first occurrence with no retry, so one
+    worker hiccup is all it takes, and the turn's thread entry is the
+    ``NO_TURN`` stub. Nobody may be sent to answer that: the owner's floor text
+    says "answer the member who spoke last", and a real model pointed at
+    ``_(no turn delivered …)_`` either hallucinates a reply or burns the turn.
+    Attributing the silence to the owner is what makes ``next_phase`` move on to
+    the next speaker instead.
     """
+    if not delivered:
+        s["last_speaker"] = cast.OWNER
+        return
     if block.get("request_floor") and role not in (cast.OWNER, cast.JUNIOR, cast.CHAIR):
         # `opening` as well as `queue`: a delegated turn mints without popping,
         # so a role can still be waiting in the opening round.
@@ -483,10 +494,10 @@ class CommitteePlaybook:
 
         block = turnblock.parse(answer)
 
-        # The gates of spec 5.4, in the one implementation Task 4 wrote and the
-        # state-machine tests drive. An unattributable turn runs none of them.
+        # The gates of spec 5.4, in the one implementation the state-machine
+        # tests drive. An unattributable turn runs none of them.
         if role:
-            _apply_block(s, role, block)
+            _apply_block(s, role, block, delivered=bool(answer))
 
         # --- the independent re-check (spec 7), master-side ---------------
         # The no-trust invariant wants an independent check of an `ok` claim.

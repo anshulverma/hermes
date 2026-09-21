@@ -462,6 +462,10 @@ def test_failed_turn_still_gets_a_stub_and_the_run_advances(
     findings for that phase. The turn still gets the NO_TURN stub, and the
     counter still advances in next_phase, so no phase name repeats and the run
     reaches done.
+
+    And t02 is the NEXT REVIEWER, not the owner. A turn that said nothing is
+    answered by nobody: sending the owner to reply to `_(no turn delivered …)_`
+    either produces a hallucinated reply or burns the turn.
     """
     monkeypatch.setenv(committee.ENV_MAX_TURNS, "4")
     pb = committee.CommitteePlaybook()
@@ -472,7 +476,7 @@ def test_failed_turn_still_gets_a_stub_and_the_run_advances(
     assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
 
     assert _dispatched_phases(conn, run_id) == [
-        "t01-senior_director", "t02-owner", "t03-manager", "t04-owner", "decision",
+        "t01-senior_director", "t02-manager", "t03-owner", "t04-tpm", "decision",
     ]
     assert conn.execute(
         "SELECT state FROM tickets WHERE id=?", (f"{run_id}/t01-senior_director",)
@@ -480,8 +484,8 @@ def test_failed_turn_still_gets_a_stub_and_the_run_advances(
 
     turns = _turns(run_id)
     assert [h for h, _ in turns] == [
-        _heading(1, "senior_director"), _heading(2, cast.OWNER),
-        _heading(3, "manager"), _heading(4, cast.OWNER),
+        _heading(1, "senior_director"), _heading(2, "manager"),
+        _heading(3, cast.OWNER), _heading(4, "tpm"),
     ]
     assert turns[0][1] == thread.NO_TURN
     assert turns[1][1] != thread.NO_TURN
