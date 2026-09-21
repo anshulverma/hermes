@@ -177,6 +177,13 @@ class CommitteePlaybook:
                 "revised": "",
                 "roster": {},
                 "max_turns": DEFAULT_MAX_TURNS,
+                # why the meeting stopped. Set by `_decision`, which every route
+                # to the decision phase goes through; read by
+                # `_reduce_decision`. Nothing else records this, and the first
+                # live run hit the turn cap with nothing anywhere saying so.
+                "ended": None,
+                # role -> [{"turn", "text"}], one entry per stated stance.
+                "stances": {},
             }
             self._state_by_run[run.id] = s
         return s
@@ -192,9 +199,16 @@ class CommitteePlaybook:
         s["last_speaker"] = cast.OWNER if role in (cast.OWNER, cast.JUNIOR) else role
         return name
 
-    def _decision(self, s: dict) -> str:
-        """Route to the terminal decision phase, chaired, losing nothing."""
+    def _decision(self, s: dict, ended: str) -> str:
+        """Route to the terminal decision phase, chaired, losing nothing.
+
+        ``ended`` is why the meeting stopped, decided by the caller because only
+        the caller knows which branch it took. Required rather than defaulted:
+        a new route to the decision that forgot to say why would otherwise ship
+        a silently wrong reason.
+        """
         s["current_role"] = cast.CHAIR  # `decision` never passes through _turn
+        s["ended"] = ended
         if s["delegation"]:
             # only reachable when the CAP cut the edit off; reduce("decision")
             # names it in the verdict rather than dropping it silently.
@@ -502,6 +516,14 @@ class CommitteePlaybook:
         if role:
             _apply_block(s, role, block, delivered=bool(answer))
 
+        # `stance` is not a gate -- it steers nothing, so it is not in
+        # `_apply_block`. Accumulated per role so the run's state can be read as
+        # "where everyone stands" without replaying the thread. Filed under the
+        # speaker, so an unattributable turn files nothing.
+        stance = block.get("stance")
+        if role and isinstance(stance, str):
+            s["stances"].setdefault(role, []).append({"turn": turn, "text": stance})
+
         # --- the independent re-check (spec 7), master-side ---------------
         # The no-trust invariant wants an independent check of an `ok` claim. It
         # cannot live in `verify` (see `reduce`'s docstring), so it rides on the
@@ -546,6 +568,21 @@ class CommitteePlaybook:
             "role": role,
             "turn": turn,
             "delivered": bool(answer),
+            # The prose, duplicated out of thread.md and into the reduction. A
+            # reader of this run has the transcript; a READER OF THE DATABASE
+            # had not one word of what anyone said (spec 6).
+            "body": body,
+            # Uncoerced: absent stays absent, the rule the whole block obeys. A
+            # persona that stated no stance has none, never a neutral one.
+            "stance": block.get("stance"),
+            # Both paths ride on EVERY turn reduction, which looks redundant
+            # against the decision reduction that also carries them. It is not:
+            # `view_data` runs in the SERVER process, where this instance has
+            # never seen the run and `_state_by_run` is empty, so the paths
+            # cannot be read off state there -- reductions are the only channel.
+            # Do not "optimise" these away to the decision reduction alone.
+            "artifact": s["artifact"],
+            "revised": s["revised"],
             # what the speaker ASKED for; whether it was honoured is visible in
             # the run's queue / closed / delegation state.
             "request_floor": bool(block.get("request_floor")),
@@ -624,6 +661,16 @@ class CommitteePlaybook:
             "artifact_intact": intact,
             "dropped_delegation": s["dropped_delegation"],
             "dropped_floor_requests": list(s["queue"]),
+            # Why the meeting stopped. A chair that delivered nothing outranks
+            # whatever routed the run here: that IS how this meeting ended, and
+            # it is the ending the operator has to act on. The fallback covers a
+            # `decision` state that never went through `next_phase` -- reachable
+            # only by seeding the phase directly.
+            "ended": "chair turn failed" if not body else (s["ended"] or "queue empty"),
+            # Same reason as the turn reduction: server-side `view_data` cannot
+            # read instance state.
+            "artifact": s["artifact"],
+            "revised": s["revised"],
             "error": "; ".join(errors) or None,
         })]
 
@@ -639,14 +686,16 @@ class CommitteePlaybook:
             s["delegation"] = None  # consumed exactly once, here
             return self._turn(s, cast.JUNIOR)
         if s["closed"] or s["turn"] > s["max_turns"]:
-            return self._decision(s)
+            # Mirrors the `or`: an owner that closed is why the meeting stopped,
+            # even when the cap would have stopped it on the next hop anyway.
+            return self._decision(s, "owner closed" if s["closed"] else "turn cap")
         if s["last_speaker"] != cast.OWNER:
             return self._turn(s, cast.OWNER)  # the owner answers every reviewer
         if s["opening"]:
             return self._turn(s, s["opening"].pop(0))
         if s["queue"]:
             return self._turn(s, s["queue"].pop(0))  # FIFO
-        return self._decision(s)
+        return self._decision(s, "queue empty")
 
     def is_done(self, run: Run) -> bool:
         """Done iff the chair's turn settled and reduce recorded a verdict.

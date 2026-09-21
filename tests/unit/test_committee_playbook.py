@@ -847,7 +847,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
         "turn", "opening", "queue", "delegation", "pending_action", "last_speaker",
         "closed", "verdict", "current_role", "current_turn", "dropped_delegation",
         "rechecks", "pre_edit_digest", "artifact_digest", "charge", "artifact",
-        "revised", "roster", "max_turns",
+        "revised", "roster", "max_turns", "ended", "stances",
     }
     assert s["turn"] == 1
     assert s["opening"] == list(cast.SENIORITY)
@@ -862,6 +862,8 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     assert s["dropped_delegation"] is None and s["current_role"] is None
     assert s["closed"] is False and s["verdict"] == "" and s["current_turn"] == 0
     assert s["charge"] == "" and s["artifact"] == "" and s["revised"] == ""
+    # nothing has ended yet, and nobody has stated a stance
+    assert s["ended"] is None and s["stances"] == {}
     assert pb._state(run) is s  # same run, same dict
 
 
@@ -2679,6 +2681,177 @@ def test_no_reduction_carries_needs_human_ticket_ids():
     assert len(produced) == 2
     for reduction in produced:
         assert "needs_human_ticket_ids" not in reduction.json
+
+
+# --- what a reduction carries for the view (spec 6, 7) ---------------------
+#
+# `view_data` runs in the SERVER process, where this instance has never seen the
+# run and `_state_by_run` is empty. Everything the view renders therefore has to
+# be ON a reduction -- including the two artifact paths, which look redundant on
+# a turn and are not.
+
+
+def test_a_turn_reduction_carries_the_prose_and_both_artifact_paths():
+    """The reduction is the view's only channel; `thread.md` is not in the DB."""
+    pb = _committee()
+    run = _run(phase="t03-staff_ic")
+    s = pb._state(run)
+    s.update(
+        current_role="staff_ic",
+        current_turn=3,
+        opening=[],
+        artifact="/srv/proposals/migration.md",
+        revised="/var/hermes/runs/r1/revised/migration.md",
+    )
+
+    answer = _turn_answer("The rollout plan is thin.", request_floor="yes")
+    red = pb.reduce(
+        run, "t03-staff_ic", [_finding(run, f"{run.id}/t03-staff_ic", answer)],
+        _NamedSite("local"),
+    )[0]
+
+    assert red.json["body"] == "The rollout plan is thin."
+    assert "hermes-turn" not in red.json["body"]  # stripped, as the transcript is
+    assert red.json["artifact"] == "/srv/proposals/migration.md"
+    assert red.json["revised"] == "/var/hermes/runs/r1/revised/migration.md"
+
+
+def test_a_turn_reduction_body_distinguishes_signals_only_from_silence():
+    """A delivered turn carrying no prose is not a failed turn (spec 5.2)."""
+    from playbooks.committee.playbook import _SIGNALS_ONLY
+
+    pb = _committee()
+    run = _run(phase="t04-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=4, opening=[])
+
+    signals = pb.reduce(
+        run, "t04-owner",
+        [_finding(run, f"{run.id}/t04-owner", _turn_answer("", close="no"))],
+        _NamedSite("local"),
+    )[0]
+    assert signals.json["delivered"] is True
+    assert signals.json["body"] == _SIGNALS_ONLY
+
+    s["current_turn"] = 5
+    silent = pb.reduce(run, "t05-owner", [], _NamedSite("local"))[0]
+    assert silent.json["delivered"] is False
+    assert silent.json["body"] == ""
+
+
+def test_a_turn_reduction_carries_a_stance_and_absent_stays_absent():
+    """A persona that stated no stance has none, never a neutral one (spec 7)."""
+    pb = _committee()
+    run = _run(phase="t01-senior_director")
+    s = pb._state(run)
+    s.update(current_role="senior_director", current_turn=1, opening=[])
+
+    stated = pb.reduce(
+        run, "t01-senior_director",
+        [_finding(
+            run, f"{run.id}/t01-senior_director",
+            _turn_answer("The dates are the problem.",
+                         stance="against until the dates are funded"),
+        )],
+        _NamedSite("local"),
+    )[0]
+    assert stated.json["stance"] == "against until the dates are funded"
+
+    s.update(current_role="manager", current_turn=2)
+    quiet = pb.reduce(
+        run, "t02-manager",
+        [_finding(run, f"{run.id}/t02-manager", _turn_answer("No view yet.", close="no"))],
+        _NamedSite("local"),
+    )[0]
+    assert quiet.json["stance"] is None
+    assert "stance" in quiet.json  # present-and-None, never missing
+
+    s.update(current_role="senior_director", current_turn=8)
+    pb.reduce(
+        run, "t08-senior_director",
+        [_finding(
+            run, f"{run.id}/t08-senior_director",
+            _turn_answer("Funded now; I can live with it.", stance="for, with the funding"),
+        )],
+        _NamedSite("local"),
+    )
+
+    assert s["stances"] == {
+        "senior_director": [
+            {"turn": 1, "text": "against until the dates are funded"},
+            {"turn": 8, "text": "for, with the funding"},
+        ],
+    }
+    assert "manager" not in s["stances"]
+
+
+def test_next_phase_records_why_the_meeting_stopped():
+    """Three of the four endings are decided by the branch `next_phase` takes."""
+    # the owner closed, after the opening round drained
+    _, _, closed, seen, _, _ = _drive({"t14-owner": {"close": True}})
+    assert seen[-1] == "decision"
+    assert closed["ended"] == "owner closed"
+
+    # the cap cut the discussion off
+    _, _, capped, _, _, _ = _drive(lambda phase, s: {}, max_turns=3)
+    assert capped["ended"] == "turn cap"
+
+    # nobody asked for a second turn
+    _, _, quiet, _, _, _ = _drive({})
+    assert quiet["ended"] == "queue empty"
+
+    # both at once: the close is the reason, the cap is incidental. Mirrors the
+    # `or` in next_phase, which reads `closed` first.
+    _, _, both, _, _, _ = _drive({"t14-owner": {"close": True}}, max_turns=14)
+    assert both["closed"] is True and both["turn"] > 14
+    assert both["ended"] == "owner closed"
+
+
+def test_the_decision_reduction_carries_the_ending_and_both_artifact_paths():
+    """The view reads the ending off the decision, not off instance state."""
+    pb = _committee()
+    run = _run(phase="decision")
+    s = pb._state(run)
+    # `artifact_digest` is left empty, so `artifact_intact` folds to False here.
+    # That is the subject of its own tests, not of this one.
+    s.update(
+        current_role="chair",
+        ended="turn cap",
+        artifact="/srv/proposals/migration.md",
+        revised="/var/hermes/runs/r1/revised/migration.md",
+    )
+
+    red = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Approve with changes.")],
+        _NamedSite("local"),
+    )[0]
+
+    assert red.json["ended"] == "turn cap"
+    assert red.json["artifact"] == "/srv/proposals/migration.md"
+    assert red.json["revised"] == "/var/hermes/runs/r1/revised/migration.md"
+
+
+def test_the_decision_reduction_always_names_an_ending():
+    """A chair that delivered nothing IS the ending, whatever routed the run here."""
+    pb = _committee()
+    run = _run(phase="decision")
+    pb._state(run).update(current_role="chair", ended="turn cap")
+
+    failed = pb.reduce(run, "decision", [], _NamedSite("local"))[0]
+    assert failed.json["delivered"] is False
+    assert failed.json["ended"] == "chair turn failed"
+
+    # A `decision` state that never went through next_phase -- only reachable by
+    # seeding the phase directly -- still names an ending rather than None.
+    fresh = _committee()
+    fresh_run = _run(phase="decision")
+    fresh._state(fresh_run)["current_role"] = "chair"
+    fallback = fresh.reduce(
+        fresh_run, "decision",
+        [_finding(fresh_run, f"{fresh_run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )[0]
+    assert fallback.json["ended"] == "queue empty"
 
 
 # --- registration and wiring ---------------------------------------------
