@@ -18,6 +18,7 @@ const mockRunDetail: RunDetail = {
   created_at: '2026-07-29T10:00:00Z',
   updated_at: '2026-07-29T10:05:00Z',
   config: { issue_kind: 'bug' },
+  has_view: false,
   tickets: {
     queued: 5,
     running: 2,

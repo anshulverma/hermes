@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fetchHealth, fetchRuns, fetchRun, fetchReductions, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, abandonTicket, retryTicket, setTicketPriority, acceptReduction, rejectReduction, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
+import { fetchHealth, fetchRuns, fetchRun, fetchReductions, fetchViewData, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, abandonTicket, retryTicket, setTicketPriority, acceptReduction, rejectReduction, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
 import { clearToken, setToken } from './auth';
 
 describe('API client', () => {
@@ -125,6 +125,19 @@ describe('API client', () => {
       }) as any;
 
       await expect(fetchRun('no-such-run')).rejects.toThrow('HTTP error! status: 404');
+    });
+  });
+
+  describe('playbook views', () => {
+    it('should fetch view data for a run', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ kind: 'committee', progress: { turn: 20, cap: 20 } }),
+      }) as any;
+
+      const result = await fetchViewData('run-2');
+      expect(result).toEqual({ kind: 'committee', progress: { turn: 20, cap: 20 } });
+      expect(fetch).toHaveBeenCalledWith('/api/runs/run-2/view', expect.any(Object));
     });
   });
 

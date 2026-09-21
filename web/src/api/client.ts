@@ -43,6 +43,9 @@ export type RunDetail = Run & {
   config: Record<string, any>;
   updated_at: string;
   phases: Phase[];
+  // The run's playbook ships its own view. Required, not optional: an absent
+  // field would read as "no view" by accident rather than by answer.
+  has_view: boolean;
 };
 
 export type Ticket = {
@@ -384,6 +387,17 @@ export async function fetchReductions(runId: string, phase?: string): Promise<Re
   const queryString = params.toString();
   const url = `/api/runs/${runId}/reductions${queryString ? '?' + queryString : ''}`;
   return fetchJSON<Reduction[]>(url);
+}
+
+/**
+ * Playbook-owned views. `view` is small and safe to poll; the artifacts are not,
+ * so they are a separate route — fetched on demand by the playbook's own bundle,
+ * which cannot import this module and carries its own `apiGet`. There is
+ * deliberately no `fetchViewArtifact` here: it would have no caller.
+ */
+
+export async function fetchViewData(runId: string): Promise<Record<string, any>> {
+  return fetchJSON<Record<string, any>>(`/api/runs/${runId}/view`);
 }
 
 /**
