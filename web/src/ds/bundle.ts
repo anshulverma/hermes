@@ -7,6 +7,11 @@ declare global {
   interface Window {
     React: typeof import('react');
     ReactDOM: typeof import('react-dom');
+    ReactJSXRuntime: typeof import('react/jsx-runtime');
+    HermesUI: {
+      Markdown: typeof import('../components/Markdown').default;
+      getToken: typeof import('../api/auth').getToken;
+    };
     MonoDarkDashDesignSystem_66fdfe: any;
     DSNS: any;
   }

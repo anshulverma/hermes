@@ -5,6 +5,10 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
+    // Default is the workspace root, which web/package-lock.json pins to web/ —
+    // so a test importing the built playbook view under ../playbooks is Denied.
+    // Widened by exactly one directory, not to the whole repo.
+    fs: { allow: ['.', '../playbooks'] },
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8080',
