@@ -241,8 +241,16 @@ class CommitteePlaybook:
                 max_turns = int(os.environ.get(ENV_MAX_TURNS, DEFAULT_MAX_TURNS))
             except (TypeError, ValueError):
                 max_turns = DEFAULT_MAX_TURNS
+            # `0` and `-5` parse, and mint a committee with no turns at all: the
+            # chair rules on an empty thread. That is junk the same way "soon"
+            # is junk, and gets the same answer.
+            if max_turns < 1:
+                max_turns = DEFAULT_MAX_TURNS
 
-            s["charge"] = (charge or DEFAULT_CHARGE)[:cast.CHARGE_MAX]
+            # `_clip` rather than a raw slice, so an over-long charge is cut at
+            # a word with an ellipsis instead of mid-word. `cast.goal` clips it
+            # again; the second clip is a no-op on an already-short line.
+            s["charge"] = cast._clip(charge or DEFAULT_CHARGE, cast.CHARGE_MAX)
             s["artifact"] = artifact
             s["revised"] = str(thread.revised_path(run.id, artifact))
             s["max_turns"] = max_turns

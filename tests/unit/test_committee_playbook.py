@@ -1355,10 +1355,48 @@ def test_max_turns_reads_the_env_and_falls_back_on_junk(artifact, monkeypatch):
     pb.seed(run, _NamedSite("local"))
     assert pb._state(run)["max_turns"] == 5
 
+    # Resolved ONCE, at `open`: the docstring says so and nothing else did. A
+    # mid-run environment change must not swap the cap or the artifact under a
+    # conversation that is already half-written.
+    s = pb._state(run)
+    before = (s["max_turns"], s["artifact"], s["revised"], s["charge"])
+    swapped = artifact.parent / "a-different-proposal.md"
+    swapped.write_text("# Something else\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "2")
+    monkeypatch.setenv("HERMES_COMMITTEE_ARTIFACT", str(swapped))
+    s["current_role"] = "manager"
+    pb.seed(_run(phase="t02-manager"), _NamedSite("local"))
+    assert (s["max_turns"], s["artifact"], s["revised"], s["charge"]) == before
+
+    monkeypatch.setenv("HERMES_COMMITTEE_ARTIFACT", str(artifact))
     monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "soon")
     other = _committee()
     other.seed(run, _NamedSite("local"))
     assert other._state(run)["max_turns"] == 30
+
+
+def test_a_cap_below_one_is_junk_like_any_other_junk(artifact, monkeypatch):
+    """`0` and `-5` parse, and mint a committee that never speaks.
+
+    `int("0")` does not raise, so the junk fallback above never sees it, and the
+    chair ends up ruling on an empty thread. A cap that cannot produce a single
+    turn is not a time-box, it is a typo.
+    """
+    from playbooks.committee.playbook import DEFAULT_MAX_TURNS
+
+    for value in ("0", "-5", "-1"):
+        monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", value)
+        pb = _committee()
+        run = _run(phase="open")
+        pb.seed(run, _NamedSite("local"))
+        assert pb._state(run)["max_turns"] == DEFAULT_MAX_TURNS, value
+
+    # 1 is a legitimate, if brutal, cap: one turn, then the decision.
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "1")
+    pb = _committee()
+    run = _run(phase="open")
+    pb.seed(run, _NamedSite("local"))
+    assert pb._state(run)["max_turns"] == 1
 
 
 def test_charge_defaults_when_no_goals_and_is_clipped(artifact):
@@ -1375,8 +1413,17 @@ def test_charge_defaults_when_no_goals_and_is_clipped(artifact):
     long_pb = _committee()
     long_run = _run(config={"goals": ["x" * 500, "y" * 500]}, phase="open")
     long_pb.seed(long_run, _NamedSite("local"))
-    assert len(long_pb._state(long_run)["charge"]) == cast.CHARGE_MAX
+    charge = long_pb._state(long_run)["charge"]
+    assert len(charge) == cast.CHARGE_MAX
     assert cast.CHARGE_MAX == 400
+    # Cut with an ellipsis, not with a raw slice: a charge chopped mid-word is
+    # what the worker reads as the question it is answering.
+    assert charge.endswith("…")
+
+    wordy = _committee()
+    wordy_run = _run(config={"goals": ["word " * 200]}, phase="open")
+    wordy.seed(wordy_run, _NamedSite("local"))
+    assert wordy._state(wordy_run)["charge"].endswith("word…")
 
 
 def test_turn_ticket_carries_exactly_the_frozen_payload_keys(artifact):

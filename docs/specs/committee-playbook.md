@@ -56,8 +56,14 @@ is *Decide whether to approve this proposal.*
 | `HERMES_COMMITTEE_DRIVER` | unset | Optional methodology slash command |
 
 `ARTIFACT` and `MAX_TURNS` are read once, at `open` seed time, so a mid-run change cannot swap the
-cap; an `ARTIFACT` that is unset or is not an existing readable file fails the run on the spot,
-naming the variable. `DRIVER` is read on every `driver()` call, which may run in another process.
+cap or the artifact; an `ARTIFACT` that is unset or is not an existing readable file fails the run
+on the spot, naming the variable. A `MAX_TURNS` that does not parse — *and one below `1`, which
+would mint a committee that never speaks* — falls back to `30`. `DRIVER` is read on every
+`driver()` call, which may run in another process.
+
+The charge is clipped to 400 characters (`cast.CHARGE_MAX`) with an ellipsis rather than cut
+mid-word, and a delegated `action` to 200 (`turnblock.ACTION_MAX`); the assembled goal is asserted
+under 3600.
 
 ## The turn block
 
@@ -129,6 +135,10 @@ admission before the first turn, with an error that says nothing about the commi
 - **The turn cap is literal.** At a low `HERMES_COMMITTEE_MAX_TURNS` the run stops mid-exchange —
   at `3`, on a reviewer's turn, with no owner reply after it — and goes straight to the decision.
   That is the cap working, not a lost turn.
+- **The turn cap has no upper bound, but `hermes run` does.** `master_loop` is called with
+  `max_cycles=1000` (`engine/cli.py:451`), so a `MAX_TURNS` in the high hundreds can exhaust the
+  cycle budget and leave the run `running` with no decision. Nothing rejects such a value; pick one
+  the loop can actually reach.
 - **A chair turn that produces no result ends the run `failed`** — the one deliberate non-`done`
   terminal state. A committee that produced no decision did not finish, and fabricating a verdict
   would be worse; `thread.md` survives either way.
