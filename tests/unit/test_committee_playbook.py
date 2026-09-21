@@ -315,6 +315,19 @@ _GUARDRAIL = (
 )
 
 
+def _labelled(goal: str, *lines: str) -> None:
+    """Assert each `label: value` line appears whole.
+
+    Bare containment of the values is not enough. `cast.goal` writes two paths
+    on adjacent lines, and swapping the two values in that template leaves every
+    containment assertion green -- while aiming the one write-permitted persona
+    at the original artifact under `--permission-mode bypassPermissions`. The
+    brief() test already applies this discipline; the goal tests did not.
+    """
+    for line in lines:
+        assert line in goal, line
+
+
 def test_reviewer_goal_carries_its_material_and_its_completion_condition():
     g = cast.goal(
         "tl",
@@ -324,9 +337,13 @@ def test_reviewer_goal_carries_its_material_and_its_completion_condition():
         revised=_REVISED,
     )
     assert "You are Marcus Feld, Tech Lead." in g
-    assert _ARTIFACT in g
-    assert _THREAD in g
-    assert _CHARGE in g
+    _labelled(
+        g,
+        f"The charge: {_CHARGE}",
+        f"The artifact under review: {_ARTIFACT}",
+        f"The thread: {_THREAD}",
+    )
+    assert _REVISED not in g  # a reviewer is never shown the editable copy
     assert _GUARDRAIL in g
     assert turnblock.instruction(owner=False).strip() in g
     # The speaker must not also append to thread.md: reduce is its sole writer.
@@ -348,9 +365,12 @@ def test_owner_goal_says_whose_floor_it_is_and_gets_the_owner_block():
     # model is fighting a rule it cannot see (spec 5.4).
     assert "cannot close the discussion until every member of the committee" in g
     assert turnblock.instruction(owner=True).strip() in g
-    assert _ARTIFACT in g
-    assert _THREAD in g
-    assert _CHARGE in g
+    _labelled(
+        g,
+        f"The charge: {_CHARGE}",
+        f"The artifact under review: {_ARTIFACT}",
+        f"The thread: {_THREAD}",
+    )
     assert "Hermes appends it for you" in g
     assert g.endswith(_DONE_TURN)
 
@@ -365,11 +385,17 @@ def test_junior_goal_names_the_revised_path_and_the_delegated_action():
         action="add a rollback section naming who pages",
     )
     assert "You are Alex Moreau, Software Engineer." in g
-    assert _ARTIFACT in g
-    assert _THREAD in g
-    assert _REVISED in g
-    assert _CHARGE in g
-    assert "add a rollback section naming who pages" in g
+    # Label AND value. This is the one persona permitted to write, and swapping
+    # the two path values in the template leaves bare containment green while
+    # aiming it at the original artifact under bypassPermissions.
+    _labelled(
+        g,
+        f"The charge: {_CHARGE}",
+        f"The original artifact, which stays untouched: {_ARTIFACT}",
+        f"The revised copy you edit: {_REVISED}",
+        f"The thread the request came out of: {_THREAD}",
+        "The owner delegated this to you: add a rollback section naming who pages",
+    )
     # The one file it may write, and the only file it may write.
     assert "the only file you may write" in g
     # And it already exists as a byte copy. Without that, a model can reasonably
@@ -420,10 +446,14 @@ def test_chair_goal_is_the_decision_and_calls_the_verdict_a_simulation():
         revised=_REVISED,
     )
     assert "You are Dana Whitfield, Senior Director of Engineering." in g
-    assert _ARTIFACT in g
-    assert _THREAD in g
-    assert _REVISED in g
-    assert _CHARGE in g
+    _labelled(
+        g,
+        f"The charge: {_CHARGE}",
+        f"The artifact reviewed: {_ARTIFACT}",
+        "The revised copy, which exists only if the committee delegated an "
+        f"edit: {_REVISED}",
+        f"The whole thread: {_THREAD}",
+    )
     assert "simulation" in g
     assert _GUARDRAIL in g
     assert g.endswith(_DONE_DECISION)
@@ -2195,7 +2225,15 @@ def test_reduce_junior_edit_measures_this_edit_not_drift_from_the_original(tmp_p
 
 
 def test_reduce_records_a_missing_revised_file_as_unverified(tmp_path):
-    """No revised copy at all is the loudest failure of the re-check."""
+    """No revised copy at all is the loudest failure of the re-check.
+
+    `pre_edit_digest` is a REAL digest here, so the `before and ...` clause does
+    not short-circuit and `revised.is_file()` is what has to catch this. Without
+    it, `digest` of an absent file is "", which `!= before`, and the master would
+    report `verified: True` for a file that does not exist.
+    """
+    from playbooks.committee import thread
+
     pb = _committee()
     run = _run(phase="t05-junior_ic")
     artifact = tmp_path / "proposal.md"
@@ -2209,7 +2247,9 @@ def test_reduce_records_a_missing_revised_file_as_unverified(tmp_path):
         artifact=str(artifact),
         revised=str(tmp_path / "nowhere" / "proposal.md"),
         pending_action="add a rollback paragraph",
+        pre_edit_digest=thread.digest(artifact),
     )
+    assert s["pre_edit_digest"], "the guard under test is short-circuited"
 
     reductions = pb.reduce(
         run,
