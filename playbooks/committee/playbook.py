@@ -493,8 +493,17 @@ class CommitteePlaybook:
                 # fallback: the only other digest available is the original's,
                 # and comparing to that is the unsound reading above.
                 before = s["pre_edit_digest"]
+                # An empty `before` is not a digest: `digest` of a zero-byte
+                # file is e3b0c442..., never "". It means the snapshot itself
+                # failed -- the original had vanished before any copy was made
+                # (`seed`'s OSError path) -- so there is nothing to compare
+                # against and no evidence any edit landed. Without this clause
+                # a worker that INVENTED the revised file from nothing would
+                # hash to something != "" and be reported as verified, which
+                # inverts the one master-side no-trust check (spec 7).
                 verified = bool(
-                    revised is not None
+                    before
+                    and revised is not None
                     and revised.is_file()
                     and thread.digest(revised) != before
                 )

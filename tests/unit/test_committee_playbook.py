@@ -1898,6 +1898,50 @@ def test_reduce_records_a_missing_revised_file_as_unverified(tmp_path):
     assert reductions[0].json["error"] is None  # an absent file is an answer, not a crash
 
 
+def test_reduce_treats_a_missing_pre_edit_snapshot_as_a_failed_recheck(tmp_path):
+    """An empty `pre_edit_digest` is a FAILED snapshot, and can only be a failure.
+
+    `seed` leaves it empty in exactly one case: the original vanished before any
+    copy could be made, so nothing was hashed. If the worker then CREATES the
+    revised file out of nothing, its digest is not "" -- and comparing the two
+    reports the fabrication as a verified edit, which inverts the one
+    master-side no-trust check there is. "" is unreachable on the healthy path:
+    the digest of a zero-byte file is e3b0c442..., never "".
+    """
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    revised = thread.revised_path(run.id, "proposal.md")
+    revised.write_text("a revised copy the worker invented from nothing\n")
+
+    s = pb._state(run)
+    s.update(
+        current_role="junior_ic",
+        current_turn=5,
+        opening=[],
+        artifact=str(tmp_path / "proposal.md"),  # gone before seed could copy it
+        revised=str(revised),
+        pending_action="add a rollback paragraph",
+        pre_edit_digest="",  # what seed's OSError path leaves behind
+    )
+
+    reductions = pb.reduce(
+        run,
+        "t05-junior_ic",
+        [_finding(run, f"{run.id}/t05-junior_ic", "Added a rollback paragraph.")],
+        _NamedSite("local"),
+    )
+
+    assert thread.digest(revised) != ""  # the invented file hashes perfectly well
+    assert reductions[0].json["verified"] is False, \
+        "an invented revised copy was reported as a verified edit"
+    assert reductions[0].json["error"] is None
+    assert s["rechecks"] == [
+        {"turn": 5, "action": "add a rollback paragraph", "verified": False}
+    ]
+
+
 # --- reduce: the decision (spec 5.2, 5.3, criteria 7, 8, 9) ---------------
 
 
