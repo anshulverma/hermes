@@ -912,6 +912,18 @@ def test_regression_a_delegation_is_consumed_exactly_once_and_never_lost():
         "open", "t01-senior_director", "t02-owner", "t03-junior_ic", "decision",
     ], both_seen
 
+    # The boundary itself: `turn <= max_turns`, not `<`. On the LAST available
+    # turn the edit still happens. With `<` the delegation is dropped one turn
+    # early and the committee spends that turn on another reviewer instead --
+    # a change no other case in this file can see.
+    _, _, just, just_seen, _ = _drive(
+        {"t02-owner": {"delegate": True, "action": "just in time"}}, max_turns=3
+    )
+    assert just_seen == [
+        "open", "t01-senior_director", "t02-owner", "t03-junior_ic", "decision",
+    ], just_seen
+    assert just["dropped_delegation"] is None
+
     _, _, capped, capped_seen, capped_sp = _drive(
         {"t02-owner": {"delegate": True, "action": "too late"}}, max_turns=2
     )
@@ -1461,6 +1473,8 @@ def test_turn_ticket_carries_exactly_the_frozen_payload_keys(artifact):
 
 def test_junior_seed_byte_copies_the_original_and_leaves_it_untouched(artifact):
     """§5.5: the revised copy is in place before the junior IC's worker runs."""
+    import hashlib
+
     from playbooks.committee import cast, thread
 
     pb = _committee()
@@ -1478,6 +1492,11 @@ def test_junior_seed_byte_copies_the_original_and_leaves_it_untouched(artifact):
     revised = thread.revised_path(run.id, str(artifact))
     assert revised.read_bytes() == original
     assert artifact.read_bytes() == original
+    # The §7 snapshot: taken AFTER ensure_revised, over the COPY. On this first
+    # delegation the copy is byte-identical to the original, so the digest is
+    # the original's -- which is the only thing that makes the two readings
+    # distinguishable on the second delegation (see the test below).
+    assert s["pre_edit_digest"] == hashlib.sha256(original).hexdigest()
     t = tickets[0]
     assert set(t.payload) == {"role", "title", "goal", "kind", "action"}
     assert t.payload["role"] == "junior_ic"
@@ -1488,6 +1507,8 @@ def test_junior_seed_byte_copies_the_original_and_leaves_it_untouched(artifact):
 
 def test_a_second_junior_seed_keeps_the_edited_revised_copy(artifact):
     """ensure_revised copies only when absent: a later edit builds on the first."""
+    import hashlib
+
     from playbooks.committee import cast, thread
 
     pb = _committee()
@@ -1508,6 +1529,11 @@ def test_a_second_junior_seed_keeps_the_edited_revised_copy(artifact):
 
     assert revised.read_text(encoding="utf-8") == "# Proposal\n\nShip the thing, but smaller.\n"
     assert artifact.read_text(encoding="utf-8") == "# Proposal\n\nShip the thing.\n"
+    # The second snapshot is of the EDITED copy, not of the original: comparing
+    # a later edit against the original reports `verified: true` for every one
+    # of them, including an edit that changed nothing (spec §7).
+    assert s["pre_edit_digest"] == hashlib.sha256(revised.read_bytes()).hexdigest()
+    assert s["pre_edit_digest"] != hashlib.sha256(artifact.read_bytes()).hexdigest()
 
 
 def test_a_junior_seed_survives_an_artifact_deleted_mid_run(artifact):
