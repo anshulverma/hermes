@@ -1,0 +1,346 @@
+[
+ {
+  "phase": "t01-senior_director",
+  "kind": "turn",
+  "json": {
+   "role": "senior_director",
+   "turn": 1,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t02-owner",
+  "kind": "turn",
+  "json": {
+   "role": "owner",
+   "turn": 2,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": true,
+   "close": false,
+   "action": "Rewrite \u00a72 \"When to reach for it\" so each trigger is a measurable threshold with a named declarer, folding the organizational-boundary trigger into the zone/credential-domain trigger and deleting the ",
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t03-junior_ic",
+  "kind": "turn",
+  "json": {
+   "role": "junior_ic",
+   "turn": 3,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": true,
+   "error": null
+  }
+ },
+ {
+  "phase": "t04-manager",
+  "kind": "turn",
+  "json": {
+   "role": "manager",
+   "turn": 4,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t05-owner",
+  "kind": "turn",
+  "json": {
+   "role": "owner",
+   "turn": 5,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": true,
+   "close": false,
+   "action": "Rewrite \u00a714.1 \u2014 delete the batch-submit claim (it is federation-build cost, not a seam), restate the remaining seam as the events-cursor invariant (monotonic, never pruned within a run), and flag the ",
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t06-junior_ic",
+  "kind": "turn",
+  "json": {
+   "role": "junior_ic",
+   "turn": 6,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": true,
+   "error": null
+  }
+ },
+ {
+  "phase": "t07-tpm",
+  "kind": "turn",
+  "json": {
+   "role": "tpm",
+   "turn": 7,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t08-owner",
+  "kind": "turn",
+  "json": {
+   "role": "owner",
+   "turn": 8,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": true,
+   "close": false,
+   "action": "Delete the false \"same endpoint the UI uses to inject externally-created tickets\" claim from \u00a74's Push bullet \u2014 state plainly that the shard-submit endpoint does not exist and is federation build cost",
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t09-junior_ic",
+  "kind": "turn",
+  "json": {
+   "role": "junior_ic",
+   "turn": 9,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": true,
+   "error": null
+  }
+ },
+ {
+  "phase": "t10-pm",
+  "kind": "turn",
+  "json": {
+   "role": "pm",
+   "turn": 10,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t11-owner",
+  "kind": "turn",
+  "json": {
+   "role": "owner",
+   "turn": 11,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": true,
+   "close": false,
+   "action": "Record the amendments already conceded on the floor \u2014 in \u00a72 restore trigger 2's reachability half as a discovered predicate rather than a numeric threshold and add the two preconditions (no deputy wit",
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t12-junior_ic",
+  "kind": "turn",
+  "json": {
+   "role": "junior_ic",
+   "turn": 12,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": true,
+   "error": null
+  }
+ },
+ {
+  "phase": "t13-tl",
+  "kind": "turn",
+  "json": {
+   "role": "tl",
+   "turn": 13,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t14-owner",
+  "kind": "turn",
+  "json": {
+   "role": "owner",
+   "turn": 14,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": true,
+   "close": false,
+   "action": "Cut the delegation half from the spec \u2014 \u00a75, \u00a78, the delegation ledger, capability advertisement, the shard-submit endpoint, and \u00a74's SSH provisioning of deputies \u2014 keep the `nodes` registry, bound wha",
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t15-junior_ic",
+  "kind": "turn",
+  "json": {
+   "role": "junior_ic",
+   "turn": 15,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": true,
+   "error": null
+  }
+ },
+ {
+  "phase": "t16-staff_ic",
+  "kind": "turn",
+  "json": {
+   "role": "staff_ic",
+   "turn": 16,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t17-owner",
+  "kind": "turn",
+  "json": {
+   "role": "owner",
+   "turn": 17,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": true,
+   "close": false,
+   "action": "In DESIGN.md's \"Control plane & status\" section (lines 575-579), delete the false claim that a batch-submit endpoint for externally-created tickets is \"already needed by the UI\" \u2014 sub-project 3 has no",
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t18-junior_ic",
+  "kind": "turn",
+  "json": {
+   "role": "junior_ic",
+   "turn": 18,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": true,
+   "error": null
+  }
+ },
+ {
+  "phase": "t19-data_scientist",
+  "kind": "turn",
+  "json": {
+   "role": "data_scientist",
+   "turn": 19,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": false,
+   "action": null,
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "t20-owner",
+  "kind": "turn",
+  "json": {
+   "role": "owner",
+   "turn": 20,
+   "delivered": true,
+   "request_floor": false,
+   "delegate": false,
+   "close": true,
+   "action": null,
+   "verified": null,
+   "error": null
+  }
+ },
+ {
+  "phase": "decision",
+  "kind": "decision",
+  "json": {
+   "verdict": "I've read the artifact, the revised copy, and all twenty turns.\n\n---\n\n# Decision \u2014 Hermes federation layer\n\n**Chair: Dana Whitfield, Senior Director of Engineering**\n**Charge: fund now / defer again / drop**\n\n## Verdict: do not approve. Drop.\n\n`docs/specs/federation-future.md` is retired whole \u2014 frame included, not renamed, not re-scoped, not deferred a third time. Nothing is funded. The successor, if one exists, is a new proposal with a new author.\n\nI opened this review with defer, a date and a named owner. I am ruling against my own turn-01 position, and I'll say why in the record rather than let it be inferred.\n\n---\n\n## Why defer no longer survives\n\nMy turn-01 defer rested on three things. All three are gone.\n\n**1. \"The option is already bought.\"** It wasn't, and worse, the bill was being quietly written against a signed half. Ruth Delgado asked the cheapest question in the review \u2014 is \u00a714.1 actually free \u2014 and the answer was no: batch-submit was never in sub-project 3's scope, the SPA does not create tickets, and \"already needed by the UI\" was a cover story that had already propagated into someone else's section of `DESIGN.md`. A single false clause migrated on its own, uncorrected, until a manager asked. That is the behaviour of this document, demonstrated at sentence scale.\n\n**2. \"Which trigger fires first, and who declares it.\"** Maya Okonkwo answered honestly: trigger 2, and then Marcus Feld showed the spec's own provisioning path does not survive it. \u00a74 stood deputies up over SSH; trigger 2 is *there exists a crew the root cannot SSH to*. Followed honestly, delegation's bootstrap terminates in the team on the far side installing Hermes themselves \u2014 which is Elena Vargas's option two, and the delegation half never gets to exist. Three independent derivations \u2014 architectural, product, and the owner's own \u2014 landed on the same cut. That is the strongest evidence this review produced, and it was produced after I voted.\n\n**3. \"The yeses aren't in this room.\"** I raised this as a scheduling risk. Priya Raman showed it is a correctness problem in the document. There is no read-only credential in this system: one shared secret per node, no TTL, no per-actor scoping, every holder with full control-plane authority, `GET` token-gated on every non-loopback bind by construction, scoped tokens explicitly out of scope, and non-loopback deployment requiring a per-zone trusted auth proxy as a stated **must**. \u00a74 asserts a scoping property the system does not have, and fourteen turns walked past it. The cut to pull-only removed two of Elena's three clauses and left the credential clause untouched \u2014 the one clause any security org reads. My turn-01 objection is not retired. It is the same size it was, and it attaches to the aggregation half exactly as much as to the delegation half.\n\nAnd the finding that kills the *mechanism*, not the argument: **six delegations, zero bytes.** Maya named that failure mode in turn 11 and then demonstrated it four more times. A revised copy exists in the run directory; the repository file is 211 lines, mtime 2026-07-29, tree clean, and every sentence this committee believes it retired is still in it. \"Defer a smaller document\" is a proposal about a capability this review has now disproved it has. I will not fund a deferral whose enforcement mechanism has a measured yield of zero.\n\nAdd Tobias Lin's arithmetic and the exit disappears too: the demand metric has no numerator definition, a denominator of one, no period and no channel, and reaches usable power no earlier than ~Q2 2027 on a rate nobody has measured. It can open the question; it cannot close it. A deferral gated on a test that cannot return a decisive null is a deferral with no exit \u2014 which is what I said in turn 01, arriving as arithmetic rather than as my hunch.\n\n**On funding now:** nobody argued for it, including the owner, from turn 02 onward. No named user for delegation, no provisioning path, an unsupported safety claim, an unpriced credential intake, and an unknowable success criterion. Sam Iyer's schedule put the earliest honest production date at Q4 2027, and Maya confirmed nothing breaks before then that only deputies fix. It is not close.\n\n## On the split vote\n\nFour defer, four drop, split chronologically. I am not treating that as a tie.\n\nRuth Delgado and Sam Iyer voted defer under conditions strictly weaker than drop \u2014 Ruth would not start the build this half under any reading, and Sam's expiry now has nothing to expire. I do not require written re-confirmation from either.\n\nElena Vargas is the one member who loses something real, and I'm not going to paper over it. The aggregation half she argued for took three downgrades after she spoke: \"one answer\" became \"one view\" under the no-completeness bound; the full-authority token went back into the ask she said nobody signs; and both its cost and its success criterion were shown to be unknown. Elena \u2014 your product instinct was right, the cut you proposed was correct, and the thing left standing is not the thing you were advocating. Aggregation re-enters as **your** proposal, authored by someone who is not Maya, gated on the survey and priced by Ruth, or it doesn't re-enter. If you think the downgrades don't change your position, bring it to me directly; I'll hear it as a new proposal, not as an appeal on this artifact.\n\nMaya Okonkwo: you argued yourself out of your own proposal across twenty turns, retracted an endorsement in the record rather than quietly, and insisted the drop be written on reasons that hold whether or not the survey vindicates you. That is the most useful thing anyone did in this room. It is noted, and it counts in your favour, not against.\n\n## What the drop does not rest on\n\nNot on \"nobody in this company has a delegation problem.\" Ifeoma Adeyemi's survey has not come back, and Maya is right that a decision written on an unreturned result reads as refuted the moment someone turns up. The ruling rests on findings that are true today:\n\n- no named user for delegation;\n- a provisioning path that fails in the only trigger the spec expects, and fails *into* pull;\n- `verify`'s contract is a contract about a `site`, nothing defines a `site` for hosts you do not own, the default is deny, and `verify_recheck_optional` lets the untrusted node flip the fail-safe into a pass \u2014 a safety claim the document cannot support;\n- \u00a74 asserts a token scoping property `DESIGN.md` explicitly does not provide;\n- the review's own correction mechanism produced zero bytes;\n- no measurable success criterion, with an empty baseline population that shipping would destroy.\n\nThe survey still runs. It is now input to a possible successor and to my own review, not a condition on this decision.\n\n## What survives, with names\n\nMaya's closing condition is adopted as mine: **the chair verifies the files, not the thread.** Nothing below is recorded as done until I have seen it in the repository. The revised copy in the run directory is a record of intent, not a landed change, and it is not to be applied as a whole \u2014 the surviving items get extracted by hand.\n\n| Item | Owner | Date |\n|---|---|---|\n| `DESIGN.md:575-579` \u2014 delete batch-submit and \"both already needed by the UI\" | Ruth assigns, repo access required; I verify the diff | this week |\n| `verify`/`site` contract note into `DESIGN.md` \u2014 written Priya's way: a contract about a `site`, undefined for hosts you don't own, default deny | Marcus Feld | with the bus-factor week |\n| \u00a713 driver-as-Hermes, one line into `DESIGN.md` | folded into the above | same |\n| Event-stream invariant into sub-project 3's DoD \u2014 worded about **the stream**, not \"within a run\", rationale carried in the test name | Ruth assigns to sub-project 3; I verify before it closes | before sub-project 3 closes |\n| Incarnation identifier / max-id detector \u2014 **new surface, priced by Ruth**, not inferred into a signed half. There is no free fallback; staleness-on-health does not detect it | Ruth Delgado | when aggregation is priced |\n| Survey, both questions \u2014 dispatch tree *and* cross-run status aggregation | Ifeoma Adeyemi | readout Fri Oct 9 |\n| Three saturation ratios, definitions written before the code, including the writer-ratio numerator (union-of-blocked-time or one named connection \u2014 not a naive sum) and where on [0,1] we act | Tobias Lin defines, Ifeoma implements | definitions in 20 min; two weeks Oct 12\u201323 |\n| Bus factor on lease and dispatch \u2014 make it legible to a third person | Marcus Feld | one week, this half |\n\nThe three ratios are recorded as **flat-engine health**, funded on Ruth's justification, and that is the only justification that appears next to them. If they enter the record as federation instrumentation they will come back attached to the fourth version of this document.\n\n## What I am cancelling\n\n- **Sam's 2027-01-15 checkpoint.** Nothing expires. Closed.\n- **The demand count as a gate.** Kept only as Tobias's one-directional signal \u2014 a named ask opens the question, zero closes nothing \u2014 routed to Sam Iyer, never counted by the proposal's author. No dashboard, no denominator theatre.\n- **Maya's security lead-time question.** Released. There is no intake to size. If aggregation is written, the question gets asked in its true form \u2014 unscoped full-authority token plus a per-zone trusted auth proxy \u2014 and not before.\n- **Alex Moreau's \u00a77 flag.** Moot; the orphaned semaphore dies with the document. Alex: six flags raised, five answered late or not at all, and every one was correct. That is on the room, not on you.\n\n## Two cautions, recorded\n\n**Do not record the surviving half as cheap.** I am not accepting \"a read-layer item sized against sub-project 3.\" With the credential model as built, an unstated `verify` contract across ownership boundaries, and a cursor with no incarnation, the aggregator's cost is unknown and its security intake is the one I flagged in turn 01, undiminished. Unknown and labelled is acceptable. \"The expensive parts were the ones we cut\" is how this returns a fourth time.\n\n**Do not record it as measurable either.** Nobody in this room can currently write its success criterion.\n\n## What I'll say in my own review\n\nWe ran three reviews and two deferrals on a document that produced no user, no landed byte, and one safety claim its own codebase contradicts. The yield of this review is not a federation layer. It is three findings about the engine we actually ship \u2014 a bus factor of two on lease and dispatch, an undefined `verify` contract that bites the first time anything crosses an ownership boundary, and a false seam claim sitting in the live design doc \u2014 plus three interpretable health ratios and a week of survey. Those are cheap, they are real today, and they serve the only version of this that makes Hermes the thing three orgs standardise on: a flat engine that more than one org can actually adopt. Every engineer-quarter we did not spend on deputies is one spent there.\n\n---\n\n**This verdict is a simulation.** It is a role-played committee ruling produced from the thread and the artifact, not an approval, a funding decision, or an authorisation of any kind. No file was written, no repository was touched, and nothing here binds any real person, team, or budget. Any real decision needs the actual owners in an actual room.\n\n- re-check of turn 03 (junior_ic): APPLIED \u2014 delegated: Rewrite \u00a72 \"When to reach for it\" so each trigger is a measurable threshold with a named declarer, folding the organizational-boundary trigger into the zone/credential-domain trigger and deleting the \n\n- re-check of turn 06 (junior_ic): APPLIED \u2014 delegated: Rewrite \u00a714.1 \u2014 delete the batch-submit claim (it is federation-build cost, not a seam), restate the remaining seam as the events-cursor invariant (monotonic, never pruned within a run), and flag the \n\n- re-check of turn 09 (junior_ic): APPLIED \u2014 delegated: Delete the false \"same endpoint the UI uses to inject externally-created tickets\" claim from \u00a74's Push bullet \u2014 state plainly that the shard-submit endpoint does not exist and is federation build cost\n\n- re-check of turn 12 (junior_ic): APPLIED \u2014 delegated: Record the amendments already conceded on the floor \u2014 in \u00a72 restore trigger 2's reachability half as a discovered predicate rather than a numeric threshold and add the two preconditions (no deputy wit\n\n- re-check of turn 15 (junior_ic): APPLIED \u2014 delegated: Cut the delegation half from the spec \u2014 \u00a75, \u00a78, the delegation ledger, capability advertisement, the shard-submit endpoint, and \u00a74's SSH provisioning of deputies \u2014 keep the `nodes` registry, bound wha\n\n- re-check of turn 18 (junior_ic): APPLIED \u2014 delegated: In DESIGN.md's \"Control plane & status\" section (lines 575-579), delete the false claim that a batch-submit endpoint for externally-created tickets is \"already needed by the UI\" \u2014 sub-project 3 has no\n\nThis verdict is a simulation produced by AI personas reading one file. It is not an approval, not a sign-off, and carries no authority: a human decides.",
+   "delivered": true,
+   "rechecks": [
+    {
+     "turn": 3,
+     "action": "Rewrite \u00a72 \"When to reach for it\" so each trigger is a measurable threshold with a named declarer, folding the organizational-boundary trigger into the zone/credential-domain trigger and deleting the ",
+     "verified": true
+    },
+    {
+     "turn": 6,
+     "action": "Rewrite \u00a714.1 \u2014 delete the batch-submit claim (it is federation-build cost, not a seam), restate the remaining seam as the events-cursor invariant (monotonic, never pruned within a run), and flag the ",
+     "verified": true
+    },
+    {
+     "turn": 9,
+     "action": "Delete the false \"same endpoint the UI uses to inject externally-created tickets\" claim from \u00a74's Push bullet \u2014 state plainly that the shard-submit endpoint does not exist and is federation build cost",
+     "verified": true
+    },
+    {
+     "turn": 12,
+     "action": "Record the amendments already conceded on the floor \u2014 in \u00a72 restore trigger 2's reachability half as a discovered predicate rather than a numeric threshold and add the two preconditions (no deputy wit",
+     "verified": true
+    },
+    {
+     "turn": 15,
+     "action": "Cut the delegation half from the spec \u2014 \u00a75, \u00a78, the delegation ledger, capability advertisement, the shard-submit endpoint, and \u00a74's SSH provisioning of deputies \u2014 keep the `nodes` registry, bound wha",
+     "verified": true
+    },
+    {
+     "turn": 18,
+     "action": "In DESIGN.md's \"Control plane & status\" section (lines 575-579), delete the false claim that a batch-submit endpoint for externally-created tickets is \"already needed by the UI\" \u2014 sub-project 3 has no",
+     "verified": true
+    }
+   ],
+   "artifact_intact": true,
+   "dropped_delegation": null,
+   "dropped_floor_requests": [],
+   "error": null
+  }
+ }
+]
