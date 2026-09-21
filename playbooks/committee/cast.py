@@ -374,6 +374,20 @@ def goal(
             "The revised copy, which exists only if the committee delegated an "
             f"edit: {revised}\n"
             f"The whole thread: {thread}\n\n"
+            # The first live run: the chair checked the repository file, found
+            # it unchanged, called six landed delegations "zero bytes" and ruled
+            # partly against the proposal on that reading. An unmodified
+            # original is criterion 6 (`docs/specs/committee-playbook.md:154`),
+            # the guarantee _GUARDRAIL below exists to keep -- but the guardrail
+            # tells the chair what IT may not do, not how to read a repository
+            # that no one was allowed to touch. Say it outright, before the
+            # chair infers a broken edit mechanism from a working one.
+            "The original artifact is never modified: every delegated edit "
+            "landed in the revised copy named above, and that is by design — "
+            "an unchanged original is the guarantee holding, not an edit that "
+            "failed. What this committee produces is a recommendation plus "
+            "that copy, not a landed change. Judge the delegated edits by the "
+            "copy.\n\n"
             # No "weigh what was said, name who is owed an answer, say what
             # would change your mind": that is a review procedure, and spec 9
             # puts methodology behind HERMES_COMMITTEE_DRIVER. The two carve-outs
