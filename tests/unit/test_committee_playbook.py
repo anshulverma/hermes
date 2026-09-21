@@ -2053,3 +2053,150 @@ def test_no_reduction_carries_needs_human_ticket_ids():
     assert len(produced) == 2
     for reduction in produced:
         assert "needs_human_ticket_ids" not in reduction.json
+
+
+# --- registration and wiring ---------------------------------------------
+
+
+def test_registration_importing_the_package_registers_committee():
+    """`import playbooks.committee` is the whole registration step.
+
+    The package __init__ re-exports the playbook module, whose bottom-of-file
+    register() call is the import side-effect. The registry holds one instance
+    (engine/playbook.py:52), which is what spec 5.2 relies on for per-run state.
+    """
+    import playbooks.committee  # noqa: F401
+
+    from engine import playbook as _playbook
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    pb = _playbook.load("committee")
+    assert isinstance(pb, CommitteePlaybook)
+    assert pb.name == "committee"
+    assert _playbook.load("committee") is pb
+
+
+def test_registration_instance_satisfies_the_playbook_protocol():
+    """All eight methods plus name/phases are present on the registered object."""
+    import playbooks.committee  # noqa: F401
+
+    from engine import playbook as _playbook
+    from engine.playbook import Playbook
+
+    pb = _playbook.load("committee")
+    assert isinstance(pb, Playbook)
+    for method in (
+        "seed",
+        "payload_schema",
+        "result_schema",
+        "driver",
+        "reduce",
+        "verify",
+        "next_phase",
+        "is_done",
+    ):
+        assert callable(getattr(pb, method)), method
+
+
+def test_registration_phases_are_open_then_decision():
+    """phases[0] is the phase the CLI seeds (engine/cli.py:385)."""
+    import playbooks.committee  # noqa: F401
+
+    from engine import playbook as _playbook
+
+    pb = _playbook.load("committee")
+    assert pb.phases == ["open", "decision"]
+    assert pb.phases[0] == "open"
+
+
+def test_registration_resolves_through_playbook_modules_env(tmp_path):
+    """HERMES_PLAYBOOK_MODULES=playbooks.committee resolves the playbook with no engine edit.
+
+    _load_playbook_site_agent calls _import_registration_modules() (engine/cli.py:226)
+    before playbook.load(playbook_name) (engine/cli.py:228), and that importer walks
+    config.playbook_modules() (engine/cli.py:173-179). So the env var is the whole
+    wiring -- acceptance criteria 11 and 13 together.
+
+    A subprocess, because sys.modules must start clean: in-process, another test in
+    this file has already imported playbooks.committee.playbook, which would make the
+    package __init__ re-export look unnecessary.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    workspace = Path(__file__).parent.parent.parent
+
+    script = f"""
+import sys
+
+sys.path.insert(0, r"{workspace}")
+
+import argparse
+
+from engine.cli import _load_playbook_site_agent
+from engine.playbook import Playbook
+
+assert "playbooks.committee" not in sys.modules, "committee was pre-imported"
+
+args = argparse.Namespace(playbook="committee", site="local", agent="claude")
+pb, st, ag = _load_playbook_site_agent(args)
+
+assert pb.name == "committee", pb.name
+assert type(pb).__name__ == "CommitteePlaybook", type(pb).__name__
+assert pb.phases == ["open", "decision"], pb.phases
+assert isinstance(pb, Playbook)
+assert st.name == "local", st.name
+assert ag.name == "claude", ag.name
+
+print("OK")
+"""
+
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    # Drop every inherited HERMES_* var: the real HERMES_HOME/local is a
+    # per-developer auto-discovery directory (engine/cli.py:139-171) and must
+    # not be imported into this assertion.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_")}
+    env.update(
+        {
+            "PYTHONPATH": str(workspace),
+            "HERMES_HOME": str(home),
+            "HERMES_PLAYBOOK_MODULES": "playbooks.committee",
+        }
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, f"{result.stderr}\n{result.stdout}"
+    assert result.stdout.strip() == "OK"
+
+
+def test_wiring_adds_nothing_to_engine_server_or_web():
+    """Acceptance criterion 13: engine/, server/ and web/ are unmodified.
+
+    Dexter and research are wired by a hardcoded import in _load_playbook_site_agent
+    (engine/cli.py:211-212). Committee is deliberately NOT, because that is an engine
+    edit. This fails the moment someone "fixes" the wiring that way.
+    """
+    from pathlib import Path
+
+    workspace = Path(__file__).parent.parent.parent
+
+    hits = []
+    for tree in ("engine", "server", "web/src"):
+        for path in sorted((workspace / tree).rglob("*")):
+            if not path.is_file() or path.suffix not in (".py", ".sql", ".ts", ".tsx"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace").lower()
+            if "committee" in text:
+                hits.append(str(path.relative_to(workspace)))
+
+    assert hits == [], f"committee is named inside engine/server/web: {hits}"

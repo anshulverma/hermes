@@ -59,6 +59,7 @@ def test_package_discovery_finds_all_subpackages():
         "engine.db",
         "agents.claude",
         "playbooks.dexter",
+        "playbooks.committee",
     }
 
     missing = required - packages_set
