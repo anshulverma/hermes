@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 
 from engine import playbook as _playbook
 from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
-from playbooks.committee import cast, thread, turnblock
+from playbooks.committee import cast, thread, turnblock, view
 
 if TYPE_CHECKING:  # avoid import cycle
     from engine.site import Site
@@ -705,6 +705,19 @@ class CommitteePlaybook:
         produced no decision did not finish.
         """
         return run.phase == "decision" and bool(self._state(run)["verdict"])
+
+    # --- the view seam (spec §4) ----------------------------------------
+    # Optional and duck-typed: never declared on the Playbook Protocol, so
+    # adding them cannot un-conform dexter or research, and the engine never
+    # calls them. The server discovers them with getattr.
+
+    def view_asset(self) -> Path | None:
+        """Absolute path to the built committee view bundle, or None."""
+        return view.view_asset()
+
+    def view_data(self, run: Run, reductions: list[Reduction]) -> dict:
+        """Everything the committee view renders, from reductions alone."""
+        return view.view_data(run, reductions)
 
 
 _playbook.register("committee", CommitteePlaybook())

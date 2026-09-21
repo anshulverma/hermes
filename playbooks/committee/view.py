@@ -289,3 +289,18 @@ def _cap() -> int:
     except (TypeError, ValueError):
         return DEFAULT_MAX_TURNS
     return cap if cap >= 1 else DEFAULT_MAX_TURNS
+
+
+# --- the built bundle ------------------------------------------------------
+
+# Committed next to the source it is built from. Absolute and inside the
+# package, so the server never derives a path from a URL. Reached BY PATH and
+# never by import: this module shadows the `view/` directory beside it, so
+# `playbooks.committee.view` is this file and there is no package to import
+# `dist` out of.
+DIST = Path(__file__).resolve().parent / "view" / "dist" / "committee.umd.js"
+
+
+def view_asset() -> Path | None:
+    """Absolute path to the built UMD bundle, or None when it is not built."""
+    return DIST if DIST.exists() else None

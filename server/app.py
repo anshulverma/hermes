@@ -16,6 +16,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 from engine import config
 from engine.db.migrate import connect
+from engine.models import Reduction
 from engine.queue import (
     TERMINAL_RUN_STATES,
     apply_run_action,
@@ -38,6 +39,42 @@ def is_loopback(bind: str | None) -> bool:
     if bind is None:
         return True
     return bind in ("127.0.0.1", "localhost", "::1")
+
+
+# Playbook-owned views (spec §4): two optional duck-typed methods on a playbook
+# object, never on the Playbook Protocol, so a playbook without them is simply
+# a playbook with no view. The kill switch is one env var so an operator binding
+# past loopback can stop executing playbook-authored JS in the browser (spec §9).
+VIEWS_ENV = "HERMES_PLAYBOOK_VIEWS"
+
+
+def view_playbook(name: str):
+    """The registered playbook behind ``name``'s view, or None if there is none.
+
+    One function so the four call sites cannot disagree about what "has a view"
+    means. None covers every way a view can be absent: the kill switch, a name
+    that is not in the registry, a playbook without the seam, and a seam whose
+    built asset is not on disk.
+
+    The name is a registry key and never a path component, which is the whole
+    traversal defence: a name carrying ``../`` misses the registry and gets the
+    same None as any other unknown name.
+    """
+    if os.environ.get(VIEWS_ENV) == "0":
+        return None
+    from engine import playbook as playbook_module
+    try:
+        obj = playbook_module.load(name)
+    except KeyError:
+        return None
+    if not callable(getattr(obj, "view_asset", None)):
+        return None
+    if not callable(getattr(obj, "view_data", None)):
+        return None
+    asset = obj.view_asset()
+    if asset is None or not Path(asset).exists():
+        return None
+    return obj
 
 
 # A subject is a list-row heading, so it is one line and bounded even when the
@@ -302,6 +339,7 @@ def create_app(bind: str | None = None) -> FastAPI:
                 "updated_at": updated_at,
                 "tickets": tickets,
                 "phases": phases,
+                "has_view": view_playbook(playbook_name) is not None,
             }
         finally:
             conn.close()
@@ -1982,5 +2020,102 @@ def create_app(bind: str | None = None) -> FastAPI:
     assets_dir = dist_dir / "assets"
     if assets_dir.exists() and assets_dir.is_dir():
         app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
+
+    # --- playbook-owned views (spec §4) ---------------------------------
+
+    @app.get("/api/playbooks/{name}/view.js")
+    def get_playbook_view_asset(
+        name: str, _: None = Depends(require_auth_read)
+    ) -> FileResponse:
+        """Serve a playbook's built view bundle."""
+        obj = view_playbook(name)
+        if obj is None:
+            raise HTTPException(status_code=404, detail=f"Playbook {name!r} has no view")
+        return FileResponse(
+            str(obj.view_asset()),
+            media_type="text/javascript",
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+
+    @app.get("/api/runs/{run_id}/view")
+    def get_run_view(run_id: str, _: None = Depends(require_auth_read)) -> dict[str, Any]:
+        """Everything the run's playbook view renders.
+
+        ``view_data`` runs HERE, in the server process: it can read neither the
+        playbook's instance state nor the master's environment. A playbook that
+        falls back to an env var for something no reduction carries gets THIS
+        process's value, so a server started without the env the master ran with
+        shows that field's default. Known, and not papered over here -- the fix
+        is to put the value on a reduction, in the playbook.
+        """
+        home = config.resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            try:
+                run = load_run(conn, run_id)
+            except ValueError:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+            obj = view_playbook(run.playbook)
+            if obj is None:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} has no view")
+            rows = conn.execute(
+                """SELECT id, run_id, phase, kind, json, review_state
+                   FROM reductions WHERE run_id=? ORDER BY id""",
+                (run_id,),
+            ).fetchall()
+            reductions = [
+                Reduction(kind=r[3], json=json.loads(r[4]), id=r[0], run_id=r[1],
+                          phase=r[2], review_state=r[5])
+                for r in rows
+            ]
+            return obj.view_data(run, reductions)
+        finally:
+            conn.close()
+
+    @app.get("/api/runs/{run_id}/view/artifact")
+    def get_run_view_artifact(
+        run_id: str, which: str, _: None = Depends(require_auth_read)
+    ) -> dict[str, Any]:
+        """One of the run's two artifacts, as text, on demand.
+
+        The path is read off the newest reduction that names one: the playbook
+        records the absolute paths it used, and the server never builds one.
+        ``which`` therefore chooses between two literal dict keys and is never
+        itself any part of a path.
+        """
+        if which not in ("original", "revised"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"which must be 'original' or 'revised', not {which!r}",
+            )
+        key = "artifact" if which == "original" else "revised"
+        home = config.resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT playbook FROM runs WHERE id=?", (run_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+            if view_playbook(row[0]) is None:
+                raise HTTPException(status_code=404, detail=f"Run {run_id!r} has no view")
+            rows = conn.execute(
+                "SELECT json FROM reductions WHERE run_id=? ORDER BY id DESC", (run_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+
+        for (raw,) in rows:
+            path = json.loads(raw).get(key)
+            if isinstance(path, str) and path:
+                try:
+                    return {"text": Path(path).read_text(encoding="utf-8", errors="replace")}
+                except OSError:
+                    break
+        raise HTTPException(
+            status_code=404, detail=f"Run {run_id!r} has no {which} artifact"
+        )
 
     return app
