@@ -292,7 +292,9 @@ _GUARDRAIL = (
 _GUARDRAIL_EDIT = (
     "This review lands nothing, submits nothing and touches no repository. "
     "The revised copy named above is the only file you may write: leave every "
-    "other file, the original artifact included, exactly as you found it."
+    "other file, the original artifact included, exactly as you found it. That "
+    "copy is already a byte copy of the original — change only what was "
+    "delegated and leave the rest of it alone."
 )
 
 _FLOOR_OWNER = (
@@ -358,8 +360,15 @@ def goal(
     if role == CHAIR:
         return (
             f"{brief(CHAIR)}\n\n"
-            "You chair this proposal review committee. The review is over and "
-            "the decision is yours to write.\n\n"
+            # The brief above is the senior_director's, and its `style` line --
+            # "asks two questions and stops talking" -- is a fine REVIEWER
+            # instruction and a terrible chair instruction. `is_done` accepts
+            # any non-empty prose as the verdict, so a chair that returned two
+            # questions would end the run `done` on a non-decision. One sentence
+            # is cheaper than a tenth persona.
+            "That brief is how you reviewed this proposal. You chair it too, "
+            "and in the chair you rule rather than question. The review is over "
+            "and the decision is yours to write.\n\n"
             f"The charge: {charge}\n"
             f"The artifact reviewed: {artifact}\n"
             "The revised copy, which exists only if the committee delegated an "

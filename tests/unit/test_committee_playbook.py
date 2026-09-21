@@ -372,6 +372,12 @@ def test_junior_goal_names_the_revised_path_and_the_delegated_action():
     assert "add a rollback section naming who pages" in g
     # The one file it may write, and the only file it may write.
     assert "the only file you may write" in g
+    # And it already exists as a byte copy. Without that, a model can reasonably
+    # rewrite it wholesale or reconstruct it from memory and lose content -- and
+    # the §7 re-check would still pass, because it only asks whether the sha256
+    # moved.
+    assert "already a byte copy of the original" in g
+    assert "change only what was delegated" in g
     # Its block keys are all ignored (§5.4), so it is not asked for a block.
     assert "hermes-turn" not in g
     assert g.endswith(
@@ -421,6 +427,14 @@ def test_chair_goal_is_the_decision_and_calls_the_verdict_a_simulation():
     assert "simulation" in g
     assert _GUARDRAIL in g
     assert g.endswith(_DONE_DECISION)
+
+    # The brief is the senior_director's, reviewer `style` and all: "asks two
+    # questions and stops talking". A chair handed that plus _DONE_DECISION may
+    # well return two questions, and `is_done` accepts any non-empty prose as
+    # the verdict -- so the run would end `done` on a non-decision. The goal has
+    # to overrule the inherited style in so many words.
+    assert cast.CAST["senior_director"]["style"] in g
+    assert "in the chair you rule rather than question" in g
 
     # Spec §9: material, not method. The chair is told WHAT to produce and is
     # handed the thread; HOW to weigh it belongs behind HERMES_COMMITTEE_DRIVER.
