@@ -2707,7 +2707,18 @@ print("OK")
 
 def test_wiring_adds_nothing_to_engine_server_or_web():
     """Acceptance criterion 13, as far as a grep can prove it: no .py/.sql/.ts/.tsx
-    file under engine/, server/ or web/src names the committee.
+    PRODUCTION file under engine/, server/ or web/src names the committee.
+
+    Web test files are exempt, and deliberately. The playbook-view seam is
+    generic -- `view_asset`/`view_data`, `window.HermesView_{name}`, one tab
+    driven by `has_view` -- and the way you prove a generic seam works is to
+    stand a concrete playbook in it. `web/src/ds/playbook-view-load.test.tsx`
+    loads the committee's own built bundle, `web/src/views/CommitteeView.test.tsx`
+    renders the committee's own component, and the App and client fixtures set
+    `playbook: 'committee'`. None of that is wiring: delete every one of those
+    files and the control plane behaves identically. The production halves --
+    `PlaybookView.tsx`, `TopBar.tsx`, `App.tsx`, `server/app.py` -- still may not
+    name it, and this test still says so.
 
     Not the whole criterion -- an unrelated engine edit would pass this -- but it
     is the half that a wrong fix actually trips. Dexter and research are wired by
@@ -2724,6 +2735,8 @@ def test_wiring_adds_nothing_to_engine_server_or_web():
     for tree in ("engine", "server", "web/src"):
         for path in sorted((workspace / tree).rglob("*")):
             if not path.is_file() or path.suffix not in (".py", ".sql", ".ts", ".tsx"):
+                continue
+            if path.name.endswith((".test.ts", ".test.tsx")):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace").lower()
             if "committee" in text:
