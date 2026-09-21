@@ -417,3 +417,144 @@ def test_every_goal_stays_under_the_budget_at_maximum_size():
         )
         assert len(g) < cast.GOAL_MAX, f"{role}: {len(g)}"
         assert len(g) > 1500, f"{role}: {len(g)}"
+
+
+# --- thread.md: the transcript ---
+
+def test_thread_header_carries_the_charge_the_artifact_and_the_roster(tmp_path):
+    """write_header lands under HERMES_HOME and names the charge, the artifact and everyone."""
+    from playbooks.committee import thread
+
+    run_id = "committee-20260918-000000"
+    artifact = str(tmp_path / "proposal.md")
+    thread.write_header(
+        run_id,
+        charge="Decide whether to approve the queue rewrite.",
+        artifact=artifact,
+        roster=[
+            "Dana Okoye, Senior Director (senior_director)",
+            "Priya Raman, Staff Engineer (staff_ic)",
+        ],
+    )
+
+    written = thread.path(run_id)
+    assert written == tmp_path / "runs" / run_id / "thread.md"
+    text = written.read_text(encoding="utf-8")
+    assert text.startswith(f"# Committee — {run_id}")
+    assert "**Charge:** Decide whether to approve the queue rewrite." in text
+    assert f"**Artifact:** {artifact}" in text
+    assert "- Dana Okoye, Senior Director (senior_director)" in text
+    assert "- Priya Raman, Staff Engineer (staff_ic)" in text
+
+
+def test_thread_appends_turns_in_order_and_never_truncates(tmp_path):
+    """Two turns land in order, in the spec's heading format, and keep the header."""
+    from playbooks.committee import cast, thread
+
+    run_id = "committee-20260918-000000"
+    thread.write_header(run_id, charge="c", artifact="a", roster=[])
+    thread.append_turn(run_id, turn=3, role="staff_ic", body="The retry loop is unbounded.\n")
+    thread.append_turn(run_id, turn=4, role="owner", body="Agreed, I will cap it.")
+
+    text = thread.path(run_id).read_text(encoding="utf-8")
+    staff = cast.persona("staff_ic")
+    owner = cast.persona("owner")
+    h3 = f"## turn 03 — {staff['name']}, {staff['title']} (staff_ic)"
+    h4 = f"## turn 04 — {owner['name']}, {owner['title']} (owner)"
+
+    assert f"{h3}\n\nThe retry loop is unbounded.\n" in text
+    assert f"{h4}\n\nAgreed, I will cap it.\n" in text
+    assert text.index(h3) < text.index(h4)
+    # append-only: the second write did not truncate the first, nor the header
+    assert text.count("# Committee") == 1
+    assert text.count("## turn ") == 2
+
+
+def test_thread_empty_body_writes_the_no_turn_stub(tmp_path):
+    """A turn whose worker produced nothing still gets a contiguous, visible entry."""
+    from playbooks.committee import cast, thread
+
+    run_id = "committee-20260918-000000"
+    thread.write_header(run_id, charge="c", artifact="a", roster=[])
+    thread.append_turn(run_id, turn=7, role="pm", body="   ")
+
+    text = thread.path(run_id).read_text(encoding="utf-8")
+    pm = cast.persona("pm")
+    assert thread.NO_TURN == "_(no turn delivered — the worker failed; see hermes show)_"
+    assert f"## turn 07 — {pm['name']}, {pm['title']} (pm)\n\n{thread.NO_TURN}\n" in text
+
+
+def test_thread_decision_heading_names_the_chair(tmp_path):
+    """append_decision writes the chair heading, with no role suffix."""
+    from playbooks.committee import cast, thread
+
+    run_id = "committee-20260918-000000"
+    thread.write_header(run_id, charge="c", artifact="a", roster=[])
+    thread.append_decision(
+        run_id,
+        body="Approve with changes. This verdict is a simulation, not an approval.",
+    )
+
+    text = thread.path(run_id).read_text(encoding="utf-8")
+    chair = cast.persona(cast.CHAIR_ROLE)
+    heading = f"## decision — {chair['name']}, {chair['title']}"
+    assert f"{heading}\n\nApprove with changes." in text
+    tail = text.split("## decision")[1]
+    assert "(senior_director)" not in tail
+
+
+# --- the revised copy and its digest ---
+
+def test_thread_revised_path_uses_the_basename(tmp_path):
+    """A nested or relative artifact path cannot escape the run's revised directory."""
+    from playbooks.committee import thread
+
+    run_id = "committee-20260918-000000"
+    revised = tmp_path / "runs" / run_id / "revised"
+
+    assert thread.revised_path(run_id, "/a/b/../nested/proposal.md") == revised / "proposal.md"
+    assert revised.is_dir()  # state_dir("runs", run_id, "revised") created it
+    assert thread.revised_path(run_id, "../../etc/passwd") == revised / "passwd"
+
+
+def test_thread_ensure_revised_copies_once_and_never_clobbers(tmp_path):
+    """First call byte-copies the original; a second call leaves the junior IC's edit alone."""
+    from playbooks.committee import thread
+
+    run_id = "committee-20260918-000000"
+    artifact = tmp_path / "proposal.md"
+    artifact.write_bytes(b"hello\n")
+
+    copy = thread.ensure_revised(run_id, str(artifact))
+    assert copy == tmp_path / "runs" / run_id / "revised" / "proposal.md"
+    assert copy.read_bytes() == b"hello\n"
+
+    copy.write_bytes(b"hello\nworld\n")  # the junior IC's edit
+    mtime = copy.stat().st_mtime_ns
+
+    again = thread.ensure_revised(run_id, str(artifact))
+    assert again == copy
+    assert copy.read_bytes() == b"hello\nworld\n"
+    assert copy.stat().st_mtime_ns == mtime
+    assert artifact.read_bytes() == b"hello\n"  # the original is never touched
+
+
+def test_thread_digest_is_empty_for_a_missing_file_and_tracks_content(tmp_path):
+    """digest() is the §7 re-check: absent reads as "", and content changes move it."""
+    from playbooks.committee import thread
+
+    target = tmp_path / "revised.md"
+    assert thread.digest(target) == ""
+    assert thread.digest(str(target)) == ""
+
+    target.write_bytes(b"hello\n")
+    assert thread.digest(target) == (
+        "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+    )
+
+    target.write_bytes(b"hello\nworld\n")
+    assert thread.digest(str(target)) == (
+        "4a1e67f2fe1d1cc7b31d0ca2ec441da4778203a036a77da10344c85e24ff0f92"
+    )
+
+    assert thread.digest(tmp_path) == ""  # a directory is not a file
