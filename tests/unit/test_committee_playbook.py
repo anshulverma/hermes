@@ -12,12 +12,16 @@ parseable, or absent -- and absent stays absent, never inferred into a False.
 """
 from __future__ import annotations
 
+import itertools
+import random
 import re
 
 import pytest
 
+from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
 from playbooks.committee import cast, turnblock
 from playbooks.committee import turnblock as T
+from playbooks.committee.playbook import _apply_block
 
 
 @pytest.fixture(autouse=True)
@@ -558,3 +562,380 @@ def test_thread_digest_is_empty_for_a_missing_file_and_tracks_content(tmp_path):
     )
 
     assert thread.digest(tmp_path) == ""  # a directory is not a file
+
+
+# --- part 1: the class skeleton and its per-run state -----------------------
+
+
+def _run(config=None, phase="open", reductions=None):
+    """Helper: construct a Run for testing."""
+    return Run(
+        id="committee-20260918-000000",
+        playbook="committee",
+        site="local",
+        base_ref="main",
+        config=config if config is not None else {},
+        phase=phase,
+        reductions=reductions or [],
+    )
+
+
+def _committee():
+    """A fresh CommitteePlaybook, imported late the way the research tests do."""
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    return CommitteePlaybook()
+
+
+def test_the_playbook_names_itself_and_its_two_static_phases():
+    """name and phases are the only attributes the engine reads off a playbook."""
+    pb = _committee()
+
+    assert pb.name == "committee"
+    assert pb.phases == ["open", "decision"]
+    # phases is per-instance, not shared class state
+    assert pb.phases is not _committee().phases
+
+
+def test_state_starts_at_turn_one_with_the_opening_round_loaded():
+    """The per-run dict is created on first use, with exactly the documented keys."""
+    from playbooks.committee import cast
+
+    pb = _committee()
+    run = _run()
+    s = pb._state(run)
+
+    assert set(s) == {
+        "turn", "opening", "queue", "delegation", "pending_action", "last_speaker",
+        "closed", "verdict", "current_role", "current_turn", "dropped_delegation",
+        "rechecks", "pre_edit_digest", "charge", "artifact", "revised", "roster",
+        "max_turns",
+    }
+    assert s["turn"] == 1
+    assert s["opening"] == list(cast.SENIORITY)
+    assert isinstance(s["opening"], list)  # a copy: popping must not touch the cast
+    # regression 1: last_speaker starts "owner", not None -- with None the owner-reply
+    # rule fires before the opening round and mints t01-owner, a reply to an empty thread.
+    assert s["last_speaker"] == "owner"
+    assert s["max_turns"] == 30
+    assert s["queue"] == [] and s["rechecks"] == [] and s["roster"] == {}
+    assert s["pre_edit_digest"] == ""
+    assert s["delegation"] is None and s["pending_action"] is None
+    assert s["dropped_delegation"] is None and s["current_role"] is None
+    assert s["closed"] is False and s["verdict"] == "" and s["current_turn"] == 0
+    assert s["charge"] == "" and s["artifact"] == "" and s["revised"] == ""
+    assert pb._state(run) is s  # same run, same dict
+
+
+def test_state_is_lru_bounded_at_sixteen_runs():
+    """The cache evicts the oldest run, as playbooks/research/playbook.py:232-244 does."""
+    from playbooks.committee.playbook import _CACHE_MAX
+
+    assert _CACHE_MAX == 16
+    pb = _committee()
+    first = _run()
+    first.id = "committee-run-000"
+    pb._state(first)
+    for n in range(1, _CACHE_MAX + 1):
+        later = _run()
+        later.id = f"committee-run-{n:03d}"
+        pb._state(later)
+
+    assert len(pb._state_by_run) == _CACHE_MAX
+    assert "committee-run-000" not in pb._state_by_run
+    assert "committee-run-016" in pb._state_by_run
+
+
+# --- the state machine: the executable model of spec 5.3, ported ------------
+#
+# The model drove a transcription of the pseudocode; these drive the real
+# CommitteePlaybook.next_phase through the real _apply_block. Three layers, all
+# three kept: the named regressions and boundaries, all 125 three-turn prefixes
+# of the block vocabulary, and a seeded fuzz loop over random blocks and caps.
+#
+# There is no second transcription of the gates here: _drive calls the product's
+# _apply_block, so deleting the gates from reduce turns every layer below RED.
+
+_REVIEWERS = list(cast.SENIORITY)
+
+
+def _drive(script, max_turns=30):
+    """Drive a whole run through the real next_phase.
+
+    `script` maps a phase name to the block its speaker emits, or is a callable
+    (phase, state) -> block. A `_ok: False` key models a turn whose worker
+    produced no finding. Returns (pb, run, state, phases_seen, speakers).
+    """
+    pb = _committee()
+    run = _run()
+    s = pb._state(run)
+    s["max_turns"] = max_turns
+    seen = ["open"]
+    speakers = []
+    while True:
+        nxt = pb.next_phase(run)
+        if nxt is None:
+            break
+        assert nxt not in seen, f"REPEATED PHASE {nxt!r} (seen={seen})"
+        assert len(seen) < 400, f"NON-TERMINATION: {seen[:40]}..."
+        seen.append(nxt)
+        run.phase = nxt
+        if nxt == "decision":
+            s["verdict"] = "approve"  # what reduce("decision") will set
+            speakers.append("chair")
+            continue
+        # the turn number reduce() reads must match the name next_phase minted
+        assert nxt == f"t{s['current_turn']:02d}-{s['current_role']}"
+        speakers.append(s["current_role"])
+        block = script(nxt, s) if callable(script) else dict(script.get(nxt, {}))
+        # a turn whose worker produced no finding contributes nothing to the
+        # gates; next_phase still advances past it
+        if block.get("_ok", True):
+            _apply_block(s, s["current_role"], block)
+    return pb, run, s, seen, speakers
+
+
+def check_invariants(s, seen, speakers, max_turns=30):
+    """Every property the model asserted on every run it drove."""
+    assert len(seen) == len(set(seen)), "duplicate phase name"
+    assert seen[-1] == "decision", f"did not end at decision: {seen[-1]}"
+    assert seen.count("decision") == 1, "decision reached more than once"
+    nums = [int(p[1:3]) for p in seen if p.startswith("t")]
+    if nums:
+        assert max(nums) <= max_turns, f"turn cap exceeded: max NN={max(nums)} > {max_turns}"
+        assert nums == sorted(nums), "turn numbers out of order"
+        assert len(nums) == len(set(nums)), "turn number reused"
+    # Only the cap may drop a delegation (spec 5.3). `s["delegation"] is None` would
+    # be a tautology here -- both exits to `decision` go through `_decision`, which
+    # clears it unconditionally -- so assert the property that actually discriminates.
+    if s["dropped_delegation"]:
+        assert s["turn"] > s["max_turns"], "a delegation was dropped with turns to spare"
+    # every reviewer turn is answered by the owner, unless the cap cut it off
+    body = speakers[:-1]  # drop the chair
+    for i, who in enumerate(body):
+        if who in _REVIEWERS and i + 1 < len(body):
+            assert body[i + 1] == "owner", f"reviewer {who} at {i} unanswered by {body[i+1]}"
+        # a trailing reviewer is the documented cap cut-off
+
+
+# --- the seven regressions from spec 11, each a defect caught in hardening ---
+
+
+def test_regression_turn_01_is_the_first_opening_reviewer():
+    # 1: with last_speaker=None the owner-reply rule fires first and mints t01-owner,
+    # an owner reply to an empty thread -- the turn the `open` bootstrap exists to delete.
+    _, _, _, seen, sp = _drive({})
+
+    assert seen[1] == "t01-senior_director", seen[1]
+    assert sp[0] == "senior_director", f"turn 01 speaker is {sp[0]}, expected first reviewer"
+    assert "t01-owner" not in seen
+
+
+def test_regression_the_decision_phase_is_seeded_as_the_chair():
+    # 2: both exits to `decision` go through _decision, which sets
+    # current_role="chair". seed hardcodes the chair for the decision phase, so this
+    # line is not what builds that ticket -- what it buys is that the state dict stays
+    # truthful about who is speaking. _reduce_turn attributes a turn off current_role
+    # and fails closed when it is wrong, so a stale role is a real defect.
+    _, _, closed_state, closed_seen, _ = _drive({"t02-owner": {"close": True}})
+    assert closed_seen[-1] == "decision"
+    assert closed_state["current_role"] == "chair"
+
+    _, _, capped_state, capped_seen, _ = _drive(lambda phase, s: {}, max_turns=3)
+    assert capped_seen[-1] == "decision", capped_seen
+    assert capped_state["current_role"] == "chair"
+
+
+def test_regression_a_turn_with_no_finding_still_advances_the_counter():
+    # 3: the counter advances in next_phase, not reduce. Advanced in reduce it would
+    # stall on a failed turn and re-emit that phase name, which _phase_reduced
+    # (engine/dispatch.py:311-321) reads as "already reduced" -- a silent deadlock.
+    _, _, s, seen, sp = _drive({
+        "t03-manager": {"_ok": False, "request_floor": True},
+        "t04-owner": {"_ok": False, "close": True},
+    })
+    check_invariants(s, seen, sp)
+
+    assert seen[4] == "t04-owner" and seen[5] == "t05-tpm", seen[:8]
+    assert len(seen) == len(set(seen))
+    assert s["queue"] == [], "a floor request from a turn with no finding was honoured"
+    assert s["closed"] is False, "a close from a turn with no finding was honoured"
+    assert max(int(p[1:3]) for p in seen if p.startswith("t")) == 14
+
+
+def test_regression_next_phase_returns_none_at_decision_so_is_done_is_reachable():
+    # 4: is_done is consulted only when next_phase returns None
+    # (engine/dispatch.py:281-292); a machine that kept minting names never finishes.
+    pb = _committee()
+    run = _run(phase="decision")
+    s = pb._state(run)
+
+    assert pb.next_phase(run) is None
+    assert pb.is_done(run) is False  # no verdict yet -> the run ends failed, by design
+    s["verdict"] = "approve with changes"
+    assert pb.is_done(run) is True
+
+    mid = _committee()
+    mid_run = _run(phase="t04-owner")
+    mid._state(mid_run)["verdict"] = "approve"
+    assert mid.is_done(mid_run) is False, "is_done fired before the decision phase"
+
+
+def test_regression_the_floor_queue_is_entered_after_the_opening_round():
+    # 5: once `opening` drains, rule 5 must actually pop the queue -- an early exit to
+    # decision would silently discard every floor request the committee made.
+    _, _, s, seen, sp = _drive({
+        "t01-senior_director": {"request_floor": True},
+        "t05-tpm": {"request_floor": True},
+    })
+    check_invariants(s, seen, sp)
+
+    assert s["queue"] == []
+    assert seen[15] == "t15-senior_director" and seen[17] == "t17-tpm", seen[14:]
+    tail = sp[sp.index("data_scientist"):]
+    assert tail == [
+        "data_scientist", "owner", "senior_director", "owner", "tpm", "owner", "chair",
+    ], tail
+
+
+def test_regression_a_delegation_is_consumed_exactly_once_and_never_lost():
+    # 6: the ordering defect the fuzz found at max_turns=2 -- with `close` tested first,
+    # "make this change and we're done" dropped the edit on the floor. What catches it
+    # across the driven runs is check_invariants' dropped_delegation clause: a
+    # delegation dropped with turns still on the clock.
+    _, _, once, once_seen, once_sp = _drive(
+        {"t02-owner": {"delegate": True, "action": "tighten the risk section"}}
+    )
+    check_invariants(once, once_seen, once_sp)
+    assert once_seen[3] == "t03-junior_ic", once_seen[:5]
+    assert once_sp.count("junior_ic") == 1, f"delegation consumed more than once: {once_sp}"
+    assert once["pending_action"] == "tighten the risk section"
+    assert once_sp[once_sp.index("junior_ic") + 1] != "owner", \
+        "junior_ic wrongly triggered an owner reply"
+
+    _, _, both, both_seen, both_sp = _drive(
+        {"t02-owner": {"close": True, "delegate": True, "action": "x"}}
+    )
+    check_invariants(both, both_seen, both_sp)
+    assert both_sp.count("junior_ic") == 1, f"the delegated edit was dropped: {both_sp}"
+    assert both_seen == [
+        "open", "t01-senior_director", "t02-owner", "t03-junior_ic", "decision",
+    ], both_seen
+
+    _, _, capped, capped_seen, capped_sp = _drive(
+        {"t02-owner": {"delegate": True, "action": "too late"}}, max_turns=2
+    )
+    check_invariants(capped, capped_seen, capped_sp, max_turns=2)
+    assert "junior_ic" not in capped_sp, "the cap did not stop the edit"
+    assert capped["delegation"] is None
+    assert capped["dropped_delegation"] == "too late", \
+        "a cap-dropped delegation must be recorded, not lost"
+
+
+def test_regression_no_phase_repeats_and_the_cap_holds_across_a_full_run():
+    # 7: a repeated phase name deadlocks the run silently (engine/dispatch.py:311-321)
+    # and an NN above the cap breaks acceptance criterion 5.
+    for max_turns in (1, 2, 3, 5, 8, 13, 30):
+        _, _, s, seen, sp = _drive(lambda phase, st: {"request_floor": True},
+                                   max_turns=max_turns)
+        check_invariants(s, seen, sp, max_turns=max_turns)
+        nums = [int(p[1:3]) for p in seen if p.startswith("t")]
+        assert len(seen) == len(set(seen)), f"max_turns={max_turns}: {seen}"
+        assert not nums or max(nums) <= max_turns, f"max_turns={max_turns}: {seen}"
+
+
+# --- the two documented boundaries ------------------------------------------
+
+
+def test_the_default_run_is_t01_through_t14_then_the_decision():
+    """7 reviewers + 7 owner replies, no delegations, empty queue: highest NN is 14."""
+    _, _, _, seen, _ = _drive({})
+
+    assert seen == [
+        "open",
+        "t01-senior_director", "t02-owner",
+        "t03-manager", "t04-owner",
+        "t05-tpm", "t06-owner",
+        "t07-pm", "t08-owner",
+        "t09-tl", "t10-owner",
+        "t11-staff_ic", "t12-owner",
+        "t13-data_scientist", "t14-owner",
+        "decision",
+    ], seen
+
+
+def test_max_turns_thirty_mints_t30_and_never_t31():
+    """_turn post-increments: turn==30 mints t30 and leaves 31, which routes to decision."""
+    _, _, s, seen, sp = _drive(lambda phase, st: {"request_floor": True}, max_turns=30)
+    check_invariants(s, seen, sp, max_turns=30)
+
+    nums = [int(p[1:3]) for p in seen if p.startswith("t")]
+    assert max(nums) == 30
+    assert not any(p.startswith("t31") for p in seen), seen[-3:]
+    assert s["turn"] == 31
+
+
+# --- the exhaustive and fuzz layers -----------------------------------------
+
+_BLOCK_VOCABULARY = [
+    {},
+    {"request_floor": True},
+    {"close": True},
+    {"delegate": True, "action": "a"},
+    {"_ok": False},
+]
+
+# The model ran 4000 fuzz iterations; 500 is what ships. Measured on this machine:
+# 4000 runs cost 0.081 s and 500 cost 0.008 s, against a 16 s suite. 500 still draws
+# each of the eight caps ~60 times, and the seed is fixed so the sample is the same
+# sample on every run -- the delegate/close defect showed up at max_turns=2 within
+# the first handful of iterations, as a dropped_delegation with turns to spare.
+_FUZZ_RUNS = 500
+_FUZZ_SEED = 20260918
+_FUZZ_CAPS = [1, 2, 3, 5, 8, 13, 30, 31]
+
+
+def test_every_three_turn_prefix_of_the_block_vocabulary_holds():
+    """All 125 three-turn prefixes of the block vocabulary keep every invariant."""
+    checked = 0
+    for combo in itertools.product(_BLOCK_VOCABULARY, repeat=3):
+        def script(phase, s, c=combo):
+            index = s["turn"] - 2  # the turn that just spoke, 0-based
+            return dict(c[index]) if 0 <= index < len(c) else {}
+
+        try:
+            _, _, s, seen, sp = _drive(script)
+            check_invariants(s, seen, sp)
+        except AssertionError as exc:
+            raise AssertionError(f"combo={combo}: {exc}") from exc
+        checked += 1
+
+    assert checked == 125
+
+
+def test_seeded_fuzz_over_random_blocks_and_random_caps():
+    """500 seeded random runs, caps 1..31, every invariant on every run."""
+    rng = random.Random(_FUZZ_SEED)
+    for iteration in range(_FUZZ_RUNS):
+        max_turns = rng.choice(_FUZZ_CAPS)
+
+        def script(phase, s, r=rng):
+            block = {}
+            if r.random() < 0.35:
+                block["request_floor"] = True
+            if r.random() < 0.15:
+                block["delegate"] = True
+                block["action"] = "do the thing"
+            if r.random() < 0.06:
+                block["close"] = True
+            if r.random() < 0.10:
+                block["_ok"] = False
+            return block
+
+        try:
+            _, _, s, seen, sp = _drive(script, max_turns=max_turns)
+            check_invariants(s, seen, sp, max_turns=max_turns)
+        except AssertionError as exc:
+            raise AssertionError(
+                f"seed-iter {iteration} max_turns={max_turns}: {exc}"
+            ) from exc

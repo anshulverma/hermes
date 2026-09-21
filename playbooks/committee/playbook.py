@@ -1,0 +1,165 @@
+"""CommitteePlaybook — a simulated review committee over a single artifact.
+
+Nine personas read one file and argue about it in one thread. The engine sees two
+static phases (``open``, ``decision``); every turn between them is a phase minted
+at runtime as ``t{NN:02d}-{role}`` — one ticket, one speaker, strictly serial.
+
+This module is the state machine. ``next_phase`` decides who speaks next and
+``is_done`` decides when the meeting is over. Everything they need lives in a
+per-run dict on the instance (``_state``), because ``run.config`` is read-only and
+``run.reductions`` reaches only one phase back. That is safe: a run is never
+resumed, and ``seed``/``reduce``/``next_phase``/``is_done`` all run in the master
+process against the one registry singleton.
+
+Ordering is load-bearing and was verified by simulation rather than by reading. A
+pending delegation outranks ``close`` — an edit the owner asked for still happens,
+and costs one turn — and the turn cap outranks both, so ``t31`` can never be minted
+under ``max_turns=30``. A delegation the cap does drop is recorded as
+``dropped_delegation`` rather than lost.
+
+Stdlib-only.
+"""
+from __future__ import annotations
+
+from engine import playbook as _playbook
+from engine.models import Run
+from playbooks.committee import cast
+
+_CACHE_MAX = 16
+
+ENV_ARTIFACT = "HERMES_COMMITTEE_ARTIFACT"
+ENV_MAX_TURNS = "HERMES_COMMITTEE_MAX_TURNS"
+ENV_DRIVER = "HERMES_COMMITTEE_DRIVER"
+
+DEFAULT_MAX_TURNS = 30
+DEFAULT_CHARGE = "Decide whether to approve this proposal."
+
+
+def _apply_block(s: dict, role: str, block: dict) -> None:
+    """The gates of spec 5.4, applied to one speaker's parsed hermes-turn block.
+
+    Enforced, not advisory — and there is exactly ONE copy of them. Task 7's
+    ``reduce`` calls this after parsing an answer, and the state-machine tests
+    drive it through ``_drive``. A second transcription in the tests would let
+    the product's gates rot while every test layer stayed green.
+    """
+    if block.get("request_floor") and role not in (cast.OWNER, cast.JUNIOR, cast.CHAIR):
+        # `opening` as well as `queue`: a delegated turn mints without popping,
+        # so a role can still be waiting in the opening round.
+        if role not in s["queue"] and role not in s["opening"]:
+            s["queue"].append(role)
+    if role == cast.OWNER:
+        if block.get("close"):
+            s["closed"] = True
+        if block.get("delegate") and block.get("action"):
+            s["delegation"] = block["action"]
+
+
+class CommitteePlaybook:
+    """A committee of personas reviewing one artifact, one speaker per phase."""
+
+    name = "committee"
+
+    def __init__(self) -> None:
+        """Initialize the playbook with per-instance state."""
+        # Instance attributes (not class attributes) so mutation stays isolated.
+        self.phases = ["open", "decision"]
+        self._state_by_run: dict[str, dict] = {}
+
+    # --- per-run state (master-only) ------------------------------------
+
+    def _state(self, run: Run) -> dict:
+        """The run's mutable committee state, created on first use, LRU-bounded.
+
+        Master-only: seed, reduce, next_phase and is_done all run in the process
+        that owns the run, so this dict is the run's memory. The transport-path
+        methods never read it.
+        """
+        s = self._state_by_run.get(run.id)
+        if s is None:
+            s = {
+                "turn": 1,
+                "opening": list(cast.SENIORITY),
+                "queue": [],
+                "delegation": None,
+                "pending_action": None,
+                # "owner", never None: with None the owner-reply rule fires before
+                # the opening round and mints t01-owner -- a reply to an empty thread.
+                "last_speaker": cast.OWNER,
+                "closed": False,
+                "verdict": "",
+                "current_role": None,
+                # the turn number reduce() needs; the phase name is never parsed back.
+                "current_turn": 0,
+                "dropped_delegation": None,
+                "rechecks": [],
+                # the revised copy's sha256 as seed() found it, just before a
+                # junior-IC worker ran; reduce compares against this rather than
+                # against the original, so a second edit that changed nothing
+                # still fails its re-check (spec 7).
+                "pre_edit_digest": "",
+                "charge": "",
+                "artifact": "",
+                "revised": "",
+                "roster": {},
+                "max_turns": DEFAULT_MAX_TURNS,
+            }
+            self._state_by_run[run.id] = s
+            # Evict the oldest entry when the cache exceeds the bound.
+            if len(self._state_by_run) > _CACHE_MAX:
+                del self._state_by_run[next(iter(self._state_by_run))]
+        return s
+
+    def _turn(self, s: dict, role: str) -> str:
+        """Mint the next turn phase for `role` and advance the counter."""
+        name = f"t{s['turn']:02d}-{role}"
+        # reduce needs NN for the thread heading and must not parse the phase name.
+        s["current_turn"] = s["turn"]
+        s["turn"] += 1
+        s["current_role"] = role
+        # the junior IC speaks FOR the owner, so it does not trigger an owner reply
+        s["last_speaker"] = cast.OWNER if role in (cast.OWNER, cast.JUNIOR) else role
+        return name
+
+    def _decision(self, s: dict) -> str:
+        """Route to the terminal decision phase, chaired, losing nothing."""
+        s["current_role"] = cast.CHAIR  # `decision` never passes through _turn
+        if s["delegation"]:
+            # only reachable when the CAP cut the edit off; reduce("decision")
+            # names it in the verdict rather than dropping it silently.
+            s["dropped_delegation"] = s["delegation"]
+            s["delegation"] = None
+        return "decision"
+
+    def next_phase(self, run: Run) -> str | None:
+        """Who speaks next, or None once the decision has been taken."""
+        s = self._state(run)
+        if run.phase == "decision":
+            return None  # -> is_done
+        # a delegation outranks `close`: an edit the owner asked for still happens,
+        # and costs one turn. The cap outranks BOTH, so this can never mint t31.
+        if s["delegation"] and s["turn"] <= s["max_turns"]:
+            s["pending_action"] = s["delegation"]
+            s["delegation"] = None  # consumed exactly once, here
+            return self._turn(s, cast.JUNIOR)
+        if s["closed"] or s["turn"] > s["max_turns"]:
+            return self._decision(s)
+        if s["last_speaker"] != cast.OWNER:
+            return self._turn(s, cast.OWNER)  # the owner answers every reviewer
+        if s["opening"]:
+            return self._turn(s, s["opening"].pop(0))
+        if s["queue"]:
+            return self._turn(s, s["queue"].pop(0))  # FIFO
+        return self._decision(s)
+
+    def is_done(self, run: Run) -> bool:
+        """Done iff the chair's turn settled and reduce recorded a verdict.
+
+        A chair turn that produced no finding leaves the verdict empty and the run
+        ends `failed` (engine/dispatch.py:295) — deliberate: a committee that
+        produced no decision did not finish.
+        """
+        return run.phase == "decision" and bool(self._state(run)["verdict"])
+
+
+_playbook.register("committee", CommitteePlaybook())
