@@ -81,8 +81,20 @@ def revised_path(run_id: str, artifact: str) -> Path:
     path still lands inside the run's own directory. ``revised`` is a component
     of the ``state_dir`` call, not a join onto its result, because ``state_dir``
     is what creates the directory (mode 0700).
+
+    An artifact whose basename is empty or ``..`` -- ``""``, ``"/"``, ``"."``,
+    a trailing slash -- would return the DIRECTORY instead of a file in it:
+    ``ensure_revised`` would then see it already exists and skip the copy, and
+    ``digest`` of a directory is ``""``, so every re-check would report
+    ``verified: false`` with no error anywhere. Raise instead.
+
+    Raises:
+        ValueError: ``artifact`` has no usable filename.
     """
-    return _config.state_dir("runs", run_id, "revised") / Path(artifact).name
+    name = Path(artifact).name
+    if not name or name == "..":
+        raise ValueError(f"artifact has no usable filename: {artifact!r}")
+    return _config.state_dir("runs", run_id, "revised") / name
 
 
 def ensure_revised(run_id: str, artifact: str) -> Path:
@@ -104,9 +116,13 @@ def digest(path) -> str:
     The master-side re-check (spec 7) compares this before and after a junior-IC
     turn. An unreadable file is an unchanged one as far as the check goes, which
     is the honest reading: no evidence the edit landed.
+
+    ``TypeError``/``ValueError`` as well as ``OSError``: this is called from
+    ``reduce``, which must never raise, and ``Path(None)`` is a ``TypeError``
+    rather than an ``OSError``.
     """
     try:
         data = Path(path).read_bytes()
-    except OSError:
+    except (OSError, TypeError, ValueError):
         return ""
     return hashlib.sha256(data).hexdigest()

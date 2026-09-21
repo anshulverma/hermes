@@ -519,6 +519,23 @@ def test_thread_revised_path_uses_the_basename(tmp_path):
     assert thread.revised_path(run_id, "/a/b/../nested/proposal.md") == revised / "proposal.md"
     assert revised.is_dir()  # state_dir("runs", run_id, "revised") created it
     assert thread.revised_path(run_id, "../../etc/passwd") == revised / "passwd"
+    assert thread.revised_path(run_id, "/a/b/trailing-slash.md/") == revised / "trailing-slash.md"
+
+
+def test_thread_revised_path_refuses_an_artifact_with_no_filename(tmp_path):
+    """An empty or `..` basename would silently disable the §7 re-check forever.
+
+    Those return the revised DIRECTORY rather than a file inside it:
+    `ensure_revised` then sees it already exists and skips the copy, and
+    `digest` of a directory is "" -- so every delegation reports
+    `verified: false` and nothing anywhere says why. Raise instead.
+    """
+    from playbooks.committee import thread
+
+    run_id = "committee-20260918-000000"
+    for bad in ("", "/", ".", "..", "proposal/.."):
+        with pytest.raises(ValueError, match="no usable filename"):
+            thread.revised_path(run_id, bad)
 
 
 def test_thread_ensure_revised_copies_once_and_never_clobbers(tmp_path):
@@ -550,6 +567,16 @@ def test_thread_digest_is_empty_for_a_missing_file_and_tracks_content(tmp_path):
     target = tmp_path / "revised.md"
     assert thread.digest(target) == ""
     assert thread.digest(str(target)) == ""
+    # reduce must never raise, and Path(None) is a TypeError, not an OSError.
+    assert thread.digest(None) == ""
+    assert thread.digest(17) == ""
+
+    # An EMPTY file is not an absent one: absent is "", empty is the sha256 of
+    # zero bytes. Collapsing the two would make `verified` unreadable.
+    target.write_bytes(b"")
+    assert thread.digest(target) == (
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    )
 
     target.write_bytes(b"hello\n")
     assert thread.digest(target) == (
