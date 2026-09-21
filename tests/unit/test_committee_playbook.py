@@ -2427,11 +2427,15 @@ print("OK")
 
 
 def test_wiring_adds_nothing_to_engine_server_or_web():
-    """Acceptance criterion 13: engine/, server/ and web/ are unmodified.
+    """Acceptance criterion 13, as far as a grep can prove it: no .py/.sql/.ts/.tsx
+    file under engine/, server/ or web/src names the committee.
 
-    Dexter and research are wired by a hardcoded import in _load_playbook_site_agent
-    (engine/cli.py:211-212). Committee is deliberately NOT, because that is an engine
-    edit. This fails the moment someone "fixes" the wiring that way.
+    Not the whole criterion -- an unrelated engine edit would pass this -- but it
+    is the half that a wrong fix actually trips. Dexter and research are wired by
+    a hardcoded import in _load_playbook_site_agent (engine/cli.py:211-212);
+    committee is deliberately NOT, because that is an engine edit. This fails the
+    moment someone "fixes" the wiring that way. `git diff main..HEAD -- engine/
+    server/ web/` is the assertion for the rest.
     """
     from pathlib import Path
 

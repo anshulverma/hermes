@@ -241,9 +241,11 @@ class ScriptedCommitteeAgent:
     takes, so a role-keyed floor request would re-queue that role on every turn
     until the cap. It is still a static lookup -- no counter, no mutation.
 
-    ``max_in_flight`` is the observation criterion 4 wants: bumped in
-    ``build_invocation``, dropped in ``parse_result``, so it records the most
-    workers ever open at once.
+    The chair's prose deliberately does NOT contain the simulation disclaimer.
+    A real chair is asked for one by its completion condition, but a double that
+    says it lets the tests pass on the double's own words: the disclaimer the
+    product appends (``playbook._SIMULATION``) could be deleted outright and
+    every assertion here would still be green.
 
     Integrity is honoured the way ``DexterMockAgent`` does it: recompute
     ``payload_sha256`` over the received payload, ``contract_fail`` on mismatch.
@@ -255,14 +257,10 @@ class ScriptedCommitteeAgent:
         self.owner_block = owner_block
         self.fail_roles = frozenset(fail_roles)
         self.floor_phases = frozenset(floor_phases)
-        self._in_flight = 0
-        self.max_in_flight = 0
 
     # --- Agent protocol ---------------------------------------------------
 
     def build_invocation(self, envelope: dict, driver) -> list[str]:
-        self._in_flight += 1
-        self.max_in_flight = max(self.max_in_flight, self._in_flight)
         payload = envelope.get("payload") or {}
         action = payload.get("action") or ""
         if payload.get("kind") != "edit" or action.startswith("no-op:"):
@@ -278,7 +276,6 @@ class ScriptedCommitteeAgent:
         ]
 
     def parse_result(self, raw: str, envelope: dict) -> Result:
-        self._in_flight = max(0, self._in_flight - 1)
         now = time.time()
         payload = envelope.get("payload") or {}
 
@@ -327,10 +324,9 @@ class ScriptedCommitteeAgent:
         role = payload.get("role", "")
         kind = payload.get("kind", "")
         if kind == "decision":
-            return (
-                "Approve with changes: fund the migration once the rollback plan "
-                "lands. This verdict is a simulation, not an approval."
-            )
+            # No disclaimer: that sentence is the PRODUCT's to append. See the
+            # class docstring.
+            return "Approve with changes: fund the migration once the rollback plan lands."
         if kind == "edit":
             action = payload.get("action") or ""
             if action.startswith("no-op:"):
@@ -384,7 +380,6 @@ def test_full_conversation_reaches_done_with_no_human(
         ).fetchall()
     ]
     assert len(set(ticket_ids)) == len(ticket_ids) == len(expected_phases)
-    assert agent.max_in_flight == 1
 
     # criterion 3: one thread entry per turn, in order, each a named persona,
     # with the owner's reply following every reviewer turn.
@@ -402,7 +397,10 @@ def test_full_conversation_reaches_done_with_no_human(
     decisions = [(h, b) for h, b in _entries(run_id) if h.startswith("## decision")]
     assert len(decisions) == 1
     assert decisions[0][0] == f"## decision — {chair['name']}, {chair['title']}"
-    assert "simulation, not an approval" in decisions[0][1]
+    # The PRODUCT's disclaimer, verbatim. The double does not say it, so
+    # deleting `parts.append(_SIMULATION)` turns this RED.
+    assert committee._SIMULATION in decisions[0][1]
+    assert "not an approval, not a sign-off" in decisions[0][1]
 
     # criterion 6: the original is untouched and no revised copy was ever made.
     assert thread.digest(artifact) == original
@@ -464,7 +462,6 @@ def test_failed_turn_still_gets_a_stub_and_the_run_advances(
     assert lost["role"] == "senior_director"
     assert lost["turn"] == 1
     assert lost["delivered"] is False
-    assert agent.max_in_flight == 1
 
 
 def test_turn_cap_ends_the_conversation_at_the_cap(
@@ -577,9 +574,54 @@ def test_failed_recheck_is_named_in_the_decision(
     assert decision["rechecks"] == [
         {"turn": 3, "action": NOOP_ACTION, "verified": False}
     ]
-    # Named in the transcript itself, not buried in the reduction json.
+    # Named in the transcript itself, not buried in the reduction json -- and
+    # named as a FAILURE. Without the verdict, an unconditional "APPLIED" reads
+    # exactly like a successful edit to the human who reads this file.
     body = [b for h, b in _entries(run_id) if h.startswith("## decision")][0]
     assert NOOP_ACTION in body
+    assert "DID NOT APPLY" in body
+    assert "APPLIED —" not in body
+
+
+def test_the_cap_drops_a_delegation_and_the_decision_says_so(
+    home, source_repo, artifact, conn, local_site, monkeypatch
+):
+    """The other half of criterion 5: a delegation the cap cuts off is recorded.
+
+    The owner delegates on t02 with the cap at 2, so there is no t03 to spend on
+    the edit. `_decision` must move the pending delegation to
+    `dropped_delegation` rather than dropping it on the floor: an edit the owner
+    asked for and never got is a fact about this committee's output.
+    """
+    monkeypatch.setenv(committee.ENV_MAX_TURNS, "2")
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(owner_block=OWNER_DELEGATES)
+    run_id = "committee-20260918-000007"
+    original = thread.digest(artifact)
+
+    host = _start(conn, run_id, pb, local_site, agent)
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
+
+    # No junior-IC turn: the cap fell before one could be minted.
+    assert _dispatched_phases(conn, run_id) == [
+        "t01-senior_director", "t02-owner", "decision",
+    ]
+    assert not thread.revised_path(run_id, str(artifact)).exists()
+    assert thread.digest(artifact) == original
+
+    owner_turn = _reduction_for(conn, run_id, "t02-owner")
+    assert owner_turn["delegate"] is True
+    assert owner_turn["action"] == EDIT_ACTION
+
+    decision = _reduction_for(conn, run_id, "decision")
+    assert decision["dropped_delegation"] == EDIT_ACTION
+    assert decision["rechecks"] == []
+
+    # And a human reading only thread.md still learns the edit never happened.
+    body = [b for h, b in _entries(run_id) if h.startswith("## decision")][0]
+    assert "dropped_delegation" in body
+    assert EDIT_ACTION in body
+    assert "no edit was made" in body
 
 
 def test_failed_chair_turn_fails_the_run(
