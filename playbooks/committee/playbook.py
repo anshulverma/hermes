@@ -59,7 +59,12 @@ def _apply_block(s: dict, role: str, block: dict) -> None:
         if role not in s["queue"] and role not in s["opening"]:
             s["queue"].append(role)
     if role == cast.OWNER:
-        if block.get("close"):
+        # The opening round outranks `close`. The owner's persona wants "a clear
+        # decision" and "concedes fast on small things", so a worker that hears
+        # one reviewer, answers it and closes produces a two-turn "committee"
+        # that reaches `done` looking perfectly healthy while six members never
+        # speak. The owner's goal says so too; this is what enforces it.
+        if block.get("close") and not s["opening"]:
             s["closed"] = True
         if block.get("delegate") and block.get("action"):
             s["delegation"] = block["action"]

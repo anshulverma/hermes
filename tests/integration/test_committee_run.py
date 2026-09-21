@@ -102,6 +102,16 @@ CHARGE = "Decide whether to fund the scheduler migration."
 EDIT_ACTION = "Add a rollback plan to section 4."
 NOOP_ACTION = "no-op: leave the revised copy exactly as it is."
 
+# The opening round with nothing else happening: seven reviewers in seniority
+# order, each answered by the owner. t01..t14. The owner cannot close before
+# this drains (spec 5.4), so it is the floor of every uncapped run.
+OPENING_ROUND = [
+    phase
+    for index, role in enumerate(cast.SENIORITY)
+    for phase in (f"t{2 * index + 1:02d}-{role}", f"t{2 * index + 2:02d}-{cast.OWNER}")
+]
+LAST_OPENING_OWNER_TURN = OPENING_ROUND[-1]  # "t14-owner"
+
 
 def _mk_run(conn, run_id):
     """Insert a running committee run parked on the zero-ticket `open` phase."""
@@ -236,10 +246,13 @@ class ScriptedCommitteeAgent:
       - ``role == owner``      -> ``owner_block``, fixed at construction.
       - anything else          -> a reviewer turn.
 
-    ``floor_phases`` is the one hook keyed on ``envelope["phase"]`` rather than
-    the payload: a reviewer's payload is byte-identical on every turn that role
-    takes, so a role-keyed floor request would re-queue that role on every turn
-    until the cap. It is still a static lookup -- no counter, no mutation.
+    ``floor_phases`` and ``owner_phases`` are the two hooks keyed on
+    ``envelope["phase"]`` rather than the payload: a role's payload is
+    byte-identical on every turn that role takes, so a role-keyed floor request
+    would re-queue that role on every turn until the cap, and a role-keyed
+    delegation would re-delegate on every owner turn. They are still static
+    lookups -- no counter, no mutation. ``owner_phases=None`` means every owner
+    turn, which is what the quiet default wants.
 
     The chair's prose deliberately does NOT contain the simulation disclaimer.
     A real chair is asked for one by its completion condition, but a double that
@@ -253,8 +266,16 @@ class ScriptedCommitteeAgent:
 
     name = "scripted_committee"
 
-    def __init__(self, *, owner_block=OWNER_QUIET, fail_roles=(), floor_phases=()):
+    def __init__(
+        self,
+        *,
+        owner_block=OWNER_QUIET,
+        owner_phases=None,
+        fail_roles=(),
+        floor_phases=(),
+    ):
         self.owner_block = owner_block
+        self.owner_phases = None if owner_phases is None else frozenset(owner_phases)
         self.fail_roles = frozenset(fail_roles)
         self.floor_phases = frozenset(floor_phases)
 
@@ -333,7 +354,14 @@ class ScriptedCommitteeAgent:
                 return f"I left the revised copy untouched: {action}"
             return f"I applied the delegated change to the revised copy: {action}"
         if role == cast.OWNER:
-            return _wrap("Fair point; here is where I land on it.", self.owner_block)
+            speaking = (
+                self.owner_phases is None
+                or envelope.get("phase") in self.owner_phases
+            )
+            return _wrap(
+                "Fair point; here is where I land on it.",
+                self.owner_block if speaking else OWNER_QUIET,
+            )
         block = (
             FLOOR_REVIEWER if envelope.get("phase") in self.floor_phases
             else QUIET_REVIEWER
@@ -495,12 +523,16 @@ def test_delegated_edit_writes_only_the_revised_copy(
 ):
     """Criterion 6: the original stays byte-identical; the revised copy differs.
 
-    The owner's block carries `delegate: yes` AND `close: yes` on one turn. A
-    delegation outranks close, so the junior IC's edit still happens and costs
-    one turn; then `closed` routes straight to the decision.
+    The owner's block carries `delegate: yes` AND `close: yes` on one turn, and
+    that turn is the last of the opening round, because a close before the round
+    drains is ignored (spec 5.4). A delegation outranks close, so the junior
+    IC's edit still happens and costs one turn; then `closed` routes straight to
+    the decision.
     """
     pb = committee.CommitteePlaybook()
-    agent = ScriptedCommitteeAgent(owner_block=OWNER_DELEGATES)
+    agent = ScriptedCommitteeAgent(
+        owner_block=OWNER_DELEGATES, owner_phases={LAST_OPENING_OWNER_TURN}
+    )
     run_id = "committee-20260918-000004"
     original = thread.digest(artifact)
 
@@ -508,7 +540,7 @@ def test_delegated_edit_writes_only_the_revised_copy(
     assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
 
     assert _dispatched_phases(conn, run_id) == [
-        "t01-senior_director", "t02-owner", "t03-junior_ic", "decision",
+        *OPENING_ROUND, "t15-junior_ic", "decision",
     ]
 
     revised = thread.revised_path(run_id, str(artifact))
@@ -518,24 +550,24 @@ def test_delegated_edit_writes_only_the_revised_copy(
     assert artifact.read_text() in revised.read_text()  # a byte copy, then appended to
     assert EDIT_ACTION in revised.read_text()
 
-    owner_turn = _reduction_for(conn, run_id, "t02-owner")
+    owner_turn = _reduction_for(conn, run_id, LAST_OPENING_OWNER_TURN)
     assert owner_turn["role"] == cast.OWNER
     assert owner_turn["delegate"] is True
     assert owner_turn["close"] is True
     assert owner_turn["action"] == EDIT_ACTION
 
-    edit_turn = _reduction_for(conn, run_id, "t03-junior_ic")
+    edit_turn = _reduction_for(conn, run_id, "t15-junior_ic")
     assert edit_turn["role"] == cast.JUNIOR
-    assert edit_turn["turn"] == 3
+    assert edit_turn["turn"] == 15
     assert edit_turn["delivered"] is True
     assert edit_turn["verified"] is True                # the master-side re-check
 
     decision = _reduction_for(conn, run_id, "decision")
     assert decision["rechecks"] == [
-        {"turn": 3, "action": EDIT_ACTION, "verified": True}
+        {"turn": 15, "action": EDIT_ACTION, "verified": True}
     ]
     assert decision["dropped_delegation"] is None
-    assert _heading(3, cast.JUNIOR) in [h for h, _ in _turns(run_id)]
+    assert _heading(15, cast.JUNIOR) in [h for h, _ in _turns(run_id)]
 
 
 def test_failed_recheck_is_named_in_the_decision(
@@ -550,7 +582,9 @@ def test_failed_recheck_is_named_in_the_decision(
     that made none, so the failure must reach the decision.
     """
     pb = committee.CommitteePlaybook()
-    agent = ScriptedCommitteeAgent(owner_block=OWNER_DELEGATES_NOOP)
+    agent = ScriptedCommitteeAgent(
+        owner_block=OWNER_DELEGATES_NOOP, owner_phases={LAST_OPENING_OWNER_TURN}
+    )
     run_id = "committee-20260918-000005"
     original = thread.digest(artifact)
 
@@ -558,7 +592,7 @@ def test_failed_recheck_is_named_in_the_decision(
     assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
 
     assert _dispatched_phases(conn, run_id) == [
-        "t01-senior_director", "t02-owner", "t03-junior_ic", "decision",
+        *OPENING_ROUND, "t15-junior_ic", "decision",
     ]
 
     revised = thread.revised_path(run_id, str(artifact))
@@ -566,13 +600,13 @@ def test_failed_recheck_is_named_in_the_decision(
     assert thread.digest(revised) == original    # ... and the worker changed nothing
     assert thread.digest(artifact) == original
 
-    edit_turn = _reduction_for(conn, run_id, "t03-junior_ic")
+    edit_turn = _reduction_for(conn, run_id, "t15-junior_ic")
     assert edit_turn["delivered"] is True
     assert edit_turn["verified"] is False
 
     decision = _reduction_for(conn, run_id, "decision")
     assert decision["rechecks"] == [
-        {"turn": 3, "action": NOOP_ACTION, "verified": False}
+        {"turn": 15, "action": NOOP_ACTION, "verified": False}
     ]
     # Named in the transcript itself, not buried in the reduction json -- and
     # named as a FAILURE. Without the verdict, an unconditional "APPLIED" reads

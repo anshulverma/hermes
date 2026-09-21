@@ -344,6 +344,9 @@ def test_owner_goal_says_whose_floor_it_is_and_gets_the_owner_block():
     )
     assert "You are Maya Okonkwo, Staff Engineer & proposal owner." in g
     assert "Answer the member who spoke last" in g
+    # The close gate is enforced master-side; the goal must also SAY so, or the
+    # model is fighting a rule it cannot see (spec 5.4).
+    assert "cannot close the discussion until every member of the committee" in g
     assert turnblock.instruction(owner=True).strip() in g
     assert _ARTIFACT in g
     assert _THREAD in g
@@ -827,7 +830,9 @@ def test_regression_the_decision_phase_is_seeded_as_the_chair():
     # line is not what builds that ticket -- what it buys is that the state dict stays
     # truthful about who is speaking. _reduce_turn attributes a turn off current_role
     # and fails closed when it is wrong, so a stale role is a real defect.
-    _, _, closed_state, closed_seen, _ = _drive({"t02-owner": {"close": True}})
+    # t14-owner, not t02: a close before the opening round drains is ignored.
+    _, _, closed_state, closed_seen, _ = _drive({"t14-owner": {"close": True}})
+    assert closed_state["closed"] is True
     assert closed_seen[-1] == "decision"
     assert closed_state["current_role"] == "chair"
 
@@ -903,14 +908,14 @@ def test_regression_a_delegation_is_consumed_exactly_once_and_never_lost():
     assert once_sp[once_sp.index("junior_ic") + 1] != "owner", \
         "junior_ic wrongly triggered an owner reply"
 
+    # Both signals on one turn, at the first turn a close is actually honoured.
     _, _, both, both_seen, both_sp = _drive(
-        {"t02-owner": {"close": True, "delegate": True, "action": "x"}}
+        {"t14-owner": {"close": True, "delegate": True, "action": "x"}}
     )
     check_invariants(both, both_seen, both_sp)
     assert both_sp.count("junior_ic") == 1, f"the delegated edit was dropped: {both_sp}"
-    assert both_seen == [
-        "open", "t01-senior_director", "t02-owner", "t03-junior_ic", "decision",
-    ], both_seen
+    assert both_seen[-3:] == ["t14-owner", "t15-junior_ic", "decision"], both_seen[-4:]
+    assert both["closed"] is True
 
     # The boundary itself: `turn <= max_turns`, not `<`. On the LAST available
     # turn the edit still happens. With `<` the delegation is dropped one turn
@@ -1752,6 +1757,49 @@ def test_reduce_honours_close_from_the_owner():
     assert s["closed"] is True
     assert s["delegation"] is None
     assert reductions[0].json["close"] is True
+
+
+def test_reduce_refuses_a_close_before_the_opening_round_drains():
+    """The owner may not end a nine-persona committee at turn 02 (spec 5.4).
+
+    The owner persona's goal is "get a clear decision" and its style "concedes
+    fast on small things", so a real worker that hears one reviewer, answers it
+    and closes produces a two-turn "committee" that reaches `done` looking
+    perfectly healthy while six members never speak. The gate is enforced here,
+    not merely asked for in the goal.
+    """
+    pb = _committee()
+    run = _run(phase="t02-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=2)  # `opening` left as seeded
+
+    assert s["opening"], "the opening round has not drained"
+    answer = _turn_answer("Heard; I think we are done here.", close="yes")
+    reductions = pb.reduce(
+        run, "t02-owner", [_finding(run, f"{run.id}/t02-owner", answer)],
+        _NamedSite("local"),
+    )
+
+    assert s["closed"] is False
+    assert reductions[0].json["close"] is True  # said, not honoured
+
+    # The same block, once every member has spoken, does close the discussion.
+    s.update(opening=[], current_turn=14)
+    pb.reduce(
+        run, "t14-owner", [_finding(run, f"{run.id}/t14-owner", answer)],
+        _NamedSite("local"),
+    )
+    assert s["closed"] is True
+
+
+def test_an_early_close_does_not_shorten_the_committee():
+    """The whole machine, not just the gate: t02's close leaves the round intact."""
+    _, _, s, seen, sp = _drive({"t02-owner": {"close": True}})
+    check_invariants(s, seen, sp)
+
+    assert s["closed"] is False
+    assert seen[-2:] == ["t14-owner", "decision"], seen
+    assert set(cast.SENIORITY) <= set(sp), f"a member never spoke: {sp}"
 
 
 def test_reduce_honours_a_delegation_with_an_action_from_the_owner():

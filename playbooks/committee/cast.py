@@ -299,7 +299,9 @@ _FLOOR_OWNER = (
     "You wrote this proposal and you are accountable for it. Answer the member "
     "who spoke last, directly and in your own voice: concede what their "
     "argument earns and defend what it does not. You make no edits yourself — "
-    "an edit is something you delegate."
+    "an edit is something you delegate. You cannot close the discussion until "
+    "every member of the committee has taken an opening turn: a close before "
+    "that is ignored."
 )
 
 _FLOOR_REVIEWER = (

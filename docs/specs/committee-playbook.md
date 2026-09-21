@@ -85,6 +85,13 @@ already queued or still to speak in the opening round. A delegation outranks `cl
 still happens, and costs a turn — and the cap outranks both, naming in the decision any delegation
 it drops.
 
+**The owner cannot close before the opening round drains.** A `close: yes` on a turn where any
+reviewer has still to take its opening turn is recorded on the reduction and then discarded: the
+owner is told so in its goal, and `_apply_block` enforces it. Without the gate the owner — whose
+persona wants "a clear decision" and "concedes fast on small things" — can end a nine-persona
+committee at turn 02, producing a two-turn transcript that reaches `done` looking healthy. The
+owner may close again on any later turn.
+
 ## Where things land
 
 Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
