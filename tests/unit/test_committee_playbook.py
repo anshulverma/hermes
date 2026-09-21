@@ -1175,3 +1175,268 @@ def test_the_transport_path_methods_need_no_per_run_state(monkeypatch):
 
     # None of the four reached for per-run state, so none of them minted any.
     assert pb._state_by_run == {}
+
+
+# --- seed: the open bootstrap, the site guard, configuration ---------------
+
+
+class _NamedSite:
+    """A site stub: the §8 guard reads nothing off a site but ``name``."""
+
+    def __init__(self, name: str):
+        self.name = name
+
+
+@pytest.fixture
+def artifact(tmp_path, monkeypatch, clean_env):
+    """An existing artifact file, exported the way §6 requires."""
+    path = tmp_path / "proposal.md"
+    path.write_text("# Proposal\n\nShip the thing.\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_COMMITTEE_ARTIFACT", str(path))
+    return path
+
+
+def test_seed_open_is_a_zero_ticket_bootstrap(artifact):
+    """`open` seeds no ticket and writes the header: charge, artifact, roster."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    run = _run(config={"goals": ["Decide whether to fund the migration."]}, phase="open")
+
+    assert pb.seed(run, _NamedSite("local")) == []
+
+    header = thread.path(run.id).read_text(encoding="utf-8")
+    assert "Decide whether to fund the migration." in header
+    assert str(artifact) in header
+    for role in cast.CAST:
+        assert role in header
+        assert cast.persona(role)["name"] in header
+
+    s = pb._state(run)
+    assert s["charge"] == "Decide whether to fund the migration."
+    assert s["artifact"] == str(artifact)
+    assert s["revised"] == str(thread.revised_path(run.id, str(artifact)))
+    assert s["max_turns"] == 30
+
+
+def test_seed_open_requires_the_artifact_variable():
+    """Unset HERMES_COMMITTEE_ARTIFACT fails fast, naming the variable."""
+    pb = _committee()
+    with pytest.raises(ValueError) as excinfo:
+        pb.seed(_run(phase="open"), _NamedSite("local"))
+    assert "HERMES_COMMITTEE_ARTIFACT" in str(excinfo.value)
+
+
+def test_seed_open_rejects_a_path_that_is_not_a_file(tmp_path, monkeypatch):
+    """A path naming no readable file fails fast, naming the variable and the path."""
+    from playbooks.committee import thread
+
+    missing = tmp_path / "no-such-proposal.md"
+    monkeypatch.setenv("HERMES_COMMITTEE_ARTIFACT", str(missing))
+
+    pb = _committee()
+    run = _run(phase="open")
+    with pytest.raises(ValueError) as excinfo:
+        pb.seed(run, _NamedSite("local"))
+
+    message = str(excinfo.value)
+    assert "HERMES_COMMITTEE_ARTIFACT" in message
+    assert str(missing) in message
+    # validated before anything is written
+    assert not thread.path(run.id).exists()
+
+
+def test_site_guard_accepts_local_subprocess_sites_only(artifact):
+    """§8: `local` and `fan-*` pass; anything else raises, naming the site."""
+    for name in ("local", "fan-claude", "fan-codex"):
+        assert _committee().seed(_run(phase="open"), _NamedSite(name)) == []
+
+    for name in ("devserver", "ssh", "fan"):
+        with pytest.raises(ValueError) as excinfo:
+            _committee().seed(_run(phase="open"), _NamedSite(name))
+        assert repr(name) in str(excinfo.value)
+
+
+def test_max_turns_reads_the_env_and_falls_back_on_junk(artifact, monkeypatch):
+    """The cap is resolved once, at open seed time, and junk means 30."""
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "5")
+    pb = _committee()
+    run = _run(phase="open")
+    pb.seed(run, _NamedSite("local"))
+    assert pb._state(run)["max_turns"] == 5
+
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "soon")
+    other = _committee()
+    other.seed(run, _NamedSite("local"))
+    assert other._state(run)["max_turns"] == 30
+
+
+def test_charge_defaults_when_no_goals_and_is_clipped(artifact):
+    """No --goals means the default charge; a long one is clipped at CHARGE_MAX."""
+    from playbooks.committee import cast
+    from playbooks.committee.playbook import DEFAULT_CHARGE
+
+    pb = _committee()
+    run = _run(config={}, phase="open")
+    pb.seed(run, _NamedSite("local"))
+    assert pb._state(run)["charge"] == DEFAULT_CHARGE
+    assert DEFAULT_CHARGE == "Decide whether to approve this proposal."
+
+    long_pb = _committee()
+    long_run = _run(config={"goals": ["x" * 500, "y" * 500]}, phase="open")
+    long_pb.seed(long_run, _NamedSite("local"))
+    assert len(long_pb._state(long_run)["charge"]) == cast.CHARGE_MAX
+    assert cast.CHARGE_MAX == 400
+
+
+def test_turn_ticket_carries_exactly_the_frozen_payload_keys(artifact):
+    """A turn phase seeds one ticket for s["current_role"], id f"{run.id}/{phase}"."""
+    from engine import contracts
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="open")
+    pb.seed(run, site)
+
+    phase = pb.next_phase(_run(phase="open"))
+    assert phase == "t01-senior_director"
+
+    tickets = pb.seed(_run(phase=phase), site)
+    assert len(tickets) == 1
+    t = tickets[0]
+    assert t.id == f"{run.id}/{phase}"
+    assert t.run_id == run.id
+    assert t.phase == phase
+    assert t.state == "queued"
+    assert t.resource_req == "cpu"
+    assert t.priority == 0.0
+    assert t.attempts == 0
+    assert set(t.payload) == {"role", "title", "goal", "kind", "action"}
+    assert t.payload["role"] == "senior_director"
+    assert t.payload["kind"] == "turn"
+    assert t.payload["action"] is None
+    assert str(artifact) in t.payload["goal"]
+    assert str(thread.path(run.id)) in t.payload["goal"]
+    assert len(t.payload["goal"]) <= cast.GOAL_MAX
+    contracts.validate(t.payload, pb.payload_schema(phase))
+
+
+def test_junior_seed_byte_copies_the_original_and_leaves_it_untouched(artifact):
+    """§5.5: the revised copy is in place before the junior IC's worker runs."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="open")
+    pb.seed(run, site)
+    original = artifact.read_bytes()
+
+    s = pb._state(run)
+    s["current_role"] = cast.JUNIOR
+    s["pending_action"] = "cut the roadmap section to one paragraph"
+
+    tickets = pb.seed(_run(phase="t04-junior_ic"), site)
+
+    revised = thread.revised_path(run.id, str(artifact))
+    assert revised.read_bytes() == original
+    assert artifact.read_bytes() == original
+    t = tickets[0]
+    assert set(t.payload) == {"role", "title", "goal", "kind", "action"}
+    assert t.payload["role"] == "junior_ic"
+    assert t.payload["kind"] == "edit"
+    assert t.payload["action"] == "cut the roadmap section to one paragraph"
+    assert str(revised) in t.payload["goal"]
+
+
+def test_a_second_junior_seed_keeps_the_edited_revised_copy(artifact):
+    """ensure_revised copies only when absent: a later edit builds on the first."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="open")
+    pb.seed(run, site)
+
+    s = pb._state(run)
+    s["current_role"] = cast.JUNIOR
+    s["pending_action"] = "cut the roadmap section to one paragraph"
+    pb.seed(_run(phase="t04-junior_ic"), site)
+
+    revised = thread.revised_path(run.id, str(artifact))
+    revised.write_text("# Proposal\n\nShip the thing, but smaller.\n", encoding="utf-8")
+
+    s["pending_action"] = "add a rollback plan"
+    pb.seed(_run(phase="t06-junior_ic"), site)
+
+    assert revised.read_text(encoding="utf-8") == "# Proposal\n\nShip the thing, but smaller.\n"
+    assert artifact.read_text(encoding="utf-8") == "# Proposal\n\nShip the thing.\n"
+
+
+def test_a_junior_seed_survives_an_artifact_deleted_mid_run(artifact):
+    """A vanished original degrades the turn; it must not abandon the run.
+
+    `seed` is called unguarded inside the master loop
+    (engine/dispatch.py:287), so an OSError out of ensure_revised would leave
+    the run `running` with no terminal state and no event. The turn is
+    dispatched with an empty pre-edit digest instead, which is what reduce's
+    §7 re-check reads as an edit that did not land.
+    """
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="open")
+    pb.seed(run, site)
+
+    artifact.unlink()
+    s = pb._state(run)
+    s["current_role"] = cast.JUNIOR
+    s["pending_action"] = "add a rollback plan"
+
+    tickets = pb.seed(_run(phase="t04-junior_ic"), site)
+
+    assert len(tickets) == 1
+    assert tickets[0].payload["kind"] == "edit"
+    assert s["pre_edit_digest"] == ""
+    assert not thread.revised_path(run.id, s["artifact"]).exists()
+
+
+def test_decision_ticket_is_built_for_the_chair(artifact):
+    """`decision` seeds one chair ticket with the chair goal."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="open")
+    pb.seed(run, site)
+    s = pb._state(run)
+
+    tickets = pb.seed(_run(phase="decision"), site)
+    assert len(tickets) == 1
+    t = tickets[0]
+    assert t.id == f"{run.id}/decision"
+    assert t.phase == "decision"
+    assert t.payload["role"] == cast.CHAIR
+    assert cast.CHAIR == "chair"
+    assert t.payload["kind"] == "decision"
+    assert t.payload["action"] is None
+    assert t.payload["goal"] == cast.goal(
+        cast.CHAIR,
+        charge=s["charge"],
+        artifact=s["artifact"],
+        thread=str(thread.path(run.id)),
+        revised=s["revised"],
+        action=None,
+    )
+
+
+def test_the_site_guard_runs_before_the_config_check(artifact, monkeypatch):
+    """A bad site is reported as a bad site, not as a missing artifact."""
+    monkeypatch.delenv("HERMES_COMMITTEE_ARTIFACT", raising=False)
+    pb = _committee()
+    with pytest.raises(ValueError) as excinfo:
+        pb.seed(_run(phase="open"), _NamedSite("devserver"))
+    message = str(excinfo.value)
+    assert "'devserver'" in message
+    assert "HERMES_COMMITTEE_ARTIFACT" not in message

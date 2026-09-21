@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING
 
 from engine import playbook as _playbook
 from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
-from playbooks.committee import cast
+from playbooks.committee import cast, thread
 
 if TYPE_CHECKING:  # avoid import cycle
     from engine.site import Site
@@ -136,6 +136,143 @@ class CommitteePlaybook:
             s["dropped_delegation"] = s["delegation"]
             s["delegation"] = None
         return "decision"
+
+    # --- seeding --------------------------------------------------------
+
+    def seed(self, run: Run, site: "Site") -> list[Ticket]:
+        """Seed the current phase.
+
+        Three shapes, dispatched on the phase the engine set. The phase name is
+        display-only and is never parsed for data (§5.6):
+
+        * ``open`` is a zero-ticket bootstrap. It checks the site, resolves the
+          run's configuration once — so a mid-run environment change cannot swap
+          the turn cap — builds the per-run state and writes the thread header.
+          No worker runs: an owner opening would only paraphrase a document that
+          every reviewer is told to read for itself.
+        * ``decision`` is one ticket for the chair.
+        * anything else is one ticket for ``s["current_role"]``, the speaker
+          ``_turn`` recorded when it minted this phase. A junior-IC turn
+          byte-copies the artifact into the revised directory first, so the
+          worker only ever edits a file that is already there and ``reduce``'s
+          re-check (§7) has something to hash.
+
+        Raises:
+            ValueError: the run is on a site that does not run its workers as
+                local subprocesses (§8), or ``HERMES_COMMITTEE_ARTIFACT`` is
+                unset or does not name an existing readable file (§6).
+        """
+        # §8: the thread file lives under HERMES_HOME on the master and no site
+        # exposes a master-to-host push, so only a local-subprocess site works.
+        if site.name != "local" and not site.name.startswith("fan-"):
+            raise ValueError(
+                f"the committee playbook requires a local-subprocess site, but this "
+                f"run is on {site.name!r}. Use 'local' or a 'fan-<agent>' site: the "
+                f"thread file lives under HERMES_HOME on the master and no site can "
+                f"push it to a remote host."
+            )
+
+        phase = run.phase or self.phases[0]
+        s = self._state(run)
+
+        if phase == "open":
+            raw = (os.environ.get(ENV_ARTIFACT) or "").strip()
+            if not raw:
+                raise ValueError(
+                    f"{ENV_ARTIFACT} is unset: the committee reviews exactly one file "
+                    f"and there is no default. Export "
+                    f"{ENV_ARTIFACT}=/abs/path/to/the/file."
+                )
+            artifact = os.path.abspath(raw)
+            if not (os.path.isfile(artifact) and os.access(artifact, os.R_OK)):
+                raise ValueError(
+                    f"{ENV_ARTIFACT}={raw!r} does not name an existing readable file "
+                    f"(resolved to {artifact})."
+                )
+
+            # run.config carries exactly one key, and only from --goals
+            # (engine/cli.py:375-379); nothing else ever writes that column.
+            goals = run.config.get("goals") or []
+            if isinstance(goals, str):
+                goals = [goals]
+            charge = " ".join(str(g).strip() for g in goals if str(g).strip())
+
+            try:
+                max_turns = int(os.environ.get(ENV_MAX_TURNS, DEFAULT_MAX_TURNS))
+            except (TypeError, ValueError):
+                max_turns = DEFAULT_MAX_TURNS
+
+            s["charge"] = (charge or DEFAULT_CHARGE)[:cast.CHARGE_MAX]
+            s["artifact"] = artifact
+            s["revised"] = str(thread.revised_path(run.id, artifact))
+            s["max_turns"] = max_turns
+            s["roster"] = {
+                role: f"{cast.persona(role)['name']}, {cast.persona(role)['title']}"
+                for role in cast.CAST
+            }
+
+            # Written last: an OSError here fails the command exactly the way the
+            # two ValueErrors above do, with nothing half-written behind it.
+            thread.write_header(
+                run.id,
+                charge=s["charge"],
+                artifact=s["artifact"],
+                roster=[f"{role} — {who}" for role, who in s["roster"].items()],
+            )
+            return []
+
+        if phase == "decision":
+            role, kind, action = cast.CHAIR, "decision", None
+        else:
+            role = s["current_role"]
+            if role == cast.JUNIOR:
+                kind = "edit"
+                # next_phase sets pending_action before it mints a junior turn.
+                action = str(s["pending_action"] or "")
+                try:
+                    revised = thread.ensure_revised(run.id, s["artifact"])
+                except OSError:
+                    # The original was readable at `open` and has since gone.
+                    # seed() is called unguarded inside the master loop
+                    # (engine/dispatch.py:287), so letting this out would
+                    # abandon the run `running`, with no terminal state and no
+                    # event. Dispatch the turn instead: digest("") below reads
+                    # as an edit that did not land, which reduce's re-check
+                    # reports in the thread and the chair names in the verdict.
+                    revised = thread.revised_path(run.id, s["artifact"])
+                # Snapshot the copy as it stands BEFORE this worker touches it, so
+                # reduce's re-check (spec 7) measures THIS edit rather than the
+                # accumulated difference from the original. On the first delegation
+                # the copy is a byte-copy of the original, so this is exactly the
+                # comparison spec 7 describes; on the second and later ones it is
+                # the only comparison that can still fail.
+                s["pre_edit_digest"] = thread.digest(revised)
+            else:
+                kind, action = "turn", None
+
+        return [Ticket(
+            id=f"{run.id}/{phase}",
+            run_id=run.id,
+            phase=phase,
+            state="queued",
+            resource_req="cpu",
+            priority=0.0,
+            attempts=0,
+            payload={
+                "role": role,
+                "title": cast.title(role, kind),
+                "goal": cast.goal(
+                    role,
+                    charge=s["charge"],
+                    artifact=s["artifact"],
+                    thread=str(thread.path(run.id)),
+                    revised=s["revised"],
+                    action=action,
+                ),
+                "kind": kind,
+                "action": action,
+            },
+        )]
 
     # --- the transport-path methods (spec §5.6) -------------------------
     #
