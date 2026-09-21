@@ -130,13 +130,19 @@ export HERMES_COMMITTEE_ARTIFACT=/abs/path/proposal.md
 `HERMES_PLAYBOOK_MODULES` is what makes `committee` resolvable; it is deliberately not in the
 engine's hardcoded import list. Pin `HERMES_HOME`: everything under `$HERMES_HOME/local` is
 auto-imported *before* those modules, so an unpinned home can drag a private adapter in. Point
-`HERMES_REPO` at a real git repo containing
-`--base-ref` (default `main`) even though the committee never touches a worktree — `crew.add`
-provisions one and health-gates the host on `workspace_ready`, so a missing one fails host
-admission before the first turn, with an error that says nothing about the committee.
+`HERMES_REPO` at a real git repo containing the ref named by `--base-ref` (default `main`), even
+though the committee never touches a worktree — `crew.add` provisions one and health-gates the host
+on `workspace_ready`, so a missing one fails host admission before the first turn, with an error
+that says nothing about the committee.
 
 ## Limitations
 
+- **Run it from a neutral directory.** `engine/transport.py` execs the worker with no `cwd=`, so a
+  live worker inherits whatever directory `hermes run` was typed in — and the line above tells you
+  to point `HERMES_REPO` at a real git repo, which is exactly where you will be standing. Every
+  persona would then load that repo's `CLAUDE.md` as project context while reviewing an unrelated
+  proposal. `cd` somewhere empty first; only `HERMES_COMMITTEE_ARTIFACT` and `HERMES_HOME` decide
+  what the run reads and writes.
 - **The site must be `local` or `fan-*`.** No site can push a file to a remote host, so on a remote
   worker the master's `thread.md` would not exist; `seed` refuses any other site, naming it.
 - **Do not dispatch a committee run from a separate `hermes serve --host` process.** The floor
@@ -169,4 +175,11 @@ admission before the first turn, with an error that says nothing about the commi
   `needs_human` ticket would block advancement for good. The re-check lives in `reduce` instead.
 - `reduce` never raises; file-IO failures ride on the reduction as `error`.
 - No phase name and no ticket id repeats, and the highest turn never exceeds the cap.
+- **The turn counter advances in `next_phase` and never in `reduce`.** Advanced in `reduce` it
+  would stall on a turn that produced no finding and re-emit that phase name, which `_phase_reduced`
+  (`engine/dispatch.py:311-321`) reads as "already reduced" — a deadlock with no error anywhere.
+- **The four transport-path methods stay pure functions of their arguments.** `payload_schema`,
+  `driver`, `result_schema` and `verify` may run in a worker process that never called `seed`, where
+  `_state_by_run` is empty: no `self._state(run)`, no file IO, no parsing of the runtime phase name.
+  Adding state to any of them breaks a split deployment silently rather than failing a test.
 - Stdlib-only. Nothing is written outside the run's own directory under `$HERMES_HOME`.

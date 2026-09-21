@@ -11,8 +11,7 @@ per-run dict on the instance (``_state``), because ``run.config`` is read-only a
 resumed, and ``seed``/``reduce``/``next_phase``/``is_done`` all run in the master
 process against the one registry singleton.
 
-Ordering is load-bearing and was verified by simulation rather than by reading. A
-pending delegation outranks ``close`` — an edit the owner asked for still happens,
+Ordering is load-bearing. A pending delegation outranks ``close`` — an edit the owner asked for still happens,
 and costs one turn — and the turn cap outranks both, so ``t31`` can never be minted
 under ``max_turns=30``. A delegation the cap does drop is recorded as
 ``dropped_delegation`` rather than lost.
@@ -425,8 +424,7 @@ class CommitteePlaybook:
         because `hermes run` always creates a NEW run (engine/cli.py:382) and
         `hermes serve --host` only calls serve_loop (engine/cli.py:778). One
         empty answer would strand the committee mid-conversation with no operator
-        path back. This is why it is not research's answer-text gate
-        (playbooks/research/playbook.py:456-458).
+        path back.
 
         The independent re-check the no-trust invariant asks for lives in
         reduce() instead, which runs in the master (engine/dispatch.py:305), can
@@ -451,13 +449,9 @@ class CommitteePlaybook:
         which blocks advancement with nothing able to re-drive the loop.
 
         For the same reason no reduction this method returns may ever carry
-        ``needs_human_ticket_ids`` -- the one key the engine reads inside a
-        reduction (``engine/queue.py:920``). Nothing can re-drive a stuck run:
-        ``hermes run`` always creates a NEW run (``engine/cli.py:382``) and
-        ``hermes serve --host`` only calls ``serve_loop`` (``engine/cli.py:778``),
-        so a ``needs_human`` ticket blocks advancement
-        (``engine/dispatch.py:261-264``) permanently. Do not "fix" this
-        (acceptance criterion 8).
+        ``needs_human_ticket_ids``, the one key the engine reads inside a
+        reduction (``engine/queue.py:920``). Do not "fix" this (acceptance
+        criterion 8).
 
         It MUST NEVER RAISE. An exception here propagates out of
         ``engine/dispatch.py:305`` and kills the master loop mid-run, so every
@@ -477,10 +471,9 @@ class CommitteePlaybook:
         """One speaker's turn: the thread entry, then the gates."""
         errors: list[str] = []
         # `_turn` sets `current_role` before the phase is dispatched, so an empty
-        # one means the turn cannot be attributed. Fail CLOSED: no entry under
-        # someone else's name and no gates, because the old fallback (`or
-        # cast.OWNER`) handed owner authority -- `close` and `delegate` -- to a
-        # speaker nobody can name. The empty role matches no gate by construction.
+        # one means the turn cannot be attributed. Fail CLOSED -- no entry under
+        # someone else's name, no gates. A fallback to `cast.OWNER` would hand
+        # owner authority (`close`, `delegate`) to a speaker nobody can name.
         role = s["current_role"] or ""
         turn = s["current_turn"]
         answer = _latest_answer(findings)
@@ -503,42 +496,36 @@ class CommitteePlaybook:
 
         block = turnblock.parse(answer)
 
-        # The gates of spec 5.4, in the one implementation the state-machine
-        # tests drive. An unattributable turn runs none of them.
+        # The gates of spec 5.4. An unattributable turn runs none of them.
         if role:
             _apply_block(s, role, block, delivered=bool(answer))
 
         # --- the independent re-check (spec 7), master-side ---------------
-        # The no-trust invariant wants an independent check of an `ok` claim.
-        # It cannot live in `verify` (see `reduce`'s docstring), so it lives
-        # here and rides on the reduction: does the revised copy exist, and did
-        # its sha256 move during THIS turn?
+        # The no-trust invariant wants an independent check of an `ok` claim. It
+        # cannot live in `verify` (see `reduce`'s docstring), so it rides on the
+        # reduction instead: does the revised copy exist, and did its sha256
+        # move during THIS turn?
         #
-        # The comparison is against the digest `seed` snapshotted just before
-        # the worker ran -- not against the original. `ensure_revised` copies
-        # once and never again, so after the first delegation lands the copy
-        # differs from the original forever, and comparing to the original
-        # would report `verified: true` for every later edit including one that
-        # did nothing. That is precisely the silent no-op criterion 7 exists to
-        # catch. On the FIRST delegation the snapshot IS the original's digest,
-        # so this is exactly the check spec 7 describes.
+        # RULE: compare against the digest `seed` snapshotted just before the
+        # worker ran, never against the original. `ensure_revised` copies once
+        # and never again, so after the first delegation the copy differs from
+        # the original forever and every later edit -- including one that did
+        # nothing -- would read as verified. On the FIRST delegation the
+        # snapshot IS the original's digest, which is the check spec 7 describes.
         verified = None
         if role == cast.JUNIOR:
             verified = False
             try:
                 revised = Path(s["revised"]) if s["revised"] else None
-                # `seed` sets this on every junior-IC phase, so there is no
-                # fallback: the only other digest available is the original's,
-                # and comparing to that is the unsound reading above.
+                # `seed` sets this on every junior-IC phase; there is no
+                # fallback, per the RULE above.
                 before = s["pre_edit_digest"]
-                # An empty `before` is not a digest: `digest` of a zero-byte
-                # file is e3b0c442..., never "". It means the snapshot itself
-                # failed -- the original had vanished before any copy was made
-                # (`seed`'s OSError path) -- so there is nothing to compare
-                # against and no evidence any edit landed. Without this clause
-                # a worker that INVENTED the revised file from nothing would
-                # hash to something != "" and be reported as verified, which
-                # inverts the one master-side no-trust check (spec 7).
+                # An empty `before` is not a digest -- `digest` of a zero-byte
+                # file is e3b0c442..., never "" -- it means the snapshot itself
+                # failed (`seed`'s OSError path: the original vanished before
+                # any copy was made). Without the clause, a worker that INVENTED
+                # the revised file from nothing hashes to something != "" and is
+                # reported verified, inverting the one no-trust check (spec 7).
                 verified = bool(
                     before
                     and revised is not None
