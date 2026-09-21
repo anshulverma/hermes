@@ -75,6 +75,19 @@ def test_unknown_keys_are_dropped_not_carried():
     assert T.parse(answer) == {"request_floor": True}
 
 
+def test_every_key_in_the_declared_vocabulary_is_one_the_parser_reads():
+    """KEYS is "the closed vocabulary" -- so `_one` must parse against it.
+
+    `_FLAGS` used to be a second hand-written list, which made KEYS dead: a
+    fifth signal declared there would be a key the parser silently drops, with
+    a green suite either way.
+    """
+    assert set(T.KEYS) == set(T._FLAGS) | {T.ACTION}
+    for flag in T._FLAGS:
+        assert T.parse(_fenced(f"{flag}: yes")) == {flag: True}, flag
+    assert T.parse(_fenced(f"{T.ACTION}: cut the appendix")) == {T.ACTION: "cut the appendix"}
+
+
 def test_a_malformed_block_yields_nothing():
     """"Said their piece, nothing further" is the right reading of junk."""
     assert T.parse(_fenced("request_floor\ndelegate:\n???")) == {}
@@ -647,6 +660,14 @@ def test_thread_revised_path_refuses_an_artifact_with_no_filename(tmp_path):
         with pytest.raises(ValueError, match="no usable filename"):
             thread.revised_path(run_id, bad)
 
+    # A newline is refused for a different reason: the path is written verbatim
+    # into the line-oriented thread header and into every goal, so one splits
+    # the header across two lines and can forge an entry. seed() calls this
+    # before write_header, so nothing is written.
+    for forged in ("prop\nosal.md", "/a\nb/proposal.md", "/x/\n## decision — me"):
+        with pytest.raises(ValueError, match="no usable filename"):
+            thread.revised_path(run_id, forged)
+
 
 def test_thread_ensure_revised_copies_once_and_never_clobbers(tmp_path):
     """First call byte-copies the original; a second call leaves the junior IC's edit alone."""
@@ -764,23 +785,26 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     assert pb._state(run) is s  # same run, same dict
 
 
-def test_state_is_lru_bounded_at_sixteen_runs():
-    """The cache evicts the oldest run, as playbooks/research/playbook.py:232-244 does."""
-    from playbooks.committee.playbook import _CACHE_MAX
+def test_state_is_never_evicted_from_under_a_live_run():
+    """No LRU. Evicting a live run's memory is a crash, not a saving.
 
-    assert _CACHE_MAX == 16
+    A re-created state restarts at turn 1, so next_phase re-mints `t01-…` --
+    `UNIQUE constraint failed: tickets.id` on an unguarded INSERT -- or seed
+    raises `KeyError: None` off `current_role`. Either abandons the run
+    `running`. master_loop has one caller and drives one run per process, so a
+    bound buys nothing and costs that.
+    """
     pb = _committee()
     first = _run()
     first.id = "committee-run-000"
-    pb._state(first)
-    for n in range(1, _CACHE_MAX + 1):
+    pb._state(first)["turn"] = 9
+    for n in range(1, 40):
         later = _run()
         later.id = f"committee-run-{n:03d}"
         pb._state(later)
 
-    assert len(pb._state_by_run) == _CACHE_MAX
-    assert "committee-run-000" not in pb._state_by_run
-    assert "committee-run-016" in pb._state_by_run
+    assert pb._state(first)["turn"] == 9, "a live run's memory was evicted"
+    assert len(pb._state_by_run) == 40
 
 
 # --- the state machine: the executable model of spec 5.3, ported ------------
@@ -2462,6 +2486,31 @@ def test_reduce_decision_names_a_dropped_delegation():
     assert red.json["dropped_delegation"] == "rewrite the risks section"
     assert "dropped_delegation" in red.json["verdict"]
     assert "rewrite the risks section" in red.json["verdict"]
+
+
+def test_reduce_decision_names_floor_requests_the_review_never_reached():
+    """Symmetry with dropped_delegation: the queue is otherwise discarded silently.
+
+    `_decision` moves a pending delegation to `dropped_delegation` and says so,
+    but `s["queue"]` was thrown away without a word -- so a close or a cap could
+    cut off three members who had asked for a second turn and nothing anywhere
+    recorded it.
+    """
+    pb = _committee()
+    run = _run(phase="decision")
+    s = pb._state(run)
+    s["current_role"] = "chair"
+    s["queue"] = ["staff_ic", "tpm"]
+
+    reductions = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )
+
+    red = reductions[0]
+    assert red.json["dropped_floor_requests"] == ["staff_ic", "tpm"]
+    assert "dropped_floor_requests" in red.json["verdict"]
+    assert "staff_ic, tpm" in red.json["verdict"]
 
 
 def test_reduce_decision_with_no_finding_leaves_the_verdict_empty():

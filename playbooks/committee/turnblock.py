@@ -38,14 +38,17 @@ FENCE_TAG = "hermes-turn"
 
 # The closed vocabulary. Anything else in the block is dropped -- an agent
 # inventing a key must not become a signal nobody defined.
-KEYS: tuple[str, ...] = ("request_floor", "delegate", "action", "close")
+ACTION = "action"
+KEYS: tuple[str, ...] = ("request_floor", "delegate", ACTION, "close")
 
 # An action rides in a goal that shares a hard character budget with the
 # persona and both paths, and it names one edit. One line is the whole point.
 ACTION_MAX = 200
 
-# The three keys whose value is yes/no; `action` is the free-text one.
-_FLAGS = ("request_floor", "delegate", "close")
+# The keys whose value is yes/no; `action` is the free-text one. DERIVED from
+# KEYS, not a second list: a fifth signal added to KEYS alone would be declared
+# vocabulary that `_one` silently drops, with a green suite either way.
+_FLAGS = tuple(key for key in KEYS if key != ACTION)
 
 _BLOCK_RE = re.compile(
     r"```[ \t]*" + re.escape(FENCE_TAG) + r"[ \t]*\n(.*?)\n?```",
@@ -85,8 +88,8 @@ def _one(raw: str) -> dict:
         value = value.strip()
         if not value:
             continue
-        if key == "action":
-            out["action"] = value[:ACTION_MAX]
+        if key == ACTION:
+            out[ACTION] = value[:ACTION_MAX]
         elif key in _FLAGS:
             word = value.lower()
             if word in ("yes", "no"):

@@ -331,7 +331,7 @@ _DONE_DECISION = (
 )
 
 
-def _clip(text: str | None, limit: int) -> str:
+def clip(text: str | None, limit: int) -> str:
     """One line of at most ``limit`` characters, ellipsised when cut."""
     line = " ".join(str(text or "").split())
     if len(line) <= limit:
@@ -355,7 +355,7 @@ def goal(
     bounded; everything else is fixed prose, so the assembled goal has a known
     size and the unit test holds it under ``GOAL_MAX``.
     """
-    charge = _clip(charge, CHARGE_MAX)
+    charge = clip(charge, CHARGE_MAX)
 
     if role == CHAIR:
         return (
@@ -399,7 +399,7 @@ def goal(
             f"The revised copy you edit: {revised}\n"
             f"The thread the request came out of: {thread}\n\n"
             "The owner delegated this to you: "
-            f"{_clip(action, _turnblock.ACTION_MAX)}\n\n"
+            f"{clip(action, _turnblock.ACTION_MAX)}\n\n"
             f"{_GUARDRAIL_EDIT}\n\n"
             f"{_DONE_EDIT.format(revised=revised)}"
         )

@@ -32,8 +32,6 @@ from playbooks.committee import cast, thread, turnblock
 if TYPE_CHECKING:  # avoid import cycle
     from engine.site import Site
 
-_CACHE_MAX = 16
-
 ENV_ARTIFACT = "HERMES_COMMITTEE_ARTIFACT"
 ENV_MAX_TURNS = "HERMES_COMMITTEE_MAX_TURNS"
 ENV_DRIVER = "HERMES_COMMITTEE_DRIVER"
@@ -131,11 +129,18 @@ class CommitteePlaybook:
     # --- per-run state (master-only) ------------------------------------
 
     def _state(self, run: Run) -> dict:
-        """The run's mutable committee state, created on first use, LRU-bounded.
+        """The run's mutable committee state, created on first use.
 
         Master-only: seed, reduce, next_phase and is_done all run in the process
         that owns the run, so this dict is the run's memory. The transport-path
         methods never read it.
+
+        Unbounded on purpose. Evicting a live run would make ``next_phase``
+        re-mint ``t01-…`` (``UNIQUE constraint failed: tickets.id`` on an
+        unguarded INSERT) or ``seed`` raise ``KeyError: None``, either of which
+        abandons the run ``running``. ``master_loop`` has one caller and drives
+        one run per process, so a bound would convert a hypothetical into a
+        crash and buy nothing.
         """
         s = self._state_by_run.get(run.id)
         if s is None:
@@ -173,9 +178,6 @@ class CommitteePlaybook:
                 "max_turns": DEFAULT_MAX_TURNS,
             }
             self._state_by_run[run.id] = s
-            # Evict the oldest entry when the cache exceeds the bound.
-            if len(self._state_by_run) > _CACHE_MAX:
-                del self._state_by_run[next(iter(self._state_by_run))]
         return s
 
     def _turn(self, s: dict, role: str) -> str:
@@ -269,10 +271,10 @@ class CommitteePlaybook:
             if max_turns < 1:
                 max_turns = DEFAULT_MAX_TURNS
 
-            # `_clip` rather than a raw slice, so an over-long charge is cut at
+            # `clip` rather than a raw slice, so an over-long charge is cut at
             # a word with an ellipsis instead of mid-word. `cast.goal` clips it
             # again; the second clip is a no-op on an already-short line.
-            s["charge"] = cast._clip(charge or DEFAULT_CHARGE, cast.CHARGE_MAX)
+            s["charge"] = cast.clip(charge or DEFAULT_CHARGE, cast.CHARGE_MAX)
             s["artifact"] = artifact
             s["artifact_digest"] = thread.digest(artifact)
             s["revised"] = str(thread.revised_path(run.id, artifact))
@@ -607,6 +609,14 @@ class CommitteePlaybook:
                 "- dropped_delegation (the turn cap cut it off, no edit was made): "
                 f"{s['dropped_delegation']}"
             )
+        if s["queue"]:
+            # Symmetric with dropped_delegation: a floor request the close or the
+            # cap never got to is a fact about this committee's output, and the
+            # queue is otherwise discarded without a word.
+            parts.append(
+                "- dropped_floor_requests (the review ended before their turn "
+                f"came): {', '.join(s['queue'])}"
+            )
         parts.append(_SIMULATION)
         text = "\n\n".join(parts)
 
@@ -624,6 +634,7 @@ class CommitteePlaybook:
             "rechecks": [dict(check) for check in s["rechecks"]],
             "artifact_intact": intact,
             "dropped_delegation": s["dropped_delegation"],
+            "dropped_floor_requests": list(s["queue"]),
             "error": "; ".join(errors) or None,
         })]
 

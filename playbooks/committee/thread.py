@@ -88,11 +88,17 @@ def revised_path(run_id: str, artifact: str) -> Path:
     ``digest`` of a directory is ``""``, so every re-check would report
     ``verified: false`` with no error anywhere. Raise instead.
 
+    A newline anywhere in the path is refused for a different reason: the path
+    is written verbatim into the thread header and into every goal, both of
+    which are line-oriented, so one would split the header across two lines and
+    forge an entry. ``seed`` calls this before ``write_header``, so the refusal
+    lands before anything is written.
+
     Raises:
         ValueError: ``artifact`` has no usable filename.
     """
     name = Path(artifact).name
-    if not name or name == "..":
+    if not name or name == ".." or "\n" in artifact:
         raise ValueError(f"artifact has no usable filename: {artifact!r}")
     return _config.state_dir("runs", run_id, "revised") / name
 
