@@ -268,9 +268,11 @@ def title(role: str, kind: str) -> str:
     The parenthetical is the role as the state machine knows it, so the chair's
     decision ticket reads ``(chair)`` even though the name comes from the
     ``senior_director`` persona.
+
+    An unknown ``kind`` raises ``KeyError``, like ``persona``: a fallback to
+    ``turn`` would title the DECISION ticket "takes the floor".
     """
-    template = _TITLES.get(kind, _TITLES["turn"])
-    return template.format(name=persona(role)["name"], role=role)
+    return _TITLES[kind].format(name=persona(role)["name"], role=role)
 
 
 # --- the goal ---------------------------------------------------------------
@@ -361,9 +363,12 @@ def goal(
             "The revised copy, which exists only if the committee delegated an "
             f"edit: {revised}\n"
             f"The whole thread: {thread}\n\n"
-            "Read the thread end to end and rule on the charge. Weigh what was "
-            "actually said, name who is owed an answer, and say what would "
-            "change your mind.\n\n"
+            # No "weigh what was said, name who is owed an answer, say what
+            # would change your mind": that is a review procedure, and spec 9
+            # puts methodology behind HERMES_COMMITTEE_DRIVER. The two carve-outs
+            # (the junior IC's required output, `lens`) do not cover the chair,
+            # and _DONE_DECISION already states the output required.
+            "Read the thread end to end and rule on the charge.\n\n"
             f"{_GUARDRAIL}\n\n"
             f"{_DONE_DECISION}"
         )

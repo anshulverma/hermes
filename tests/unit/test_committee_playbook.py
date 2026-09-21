@@ -102,6 +102,9 @@ def test_a_delegation_with_an_empty_action_carries_no_action():
 def test_an_action_longer_than_the_cap_is_clipped():
     action = T.parse(_fenced("action: " + "x" * 500))["action"]
 
+    # Pinned literally: cast.py reads ACTION_MAX into the 3600-character goal
+    # budget, so a silent change here silently changes what a worker is handed.
+    assert T.ACTION_MAX == 200
     assert len(action) == T.ACTION_MAX
 
 
@@ -166,6 +169,9 @@ def test_the_reviewer_instruction_documents_only_the_floor_request():
 def test_the_owner_instruction_documents_all_four_keys():
     text = T.instruction(owner=True)
 
+    # The closed vocabulary, pinned literally: `for key in T.KEYS` passes just as
+    # happily against a one-element KEYS, which is the whole test gone.
+    assert T.KEYS == ("request_floor", "delegate", "action", "close")
     assert T.FENCE_TAG in text
     for key in T.KEYS:
         assert key in text
@@ -263,8 +269,10 @@ def test_brief_carries_every_persona_field():
     text = cast.brief("staff_ic")
     p = cast.CAST["staff_ic"]
     assert text.startswith("You are Priya Raman, Staff Engineer.")
+    # Label AND value, per field: bare containment passes a brief that swapped
+    # two labels over, which hands the worker somebody else's frame.
     for field in ("altitude", "goal", "ambition", "stake", "lens", "style"):
-        assert p[field] in text, field
+        assert f"{field}: {p[field]}" in text, field
 
 
 def test_title_names_the_speaker_and_the_kind():
@@ -277,6 +285,10 @@ def test_title_names_the_speaker_and_the_kind():
     assert cast.title(cast.CHAIR, "decision") == (
         "Dana Whitfield (chair) delivers the committee decision"
     )
+    # An unknown kind fails loudly. A fallback to "turn" would title the
+    # DECISION ticket "takes the floor in the committee thread".
+    with pytest.raises(KeyError):
+        cast.title("pm", "vote")
 
 
 # --- goal assembly ----------------------------------------------------------
@@ -317,6 +329,8 @@ def test_reviewer_goal_carries_its_material_and_its_completion_condition():
     assert _CHARGE in g
     assert _GUARDRAIL in g
     assert turnblock.instruction(owner=False).strip() in g
+    # The speaker must not also append to thread.md: reduce is its sole writer.
+    assert "Hermes appends it for you" in g
     assert g.endswith(_DONE_TURN)
 
 
@@ -333,6 +347,8 @@ def test_owner_goal_says_whose_floor_it_is_and_gets_the_owner_block():
     assert turnblock.instruction(owner=True).strip() in g
     assert _ARTIFACT in g
     assert _THREAD in g
+    assert _CHARGE in g
+    assert "Hermes appends it for you" in g
     assert g.endswith(_DONE_TURN)
 
 
@@ -349,6 +365,7 @@ def test_junior_goal_names_the_revised_path_and_the_delegated_action():
     assert _ARTIFACT in g
     assert _THREAD in g
     assert _REVISED in g
+    assert _CHARGE in g
     assert "add a rollback section naming who pages" in g
     # The one file it may write, and the only file it may write.
     assert "the only file you may write" in g
@@ -358,6 +375,20 @@ def test_junior_goal_names_the_revised_path_and_the_delegated_action():
         f"Done when: {_REVISED} carries the delegated change and your answer "
         "states in one line what you changed."
     )
+
+    # The action is clipped to ACTION_MAX, not to the charge's CHARGE_MAX: it
+    # shares the goal budget with a charge that may already be 400 characters.
+    long_action = cast.goal(
+        cast.JUNIOR,
+        charge=_CHARGE,
+        artifact=_ARTIFACT,
+        thread=_THREAD,
+        revised=_REVISED,
+        action="z" * 5000,
+    )
+    assert "z" * turnblock.ACTION_MAX not in long_action
+    assert "z" * (turnblock.ACTION_MAX - 1) in long_action
+    assert turnblock.ACTION_MAX < cast.CHARGE_MAX
 
 
 def test_junior_goal_without_an_action_is_a_named_failure():
@@ -383,9 +414,21 @@ def test_chair_goal_is_the_decision_and_calls_the_verdict_a_simulation():
     assert _ARTIFACT in g
     assert _THREAD in g
     assert _REVISED in g
+    assert _CHARGE in g
     assert "simulation" in g
     assert _GUARDRAIL in g
     assert g.endswith(_DONE_DECISION)
+
+    # Spec §9: material, not method. The chair is told WHAT to produce and is
+    # handed the thread; HOW to weigh it belongs behind HERMES_COMMITTEE_DRIVER.
+    # Neither carve-out (the junior IC's required output, `lens`) covers the chair.
+    assert "Read the thread end to end and rule on the charge." in g
+    for procedure in (
+        "Weigh what was actually said",
+        "name who is owed an answer",
+        "what would change your mind",
+    ):
+        assert procedure not in g, procedure
 
 
 def test_the_guardrail_survives_a_maximal_charge():
@@ -405,7 +448,17 @@ def test_the_guardrail_survives_a_maximal_charge():
 
 
 def test_every_goal_stays_under_the_budget_at_maximum_size():
-    """Longest persona, an over-length charge and action, and deep paths."""
+    """Longest persona, an over-length charge and action, and deep paths.
+
+    Also the cast's one safety invariant: under ``--permission-mode
+    bypassPermissions`` the guardrail sentence is the only thing standing
+    between a persona and the filesystem, so exactly ONE of the ten goals may
+    permit a write, and the other nine must forbid every write outright.
+    """
+    # Pinned literally: both are read as budgets elsewhere, and a mutant that
+    # widens either passes every length assertion below.
+    assert (cast.CHARGE_MAX, cast.GOAL_MAX) == (400, 3600)
+
     deep = "/home/anshulverma/.hermes/runs/committee-20260918-000000/" + "d" * 100
     artifact = f"{deep}/proposal-under-review.md"
     thread = f"{deep}/thread.md"
@@ -421,6 +474,16 @@ def test_every_goal_stays_under_the_budget_at_maximum_size():
         )
         assert len(g) < cast.GOAL_MAX, f"{role}: {len(g)}"
         assert len(g) > 1500, f"{role}: {len(g)}"
+
+        want, unwanted = (
+            ("the only file you may write", "write no file at all")
+            if role == cast.JUNIOR
+            else ("write no file at all", "the only file you may write")
+        )
+        # Case-folded: a second, contradictory sentence added to the junior's
+        # goal reads exactly the same to a worker whatever its capitalisation.
+        assert want in g.lower(), role
+        assert unwanted not in g.lower(), role
 
 
 # --- thread.md: the transcript ---
