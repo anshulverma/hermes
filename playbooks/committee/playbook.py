@@ -11,10 +11,12 @@ per-run dict on the instance (``_state``), because ``run.config`` is read-only a
 resumed, and ``seed``/``reduce``/``next_phase``/``is_done`` all run in the master
 process against the one registry singleton.
 
-Ordering is load-bearing. A pending delegation outranks ``close`` — an edit the owner asked for still happens,
-and costs one turn — and the turn cap outranks both, so ``t31`` can never be minted
-under ``max_turns=30``. A delegation the cap does drop is recorded as
-``dropped_delegation`` rather than lost.
+Ordering is load-bearing. A pending delegation outranks ``close`` — an edit the
+owner asked for still happens, and costs one turn — and the turn cap outranks
+both, so ``t31`` can never be minted under ``max_turns=30``. A delegation the cap
+does drop is recorded as ``dropped_delegation`` rather than lost. ``close``
+itself is outranked by the opening round: the owner may not end the meeting
+before every member has spoken.
 
 Stdlib-only.
 """
