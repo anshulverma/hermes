@@ -79,13 +79,16 @@ def test_every_key_in_the_declared_vocabulary_is_one_the_parser_reads():
     """KEYS is "the closed vocabulary" -- so `_one` must parse against it.
 
     `_FLAGS` used to be a second hand-written list, which made KEYS dead: a
-    fifth signal declared there would be a key the parser silently drops, with
-    a green suite either way.
+    sixth signal declared there would be a key the parser silently drops, with
+    a green suite either way. The two free-text keys are named here rather than
+    read out of `_TEXT`: `_FLAGS` is derived from `_TEXT`, so comparing the two
+    would be true by construction whatever KEYS says.
     """
-    assert set(T.KEYS) == set(T._FLAGS) | {T.ACTION}
+    assert set(T.KEYS) == set(T._FLAGS) | {T.ACTION, T.STANCE}
     for flag in T._FLAGS:
         assert T.parse(_fenced(f"{flag}: yes")) == {flag: True}, flag
     assert T.parse(_fenced(f"{T.ACTION}: cut the appendix")) == {T.ACTION: "cut the appendix"}
+    assert T.parse(_fenced(f"{T.STANCE}: unconvinced")) == {T.STANCE: "unconvinced"}
 
 
 def test_a_malformed_block_yields_nothing():
@@ -135,6 +138,36 @@ def test_a_colon_inside_an_action_survives():
     }
 
 
+def test_a_stance_is_free_text_the_way_an_action_is():
+    """Where a speaker stands is one line of English, not a yes/no flag. Read
+    as a flag it would be dropped as junk, which is the whole signal gone."""
+    answer = _fenced(
+        "request_floor: yes\nstance: fund it only if the rollback owner is named"
+    )
+
+    assert T.parse(answer) == {
+        "request_floor": True,
+        "stance": "fund it only if the rollback owner is named",
+    }
+
+
+def test_a_stance_nobody_stated_stays_absent():
+    """The rule this module exists for, applied to the fifth key: a persona
+    that stated no stance has none, and must never be rendered as neutral."""
+    assert T.parse(_fenced("request_floor: no")) == {"request_floor": False}
+    assert "stance" not in T.parse(_fenced("close: yes"))
+
+
+def test_a_stance_longer_than_the_cap_is_clipped():
+    stance = T.parse(_fenced("stance: " + "y" * 500))["stance"]
+
+    # Pinned literally: a stance rides in the same 3600-character goal budget
+    # an action does, so a silent change here silently changes what a worker
+    # is handed.
+    assert T.STANCE_MAX == 200
+    assert len(stance) == T.STANCE_MAX
+
+
 # --- turnblock: stripping ------------------------------------------------
 
 def test_the_block_is_removed_from_the_prose_it_travelled_in():
@@ -168,23 +201,25 @@ def test_stripping_tolerates_no_input():
 
 # --- turnblock: the instruction handed to a speaker ----------------------
 
-def test_the_reviewer_instruction_documents_only_the_floor_request():
+def test_the_reviewer_instruction_documents_the_floor_request_and_the_stance():
     """delegate and close are the owner's to use. Documenting them to a
-    reviewer invites a block reduce is obliged to throw away."""
+    reviewer invites a block reduce is obliged to throw away. A stance is not
+    owner-only: every speaker issued a block is asked for one."""
     text = T.instruction()
 
     assert T.FENCE_TAG in text
     assert "request_floor" in text
+    assert T.STANCE in text
     for key in ("delegate", "action", "close"):
         assert key not in text
 
 
-def test_the_owner_instruction_documents_all_four_keys():
+def test_the_owner_instruction_documents_all_five_keys():
     text = T.instruction(owner=True)
 
     # The closed vocabulary, pinned literally: `for key in T.KEYS` passes just as
     # happily against a one-element KEYS, which is the whole test gone.
-    assert T.KEYS == ("request_floor", "delegate", "action", "close")
+    assert T.KEYS == ("request_floor", "delegate", "action", "close", "stance")
     assert T.FENCE_TAG in text
     for key in T.KEYS:
         assert key in text
@@ -1064,6 +1099,26 @@ def test_max_turns_thirty_mints_t30_and_never_t31():
     assert max(nums) == 30
     assert not any(p.startswith("t31") for p in seen), seen[-3:]
     assert s["turn"] == 31
+
+
+def test_a_stance_on_a_junior_ic_turn_moves_no_gate():
+    """The junior IC's block keys are all ignored (spec 5.4) and a stance is
+    no exception: it is recorded on the reduction, never acted on. The state
+    machine must not grow a fourth gate for it."""
+    pb = _committee()
+    s = pb._state(_run())
+    queue_before = list(s["queue"])
+
+    _apply_block(
+        s,
+        cast.JUNIOR,
+        {"stance": "the delegated edit is in", "request_floor": True, "close": True},
+    )
+
+    assert s["queue"] == queue_before
+    assert s["closed"] is False
+    assert s["delegation"] is None
+    assert s["last_speaker"] == cast.OWNER
 
 
 # --- the exhaustive and fuzz layers -----------------------------------------

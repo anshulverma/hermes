@@ -16,9 +16,9 @@ happens to read "unstated" and "no" alike, but the reduction records which one
 was said, and a reader of the transcript can tell them apart.
 
 Unlike ``verdict.py``, which ``json.loads`` its fence body, this body is
-line-oriented ``key: value``. Three of the four values are yes/no and the
-fourth is one line of English; asking an agent for JSON here buys nothing and
-costs a whole class of quoting failures.
+line-oriented ``key: value``. Three of the five values are yes/no and two are
+one line of English; asking an agent for JSON here buys nothing and costs a
+whole class of quoting failures.
 
 This module is a pure parser. It knows nothing about roles: ``delegate`` and
 ``close`` are owner-only and ``request_floor`` is reviewer-only, but those
@@ -39,16 +39,24 @@ FENCE_TAG = "hermes-turn"
 # The closed vocabulary. Anything else in the block is dropped -- an agent
 # inventing a key must not become a signal nobody defined.
 ACTION = "action"
-KEYS: tuple[str, ...] = ("request_floor", "delegate", ACTION, "close")
+STANCE = "stance"
+KEYS: tuple[str, ...] = ("request_floor", "delegate", ACTION, "close", STANCE)
 
 # An action rides in a goal that shares a hard character budget with the
 # persona and both paths, and it names one edit. One line is the whole point.
 ACTION_MAX = 200
 
-# The keys whose value is yes/no; `action` is the free-text one. DERIVED from
-# KEYS, not a second list: a fifth signal added to KEYS alone would be declared
-# vocabulary that `_one` silently drops, with a green suite either way.
-_FLAGS = tuple(key for key in KEYS if key != ACTION)
+# A stance is one line of where a speaker currently stands. Same budget as an
+# action for the same reason: it is rendered per persona, not read as a page.
+STANCE_MAX = 200
+
+# The free-text keys and the cap each one is clipped to. The rest are yes/no.
+_TEXT: dict[str, int] = {ACTION: ACTION_MAX, STANCE: STANCE_MAX}
+
+# The keys whose value is yes/no. DERIVED from KEYS, not a second list: a sixth
+# signal added to KEYS alone would be declared vocabulary that `_one` silently
+# drops, with a green suite either way.
+_FLAGS = tuple(key for key in KEYS if key not in _TEXT)
 
 _BLOCK_RE = re.compile(
     r"```[ \t]*" + re.escape(FENCE_TAG) + r"[ \t]*\n(.*?)\n?```",
@@ -88,8 +96,8 @@ def _one(raw: str) -> dict:
         value = value.strip()
         if not value:
             continue
-        if key == ACTION:
-            out[ACTION] = value[:ACTION_MAX]
+        if key in _TEXT:
+            out[key] = value[:_TEXT[key]]
         elif key in _FLAGS:
             word = value.lower()
             if word in ("yes", "no"):
@@ -109,6 +117,13 @@ def strip(answer: str | None) -> str:
     return _BLOCK_RE.sub("", answer).strip()
 
 
+# Asked for in prose rather than in the worked example, exactly as `action`
+# is. The example exists to be copied verbatim, and a copied
+# `stance: <one line>` would mint that placeholder as the persona's stance --
+# and a stance, unlike a flag, is rendered back as what the speaker said.
+_STANCE_SENTENCE = "Add a `stance: <one line>` line saying where you now stand and why. "
+
+
 def instruction(owner: bool = False) -> str:
     """What to tell a speaker so that ``parse`` can read it back.
 
@@ -123,7 +138,13 @@ def instruction(owner: bool = False) -> str:
 
     Only the owner is shown ``delegate``, ``action`` and ``close``: reduce
     drops those from anyone else, so documenting them to a reviewer only
-    invites a block that is thrown away.
+    invites a block that is thrown away. ``stance`` is shown to both -- no gate
+    drops it, and a reviewer's is exactly the one a reader wants.
+
+    No role filtering is needed above this, and none should be added: ``goal``
+    returns early for the chair and the junior IC, so the owner and the seven
+    reviewers are the only speakers ever handed this, and they are exactly the
+    speakers spec 7 offers a stance to.
     """
     if owner:
         return (
@@ -136,8 +157,8 @@ def instruction(owner: bool = False) -> str:
             "Set delegate: yes only with an `action: <one line>` line naming "
             "the change the junior IC must make -- without one the delegation "
             "is dropped. close: yes ends the discussion and sends the artifact "
-            "to the chair. Omit a line you do not mean: an omitted line is read "
-            "as unstated, never as yes."
+            f"to the chair. {_STANCE_SENTENCE}Omit a line you do not mean: an "
+            "omitted line is read as unstated, never as yes."
         )
     return (
         "\n\nEnd with this block, nothing after it:\n\n"
@@ -145,6 +166,7 @@ def instruction(owner: bool = False) -> str:
         "request_floor: no\n"
         "```\n\n"
         "Set request_floor: yes only if you need a second turn after hearing "
-        "the others; the chair grants the floor in request order. Omit the line "
-        "if you do not mean it: an omitted line is read as unstated, never as yes."
+        f"the others; the chair grants the floor in request order. {_STANCE_SENTENCE}"
+        "Omit the line if you do not mean it: an omitted line is read as "
+        "unstated, never as yes."
     )
