@@ -1440,3 +1440,616 @@ def test_the_site_guard_runs_before_the_config_check(artifact, monkeypatch):
     message = str(excinfo.value)
     assert "'devserver'" in message
     assert "HERMES_COMMITTEE_ARTIFACT" not in message
+
+
+# --- reduce: the turn path and the gates (spec 5.2, 5.4) ------------------
+
+
+def _finding(run, ticket_id: str, answer: str) -> Finding:
+    """Helper: construct a Finding the way the queue writes one."""
+    return Finding(run_id=run.id, ticket_id=ticket_id, kind="result", json={"answer": answer})
+
+
+def _turn_answer(prose: str, **keys) -> str:
+    """Prose plus one hermes-turn block carrying `keys` as `key: value` lines."""
+    lines = "\n".join(f"{key}: {value}" for key, value in keys.items())
+    return f"{prose}\n\n```hermes-turn\n{lines}\n```\n"
+
+
+def test_reduce_open_writes_nothing_and_returns_no_reductions():
+    """The zero-ticket bootstrap has nothing to fold."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="open")
+
+    assert pb.reduce(run, "open", [], _NamedSite("local")) == []
+    assert not thread.path(run.id).exists()
+
+
+def test_reduce_turn_appends_the_stripped_prose_and_queues_a_floor_request():
+    """A reviewer's prose lands under its own heading; its request_floor queues it."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    run = _run(phase="t03-staff_ic")
+    s = pb._state(run)
+    s.update(current_role="staff_ic", current_turn=3, opening=[])
+
+    answer = _turn_answer(
+        "The rollout plan is thin on the middle six weeks.", request_floor="yes"
+    )
+    reductions = pb.reduce(
+        run, "t03-staff_ic", [_finding(run, f"{run.id}/t03-staff_ic", answer)],
+        _NamedSite("local"),
+    )
+
+    persona = cast.persona("staff_ic")
+    text = thread.path(run.id).read_text()
+    assert f"## turn 03 — {persona['name']}, {persona['title']} (staff_ic)" in text
+    assert "The rollout plan is thin on the middle six weeks." in text
+    assert "hermes-turn" not in text
+    assert s["queue"] == ["staff_ic"]
+
+    assert len(reductions) == 1
+    assert reductions[0].kind == "turn"
+    assert reductions[0].json["role"] == "staff_ic"
+    assert reductions[0].json["turn"] == 3
+    assert reductions[0].json["delivered"] is True
+    assert reductions[0].json["request_floor"] is True
+    assert reductions[0].json["verified"] is None
+    assert reductions[0].json["error"] is None
+
+
+def test_reduce_drops_a_floor_request_from_the_owner():
+    """The owner already speaks after every reviewer; it never queues itself."""
+    pb = _committee()
+    run = _run(phase="t04-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=4, opening=[])
+
+    answer = _turn_answer("Fair; I will take that away.", request_floor="yes")
+    reductions = pb.reduce(
+        run, "t04-owner", [_finding(run, f"{run.id}/t04-owner", answer)],
+        _NamedSite("local"),
+    )
+
+    assert s["queue"] == []
+    assert reductions[0].json["request_floor"] is True  # said, not honoured
+
+
+def test_reduce_drops_a_floor_request_from_the_junior_ic():
+    """The junior IC executes; it has no standing to take the floor (spec 4)."""
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    s = pb._state(run)
+    s.update(current_role="junior_ic", current_turn=5, opening=[])
+
+    answer = _turn_answer("Edited the rollout section.", request_floor="yes")
+    pb.reduce(
+        run, "t05-junior_ic", [_finding(run, f"{run.id}/t05-junior_ic", answer)],
+        _NamedSite("local"),
+    )
+
+    assert s["queue"] == []
+
+
+def test_reduce_drops_a_floor_request_from_a_role_still_in_the_opening_round():
+    """Without the opening half, a role could sit in both lists and speak twice."""
+    pb = _committee()
+    run = _run(phase="t02-tpm")
+    s = pb._state(run)
+    s.update(current_role="tpm", current_turn=2)  # `opening` left as seeded
+
+    assert "tpm" in s["opening"]
+    answer = _turn_answer("I want the dependency list.", request_floor="yes")
+    pb.reduce(
+        run, "t02-tpm", [_finding(run, f"{run.id}/t02-tpm", answer)], _NamedSite("local")
+    )
+
+    assert s["queue"] == []
+    assert "tpm" in s["opening"]
+
+
+def test_reduce_does_not_double_queue_a_role_already_waiting():
+    """A second request from a role already in the queue adds nothing."""
+    pb = _committee()
+    run = _run(phase="t06-manager")
+    s = pb._state(run)
+    s.update(current_role="manager", current_turn=6, opening=[])
+
+    answer = _turn_answer("Still worried about the numbers.", request_floor="yes")
+    pb.reduce(
+        run, "t06-manager", [_finding(run, f"{run.id}/t06-manager", answer)],
+        _NamedSite("local"),
+    )
+    assert s["queue"] == ["manager"]
+
+    s["current_turn"] = 8
+    pb.reduce(
+        run, "t08-manager", [_finding(run, f"{run.id}/t08-manager", answer)],
+        _NamedSite("local"),
+    )
+    assert s["queue"] == ["manager"]
+
+
+def test_reduce_honours_close_from_the_owner():
+    """`close` from the owner routes the next hop to the decision."""
+    pb = _committee()
+    run = _run(phase="t10-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=10, opening=[])
+
+    answer = _turn_answer("We have enough; taking it to a decision.", close="yes")
+    reductions = pb.reduce(
+        run, "t10-owner", [_finding(run, f"{run.id}/t10-owner", answer)],
+        _NamedSite("local"),
+    )
+
+    assert s["closed"] is True
+    assert s["delegation"] is None
+    assert reductions[0].json["close"] is True
+
+
+def test_reduce_honours_a_delegation_with_an_action_from_the_owner():
+    """`delegate: yes` plus a non-empty action arms one junior-IC turn."""
+    pb = _committee()
+    run = _run(phase="t11-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=11, opening=[])
+
+    answer = _turn_answer(
+        "Agreed, we will fix that.",
+        delegate="yes",
+        action="add a rollback paragraph to the rollout section",
+    )
+    reductions = pb.reduce(
+        run, "t11-owner", [_finding(run, f"{run.id}/t11-owner", answer)],
+        _NamedSite("local"),
+    )
+
+    assert s["delegation"] == "add a rollback paragraph to the rollout section"
+    assert reductions[0].json["delegate"] is True
+    assert reductions[0].json["action"] == "add a rollback paragraph to the rollout section"
+
+
+def test_reduce_drops_a_delegation_with_an_empty_action():
+    """An edit nobody described is not an edit; the whole delegation is dropped."""
+    pb = _committee()
+    run = _run(phase="t12-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=12, opening=[])
+
+    answer = _turn_answer("Someone should fix that.", delegate="yes", action="")
+    reductions = pb.reduce(
+        run, "t12-owner", [_finding(run, f"{run.id}/t12-owner", answer)],
+        _NamedSite("local"),
+    )
+
+    assert s["delegation"] is None
+    assert reductions[0].json["delegate"] is True
+
+
+def test_reduce_ignores_delegate_and_close_from_a_reviewer():
+    """Only the accountable owner may delegate or close (spec 5.4)."""
+    pb = _committee()
+    run = _run(phase="t07-tl")
+    s = pb._state(run)
+    s.update(current_role="tl", current_turn=7, opening=[])
+
+    answer = _turn_answer(
+        "This is done; have someone cut the appendix.",
+        delegate="yes",
+        action="cut the appendix",
+        close="yes",
+    )
+    reductions = pb.reduce(
+        run, "t07-tl", [_finding(run, f"{run.id}/t07-tl", answer)], _NamedSite("local")
+    )
+
+    assert s["closed"] is False
+    assert s["delegation"] is None
+    assert reductions[0].json["delegate"] is True  # recorded as said
+    assert reductions[0].json["close"] is True
+
+
+def test_reduce_writes_the_no_turn_stub_when_no_finding_arrived():
+    """A driver_failed worker writes no finding; the transcript stays contiguous."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    run = _run(phase="t09-pm")
+    s = pb._state(run)
+    s.update(current_role="pm", current_turn=9, opening=[])
+
+    reductions = pb.reduce(run, "t09-pm", [], _NamedSite("local"))
+
+    persona = cast.persona("pm")
+    text = thread.path(run.id).read_text()
+    assert f"## turn 09 — {persona['name']}, {persona['title']} (pm)" in text
+    assert thread.NO_TURN in text
+
+    assert len(reductions) == 1
+    assert reductions[0].json["delivered"] is False
+    assert reductions[0].json["request_floor"] is False
+    assert reductions[0].json["action"] is None
+    assert reductions[0].json["error"] is None
+    assert s["queue"] == []
+
+
+def test_reduce_records_a_block_only_answer_as_delivered_not_as_a_failure():
+    """A turn that was all signal and no prose still happened (spec 5.2).
+
+    The NO_TURN stub belongs to "no finding", not to "no prose": an owner whose
+    whole answer is the block has closed the meeting, and writing "the worker
+    failed" into the permanent transcript would be a lie.
+    """
+    from playbooks.committee import thread
+    from playbooks.committee.playbook import _SIGNALS_ONLY
+
+    pb = _committee()
+    run = _run(phase="t10-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=10, opening=[])
+
+    answer = _turn_answer("", close="yes")
+    reductions = pb.reduce(
+        run, "t10-owner", [_finding(run, f"{run.id}/t10-owner", answer)],
+        _NamedSite("local"),
+    )
+
+    assert s["closed"] is True
+    assert reductions[0].json["delivered"] is True
+    assert reductions[0].json["close"] is True
+
+    text = thread.path(run.id).read_text()
+    assert _SIGNALS_ONLY in text
+    assert thread.NO_TURN not in text
+
+
+def test_reduce_grants_no_owner_authority_to_an_unattributable_turn():
+    """A turn with no speaker fails closed: no gates, and the reason recorded."""
+    pb = _committee()
+    run = _run(phase="t04-owner")
+    s = pb._state(run)
+    s.update(current_role=None, current_turn=4, opening=[])
+
+    answer = _turn_answer("Closing this.", close="yes", delegate="yes", action="x")
+    reductions = pb.reduce(
+        run, "t04-owner", [_finding(run, f"{run.id}/t04-owner", answer)],
+        _NamedSite("local"),
+    )
+
+    assert s["closed"] is False and s["delegation"] is None
+    assert "speaker" in reductions[0].json["error"]
+
+
+def test_reduce_never_raises_when_the_thread_cannot_be_written():
+    """An exception out of reduce kills the master loop; it is recorded instead."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t02-manager")
+    s = pb._state(run)
+    s.update(current_role="manager", current_turn=2, opening=[])
+
+    # A directory where the transcript file belongs: open(path, "a") raises
+    # IsADirectoryError. chmod would not do -- state_dir chmods the run
+    # directory back to 0700 on every call, and tests may run as root.
+    thread.path(run.id).mkdir(parents=True, exist_ok=True)
+
+    answer = _turn_answer("Numbers, please.", request_floor="yes")
+    reductions = pb.reduce(
+        run, "t02-manager", [_finding(run, f"{run.id}/t02-manager", answer)],
+        _NamedSite("local"),
+    )
+
+    assert len(reductions) == 1
+    assert "thread" in reductions[0].json["error"]
+    # the gates still ran: a failed write must not swallow the floor request
+    assert s["queue"] == ["manager"]
+
+
+# --- reduce: the independent re-check of a junior-IC edit (spec 7) --------
+
+
+def test_reduce_records_a_junior_ic_edit_that_changed_the_file_as_verified(tmp_path):
+    """The master re-hashes the revised copy: changed means the edit landed."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    artifact = tmp_path / "proposal.md"
+    artifact.write_text("the original proposal\n")
+    revised = thread.ensure_revised(run.id, str(artifact))
+    pre = thread.digest(revised)  # what seed() snapshots just before the worker runs
+    revised.write_text("the original proposal\nand a rollback paragraph\n")
+
+    s = pb._state(run)
+    s.update(
+        current_role="junior_ic",
+        current_turn=5,
+        opening=[],
+        artifact=str(artifact),
+        revised=str(revised),
+        pending_action="add a rollback paragraph",
+        pre_edit_digest=pre,
+    )
+
+    reductions = pb.reduce(
+        run,
+        "t05-junior_ic",
+        [_finding(run, f"{run.id}/t05-junior_ic", "Added a rollback paragraph.")],
+        _NamedSite("local"),
+    )
+
+    assert reductions[0].json["verified"] is True
+    assert reductions[0].json["error"] is None
+    assert s["rechecks"] == [
+        {"turn": 5, "action": "add a rollback paragraph", "verified": True}
+    ]
+    assert artifact.read_text() == "the original proposal\n"  # original untouched
+
+
+def test_reduce_records_a_junior_ic_edit_that_changed_nothing_as_unverified(tmp_path):
+    """An identical revised copy means the worker claimed an edit it did not make."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    artifact = tmp_path / "proposal.md"
+    artifact.write_text("the original proposal\n")
+    revised = thread.ensure_revised(run.id, str(artifact))  # byte-copy, never edited
+
+    s = pb._state(run)
+    s.update(
+        current_role="junior_ic",
+        current_turn=5,
+        opening=[],
+        artifact=str(artifact),
+        revised=str(revised),
+        pending_action="add a rollback paragraph",
+        pre_edit_digest=thread.digest(revised),
+    )
+
+    reductions = pb.reduce(
+        run,
+        "t05-junior_ic",
+        [_finding(run, f"{run.id}/t05-junior_ic", "Added a rollback paragraph.")],
+        _NamedSite("local"),
+    )
+
+    assert reductions[0].json["verified"] is False
+    assert s["rechecks"] == [
+        {"turn": 5, "action": "add a rollback paragraph", "verified": False}
+    ]
+
+
+def test_reduce_junior_edit_measures_this_edit_not_drift_from_the_original(tmp_path):
+    """A SECOND delegated edit that changed nothing must still fail its re-check.
+
+    `ensure_revised` copies once and never again, so after the first edit lands
+    the revised copy differs from the original forever. Comparing against the
+    original would report every later edit as verified -- including one that did
+    nothing, which is exactly the silent no-op criterion 7 exists to catch. The
+    comparison is against the digest seed() snapshotted before this worker ran.
+    """
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t09-junior_ic")
+    artifact = tmp_path / "proposal.md"
+    artifact.write_text("the original proposal\n")
+    revised = thread.ensure_revised(run.id, str(artifact))
+    # Edit one already landed; the copy is permanently unlike the original.
+    revised.write_text("the original proposal\nand a rollback paragraph\n")
+
+    s = pb._state(run)
+    s.update(
+        current_role="junior_ic",
+        current_turn=9,
+        opening=[],
+        artifact=str(artifact),
+        revised=str(revised),
+        pending_action="also name the on-call owner",
+        # what seed() saw just before this second worker ran -- unchanged since
+        pre_edit_digest=thread.digest(revised),
+    )
+
+    reductions = pb.reduce(
+        run,
+        "t09-junior_ic",
+        [_finding(run, f"{run.id}/t09-junior_ic", "Named the on-call owner.")],
+        _NamedSite("local"),
+    )
+
+    assert reductions[0].json["verified"] is False, \
+        "a second no-op edit was waved through by comparing against the original"
+    assert s["rechecks"] == [
+        {"turn": 9, "action": "also name the on-call owner", "verified": False}
+    ]
+
+
+def test_reduce_records_a_missing_revised_file_as_unverified(tmp_path):
+    """No revised copy at all is the loudest failure of the re-check."""
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    artifact = tmp_path / "proposal.md"
+    artifact.write_text("the original proposal\n")
+
+    s = pb._state(run)
+    s.update(
+        current_role="junior_ic",
+        current_turn=5,
+        opening=[],
+        artifact=str(artifact),
+        revised=str(tmp_path / "nowhere" / "proposal.md"),
+        pending_action="add a rollback paragraph",
+    )
+
+    reductions = pb.reduce(
+        run,
+        "t05-junior_ic",
+        [_finding(run, f"{run.id}/t05-junior_ic", "Added a rollback paragraph.")],
+        _NamedSite("local"),
+    )
+
+    assert reductions[0].json["verified"] is False
+    assert reductions[0].json["error"] is None  # an absent file is an answer, not a crash
+
+
+# --- reduce: the decision (spec 5.2, 5.3, criteria 7, 8, 9) ---------------
+
+
+def test_reduce_decision_folds_the_verdict_and_calls_it_a_simulation():
+    """Criterion 9: the decision must say plainly that it is not an approval."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    run = _run(phase="decision")
+    s = pb._state(run)
+    s["current_role"] = "chair"
+
+    answer = "Approve with changes: land the rollback paragraph first."
+    reductions = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", answer)], _NamedSite("local")
+    )
+
+    red = reductions[0]
+    assert red.kind == "decision"
+    assert red.json["delivered"] is True
+    assert "Approve with changes" in red.json["verdict"]
+    assert "simulation" in red.json["verdict"]
+    assert "not an approval" in red.json["verdict"]
+    assert red.json["rechecks"] == []
+    assert red.json["dropped_delegation"] is None
+    assert red.json["error"] is None
+
+    chair = cast.persona(cast.CHAIR_ROLE)
+    text = thread.path(run.id).read_text()
+    assert f"## decision — {chair['name']}, {chair['title']}" in text
+    assert "Approve with changes" in text
+    assert "simulation" in text
+
+    # `is_done` reads the chair's prose, never the assembled text.
+    assert s["verdict"] == answer
+    assert pb.is_done(run) is True
+
+
+def test_reduce_decision_names_a_failed_recheck():
+    """Criterion 7: an edit that silently did not apply is named, never buried."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="decision")
+    s = pb._state(run)
+    s["current_role"] = "chair"
+    s["rechecks"] = [
+        {"turn": 5, "action": "add a rollback paragraph", "verified": False},
+        {"turn": 9, "action": "cut the appendix", "verified": True},
+    ]
+
+    reductions = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )
+
+    red = reductions[0]
+    assert "DID NOT APPLY" in red.json["verdict"]
+    assert "add a rollback paragraph" in red.json["verdict"]
+    assert "cut the appendix" in red.json["verdict"]
+    assert red.json["rechecks"] == [
+        {"turn": 5, "action": "add a rollback paragraph", "verified": False},
+        {"turn": 9, "action": "cut the appendix", "verified": True},
+    ]
+
+    text = thread.path(run.id).read_text()
+    assert "turn 05" in text
+    assert "DID NOT APPLY" in text
+
+
+def test_reduce_decision_names_a_dropped_delegation():
+    """The cap can drop an edit the owner asked for; the decision says so."""
+    pb = _committee()
+    run = _run(phase="decision")
+    s = pb._state(run)
+    s["current_role"] = "chair"
+    s["dropped_delegation"] = "rewrite the risks section"
+
+    reductions = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Do not approve.")],
+        _NamedSite("local"),
+    )
+
+    red = reductions[0]
+    assert red.json["dropped_delegation"] == "rewrite the risks section"
+    assert "dropped_delegation" in red.json["verdict"]
+    assert "rewrite the risks section" in red.json["verdict"]
+
+
+def test_reduce_decision_with_no_finding_leaves_the_verdict_empty():
+    """A failed chair turn ends the run failed, deliberately (spec 5.3)."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="decision")
+    s = pb._state(run)
+    s["current_role"] = "chair"
+
+    reductions = pb.reduce(run, "decision", [], _NamedSite("local"))
+
+    red = reductions[0]
+    assert red.kind == "decision"
+    assert red.json["verdict"] == ""
+    assert red.json["delivered"] is False
+    assert s["verdict"] == ""
+    assert pb.is_done(run) is False
+
+    # the transcript still stands, and still names what happened
+    text = thread.path(run.id).read_text()
+    assert "no decision delivered" in text
+    assert "simulation" in text
+
+
+def test_reduce_decision_never_raises_when_the_thread_cannot_be_written():
+    """The decision fold is wrapped exactly like the turn fold."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="decision")
+    s = pb._state(run)
+    s["current_role"] = "chair"
+    thread.path(run.id).mkdir(parents=True, exist_ok=True)
+
+    reductions = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )
+
+    assert len(reductions) == 1
+    assert "thread" in reductions[0].json["error"]
+    assert s["verdict"] == "Approve."  # the run still finishes
+
+
+def test_no_reduction_carries_needs_human_ticket_ids():
+    """Criterion 8: that key routes the ticket to needs_human and wedges the run."""
+    pb = _committee()
+    run = _run(phase="t03-tl")
+    s = pb._state(run)
+    s.update(current_role="tl", current_turn=3, opening=[])
+
+    produced = []
+    produced += pb.reduce(run, "open", [], _NamedSite("local"))
+    answer = _turn_answer("Ship it.", request_floor="no")
+    produced += pb.reduce(
+        run, "t03-tl", [_finding(run, f"{run.id}/t03-tl", answer)], _NamedSite("local")
+    )
+    s["current_role"] = "chair"
+    produced += pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )
+
+    assert len(produced) == 2
+    for reduction in produced:
+        assert "needs_human_ticket_ids" not in reduction.json

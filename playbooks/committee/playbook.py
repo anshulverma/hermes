@@ -22,11 +22,12 @@ Stdlib-only.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from engine import playbook as _playbook
 from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
-from playbooks.committee import cast, thread
+from playbooks.committee import cast, thread, turnblock
 
 if TYPE_CHECKING:  # avoid import cycle
     from engine.site import Site
@@ -39,6 +40,9 @@ ENV_DRIVER = "HERMES_COMMITTEE_DRIVER"
 
 DEFAULT_MAX_TURNS = 30
 DEFAULT_CHARGE = "Decide whether to approve this proposal."
+
+# A turn that was delivered but carried only its hermes-turn block.
+_SIGNALS_ONLY = "_(the speaker sent signals only, no prose)_"
 
 
 def _apply_block(s: dict, role: str, block: dict) -> None:
@@ -59,6 +63,37 @@ def _apply_block(s: dict, role: str, block: dict) -> None:
             s["closed"] = True
         if block.get("delegate") and block.get("action"):
             s["delegation"] = block["action"]
+
+
+def _latest_answer(findings: list[Finding] | None) -> str:
+    """The last non-empty ``answer`` in a settled phase's findings.
+
+    One ticket per phase means there is normally exactly one, but findings are
+    append-only and arrive id-ascending (``ORDER BY f.id``,
+    ``engine/queue.py:883``), so the last write wins -- the same fold
+    ``playbooks/dexter/playbook.py:240-245`` does per ticket id. A turn whose
+    worker failed writes no finding at all, and folds to ``""``.
+    """
+    answer = ""
+    for finding in findings or ():
+        value = (finding.json or {}).get("answer")
+        if isinstance(value, str) and value.strip():
+            answer = value
+    return answer
+
+
+# Criterion 9. The run reaches `done` unattended, and `hermes reduction accept`
+# afterwards is an audit stamp rather than a gate (it only checks
+# `review_state == 'pending'`, engine/queue.py:649) -- so nothing downstream
+# distinguishes this from a sign-off unless the text itself does.
+_SIMULATION = (
+    "This verdict is a simulation produced by AI personas reading one file. It is "
+    "not an approval, not a sign-off, and carries no authority: a human decides."
+)
+
+# A chair turn that produced nothing still gets an entry, so the transcript
+# stands and the loss is visible (spec 5.3). The run then ends `failed`.
+_NO_DECISION = "_(no decision delivered — the chair's turn failed; see hermes show)_"
 
 
 class CommitteePlaybook:
@@ -363,6 +398,171 @@ class CommitteePlaybook:
         Pure by necessity: run, ticket, result and site are all it may read.
         """
         return True
+
+    # --- the fold (master-only) -----------------------------------------
+
+    def reduce(
+        self, run: Run, phase: str, findings: list[Finding], site: "Site"
+    ) -> list[Reduction]:
+        """Fold one settled phase: write its thread entry, apply its gates.
+
+        ``reduce`` is the sole writer of ``thread.md`` after the ``open`` header
+        (spec 5.2), and the only place the independent re-check of a junior-IC
+        edit can live (spec 7): ``verify`` runs on the transport path, and a
+        ``False`` there sets the ticket ``needs_human`` (``engine/queue.py:283-286``),
+        which blocks advancement with nothing able to re-drive the loop.
+
+        For the same reason no reduction this method returns may ever carry
+        ``needs_human_ticket_ids`` -- the one key the engine reads inside a
+        reduction (``engine/queue.py:920``). Nothing can re-drive a stuck run:
+        ``hermes run`` always creates a NEW run (``engine/cli.py:382``) and
+        ``hermes serve --host`` only calls ``serve_loop`` (``engine/cli.py:778``),
+        so a ``needs_human`` ticket blocks advancement
+        (``engine/dispatch.py:261-264``) permanently. Do not "fix" this
+        (acceptance criterion 8).
+
+        It MUST NEVER RAISE. An exception here propagates out of
+        ``engine/dispatch.py:305`` and kills the master loop mid-run, so every
+        file touch is wrapped and its failure recorded under ``error`` -- the
+        shape ``playbooks/dexter/playbook.py:306-311`` uses for a failed bank.
+        """
+        if phase == "open":
+            return []  # the zero-ticket bootstrap: nothing was dispatched
+        s = self._state(run)
+        if phase == "decision":
+            return self._reduce_decision(run, s, findings)
+        return self._reduce_turn(run, s, findings)
+
+    def _reduce_turn(
+        self, run: Run, s: dict, findings: list[Finding]
+    ) -> list[Reduction]:
+        """One speaker's turn: the thread entry, then the gates."""
+        errors: list[str] = []
+        # `_turn` sets `current_role` before the phase is dispatched, so an empty
+        # one means the turn cannot be attributed. Fail CLOSED: no entry under
+        # someone else's name and no gates, because the old fallback (`or
+        # cast.OWNER`) handed owner authority -- `close` and `delegate` -- to a
+        # speaker nobody can name. The empty role matches no gate by construction.
+        role = s["current_role"] or ""
+        turn = s["current_turn"]
+        answer = _latest_answer(findings)
+        body = turnblock.strip(answer)
+        # A turn whose whole answer was the block is a DELIVERED turn with no
+        # prose -- not a failed one. Only a genuinely absent answer gets the
+        # NO_TURN stub (spec 5.2 ties it to "no finding", not "no prose").
+        if answer and not body:
+            body = _SIGNALS_ONLY
+
+        # An empty body makes `append_turn` write the NO_TURN stub, so a failed
+        # turn is visible in the transcript rather than missing from it.
+        if role:
+            try:
+                thread.append_turn(run.id, turn=turn, role=role, body=body)
+            except Exception as exc:  # never raise out of reduce
+                errors.append(f"thread: {exc}")
+        else:
+            errors.append("speaker: the turn could not be attributed")
+
+        block = turnblock.parse(answer)
+
+        # The gates of spec 5.4, in the one implementation Task 4 wrote and the
+        # state-machine tests drive. An unattributable turn runs none of them.
+        if role:
+            _apply_block(s, role, block)
+
+        # --- the independent re-check (spec 7), master-side ---------------
+        # The no-trust invariant wants an independent check of an `ok` claim.
+        # It cannot live in `verify` (see `reduce`'s docstring), so it lives
+        # here and rides on the reduction: does the revised copy exist, and did
+        # its sha256 move during THIS turn?
+        #
+        # The comparison is against the digest `seed` snapshotted just before
+        # the worker ran -- not against the original. `ensure_revised` copies
+        # once and never again, so after the first delegation lands the copy
+        # differs from the original forever, and comparing to the original
+        # would report `verified: true` for every later edit including one that
+        # did nothing. That is precisely the silent no-op criterion 7 exists to
+        # catch. On the FIRST delegation the snapshot IS the original's digest,
+        # so this is exactly the check spec 7 describes.
+        verified = None
+        if role == cast.JUNIOR:
+            verified = False
+            try:
+                revised = Path(s["revised"]) if s["revised"] else None
+                # `seed` sets this on every junior-IC phase, so there is no
+                # fallback: the only other digest available is the original's,
+                # and comparing to that is the unsound reading above.
+                before = s["pre_edit_digest"]
+                verified = bool(
+                    revised is not None
+                    and revised.is_file()
+                    and thread.digest(revised) != before
+                )
+            except Exception as exc:  # never raise out of reduce
+                errors.append(f"recheck: {exc}")
+            s["rechecks"].append({
+                "turn": turn,
+                "action": s["pending_action"] or "",
+                "verified": verified,
+            })
+
+        return [Reduction(kind="turn", json={
+            "role": role,
+            "turn": turn,
+            "delivered": bool(answer),
+            # what the speaker ASKED for; whether it was honoured is visible in
+            # the run's queue / closed / delegation state.
+            "request_floor": bool(block.get("request_floor")),
+            "delegate": bool(block.get("delegate")),
+            "close": bool(block.get("close")),
+            "action": block.get("action"),
+            "verified": verified,
+            "error": "; ".join(errors) or None,
+        })]
+
+    def _reduce_decision(
+        self, run: Run, s: dict, findings: list[Finding]
+    ) -> list[Reduction]:
+        """The chair's turn: the verdict, every re-check by name, the disclaimer."""
+        errors: list[str] = []
+        answer = _latest_answer(findings)
+        body = turnblock.strip(answer)
+
+        # `s["verdict"]` is the chair's prose and nothing else -- `is_done` reads
+        # it, so a failed chair turn must leave it empty and end the run failed
+        # (spec 5.3). The assembled text below is what a human reads.
+        s["verdict"] = body
+
+        parts = [body or _NO_DECISION]
+        for check in s["rechecks"]:
+            state = "APPLIED" if check["verified"] else "DID NOT APPLY"
+            parts.append(
+                f"- re-check of turn {check['turn']:02d} (junior_ic): {state} "
+                f"— delegated: {check['action']}"
+            )
+        if s["dropped_delegation"]:
+            parts.append(
+                "- dropped_delegation (the turn cap cut it off, no edit was made): "
+                f"{s['dropped_delegation']}"
+            )
+        parts.append(_SIMULATION)
+        text = "\n\n".join(parts)
+
+        try:
+            thread.append_decision(run.id, body=text)
+        except Exception as exc:  # never raise out of reduce
+            errors.append(f"thread: {exc}")
+
+        return [Reduction(kind="decision", json={
+            # the assembled text, so the reduction a reviewer reads carries the
+            # re-checks and the disclaimer; empty iff the chair delivered
+            # nothing, which is what ends the run failed.
+            "verdict": text if body else "",
+            "delivered": bool(body),
+            "rechecks": [dict(check) for check in s["rechecks"]],
+            "dropped_delegation": s["dropped_delegation"],
+            "error": "; ".join(errors) or None,
+        })]
 
     def next_phase(self, run: Run) -> str | None:
         """Who speaks next, or None once the decision has been taken."""
