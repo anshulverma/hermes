@@ -16,6 +16,7 @@ import re
 
 import pytest
 
+from playbooks.committee import cast, turnblock
 from playbooks.committee import turnblock as T
 
 
@@ -189,3 +190,230 @@ def test_what_the_instruction_asks_for_is_what_parse_accepts():
         "delegate": False,
         "close": False,
     }
+
+
+# --- the cast ---------------------------------------------------------------
+
+_PERSONA_FIELDS = {
+    "role",
+    "name",
+    "title",
+    "altitude",
+    "goal",
+    "ambition",
+    "stake",
+    "lens",
+    "style",
+}
+
+
+def test_cast_has_nine_roles_each_with_nine_filled_fields():
+    """Every persona is complete: the request asked for all nine fields."""
+    assert len(cast.CAST) == 9
+    assert set(cast.CAST) == {
+        "owner",
+        "senior_director",
+        "manager",
+        "tpm",
+        "pm",
+        "tl",
+        "staff_ic",
+        "data_scientist",
+        "junior_ic",
+    }
+    for role, p in cast.CAST.items():
+        assert set(p) == _PERSONA_FIELDS, role
+        assert p["role"] == role
+        for field, value in p.items():
+            assert isinstance(value, str), f"{role}.{field}"
+            assert value.strip(), f"{role}.{field} is empty"
+
+
+def test_seniority_is_the_seven_reviewers_in_order():
+    """Opening-round order, with the owner and the junior IC held out (§4)."""
+    assert cast.SENIORITY == (
+        "senior_director",
+        "manager",
+        "tpm",
+        "pm",
+        "tl",
+        "staff_ic",
+        "data_scientist",
+    )
+    assert cast.OWNER not in cast.SENIORITY
+    assert cast.JUNIOR not in cast.SENIORITY
+    assert set(cast.SENIORITY) <= set(cast.CAST)
+    assert len(set(cast.SENIORITY)) == 7
+
+
+def test_persona_resolves_the_chair_sentinel_to_the_chairing_persona():
+    assert cast.CHAIR == "chair"
+    assert cast.CHAIR_ROLE == "senior_director"
+    assert cast.persona(cast.CHAIR) is cast.CAST["senior_director"]
+    assert cast.persona("pm")["name"] == "Elena Vargas"
+    with pytest.raises(KeyError):
+        cast.persona("cto")
+
+
+def test_brief_carries_every_persona_field():
+    text = cast.brief("staff_ic")
+    p = cast.CAST["staff_ic"]
+    assert text.startswith("You are Priya Raman, Staff Engineer.")
+    for field in ("altitude", "goal", "ambition", "stake", "lens", "style"):
+        assert p[field] in text, field
+
+
+def test_title_names_the_speaker_and_the_kind():
+    assert cast.title("tpm", "turn") == (
+        "Sam Iyer (tpm) takes the floor in the committee thread"
+    )
+    assert cast.title(cast.JUNIOR, "edit") == (
+        "Alex Moreau (junior_ic) applies the edit the owner delegated"
+    )
+    assert cast.title(cast.CHAIR, "decision") == (
+        "Dana Whitfield (chair) delivers the committee decision"
+    )
+
+
+# --- goal assembly ----------------------------------------------------------
+
+_ARTIFACT = "/home/x/.hermes/runs/committee-20260918-000000/artifact/proposal.md"
+_THREAD = "/home/x/.hermes/runs/committee-20260918-000000/thread.md"
+_REVISED = "/home/x/.hermes/runs/committee-20260918-000000/revised/proposal.md"
+_CHARGE = "Approve the storage migration?"
+
+# The three completion conditions, quoted verbatim from spec §9. They are
+# written out here rather than imported so the test fails if the wording drifts.
+_DONE_TURN = (
+    "Done when: your turn is written as your answer and ends with one "
+    "hermes-turn block."
+)
+_DONE_DECISION = (
+    "Done when: your answer is the committee's decision — approve / approve "
+    "with changes / do not approve — with the reasons, and states that this "
+    "verdict is a simulation, not an approval."
+)
+_GUARDRAIL = (
+    "This review lands nothing, submits nothing and touches no repository. "
+    "Read the artifact and the thread, and write no file at all."
+)
+
+
+def test_reviewer_goal_carries_its_material_and_its_completion_condition():
+    g = cast.goal(
+        "tl",
+        charge=_CHARGE,
+        artifact=_ARTIFACT,
+        thread=_THREAD,
+        revised=_REVISED,
+    )
+    assert "You are Marcus Feld, Tech Lead." in g
+    assert _ARTIFACT in g
+    assert _THREAD in g
+    assert _CHARGE in g
+    assert _GUARDRAIL in g
+    assert turnblock.instruction(owner=False).strip() in g
+    assert g.endswith(_DONE_TURN)
+
+
+def test_owner_goal_says_whose_floor_it_is_and_gets_the_owner_block():
+    g = cast.goal(
+        cast.OWNER,
+        charge=_CHARGE,
+        artifact=_ARTIFACT,
+        thread=_THREAD,
+        revised=_REVISED,
+    )
+    assert "You are Maya Okonkwo, Staff Engineer & proposal owner." in g
+    assert "Answer the member who spoke last" in g
+    assert turnblock.instruction(owner=True).strip() in g
+    assert _ARTIFACT in g
+    assert _THREAD in g
+    assert g.endswith(_DONE_TURN)
+
+
+def test_junior_goal_names_the_revised_path_and_the_delegated_action():
+    g = cast.goal(
+        cast.JUNIOR,
+        charge=_CHARGE,
+        artifact=_ARTIFACT,
+        thread=_THREAD,
+        revised=_REVISED,
+        action="add a rollback section naming who pages",
+    )
+    assert "You are Alex Moreau, Software Engineer." in g
+    assert _ARTIFACT in g
+    assert _THREAD in g
+    assert _REVISED in g
+    assert "add a rollback section naming who pages" in g
+    # The one file it may write, and the only file it may write.
+    assert "the only file you may write" in g
+    # Its block keys are all ignored (§5.4), so it is not asked for a block.
+    assert "hermes-turn" not in g
+    assert g.endswith(
+        f"Done when: {_REVISED} carries the delegated change and your answer "
+        "states in one line what you changed."
+    )
+
+
+def test_junior_goal_without_an_action_is_a_named_failure():
+    with pytest.raises(ValueError, match="junior_ic"):
+        cast.goal(
+            cast.JUNIOR,
+            charge=_CHARGE,
+            artifact=_ARTIFACT,
+            thread=_THREAD,
+            revised=_REVISED,
+        )
+
+
+def test_chair_goal_is_the_decision_and_calls_the_verdict_a_simulation():
+    g = cast.goal(
+        cast.CHAIR,
+        charge=_CHARGE,
+        artifact=_ARTIFACT,
+        thread=_THREAD,
+        revised=_REVISED,
+    )
+    assert "You are Dana Whitfield, Senior Director of Engineering." in g
+    assert _ARTIFACT in g
+    assert _THREAD in g
+    assert _REVISED in g
+    assert "simulation" in g
+    assert _GUARDRAIL in g
+    assert g.endswith(_DONE_DECISION)
+
+
+def test_the_guardrail_survives_a_maximal_charge():
+    """The charge absorbs the cut; the tail is never clipped."""
+    g = cast.goal(
+        "data_scientist",
+        charge="x" * 5000,
+        artifact=_ARTIFACT,
+        thread=_THREAD,
+        revised=_REVISED,
+    )
+    assert _GUARDRAIL in g
+    assert g.endswith(_DONE_TURN)
+    assert "x" * cast.CHARGE_MAX not in g
+    assert "x" * (cast.CHARGE_MAX - 1) in g
+    assert "…" in g
+
+
+def test_every_goal_stays_under_the_budget_at_maximum_size():
+    """Longest persona, an over-length charge and action, and deep paths."""
+    deep = "/home/anshulverma/.hermes/runs/committee-20260918-000000/" + "d" * 100
+    artifact = f"{deep}/proposal-under-review.md"
+    thread = f"{deep}/thread.md"
+    revised = f"{deep}/revised/proposal-under-review.md"
+    for role in list(cast.CAST) + [cast.CHAIR]:
+        g = cast.goal(
+            role,
+            charge="c" * 5000,
+            artifact=artifact,
+            thread=thread,
+            revised=revised,
+            action="a" * 5000,
+        )
+        assert len(g) < cast.GOAL_MAX, f"{role}: {len(g)}"
+        assert len(g) > 1500, f"{role}: {len(g)}"
