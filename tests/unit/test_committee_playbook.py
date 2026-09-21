@@ -939,3 +939,239 @@ def test_seeded_fuzz_over_random_blocks_and_random_caps():
             raise AssertionError(
                 f"seed-iter {iteration} max_turns={max_turns}: {exc}"
             ) from exc
+
+
+# --- the four transport-path methods (spec §5.6) ---------------------------
+
+
+def _payload(kind: str, role: str, action=None) -> dict:
+    """Helper: a ticket payload of the exact shape seed() emits."""
+    return {
+        "role": role,
+        "title": f"turn — {role}",
+        "goal": "Read the artifact and take your turn.",
+        "kind": kind,
+        "action": action,
+    }
+
+
+def _ok_result(payload: dict, outcome: str = "ok") -> Result:
+    """Helper: a worker Result carrying ``payload``."""
+    return Result(
+        outcome=outcome,
+        termination_reason="goal_met" if outcome == "ok" else "driver_error",
+        result_ref=None,
+        error_summary=None,
+        started_at=1000.0,
+        ended_at=2000.0,
+        payload=payload,
+    )
+
+
+def _result_doc(payload: dict, outcome: str = "ok") -> dict:
+    """Helper: the outer result document contracts.validate_result checks."""
+    return {
+        "outcome": outcome,
+        "termination_reason": "goal_met" if outcome == "ok" else "driver_error",
+        "result_ref": None,
+        "evidence_ref": None,
+        "started_at": 1000.0,
+        "ended_at": 2000.0,
+        "error_summary": None,
+        "payload": payload,
+    }
+
+
+def test_every_ticket_kind_validates_against_the_one_payload_schema():
+    """One schema, every phase: turn, edit and decision all pass it."""
+    from engine import contracts
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    pb = CommitteePlaybook()
+    cases = [
+        ("t01-senior_director", _payload("turn", "senior_director")),
+        ("t04-junior_ic", _payload("edit", "junior_ic", action="Add a rollback plan.")),
+        ("decision", _payload("decision", "chair")),
+    ]
+    for phase, payload in cases:
+        contracts.validate(payload, pb.payload_schema(phase))
+
+
+def test_payload_schema_rejects_an_extra_key():
+    """additionalProperties:false — a stray key is a terminal contract failure."""
+    from engine import contracts
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    payload = _payload("turn", "tpm")
+    payload["urgency"] = "high"
+
+    with pytest.raises(contracts.ContractError) as exc:
+        contracts.validate(payload, CommitteePlaybook().payload_schema("t02-tpm"))
+    assert "Additional property 'urgency' not allowed" in str(exc.value)
+
+
+def test_payload_schema_requires_role_title_goal_and_kind():
+    """Four required keys; dropping any one of them fails validation."""
+    from engine import contracts
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    schema = CommitteePlaybook().payload_schema("t03-pm")
+    for key in ("role", "title", "goal", "kind"):
+        payload = _payload("turn", "pm")
+        del payload[key]
+        with pytest.raises(contracts.ContractError) as exc:
+            contracts.validate(payload, schema)
+        assert f"Required key '{key}' is missing" in str(exc.value)
+
+
+def test_action_is_nullable_and_kind_is_a_closed_vocabulary():
+    """action is None on every turn but the junior IC's; kind is an enum of three."""
+    from engine import contracts
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    schema = CommitteePlaybook().payload_schema("t05-owner")
+
+    contracts.validate(_payload("turn", "owner", action=None), schema)
+    contracts.validate(_payload("edit", "junior_ic", action="Name the risk owner."), schema)
+
+    absent = _payload("turn", "owner")
+    del absent["action"]
+    contracts.validate(absent, schema)  # not required, so absent is fine too
+
+    with pytest.raises(contracts.ContractError) as exc:
+        contracts.validate(_payload("vote", "owner"), schema)
+    assert "Value 'vote' not in enum ['turn', 'edit', 'decision']" in str(exc.value)
+
+    with pytest.raises(contracts.ContractError) as exc:
+        contracts.validate(_payload("turn", "owner", action=7), schema)
+    assert "Expected one of [string, null], got number" in str(exc.value)
+
+
+def test_result_schema_accepts_prose_and_tolerates_extra_keys():
+    """The prose is the result; the hermes-turn block is parsed out of it later."""
+    from engine import contracts
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    schema = CommitteePlaybook().result_schema("t06-staff_ic")
+
+    contracts.validate_result(_result_doc({"answer": "I have two concerns."}), schema)
+    contracts.validate_result(
+        _result_doc({"answer": "I have two concerns.", "tokens": 812, "notes": ["a"]}),
+        schema,
+    )
+
+
+def test_a_result_with_no_usable_answer_is_rejected_unless_the_worker_failed():
+    """answer is required and must be text — but only when the outcome is ok."""
+    from engine import contracts
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    schema = CommitteePlaybook().result_schema("decision")
+
+    with pytest.raises(contracts.ContractError) as exc:
+        contracts.validate_result(_result_doc({}), schema)
+    assert "$.payload: Required key 'answer' is missing" in str(exc.value)
+
+    with pytest.raises(contracts.ContractError) as exc:
+        contracts.validate_result(_result_doc({"answer": 3}), schema)
+    assert "$.payload.answer: Expected string, got number" in str(exc.value)
+
+    # validate_result skips the payload when outcome != "ok", which is why a dead
+    # turn costs a thread stub (reduce's NO_TURN body) and not a contract failure.
+    contracts.validate_result(_result_doc({}, outcome="driver_failed"), schema)
+
+
+def test_driver_is_goal_only_by_default():
+    """No methodology command unless one is configured: the prompt is the goal."""
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    driver = CommitteePlaybook().driver("t01-senior_director")
+    assert driver.command is None
+    assert driver.args == {}
+    assert driver.loop is None
+
+
+def test_driver_reads_the_environment_at_call_time(monkeypatch):
+    """Constructed before the var is set and still picks it up (spec §5.6)."""
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    pb = CommitteePlaybook()
+    assert pb.driver("decision").command is None
+
+    monkeypatch.setenv("HERMES_COMMITTEE_DRIVER", "/monk")
+    assert pb.driver("decision").command == "/monk"
+
+    monkeypatch.setenv("HERMES_COMMITTEE_DRIVER", "   ")
+    assert pb.driver("decision").command is None
+
+
+def test_driver_is_the_same_for_every_phase(monkeypatch):
+    """The method a persona reviews by does not change with whose turn it is."""
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    monkeypatch.setenv("HERMES_COMMITTEE_DRIVER", "/dexter:solve")
+    pb = CommitteePlaybook()
+    expected = Driver(command="/dexter:solve", args={}, loop=None)
+    for phase in ("open", "t01-senior_director", "t12-junior_ic", "decision"):
+        assert pb.driver(phase) == expected
+
+
+def test_verify_is_always_true():
+    """Criterion 8: verify never returns False. See the method's docstring."""
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    pb = CommitteePlaybook()
+    run = _run(phase="t01-senior_director")
+    ticket = Ticket(
+        id=f"{run.id}/t01-senior_director",
+        run_id=run.id,
+        phase="t01-senior_director",
+        state="running",
+        resource_req="cpu",
+        priority=0.0,
+        attempts=0,
+        payload=_payload("turn", "senior_director"),
+    )
+
+    assert pb.verify(run, ticket, _ok_result({"answer": "Two questions."}), site=None) is True
+    assert pb.verify(run, ticket, _ok_result({}), site=None) is True
+    assert pb.verify(run, ticket, _ok_result({"answer": "   "}), site=None) is True
+    assert pb.verify(run, ticket, _ok_result({"answer": 3, "junk": None}), site=None) is True
+    assert pb.verify(run, ticket, _ok_result({}, outcome="driver_failed"), site=None) is True
+
+
+def test_the_transport_path_methods_need_no_per_run_state(monkeypatch):
+    """What a separate `hermes serve --host` process sees: an empty state dict.
+
+    A fresh instance has never called seed, reduce or next_phase for this run, so
+    _state_by_run is empty — and all four transport-path methods still work, and
+    leave it empty.
+    """
+    from engine import contracts
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    monkeypatch.setenv("HERMES_COMMITTEE_DRIVER", "/monk")
+    pb = CommitteePlaybook()
+    assert pb._state_by_run == {}
+
+    run = _run(phase="t09-junior_ic")
+    ticket = Ticket(
+        id=f"{run.id}/t09-junior_ic",
+        run_id=run.id,
+        phase="t09-junior_ic",
+        state="running",
+        resource_req="cpu",
+        priority=0.0,
+        attempts=0,
+        payload=_payload("edit", "junior_ic", action="Add the rollback plan."),
+    )
+
+    contracts.validate(ticket.payload, pb.payload_schema(ticket.phase))
+    contracts.validate_result(
+        _result_doc({"answer": "Added it."}), pb.result_schema(ticket.phase)
+    )
+    assert pb.driver(ticket.phase).command == "/monk"
+    assert pb.verify(run, ticket, _ok_result({"answer": "Added it."}), site=None) is True
+
+    # None of the four reached for per-run state, so none of them minted any.
+    assert pb._state_by_run == {}

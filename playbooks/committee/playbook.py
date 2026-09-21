@@ -21,9 +21,15 @@ Stdlib-only.
 """
 from __future__ import annotations
 
+import os
+from typing import TYPE_CHECKING
+
 from engine import playbook as _playbook
-from engine.models import Run
+from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
 from playbooks.committee import cast
+
+if TYPE_CHECKING:  # avoid import cycle
+    from engine.site import Site
 
 _CACHE_MAX = 16
 
@@ -130,6 +136,96 @@ class CommitteePlaybook:
             s["dropped_delegation"] = s["delegation"]
             s["delegation"] = None
         return "decision"
+
+    # --- the transport-path methods (spec §5.6) -------------------------
+    #
+    # payload_schema (engine/transport.py:324), driver (engine/transport.py:391),
+    # result_schema (engine/transport.py:421) and verify (engine/queue.py:285)
+    # are NOT called from the master. Under `hermes serve --host` they run in the
+    # worker process, where this instance has never seen the run and
+    # _state_by_run is empty. All four are therefore pure functions of their
+    # arguments: no self._state(run), no per-run lookup, no file IO, no parsing
+    # of the runtime phase name. Adding state to any of them silently breaks a
+    # split deployment rather than failing a test.
+
+    def payload_schema(self, phase: str) -> dict:
+        """One payload shape for every ticket, whatever the phase.
+
+        ``phase`` is ignored on purpose: one shape means no role lookup and no
+        recovery of the speaker from the phase name. ``action`` is nullable and
+        carries the delegated edit on a junior-IC ticket only.
+
+        Two validator facts shape this schema (engine/contracts.py): there is no
+        ``integer`` type — ``_matches_type`` has no branch for it and returns
+        False for every value, 5 included — and unknown keywords (``maxLength``,
+        ``pattern``, ``minItems``) are silently ignored. So nothing here counts
+        or measures; the charge and action clipping is cast.py's job.
+        """
+        return {
+            "type": "object",
+            "required": ["role", "title", "goal", "kind"],
+            "additionalProperties": False,
+            "properties": {
+                "role": {"type": "string"},
+                "title": {"type": "string"},
+                "goal": {"type": "string"},
+                "kind": {"type": "string", "enum": ["turn", "edit", "decision"]},
+                "action": {"type": ["string", "null"]},
+            },
+        }
+
+    def result_schema(self, phase: str) -> dict:
+        """Every speaker returns prose under ``answer``, whatever its phase.
+
+        ``additionalProperties: true`` matches research
+        (playbooks/research/playbook.py:417-428): an agent that adds keys of its
+        own is not a contract failure, and a contract failure here would be
+        terminal on first occurrence. The hermes-turn block lives inside the
+        prose and is parsed by reduce, not by the contract.
+        """
+        return {
+            "type": "object",
+            "required": ["answer"],
+            "additionalProperties": True,
+            "properties": {"answer": {"type": "string"}},
+        }
+
+    def driver(self, phase: str) -> Driver:
+        """Goal-only unless ``HERMES_COMMITTEE_DRIVER`` names a methodology.
+
+        Read from the environment on every call rather than from ``run.config``:
+        this method is handed a phase and nothing else, and may run in a worker
+        process that never called ``seed``, so the environment is the one channel
+        every process shares (playbooks/research/playbook.py:440-451 does the
+        same). Whitespace is not a command.
+
+        Every phase gets the same driver. *How* to review is the driver's
+        business and does not vary by speaker; *who* you are and *what* is done
+        travel in the goal.
+        """
+        command = (os.environ.get(ENV_DRIVER) or "").strip()
+        return Driver(command=command or None, args={}, loop=None)
+
+    def verify(self, run: Run, ticket: Ticket, result: Result, site: "Site") -> bool:
+        """Always True. Deliberate — do not turn this into a form gate.
+
+        A False sets the ticket to needs_human (engine/queue.py:283-286), and a
+        needs_human ticket blocks phase advancement permanently
+        (engine/dispatch.py:261-264): nothing can re-drive a run's master loop,
+        because `hermes run` always creates a NEW run (engine/cli.py:382) and
+        `hermes serve --host` only calls serve_loop (engine/cli.py:778). One
+        empty answer would strand the committee mid-conversation with no operator
+        path back. This is why it is not research's answer-text gate
+        (playbooks/research/playbook.py:456-458).
+
+        The independent re-check the no-trust invariant asks for lives in
+        reduce() instead, which runs in the master (engine/dispatch.py:305), can
+        hash the revised file, and records its verdict on the reduction as
+        ``verified`` — visible, and named again in the decision when it failed.
+
+        Pure by necessity: run, ticket, result and site are all it may read.
+        """
+        return True
 
     def next_phase(self, run: Run) -> str | None:
         """Who speaks next, or None once the decision has been taken."""

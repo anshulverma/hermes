@@ -417,3 +417,11 @@ def test_contract_error_includes_path_in_str():
     error_str = str(err)
     assert "$.goal_envelope.driver.command" in error_str
     assert "Expected string" in error_str
+
+
+def test_validate_rejects_the_unsupported_integer_type():
+    """`integer` has no branch in _matches_type, so it rejects every value."""
+    from engine.contracts import validate, ContractError
+
+    with pytest.raises(ContractError):
+        validate(5, {"type": "integer"})
