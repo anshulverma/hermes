@@ -103,6 +103,13 @@ export default function TopBar({
     }
   };
 
+  // The Run tab owns the fallback too: App renders RunOverview for #playbook at
+  // a run with no view (App.tsx:233), and a page no tab claims is worse than a
+  // fourth copy of this one rule. The alternative -- normalising the hash to
+  // #overview in the fallback -- would cost the property that switching away to
+  // a view-less run and back reopens the playbook tab where you left it.
+  const runTabActive = view === 'overview' || (view === 'playbook' && !hasPlaybookView);
+
   return (
     <header
       style={{
@@ -133,11 +140,12 @@ export default function TopBar({
       <nav style={{ display: 'flex', gap: 4 }}>
         <button
           onClick={() => handleTabClick('overview')}
+          data-testid="tab-run"
           style={{
             padding: '6px 12px',
             fontSize: 13,
-            color: view === 'overview' ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: view === 'overview' ? 'var(--wash-subtle)' : 'transparent',
+            color: runTabActive ? 'var(--text-primary)' : 'var(--text-muted)',
+            background: runTabActive ? 'var(--wash-subtle)' : 'transparent',
             border: 'none',
             borderRadius: 'var(--radius-md)',
             cursor: 'pointer',
@@ -262,9 +270,15 @@ export default function TopBar({
         {/* The one tab that comes and goes, against the Review policy three
             buttons up. That policy is about transient state -- an empty review
             queue fills again, so hiding the tab would teach nothing. This is
-            about whether the run's playbook ships a view at all, which is fixed
-            for the life of a run: for a playbook without one there is no page
-            behind the tab, ever. */}
+            about whether the run's playbook ships a view at all: for a playbook
+            without one there is no page behind the tab, ever.
+
+            `has_view` is recomputed per request (server/app.py:342), so it is
+            fixed only for as long as the server serves the same built bundle.
+            The two ways it flips mid-run are the kill switch and a dist/
+            rebuild under a live server -- both operator actions, and both make
+            the tab vanish, the pane fall back to RunOverview, and the view
+            remount when it returns. */}
         {hasPlaybookView && (
           <button
             onClick={() => handleTabClick('playbook')}

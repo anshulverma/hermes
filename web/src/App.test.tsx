@@ -9,12 +9,38 @@ vi.mock('./api/client');
 vi.mock('./hooks/useEventStream');
 
 // The real loader injects a <script> tag and reads a window global; neither is
-// what this file is testing. The stub keeps the one rule App depends on: it
-// renders nothing unless the run has a view.
-vi.mock('./views/PlaybookView', () => ({
-  default: ({ runId, hasView }: { runId: string; hasView: boolean }) =>
-    hasView ? <div data-testid="playbook-view">playbook view for {runId}</div> : null,
-}));
+// what this file is testing. The stub keeps the two rules App depends on:
+//
+//  1. it renders nothing unless the run has a view;
+//  2. it KEEPS THE RUN IT FIRST MOUNTED WITH.
+//
+// (2) is stateful on purpose. It is the real loader's behaviour -- it only
+// blanks its pane on the first load, so a runId change renders the previous
+// run's view_data for one round trip -- and it is the entire reason App keys
+// the element on the run. Without it modelled here the `key` can be deleted
+// for free: a stateless stub re-renders with the new runId either way, and a
+// test in PlaybookView.test.tsx would only be testing React's reconciler.
+vi.mock('./views/PlaybookView', async () => {
+  const { useState } = await import('react');
+  return {
+    default: ({
+      runId,
+      hasView,
+      liveTick,
+    }: {
+      runId: string;
+      hasView: boolean;
+      liveTick?: number;
+    }) => {
+      const [mountedWith] = useState(runId);
+      return hasView ? (
+        <div data-testid="playbook-view">
+          playbook view for {mountedWith} · tick {String(liveTick)}
+        </div>
+      ) : null;
+    },
+  };
+});
 
 const mockRunDetail: RunDetail = {
   id: 'run-001',
@@ -366,6 +392,67 @@ describe('App', () => {
       await waitFor(() => {
         expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
       });
+    });
+
+    it('remounts the view when the reader switches to another run with one', async () => {
+      // Finding 10.1. The loader keeps the run it first mounted with, so
+      // without `key` on the element the pane shows run-001's view_data under
+      // run-002's id for one round trip. One round trip, easy to miss in
+      // review, invisible in CI.
+      mockRuns('run-001', 'run-002');
+      vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) => ({
+        ...withView,
+        id,
+      }));
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
+      });
+      screen.getByTestId('tab-playbook').click();
+      await waitFor(() => {
+        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
+      });
+
+      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-002');
+      });
+    });
+
+    it('hands the view the finding tick, so a new reduction refreshes it', async () => {
+      // Finding 10.2. Drop `liveTick={findingLiveTick}` and a live committee
+      // run silently stops refreshing on reduction_created -- which, for turns
+      // arriving one at a time, is the feature.
+      mockRuns('run-001');
+      vi.spyOn(client, 'fetchRun').mockResolvedValue(withView);
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
+      });
+      screen.getByTestId('tab-playbook').click();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('playbook-view')).toHaveTextContent(/tick \d+/);
+      });
+    });
+
+    it('keeps the Run tab lit when #playbook falls back to the overview', async () => {
+      // Finding 10.4: RunOverview is on screen, so some tab has to claim it.
+      window.location.hash = '#playbook';
+      mockRuns('run-001');
+      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/example run/i)).toBeInTheDocument();
+      });
+      expect(screen.getByTestId('tab-run')).toHaveStyle({ color: 'var(--text-primary)' });
     });
   });
 });
