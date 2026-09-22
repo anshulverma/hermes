@@ -1,3 +1,6 @@
+// Side effect: publishes the design-system namespace on window, which is how
+// the view reads Card, Badge and EmptyState in the browser too.
+import '../ds';
 import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 // The BUILT artifact, not the source. This test is only worth anything if it
@@ -27,13 +30,41 @@ describe('playbook view UMD boundary', () => {
     const CommitteeView = (window as any).HermesView_committee;
     expect(typeof CommitteeView).toBe('function');
 
-    render(<CommitteeView runId="run-2" />);
-    const button = screen.getByRole('button');
-    expect(button).toHaveTextContent('placeholder view for run-2 clicks: 0');
+    // The smallest payload the real component renders: one turn, so the
+    // transcript mounts and its expand/collapse hook is reachable. Shaped by
+    // view_data (playbooks/committee/view.py), not invented here. This file
+    // proves the LOADING boundary; what the view renders is
+    // web/src/views/CommitteeView.test.tsx's job.
+    const data = {
+      kind: 'committee',
+      roster: [],
+      progress: { turn: 1, cap: 30, holder: null, queue: [], ended: null },
+      timeline: [
+        {
+          n: 1,
+          role: 'owner',
+          name: 'Maya Okonkwo',
+          title: 'Staff Engineer',
+          body: 'the boundary holds',
+          action: null,
+          badges: [],
+          verified: null,
+        },
+      ],
+      stances: {},
+      verdict: null,
+      artifacts: { original: null, revised: null },
+    };
 
-    // The whole point. A second React instance throws "Invalid hook call" here;
-    // an unset ReactJSXRuntime global throws before this line ever runs.
-    fireEvent.click(button);
-    expect(button).toHaveTextContent('placeholder view for run-2 clicks: 1');
+    render(<CommitteeView runId="run-2" data={data} refetch={() => {}} />);
+
+    const expandAll = screen.getByTestId('expand-all');
+    expect(expandAll).toHaveTextContent('Expand all');
+
+    // The whole point. A second React instance throws "Invalid hook call" on
+    // this setState; an unset ReactJSXRuntime global throws before this line
+    // ever runs.
+    fireEvent.click(expandAll);
+    expect(expandAll).toHaveTextContent('Collapse all');
   });
 });

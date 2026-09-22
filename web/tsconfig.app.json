@@ -10,6 +10,15 @@
 
     /* Bundler mode */
     "moduleResolution": "bundler",
+    /* The committee view's source lives outside web/, so `react` does not
+       resolve from its directory. Point at @types/react, never at
+       ./node_modules/react/jsx-runtime: that resolves to the .js and every
+       file in src/ then fails TS7016 for want of a declaration file. */
+    "paths": {
+      "react": ["./node_modules/@types/react"],
+      "react/jsx-runtime": ["./node_modules/@types/react/jsx-runtime"],
+      "react/jsx-dev-runtime": ["./node_modules/@types/react/jsx-dev-runtime"]
+    },
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "moduleDetection": "force",
