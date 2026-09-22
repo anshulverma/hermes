@@ -24,6 +24,9 @@
  */
 
 import { useState } from 'react';
+import { Markdown } from './host';
+import Verdict from './Verdict';
+import ArtifactDiff from './Diff';
 
 // --- the data, exactly as `CommitteePlaybook.view_data` returns it -----------
 
@@ -101,13 +104,11 @@ export type CommitteeViewProps = {
 // At render time rather than at module scope: this bundle is injected by a
 // script tag, and where that lands relative to the host's own module graph is
 // not something the view gets to decide.
-
-type MarkdownProps = { children: string; maxHeight?: number | null; fontSize?: number };
-
-function hostMarkdown(): (props: MarkdownProps) => React.ReactNode {
-  return (window as unknown as { HermesUI: { Markdown: (p: MarkdownProps) => React.ReactNode } })
-    .HermesUI.Markdown;
-}
+//
+// `Markdown` comes from ./host, which is the bundle's only reader of
+// window.HermesUI. A second reader here drifted from it on the fallback: this
+// one threw when the host published nothing, host.tsx degrades to preformatted
+// text.
 
 /**
  * The design-system namespace, resolved exactly as `web/src/ds/index.ts` does.
@@ -321,7 +322,6 @@ function TimelineEntry({
   onToggle: () => void;
 }) {
   const { Badge } = ds();
-  const Markdown = hostMarkdown();
   const firstLine = entry.body.split('\n').find((l) => l.trim()) ?? '';
 
   return (
@@ -471,7 +471,7 @@ function Timeline({ timeline }: { timeline: Entry[] }) {
 
 // --- the view ----------------------------------------------------------------
 
-export default function CommitteeView({ data }: CommitteeViewProps) {
+export default function CommitteeView({ runId, data }: CommitteeViewProps) {
   const { EmptyState } = ds();
 
   // The timeline alone, NOT `&& roster.length === 0`. `view_data`'s `_roster`
@@ -503,6 +503,8 @@ export default function CommitteeView({ data }: CommitteeViewProps) {
       <ProgressBar progress={data.progress} />
       <Roster roster={data.roster} />
       <Timeline timeline={data.timeline} />
+      <Verdict runId={runId} verdict={data.verdict} />
+      <ArtifactDiff runId={runId} artifacts={data.artifacts} />
     </div>
   );
 }
