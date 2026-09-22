@@ -90,6 +90,18 @@ export function diffLines(original: string, revised: string): DiffRow[] {
 }
 
 type Artifact = { name: string; bytes: number };
+/** `GET /view/artifact` — `truncated` is true when the server hit its read cap. */
+type Copy = { text: string; truncated?: boolean };
+
+/**
+ * How many diff rows to put in the DOM.
+ *
+ * ponytail: `diffLines` is hard-bounded and fast (415 rows in 1.9 ms on the real
+ * pair); the RENDER is what does not scale — one <div> per line, measured at
+ * 20,001 nodes and 3.4 s to mount for a 20,000-line artifact. A cap plus a
+ * footer beats virtualization until a real artifact trips it.
+ */
+const MAX_ROWS = 5000;
 // `original` is nullable, matching `view_data`'s `_artifacts`, which returns
 // {"original": None, "revised": None} when no reduction names a path — the
 // state of every run in phase `open`, which is when the tab first appears.
@@ -128,6 +140,7 @@ export default function ArtifactDiff({
   legacy?: boolean;
 }) {
   const [rows, setRows] = useState<DiffRow[] | null>(null);
+  const [cut, setCut] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { original, revised } = artifacts;
@@ -137,10 +150,16 @@ export default function ArtifactDiff({
     setLoading(true);
     setError(null);
     Promise.all([
-      apiGet<{ text: string }>(`/api/runs/${runId}/view/artifact?which=original`),
-      apiGet<{ text: string }>(`/api/runs/${runId}/view/artifact?which=revised`),
+      apiGet<Copy>(`/api/runs/${runId}/view/artifact?which=original`),
+      apiGet<Copy>(`/api/runs/${runId}/view/artifact?which=revised`),
     ])
-      .then(([a, b]) => setRows(diffLines(a.text, b.text)))
+      .then(([a, b]) => {
+        // The route caps its read; a diff of two prefixes presented as a diff
+        // of two files is the same kind of confident partial claim this card
+        // exists to stop.
+        setCut(Boolean(a.truncated || b.truncated));
+        setRows(diffLines(a.text, b.text));
+      })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
   };
@@ -270,8 +289,25 @@ export default function ArtifactDiff({
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {cut && (
+            <div
+              data-testid="diff-truncated"
+              style={{
+                padding: '8px 12px',
+                borderRadius: 'var(--radius-sm)',
+                background: 'var(--status-attention-tint)',
+                border: '1px solid var(--status-attention-edge)',
+                fontSize: 12.5,
+                color: 'var(--text-primary)',
+              }}
+            >
+              The server cut at least one of the two copies short at its read cap, so this is a
+              diff of two prefixes and the counts below are not the whole file.
+            </div>
+          )}
           <div data-testid="diff-counts" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-            {adds} lines added, {dels} removed — all of it in the revised copy.{' '}
+            {adds} {adds === 1 ? 'line' : 'lines'} added, {dels} removed — all of it in the revised
+            copy.{' '}
             <span style={{ fontFamily: 'var(--font-mono)' }}>-</span> is a line only the original
             has, <span style={{ fontFamily: 'var(--font-mono)' }}>+</span> a line only the revised
             copy has.
@@ -288,7 +324,7 @@ export default function ArtifactDiff({
               borderRadius: 'var(--radius-sm)',
             }}
           >
-            {rows.map((row, i) => {
+            {rows.slice(0, MAX_ROWS).map((row, i) => {
               const style = ROW_STYLE[row.kind];
               return (
                 <div
@@ -305,6 +341,15 @@ export default function ArtifactDiff({
                 </div>
               );
             })}
+            {rows.length > MAX_ROWS && (
+              <div
+                data-testid="diff-rows-capped"
+                style={{ padding: '4px 8px', color: 'var(--text-muted)' }}
+              >
+                … {rows.length - MAX_ROWS} more rows are in the diff and not on screen. The counts
+                above are the whole diff; this pane stops at {MAX_ROWS}.
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -182,7 +182,6 @@ export const run2: CommitteeData = {
     artifact_intact: true,
     dropped_delegation: null,
     dropped_floor_requests: [],
-    simulation: true,
   },
   artifacts: {
     original: { name: 'federation-future.md', bytes: 11397 },

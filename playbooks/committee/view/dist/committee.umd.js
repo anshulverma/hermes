@@ -406,6 +406,15 @@
 		});
 		return rows;
 	}
+	/**
+	* How many diff rows to put in the DOM.
+	*
+	* ponytail: `diffLines` is hard-bounded and fast (415 rows in 1.9 ms on the real
+	* pair); the RENDER is what does not scale — one <div> per line, measured at
+	* 20,001 nodes and 3.4 s to mount for a 20,000-line artifact. A cap plus a
+	* footer beats virtualization until a real artifact trips it.
+	*/
+	var MAX_ROWS = 5e3;
 	var kb = (bytes) => `${(bytes / 1024).toFixed(1)} KB`;
 	var ROW_STYLE = {
 		same: {
@@ -426,6 +435,7 @@
 	};
 	function ArtifactDiff({ runId, artifacts, intact, legacy }) {
 		const [rows, setRows] = (0, react.useState)(null);
+		const [cut, setCut] = (0, react.useState)(false);
 		const [loading, setLoading] = (0, react.useState)(false);
 		const [error, setError] = (0, react.useState)(null);
 		const { original, revised } = artifacts;
@@ -433,7 +443,10 @@
 			if (!revised) return;
 			setLoading(true);
 			setError(null);
-			Promise.all([apiGet(`/api/runs/${runId}/view/artifact?which=original`), apiGet(`/api/runs/${runId}/view/artifact?which=revised`)]).then(([a, b]) => setRows(diffLines(a.text, b.text))).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setLoading(false));
+			Promise.all([apiGet(`/api/runs/${runId}/view/artifact?which=original`), apiGet(`/api/runs/${runId}/view/artifact?which=revised`)]).then(([a, b]) => {
+				setCut(Boolean(a.truncated || b.truncated));
+				setRows(diffLines(a.text, b.text));
+			}).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setLoading(false));
 		};
 		const adds = rows ? rows.filter((r) => r.kind === "add").length : 0;
 		const dels = rows ? rows.filter((r) => r.kind === "del").length : 0;
@@ -553,58 +566,88 @@
 					flexDirection: "column",
 					gap: 8
 				},
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					"data-testid": "diff-counts",
-					style: {
-						fontSize: 12,
-						color: "var(--text-muted)"
-					},
-					children: [
-						adds,
-						" lines added, ",
-						dels,
-						" removed — all of it in the revised copy.",
-						" ",
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							style: { fontFamily: "var(--font-mono)" },
-							children: "-"
-						}),
-						" is a line only the original has, ",
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							style: { fontFamily: "var(--font-mono)" },
-							children: "+"
-						}),
-						" a line only the revised copy has."
-					]
-				}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-					"data-testid": "diff-rows",
-					style: {
-						fontFamily: "var(--font-mono)",
-						fontSize: 11.5,
-						lineHeight: 1.5,
-						maxHeight: 420,
-						overflow: "auto",
-						border: "1px solid var(--border-hairline)",
-						borderRadius: "var(--radius-sm)"
-					},
-					children: rows.map((row, i) => {
-						const style = ROW_STYLE[row.kind];
-						return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				children: [
+					cut && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						"data-testid": "diff-truncated",
+						style: {
+							padding: "8px 12px",
+							borderRadius: "var(--radius-sm)",
+							background: "var(--status-attention-tint)",
+							border: "1px solid var(--status-attention-edge)",
+							fontSize: 12.5,
+							color: "var(--text-primary)"
+						},
+						children: "The server cut at least one of the two copies short at its read cap, so this is a diff of two prefixes and the counts below are not the whole file."
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "diff-counts",
+						style: {
+							fontSize: 12,
+							color: "var(--text-muted)"
+						},
+						children: [
+							adds,
+							" ",
+							adds === 1 ? "line" : "lines",
+							" added, ",
+							dels,
+							" removed — all of it in the revised copy.",
+							" ",
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								style: { fontFamily: "var(--font-mono)" },
+								children: "-"
+							}),
+							" is a line only the original has, ",
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								style: { fontFamily: "var(--font-mono)" },
+								children: "+"
+							}),
+							" a line only the revised copy has."
+						]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "diff-rows",
+						style: {
+							fontFamily: "var(--font-mono)",
+							fontSize: 11.5,
+							lineHeight: 1.5,
+							maxHeight: 420,
+							overflow: "auto",
+							border: "1px solid var(--border-hairline)",
+							borderRadius: "var(--radius-sm)"
+						},
+						children: [rows.slice(0, MAX_ROWS).map((row, i) => {
+							const style = ROW_STYLE[row.kind];
+							return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								style: {
+									background: style.background,
+									color: style.color,
+									padding: "0 8px",
+									whiteSpace: "pre-wrap",
+									wordBreak: "break-word"
+								},
+								children: [
+									style.sign,
+									" ",
+									row.text
+								]
+							}, i);
+						}), rows.length > MAX_ROWS && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							"data-testid": "diff-rows-capped",
 							style: {
-								background: style.background,
-								color: style.color,
-								padding: "0 8px",
-								whiteSpace: "pre-wrap",
-								wordBreak: "break-word"
+								padding: "4px 8px",
+								color: "var(--text-muted)"
 							},
 							children: [
-								style.sign,
-								" ",
-								row.text
+								"… ",
+								rows.length - MAX_ROWS,
+								" more rows are in the diff and not on screen. The counts above are the whole diff; this pane stops at ",
+								MAX_ROWS,
+								"."
 							]
-						}, i);
+						})]
 					})
-				})]
+				]
 			})]
 		});
 	}
@@ -635,13 +678,34 @@
 	* committed, unminified artifact.
 	*/
 	/**
+	* What a missing design system degrades to.
+	*
+	* `web/src/ds/index.ts:getComponent` warns and returns `() => null`, and
+	* `host.tsx` falls back to preformatted text rather than throwing. This mirrors
+	* that: an unstyled view beats a throw into `PlaybookView`'s error boundary,
+	* which is set once and never cleared, so one missing global would leave the
+	* pane red for the session.
+	*/
+	var PLAIN = {
+		Card: ({ children }) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children }),
+		Badge: ({ children }) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", { children }),
+		EmptyState: ({ title, description }) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [
+			/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: title }),
+			" ",
+			description
+		] })
+	};
+	/**
 	* The design-system namespace, resolved exactly as `web/src/ds/index.ts` does.
 	* The bundle publishes the hashed name and nothing publishes `DSNS`, so the
 	* fallback is the compatibility half of the same expression, not a guess.
 	*/
 	function ds() {
 		const w = window;
-		return w.MonoDarkDashDesignSystem_66fdfe || w.DSNS;
+		const found = w.MonoDarkDashDesignSystem_66fdfe || w.DSNS;
+		if (found) return found;
+		console.warn("[committee view] design-system globals missing; rendering unstyled");
+		return PLAIN;
 	}
 	var BADGE_LABEL = {
 		request_floor: "asked for the floor",
@@ -1015,13 +1079,10 @@
 	}
 	function CommitteeView({ runId, data }) {
 		const { EmptyState } = ds();
-		if (data.timeline.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-			style: { padding: 32 },
-			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
-				title: "Nothing said yet",
-				description: "The committee view fills in as each member takes the floor.",
-				icon: "inbox"
-			})
+		if (data.timeline.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
+			title: "Nothing said yet",
+			description: "The committee view fills in as each member takes the floor.",
+			icon: "inbox"
 		});
 		const legacy = data.timeline.length > 0 && data.artifacts.original === null || data.verdict !== null && data.progress.ended === null;
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {

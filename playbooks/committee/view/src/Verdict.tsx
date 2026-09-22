@@ -21,7 +21,11 @@ export type VerdictData = {
   artifact_intact: boolean | null;
   dropped_delegation: string | null;
   dropped_floor_requests: string[];
-  simulation: boolean;
+  // `view_data` also sends `simulation`, and this card deliberately does not
+  // read it. `_verdict` hardcodes it True, so gating the banner on it would
+  // move the most important safety sentence on the page behind a value that
+  // crosses a process boundary and can only ever fail open. Declared nowhere so
+  // a mutation of a dead field cannot look like a tested one.
 };
 
 const card: React.CSSProperties = {

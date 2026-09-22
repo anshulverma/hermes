@@ -78,7 +78,6 @@ export type CommitteeData = {
     artifact_intact: boolean | null;
     dropped_delegation: string | null;
     dropped_floor_requests: string[];
-    simulation: boolean;
   } | null;
   artifacts: {
     /**
@@ -111,13 +110,35 @@ export type CommitteeViewProps = {
 // text.
 
 /**
+ * What a missing design system degrades to.
+ *
+ * `web/src/ds/index.ts:getComponent` warns and returns `() => null`, and
+ * `host.tsx` falls back to preformatted text rather than throwing. This mirrors
+ * that: an unstyled view beats a throw into `PlaybookView`'s error boundary,
+ * which is set once and never cleared, so one missing global would leave the
+ * pane red for the session.
+ */
+const PLAIN: Record<string, any> = {
+  Card: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Badge: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
+  EmptyState: ({ title, description }: { title: string; description: string }) => (
+    <div>
+      <strong>{title}</strong> {description}
+    </div>
+  ),
+};
+
+/**
  * The design-system namespace, resolved exactly as `web/src/ds/index.ts` does.
  * The bundle publishes the hashed name and nothing publishes `DSNS`, so the
  * fallback is the compatibility half of the same expression, not a guess.
  */
 function ds(): Record<string, any> {
   const w = window as unknown as Record<string, Record<string, any>>;
-  return w.MonoDarkDashDesignSystem_66fdfe || w.DSNS;
+  const found = w.MonoDarkDashDesignSystem_66fdfe || w.DSNS;
+  if (found) return found;
+  console.warn('[committee view] design-system globals missing; rendering unstyled');
+  return PLAIN;
 }
 
 // --- badges ------------------------------------------------------------------
@@ -496,14 +517,15 @@ export default function CommitteeView({ runId, data }: CommitteeViewProps) {
   // verdict and BOTH artifacts null — and it is exactly when the tab first
   // appears.
   if (data.timeline.length === 0) {
+    // No padding of its own, for the same reason the populated branch has none:
+    // PlaybookView.tsx already wraps this component in `padding: 20`, and 32
+    // inside 20 is 52px on one branch and 20 on the other.
     return (
-      <div style={{ padding: 32 }}>
-        <EmptyState
-          title="Nothing said yet"
-          description="The committee view fills in as each member takes the floor."
-          icon="inbox"
-        />
-      </div>
+      <EmptyState
+        title="Nothing said yet"
+        description="The committee view fills in as each member takes the floor."
+        icon="inbox"
+      />
     );
   }
 

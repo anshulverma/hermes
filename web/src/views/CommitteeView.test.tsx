@@ -158,6 +158,70 @@ describe('CommitteeView badges and re-checks', () => {
       'no turn delivered — the worker failed; see hermes show',
     );
   });
+
+  it('keeps the danger colour on an undelivered turn', () => {
+    // 8.5: `no_turn: 'danger'` → undefined left 18/18 green, and the comment
+    // under BADGE_TONE names this exact failure as the reason the two tables
+    // must stay in step.
+    show({ ...run2, timeline: edgeTurns });
+
+    const badge = within(screen.getByTestId('entry-23')).getByText('no turn delivered');
+    expect(badge.getAttribute('style')).toContain('--status-danger');
+  });
+
+  it('renders an unrecognised badge slug as itself', () => {
+    // 8.6: `{BADGE_LABEL[b] ?? b}` → `{BADGE_LABEL[b]}` left 18/18 green, so a
+    // slug the Python grows before the TypeScript does would render as an empty
+    // badge rather than as the documented "renders as itself".
+    show({ ...run2, timeline: [{ ...edgeTurns[0], badges: ['brand_new_slug'] }] });
+
+    expect(within(screen.getByTestId('entry-21')).getByText('brand_new_slug')).toBeInTheDocument();
+  });
+});
+
+describe('CommitteeView and its host globals', () => {
+  it('resolves the host Markdown at render time, not at module scope', () => {
+    // 8.4: hoisting host.tsx's `window.HermesUI` read to module scope survived
+    // the whole suite, against a docstring that makes render-time resolution an
+    // explicit invariant. `../ds` publishes HermesUI before this module
+    // evaluates, so a hoisted read captures the real component and never sees
+    // the one installed here.
+    const real = (window as any).HermesUI;
+    (window as any).HermesUI = {
+      ...real,
+      Markdown: ({ children }: { children: string }) => <div>HOST-MARKDOWN:{children}</div>,
+    };
+    try {
+      show();
+      fireEvent.click(screen.getByTestId('expand-all'));
+
+      expect(screen.getAllByText(/HOST-MARKDOWN/).length).toBeGreaterThan(0);
+    } finally {
+      (window as any).HermesUI = real;
+    }
+  });
+
+  it('degrades to unstyled rather than throwing when the design system is gone', () => {
+    // WB-m10: `ds()` destructured the namespace with no guard, while the host's
+    // getComponent warns and returns `() => null` and host.tsx falls back to
+    // preformatted text. A throw here lands in PlaybookView's error boundary,
+    // which is set once and never cleared — the pane is red for the session.
+    const w = window as any;
+    const real = w.MonoDarkDashDesignSystem_66fdfe;
+    const compat = w.DSNS;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    delete w.MonoDarkDashDesignSystem_66fdfe;
+    delete w.DSNS;
+    try {
+      expect(() => show()).not.toThrow();
+      expect(screen.getByTestId('entry-1')).toBeInTheDocument();
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      w.MonoDarkDashDesignSystem_66fdfe = real;
+      w.DSNS = compat;
+      warn.mockRestore();
+    }
+  });
 });
 
 describe('CommitteeView progress', () => {
@@ -170,16 +234,21 @@ describe('CommitteeView progress', () => {
     );
   });
 
-  it('distinguishes a cap from a close', () => {
-    // run-2 itself ended `owner closed` — turn 20 carries `close: true`, and a
-    // close outranks the cap even on the turn the cap would have stopped
-    // (playbooks/committee/playbook.py, `_decision`). The cap wording therefore
-    // needs a fixture of its own.
-    show({ ...run2, progress: { ...run2.progress, ended: 'turn cap' } });
+  // 8.3: two of the four notes were asserted nowhere — replacing `queue empty`
+  // or `chair turn failed` with 'XXX' left the whole suite green. Python pins
+  // the four slugs; nothing pinned the sentence an operator actually reads.
+  // run-2 itself ended `owner closed` (turn 20 carries `close: true`, and a
+  // close outranks the cap even on the turn the cap would have stopped), so the
+  // other three need an override.
+  it.each([
+    ['owner closed', 'The owner moved to close and the chair ruled.'],
+    ['queue empty', 'Everyone who asked for the floor got it.'],
+    ['turn cap', 'The meeting ran out of turns before anyone closed it.'],
+    ['chair turn failed', 'The chair produced no decision, so the run ended failed.'],
+  ])('reads the "%s" ending back as a sentence', (ended, note) => {
+    show({ ...run2, progress: { ...run2.progress, ended } });
 
-    expect(screen.getByTestId('ended-reason')).toHaveTextContent(
-      'Ended: turn cap. The meeting ran out of turns before anyone closed it.',
-    );
+    expect(screen.getByTestId('ended-reason')).toHaveTextContent(`Ended: ${ended}. ${note}`);
   });
 
   it('shows who holds the floor and who is behind them mid-run', () => {
@@ -392,7 +461,6 @@ const VERDICT = {
   artifact_intact: true,
   dropped_delegation: null as string | null,
   dropped_floor_requests: [] as string[],
-  simulation: true as const,
 };
 
 const DECISION_ROW = {
@@ -799,6 +867,56 @@ describe('ArtifactDiff', () => {
     expect(screen.getByTestId('diff-counts')).toHaveTextContent(
       '2 lines added, 1 removed — all of it in the revised copy',
     );
+  });
+
+  it('says "1 line added", not "1 lines added"', async () => {
+    // 9.10 / WB-m7, visible in the e2e screenshot.
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('which=original') ? ok({ text: 'a\nc' }) : ok({ text: 'a\nb\nc' }),
+    );
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
+    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
+
+    expect(await screen.findByTestId('diff-counts')).toHaveTextContent('1 line added, 0 removed');
+  });
+
+  it('caps how many rows reach the DOM, and says it did', async () => {
+    // 9.6: `diffLines` is hard-bounded and fast; the RENDER is what does not
+    // scale — one <div> per line, measured at 20,001 nodes and 3.4 s to mount.
+    const big = Array.from({ length: 6000 }, (_, i) => `line ${i}`).join('\n');
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('which=original') ? ok({ text: big }) : ok({ text: `${big}\nextra` }),
+    );
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
+    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
+
+    const rows = await screen.findByTestId('diff-rows');
+    expect(rows.children).toHaveLength(5001); // 5000 rows plus the footer
+    expect(screen.getByTestId('diff-rows-capped')).toHaveTextContent('1001 more rows');
+    expect(screen.getByTestId('diff-counts')).toHaveTextContent('1 line added');
+  });
+
+  it('says so when the server cut one of the copies short', async () => {
+    // The `truncated` key the artifact route grew: a diff of two prefixes
+    // presented as a diff of two files is the same confident partial claim
+    // this card exists to stop.
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('which=original')
+        ? ok({ text: 'intro\nold clause', truncated: true })
+        : ok({ text: 'intro\nnew clause', truncated: false }),
+    );
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
+    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
+
+    expect(await screen.findByTestId('diff-truncated')).toHaveTextContent('diff of two prefixes');
+  });
+
+  it('claims nothing about truncation when neither copy was cut', async () => {
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
+    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
+
+    await screen.findByTestId('diff-rows');
+    expect(screen.queryByTestId('diff-truncated')).toBeNull();
   });
 
   it('reports a failed fetch instead of an empty diff', async () => {
