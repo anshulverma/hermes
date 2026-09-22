@@ -55,10 +55,16 @@ LOCAL_DIR ?= $(if $(HERMES_LOCAL_DIR),$(HERMES_LOCAL_DIR),$(HOME_DIR)/local)
 # Mounted read-only, and only when it exists -- an absent directory must not become an
 # empty one that podman creates on the host.
 LOCAL_MOUNT := $(if $(wildcard $(LOCAL_DIR)/.),-e HERMES_LOCAL_DIR=/hermes-local -v $(LOCAL_DIR):/hermes-local:ro,)
+# Playbooks the server imports at startup. Without `committee` here the server
+# cannot resolve a committee run's playbook: its view routes 404, `has_view` is
+# false, no tab appears, and the phase rail falls back to deriving phases from
+# tickets. `hermes run` has always needed this variable; the server never got it.
+# Empty is valid -- `make up PLAYBOOK_MODULES=` starts a server with none.
+PLAYBOOK_MODULES ?= playbooks.committee
 PROXY  ?= with-proxy
 URL    := http://127.0.0.1:$(PORT)
 
-.PHONY: help web deps browser ui-test shots image image-fast deploy up down restart status health logs shell url token clean
+.PHONY: help web deps browser ui-test ui-test-committee shots image image-fast deploy up down restart status health logs shell url token clean
 
 help: ## list targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort \
@@ -79,6 +85,23 @@ browser: ## [NET — RUN THIS YOURSELF] install Playwright + Chromium for real-b
 
 ui-test: ## run the real-browser UI tests (needs `make browser` once; offline)
 	cd web && npx playwright test
+
+# The committee spec needs a committee run to look at, and seeding fixture rows
+# into the operator's real ~/.hermes is not on. So: a second container, its own
+# name, port and HERMES_HOME, torn down either way. The home is bind-mounted, so
+# the spec writes queue.db on this host and the server reads it at /hermes-home.
+E2E_NAME ?= hermes-committee-e2e
+E2E_PORT ?= 44103
+E2E_HOME ?= /tmp/hermes-committee-e2e
+
+ui-test-committee: ## committee view end-to-end in a real browser (needs `make browser` once; offline)
+	-@podman rm -f $(E2E_NAME) >/dev/null 2>&1 || true
+	@$(MAKE) --no-print-directory up NAME=$(E2E_NAME) PORT=$(E2E_PORT) \
+	  HERMES_HOME=$(E2E_HOME) LOCAL_DIR=$(E2E_HOME)/local
+	@$(MAKE) --no-print-directory health PORT=$(E2E_PORT)
+	@cd web && HERMES_URL=http://127.0.0.1:$(E2E_PORT) HERMES_E2E_HOME=$(E2E_HOME) \
+	  npx playwright test committee-view; \
+	  status=$$?; podman rm -f $(E2E_NAME) >/dev/null 2>&1 || true; exit $$status
 
 shots: ## screenshot every view into web/screenshots/ (needs `make browser`; offline)
 	cd web && npx playwright test --grep @shot
@@ -101,6 +124,7 @@ up: ## start the containerized web UI on $(PORT) (offline; needs the image to ex
 	@mkdir -p $(HOME_DIR)
 	podman run -d --network=host --name $(NAME) \
 	  -e HERMES_BIND=127.0.0.1 \
+	  -e HERMES_PLAYBOOK_MODULES=$(PLAYBOOK_MODULES) \
 	  -v $(HOME_DIR):/hermes-home \
 	  $(LOCAL_MOUNT) \
 	  $(IMAGE) hermes serve --api --port $(PORT)

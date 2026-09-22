@@ -65,8 +65,8 @@ would mint a committee that never speaks* — falls back to `30`. `DRIVER` is re
 `driver()` call, which may run in another process.
 
 The charge is clipped to 400 characters (`cast.CHARGE_MAX`) with an ellipsis rather than cut
-mid-word, and a delegated `action` to 200 (`turnblock.ACTION_MAX`); the assembled goal is asserted
-under 3600.
+mid-word, a delegated `action` to 200 (`turnblock.ACTION_MAX`) and a `stance` to 200
+(`turnblock.STANCE_MAX`); the assembled goal is asserted under 3600.
 
 ## The turn block
 
@@ -78,6 +78,7 @@ request_floor: yes|no
 delegate: yes|no          # owner turns only; the target is always junior_ic
 action: <one line>        # required iff delegate is yes
 close: yes|no             # owner turns only
+stance: <one line>        # where you currently stand and why
 ```
 ````
 
@@ -87,6 +88,14 @@ no `action` is dropped whole. `request_floor` counts only from a reviewer, and n
 already queued or still to speak in the opening round. A delegation outranks `close` — the edit
 still happens, and costs a turn — and the cap outranks both, naming in the decision any delegation
 it drops.
+
+`stance` is not a gate. It is free text, recorded on the turn's reduction and accumulated per
+role so the committee tab can show where each persona currently stands. Absent stays absent: a
+persona that states no stance is shown as having none, never as neutral. Only the owner and the
+seven reviewers are issued a block, so the junior IC and the chair state no stance. It is the one
+key asked for in prose rather than shown in the worked example `turnblock.instruction` hands a
+speaker — a copied `stance: <one line>` would mint that placeholder as what the persona said, and
+unlike a flag a stance is rendered back verbatim.
 
 **The owner cannot close before the opening round drains.** A `close: yes` on a turn where any
 reviewer has still to take its opening turn is recorded on the reduction and then discarded: the
@@ -134,6 +143,39 @@ auto-imported *before* those modules, so an unpinned home can drag a private ada
 though the committee never touches a worktree — `crew.add` provisions one and health-gates the host
 on `workspace_ready`, so a missing one fails host admission before the first turn, with an error
 that says nothing about the committee.
+
+## The committee tab
+
+A committee run gets its own tab in the control plane: where the meeting got to and why it
+stopped, the roster with each persona's current stance, the meeting oldest-first with every turn
+attributed by name, each delegation and its re-check outcome, the verdict card, and the original
+against the revised copy. The view states that the original is never modified — reading an
+unchanged repository file as a failed edit mechanism is what swung a live verdict.
+
+The view is the playbook's, not the control plane's. `playbooks/committee/view/dist/committee.umd.js`
+is built from `playbooks/committee/view/src/` with the toolchain in `web/` and committed, so
+running it needs no Node — only rebuilding does
+(`cd web && ./node_modules/.bin/vite build --config vite.playbook-view.config.ts`). The server
+finds it through two optional methods on the registered playbook object, `view_asset()` and
+`view_data()`; `engine/` knows nothing about either, and a playbook without them simply has no tab.
+
+The server must have the playbook registered, so the control-plane process needs
+`HERMES_PLAYBOOK_MODULES=playbooks.committee` exactly as `hermes run` does. `make up` sets it (the
+`PLAYBOOK_MODULES` variable); a server started by hand does not, and an unregistered playbook is a
+404 on the view routes and `has_view: false` — no tab, no error.
+
+**`HERMES_PLAYBOOK_VIEWS=0` turns the feature off entirely.** All three view routes 404 and
+`has_view` is false on every run, so no tab appears and no view data is served. There is no partial
+setting: half-disabled is a worse state than either end. The comparison is against the literal
+string `0` and nothing else — `false`, `no` and `off` all leave the feature fully ON.
+
+Set it if the control plane is bound anywhere but loopback. A playbook already runs Python in the
+master process under the operator's account, so on a loopback bind its JavaScript running in the
+operator's browser is the same trust one process over, not an escalation. Past loopback it is one:
+anyone holding the read token now also executes playbook-authored JavaScript with the control
+plane's origin. The asset is served `text/javascript` with `X-Content-Type-Options: nosniff`, and
+its path comes from the registered playbook object rather than from the URL — the URL only names a
+playbook, and an unregistered name 404s before anything touches the filesystem.
 
 ## Limitations
 
