@@ -179,11 +179,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 // --- progress ----------------------------------------------------------------
 
-function ProgressBar({ progress }: { progress: Progress }) {
+function ProgressBar({ progress, legacy }: { progress: Progress; legacy: boolean }) {
   const { Badge } = ds();
   const { turn, cap, holder, queue, ended } = progress;
   const pct = cap > 0 ? Math.min(100, Math.round((turn / cap) * 100)) : 0;
-  const atCap = cap > 0 && turn >= cap;
+  // Amber is the "ran out of turns" colour, so it follows the ending and not
+  // the arithmetic. run-2 finished at turn 20 of 20 because the owner closed;
+  // colouring that bar amber says the opposite of the note beside it.
+  const outOfTurns = ended === 'turn cap' || (ended === null && cap > 0 && turn >= cap);
 
   return (
     <Section title="Progress">
@@ -206,10 +209,13 @@ function ProgressBar({ progress }: { progress: Progress }) {
           }}
         >
           <div
+            data-testid="turn-bar"
             style={{
               width: `${pct}%`,
               height: '100%',
-              background: atCap ? 'var(--status-attention, #e3b341)' : 'var(--status-live, #6ea8fe)',
+              background: outOfTurns
+                ? 'var(--status-attention, #e3b341)'
+                : 'var(--status-live, #6ea8fe)',
             }}
           />
         </div>
@@ -247,7 +253,9 @@ function ProgressBar({ progress }: { progress: Progress }) {
         </div>
       ) : (
         <div data-testid="ended-reason" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-          Still in session.
+          {legacy
+            ? 'This run predates the committee view: its reductions never recorded why the meeting ended, so the record does not say.'
+            : 'No ending recorded — the meeting is either still in session or stopped before the chair ruled.'}
         </div>
       )}
     </Section>
@@ -256,7 +264,7 @@ function ProgressBar({ progress }: { progress: Progress }) {
 
 // --- roster ------------------------------------------------------------------
 
-function Roster({ roster }: { roster: Persona[] }) {
+function Roster({ roster, legacy }: { roster: Persona[]; legacy: boolean }) {
   const { Badge } = ds();
   return (
     <Section title={`Committee — ${roster.length}`}>
@@ -291,7 +299,9 @@ function Roster({ roster }: { roster: Persona[] }) {
               </Badge>
             </span>
             {/* Absent stays absent: a persona that stated no stance is shown as
-                having none, never as neutral. */}
+                having none, never as neutral. On a run that predates the stance
+                signal every seat is absent, and "no stance stated" would be
+                nine false statements rather than one honest one. */}
             <div
               data-testid={`stance-${p.role}`}
               style={{
@@ -301,7 +311,7 @@ function Roster({ roster }: { roster: Persona[] }) {
                 fontStyle: p.stance ? 'normal' : 'italic',
               }}
             >
-              {p.stance ?? 'no stance stated'}
+              {p.stance ?? (legacy ? 'stance not recorded — this run predates the signal' : 'no stance stated')}
             </div>
           </div>
         ))}
@@ -323,6 +333,11 @@ function TimelineEntry({
 }) {
   const { Badge } = ds();
   const firstLine = entry.body.split('\n').find((l) => l.trim()) ?? '';
+  // A run captured before the view existed banks no `body`, so every row would
+  // be a blank line with no explanation. Say which it is.
+  const noProse = (
+    <span style={{ fontStyle: 'italic' }}>no prose recorded for this turn</span>
+  );
 
   return (
     <div
@@ -402,8 +417,8 @@ function TimelineEntry({
       )}
 
       {open ? (
-        <div style={{ marginTop: 6, paddingLeft: 18 }}>
-          <Markdown fontSize={12}>{entry.body}</Markdown>
+        <div style={{ marginTop: 6, paddingLeft: 18, color: 'var(--text-muted)' }}>
+          {entry.body ? <Markdown fontSize={12}>{entry.body}</Markdown> : noProse}
         </div>
       ) : (
         <div
@@ -417,7 +432,7 @@ function TimelineEntry({
             whiteSpace: 'nowrap',
           }}
         >
-          {firstLine}
+          {firstLine || noProse}
         </div>
       )}
     </div>
@@ -492,6 +507,17 @@ export default function CommitteeView({ runId, data }: CommitteeViewProps) {
     );
   }
 
+  // A run captured before this view existed. Its reductions predate `body`,
+  // `stance`, `ended`, `artifact` and `revised`, so `view_data` returns those
+  // five as null/empty and every card would render a confident, reassuring
+  // falsehood from a partial input: "Still in session." for a `done` run, nine
+  // seats with "no stance stated", twenty blank rows, and "no artifact has been
+  // recorded" for a run that reviewed an 11,397-byte file. Neither signal is a
+  // flag the master sets; both are shapes `reduce` can no longer produce.
+  const legacy =
+    (data.timeline.length > 0 && data.artifacts.original === null) ||
+    (data.verdict !== null && data.progress.ended === null);
+
   return (
     // No `flex: 1; overflow: auto; padding: 20` here: PlaybookView.tsx already
     // wraps this component in exactly that, and a second scroll container
@@ -500,8 +526,8 @@ export default function CommitteeView({ runId, data }: CommitteeViewProps) {
       data-testid="committee-view"
       style={{ display: 'flex', flexDirection: 'column', gap: 16 }}
     >
-      <ProgressBar progress={data.progress} />
-      <Roster roster={data.roster} />
+      <ProgressBar progress={data.progress} legacy={legacy} />
+      <Roster roster={data.roster} legacy={legacy} />
       <Timeline timeline={data.timeline} />
       <Verdict runId={runId} verdict={data.verdict} />
       {/* `intact` and not just `artifacts`: the diff card guarantees the
@@ -510,6 +536,7 @@ export default function CommitteeView({ runId, data }: CommitteeViewProps) {
         runId={runId}
         artifacts={data.artifacts}
         intact={data.verdict?.artifact_intact ?? null}
+        legacy={legacy}
       />
     </div>
   );

@@ -107,6 +107,7 @@ export default function ArtifactDiff({
   runId,
   artifacts,
   intact,
+  legacy,
 }: {
   runId: string;
   artifacts: Artifacts;
@@ -123,6 +124,8 @@ export default function ArtifactDiff({
    * null is "no decision has re-checked it yet", which is not the same as yes.
    */
   intact: boolean | null;
+  /** This run's reductions predate `artifact`, so a null path is not an absence. */
+  legacy?: boolean;
 }) {
   const [rows, setRows] = useState<DiffRow[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -165,8 +168,9 @@ export default function ArtifactDiff({
           data-testid="diff-no-artifacts"
           style={{ fontSize: 12.5, color: 'var(--text-muted)', lineHeight: 1.5 }}
         >
-          No artifact has been recorded for this run yet. The committee names the file it is
-          reviewing on its first reduction; until then there is nothing to show either side of.
+          {legacy
+            ? 'This run predates the committee view: its reductions never recorded which file the committee was handed, so there is nothing to show either side of. The record does not say the file is gone — it says nothing about it.'
+            : 'No artifact has been recorded for this run yet. The committee names the file it is reviewing on its first reduction; until then there is nothing to show either side of.'}
         </div>
       </div>
     );

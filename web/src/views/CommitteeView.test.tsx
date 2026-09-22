@@ -167,7 +167,73 @@ describe('CommitteeView progress', () => {
     expect(screen.getByTestId('turn-count')).toHaveTextContent('turn 8 of 20');
     expect(screen.getByTestId('floor-holder')).toHaveTextContent('tpm has the floor');
     expect(screen.getByTestId('floor-queue')).toHaveTextContent('tl · staff_ic');
-    expect(screen.getByTestId('ended-reason')).toHaveTextContent('Still in session.');
+    // 8.10: not "Still in session." — `ended: null` also covers a run stopped,
+    // parked or failed before the chair ruled, and `view_data` carries no run
+    // status to tell them apart. The line has to say which it cannot say.
+    expect(screen.getByTestId('ended-reason')).toHaveTextContent(
+      'still in session or stopped before the chair ruled',
+    );
+  });
+
+  it('does not paint a closed meeting with the ran-out-of-turns colour', () => {
+    // 8.7 at the source. run-2 is turn 20 of 20 AND `ended: owner closed`, so
+    // `turn >= cap` alone painted the bar amber directly beside the note saying
+    // the owner closed it. The cap is now truthful; the colour has to follow
+    // the ending, not the arithmetic.
+    show();
+
+    expect(screen.getByTestId('turn-bar').getAttribute('style')).toContain('--status-live');
+  });
+
+  it('paints a meeting that really ran out of turns amber', () => {
+    show({ ...run2, progress: { ...run2.progress, ended: 'turn cap' } });
+
+    expect(screen.getByTestId('turn-bar').getAttribute('style')).toContain('--status-attention');
+  });
+});
+
+describe('CommitteeView on a run that predates it', () => {
+  // WB-I3. Over the REAL run-2 capture — not the fixture, which synthesises the
+  // five new keys on top — `view_data` returns `ended: null`, both artifacts
+  // null, no stances and `body: ""` on all twenty turns, because those keys
+  // postdate the run. Unqualified, that is four reassuring falsehoods on one
+  // screen for every committee run already in the database.
+  const legacyRun = {
+    ...run2,
+    progress: { ...run2.progress, ended: null },
+    roster: run2.roster.map((p) => ({ ...p, stance: null })),
+    timeline: run2.timeline.map((e) => ({ ...e, body: '' })),
+    stances: {},
+    artifacts: { original: null, revised: null },
+  };
+
+  it('does not call a run that already ruled "still in session"', () => {
+    show(legacyRun);
+
+    const ended = screen.getByTestId('ended-reason');
+    expect(ended).not.toHaveTextContent('Still in session');
+    expect(ended).toHaveTextContent('predates the committee view');
+  });
+
+  it('says a stance was never recorded rather than never stated', () => {
+    show(legacyRun);
+
+    expect(screen.getByTestId('stance-owner')).toHaveTextContent('stance not recorded');
+    expect(screen.getByTestId('stance-owner')).not.toHaveTextContent('no stance stated');
+  });
+
+  it('does not leave twenty rows blank with no explanation', () => {
+    show(legacyRun);
+
+    expect(screen.getByTestId('entry-1')).toHaveTextContent('no prose recorded for this turn');
+  });
+
+  it('does not report an 11 KB reviewed file as never recorded', () => {
+    show(legacyRun);
+
+    const card = screen.getByTestId('diff-no-artifacts');
+    expect(card).toHaveTextContent('never recorded which file the committee was handed');
+    expect(card).not.toHaveTextContent('No artifact has been recorded for this run yet');
   });
 });
 

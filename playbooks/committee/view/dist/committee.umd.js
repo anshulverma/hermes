@@ -422,7 +422,7 @@
 			color: "var(--text-primary)"
 		}
 	};
-	function ArtifactDiff({ runId, artifacts, intact }) {
+	function ArtifactDiff({ runId, artifacts, intact, legacy }) {
 		const [rows, setRows] = (0, react.useState)(null);
 		const [loading, setLoading] = (0, react.useState)(false);
 		const [error, setError] = (0, react.useState)(null);
@@ -453,7 +453,7 @@
 					color: "var(--text-muted)",
 					lineHeight: 1.5
 				},
-				children: "No artifact has been recorded for this run yet. The committee names the file it is reviewing on its first reduction; until then there is nothing to show either side of."
+				children: legacy ? "This run predates the committee view: its reductions never recorded which file the committee was handed, so there is nothing to show either side of. The record does not say the file is gone — it says nothing about it." : "No artifact has been recorded for this run yet. The committee names the file it is reviewing on its first reduction; until then there is nothing to show either side of."
 			})
 		});
 		const name = (a) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
@@ -692,11 +692,11 @@
 			})
 		});
 	}
-	function ProgressBar({ progress }) {
+	function ProgressBar({ progress, legacy }) {
 		const { Badge } = ds();
 		const { turn, cap, holder, queue, ended } = progress;
 		const pct = cap > 0 ? Math.min(100, Math.round(turn / cap * 100)) : 0;
-		const atCap = cap > 0 && turn >= cap;
+		const outOfTurns = ended === "turn cap" || ended === null && cap > 0 && turn >= cap;
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
 			title: "Progress",
 			children: [
@@ -732,11 +732,14 @@
 								background: "var(--wash-subtle)",
 								overflow: "hidden"
 							},
-							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { style: {
-								width: `${pct}%`,
-								height: "100%",
-								background: atCap ? "var(--status-attention, #e3b341)" : "var(--status-live, #6ea8fe)"
-							} })
+							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								"data-testid": "turn-bar",
+								style: {
+									width: `${pct}%`,
+									height: "100%",
+									background: outOfTurns ? "var(--status-attention, #e3b341)" : "var(--status-live, #6ea8fe)"
+								}
+							})
 						}),
 						holder ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Badge, {
 							size: "sm",
@@ -780,12 +783,12 @@
 						fontSize: 12,
 						color: "var(--text-muted)"
 					},
-					children: "Still in session."
+					children: legacy ? "This run predates the committee view: its reductions never recorded why the meeting ended, so the record does not say." : "No ending recorded — the meeting is either still in session or stopped before the chair ruled."
 				})
 			]
 		});
 	}
-	function Roster({ roster }) {
+	function Roster({ roster, legacy }) {
 		const { Badge } = ds();
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
 			title: `Committee — ${roster.length}`,
@@ -848,7 +851,7 @@
 								color: p.stance ? "var(--text-secondary)" : "var(--text-muted)",
 								fontStyle: p.stance ? "normal" : "italic"
 							},
-							children: p.stance ?? "no stance stated"
+							children: p.stance ?? (legacy ? "stance not recorded — this run predates the signal" : "no stance stated")
 						})
 					]
 				}, p.role))
@@ -858,6 +861,10 @@
 	function TimelineEntry({ entry, open, onToggle }) {
 		const { Badge } = ds();
 		const firstLine = entry.body.split("\n").find((l) => l.trim()) ?? "";
+		const noProse = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+			style: { fontStyle: "italic" },
+			children: "no prose recorded for this turn"
+		});
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": `entry-${entry.n}`,
 			style: {
@@ -949,12 +956,13 @@
 				open ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					style: {
 						marginTop: 6,
-						paddingLeft: 18
+						paddingLeft: 18,
+						color: "var(--text-muted)"
 					},
-					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Markdown, {
+					children: entry.body ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Markdown, {
 						fontSize: 12,
 						children: entry.body
-					})
+					}) : noProse
 				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					style: {
 						marginTop: 2,
@@ -965,7 +973,7 @@
 						textOverflow: "ellipsis",
 						whiteSpace: "nowrap"
 					},
-					children: firstLine
+					children: firstLine || noProse
 				})
 			]
 		});
@@ -1013,6 +1021,7 @@
 				icon: "inbox"
 			})
 		});
+		const legacy = data.timeline.length > 0 && data.artifacts.original === null || data.verdict !== null && data.progress.ended === null;
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "committee-view",
 			style: {
@@ -1021,8 +1030,14 @@
 				gap: 16
 			},
 			children: [
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, { progress: data.progress }),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, { roster: data.roster }),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, {
+					progress: data.progress,
+					legacy
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, {
+					roster: data.roster,
+					legacy
+				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Timeline, { timeline: data.timeline }),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Verdict, {
 					runId,
@@ -1031,7 +1046,8 @@
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArtifactDiff, {
 					runId,
 					artifacts: data.artifacts,
-					intact: data.verdict?.artifact_intact ?? null
+					intact: data.verdict?.artifact_intact ?? null,
+					legacy
 				})
 			]
 		});
