@@ -286,16 +286,15 @@ describe('CommitteeView progress', () => {
 
 describe('CommitteeView on a run that predates it', () => {
   // WB-I3. Over the REAL run-2 capture — not the fixture, which synthesises the
-  // five new keys on top — `view_data` returns `ended: null`, both artifacts
-  // null, no stances and `body: ""` on all twenty turns, because those keys
-  // postdate the run. Unqualified, that is four reassuring falsehoods on one
+  // four new keys on top — `view_data` returns `ended: null`, both artifacts
+  // null, no stance on any seat and `body: ""` on all twenty turns, because
+  // those keys postdate the run. Unqualified, that is four reassuring falsehoods on one
   // screen for every committee run already in the database.
   const legacyRun = {
     ...run2,
     progress: { ...run2.progress, ended: null },
     roster: run2.roster.map((p) => ({ ...p, stance: null })),
     timeline: run2.timeline.map((e) => ({ ...e, body: '' })),
-    stances: {},
     artifacts: { original: null, revised: null },
   };
 

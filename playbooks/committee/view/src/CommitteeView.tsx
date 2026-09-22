@@ -71,7 +71,6 @@ export type CommitteeData = {
   roster: Persona[];
   progress: Progress;
   timeline: Entry[];
-  stances: Record<string, Array<{ turn: number; text: string }>>;
   verdict: {
     text: string;
     checks: Array<{ turn: number; action: string; verified: boolean | null }>;
@@ -253,8 +252,10 @@ function ProgressBar({ progress, legacy }: { progress: Progress; legacy: boolean
         </div>
       )}
 
-      {/* Why it stopped. The first live run hit the turn cap and nothing on
-          screen said so, which is the whole reason this line exists. */}
+      {/* Why it stopped. The first live run ended at turn 20 of a cap of 20 --
+          the owner closed on the turn the cap would have stopped anyway -- and
+          nothing on screen said which of the two it was. That is the whole
+          reason this line exists. */}
       {ended ? (
         <div
           data-testid="ended-reason"

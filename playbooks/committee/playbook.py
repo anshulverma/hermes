@@ -179,11 +179,11 @@ class CommitteePlaybook:
                 "max_turns": DEFAULT_MAX_TURNS,
                 # why the meeting stopped. Set by `_decision`, which every route
                 # to the decision phase goes through; read by
-                # `_reduce_decision`. Nothing else records this, and the first
-                # live run hit the turn cap with nothing anywhere saying so.
+                # `_reduce_decision`. Nothing else records this: the first live
+                # run ended at turn 20 of a cap of 20 -- the owner closed on the
+                # turn the cap would have stopped anyway -- and nothing anywhere
+                # said which of the two it was.
                 "ended": None,
-                # role -> [{"turn", "text"}], one entry per stated stance.
-                "stances": {},
             }
             self._state_by_run[run.id] = s
         return s
@@ -517,12 +517,10 @@ class CommitteePlaybook:
             _apply_block(s, role, block, delivered=bool(answer))
 
         # `stance` is not a gate -- it steers nothing, so it is not in
-        # `_apply_block`. Accumulated per role so the run's state can be read as
-        # "where everyone stands" without replaying the thread. Filed under the
-        # speaker, so an unattributable turn files nothing.
-        stance = block.get("stance")
-        if role and isinstance(stance, str):
-            s["stances"].setdefault(role, []).append({"turn": turn, "text": stance})
+        # `_apply_block`. It rides on the turn reduction below and nowhere else:
+        # the accumulator that used to sit here duplicated what every turn
+        # reduction already carries (role, turn, stance) and had no reader in
+        # production code on either side of the seam.
 
         # --- the independent re-check (spec 7), master-side ---------------
         # The no-trust invariant wants an independent check of an `ok` claim. It

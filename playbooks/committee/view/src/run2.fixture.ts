@@ -137,14 +137,6 @@ const STANCES: Record<string, Array<{ turn: number; text: string }>> = {
   ],
 };
 
-/** The stances filed on or before `upTo`, in the shape `_stances` emits. */
-const stancesThrough = (upTo: number) =>
-  Object.fromEntries(
-    Object.entries(STANCES)
-      .map(([role, said]) => [role, said.filter((s) => s.turn <= upTo)] as const)
-      .filter(([, said]) => said.length > 0),
-  );
-
 /** What `_roster` shows: the last position filed by `upTo`, or none. */
 const stanceAt = (role: string, upTo: number): string | null => {
   const said = (STANCES[role] ?? []).filter((s) => s.turn <= upTo);
@@ -175,7 +167,6 @@ export const run2: CommitteeData = {
   roster,
   progress: { turn: 20, cap: 20, holder: null, queue: [], ended: 'owner closed' },
   timeline,
-  stances: stancesThrough(20),
   verdict: {
     text: "I've read the artifact, the revised copy, and all twenty turns.\n\n---\n\n# Decision — Hermes federation layer\n\n**Chair: Dana Whitfield, Senior Director of Engineering**\n**Charge: fund now / defer again / drop**\n\n## Verdict: do not approve. Drop.\n\n`docs/specs/federation-future.md` is retired whole — frame included, not renamed, not re-scoped, not deferred a third time. Nothing is funded. The successor, if one exists, is a new proposal with a new author.\n\nI opened this review with defer, a date and a named owner. I am ruling against my own turn-01 position, and I'll say why in the record rather than let it be inferred.\n\n---\n\n## Why defer no longer survives\n\nMy turn-01 defer rested on three things\n\n…",
     checks: CHECKS,
@@ -227,7 +218,6 @@ export const midRun: CommitteeData = {
   })),
   progress: { turn: MID_TURN, cap: 20, holder: 'tpm', queue: ['manager'], ended: null },
   timeline: midTimeline,
-  stances: stancesThrough(MID_TURN),
   verdict: null,
 };
 

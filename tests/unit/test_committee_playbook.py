@@ -881,7 +881,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
         "turn", "opening", "queue", "delegation", "pending_action", "last_speaker",
         "closed", "verdict", "current_role", "current_turn", "dropped_delegation",
         "rechecks", "pre_edit_digest", "artifact_digest", "charge", "artifact",
-        "revised", "roster", "max_turns", "ended", "stances",
+        "revised", "roster", "max_turns", "ended",
     }
     assert s["turn"] == 1
     assert s["opening"] == list(cast.SENIORITY)
@@ -896,8 +896,8 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     assert s["dropped_delegation"] is None and s["current_role"] is None
     assert s["closed"] is False and s["verdict"] == "" and s["current_turn"] == 0
     assert s["charge"] == "" and s["artifact"] == "" and s["revised"] == ""
-    # nothing has ended yet, and nobody has stated a stance
-    assert s["ended"] is None and s["stances"] == {}
+    # nothing has ended yet
+    assert s["ended"] is None
     assert pb._state(run) is s  # same run, same dict
 
 
@@ -2818,8 +2818,8 @@ def test_a_turn_reduction_carries_a_stance_and_absent_stays_absent():
         _NamedSite("local"),
     )
 
-    # An unattributable turn files no stance. Without the `role and` guard this
-    # grows a "" key, which the roster surface renders as a nameless persona.
+    # An unattributable turn still records the stance it stated on its own
+    # reduction; `view.py:_stances` is what refuses to file it under a persona.
     s.update(current_role="", current_turn=9)
     orphan = pb.reduce(
         run, "t09-nobody",
@@ -2828,15 +2828,6 @@ def test_a_turn_reduction_carries_a_stance_and_absent_stays_absent():
         _NamedSite("local"),
     )[0]
     assert orphan.json["stance"] == "drop it"  # the reduction still records it
-    assert "" not in s["stances"]
-
-    assert s["stances"] == {
-        "senior_director": [
-            {"turn": 1, "text": "against until the dates are funded"},
-            {"turn": 8, "text": "for, with the funding"},
-        ],
-    }
-    assert "manager" not in s["stances"]
 
 
 def test_next_phase_records_why_the_meeting_stopped():

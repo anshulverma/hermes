@@ -54,7 +54,9 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
             "ended": (decision or {}).get("ended"),
         },
         "timeline": [_entry(r.json) for r in turns],
-        "stances": stances,
+        # No top-level `stances` block: `_stances` feeds `_roster`, which is the
+        # only surface that renders a stance. The payload key was typed, fixtured
+        # and asserted on both sides of the seam, and read by nothing.
         "verdict": _verdict(decision),
         "artifacts": _artifacts(reductions),
     }
@@ -230,9 +232,11 @@ def _verdict(decision: dict | None) -> dict | None:
         "artifact_intact": decision.get("artifact_intact"),
         "dropped_delegation": decision.get("dropped_delegation"),
         "dropped_floor_requests": _as_list(decision.get("dropped_floor_requests")),
-        # Criterion 8, carried as data rather than inferred from the chair's
-        # prose: `_SIMULATION` is a sentence a chair could fail to write.
-        "simulation": True,
+        # No `simulation` key. It was a constant `True` -- criterion 8 wants the
+        # disclaimer to be independent of whether the chair wrote it, and the
+        # view satisfies that by rendering the notice UNCONDITIONALLY, which is
+        # the fail-safe direction. A flag nothing reads is a flag that can be
+        # flipped to False with no test noticing and no notice disappearing.
     }
 
 

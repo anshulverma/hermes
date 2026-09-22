@@ -110,7 +110,7 @@ def test_view_data_returns_every_block_the_contract_names(run2, artifacts):
     data = view_data(_run("decision"), run2)
 
     assert set(data) == {
-        "kind", "roster", "progress", "timeline", "stances", "verdict", "artifacts",
+        "kind", "roster", "progress", "timeline", "verdict", "artifacts",
     }
     assert data["kind"] == "committee"
     assert len(data["roster"]) == 9
@@ -346,18 +346,17 @@ def test_a_run_captured_before_the_cap_key_falls_back_to_the_environment(
 
 # --- stances ----------------------------------------------------------------
 
-def test_stances_accumulate_and_absent_stays_absent(run2):
-    """Criterion 10. A persona that stated none has no entry at all -- not an
-    empty list, and never a neutral default."""
+def test_the_roster_carries_the_latest_stance_and_absent_stays_absent(run2):
+    """Criterion 10. A persona that stated none has no stance at all -- not an
+    empty string, and never a neutral default.
+
+    `roster[].stance` is the only place a stance reaches the screen. There used
+    to be a top-level `stances` block beside it carrying every stance ever
+    filed; it was typed, fixtured and asserted on both sides and rendered by
+    nothing.
+    """
     data = view_data(_run("decision"), run2)
     stance = {row["role"]: row["stance"] for row in data["roster"]}
-
-    assert set(data["stances"]) == {"owner", "manager"}
-    assert data["stances"]["owner"] == [
-        {"turn": 2, "text": _STANCES[2]},
-        {"turn": 20, "text": _STANCES[20]},
-    ]
-    assert data["stances"]["manager"] == [{"turn": 4, "text": _STANCES[4]}]
 
     assert stance["owner"] == _STANCES[20]   # the latest, not the first
     assert stance["manager"] == _STANCES[4]
@@ -377,7 +376,6 @@ def test_the_verdict_carries_the_chairs_text_the_rechecks_and_the_disclaimer(run
     verdict = view_data(_run("decision"), run2)["verdict"]
 
     assert verdict["text"].startswith("I've read the artifact, the revised copy")
-    assert verdict["simulation"] is True
     assert verdict["artifact_intact"] is True
     assert verdict["dropped_delegation"] is None
     assert verdict["dropped_floor_requests"] == []
@@ -402,7 +400,6 @@ def test_a_run_with_no_reductions_renders_an_empty_meeting():
     data = view_data(_run("open"), [])
 
     assert data["timeline"] == []
-    assert data["stances"] == {}
     assert data["verdict"] is None
     assert data["artifacts"] == {"original": None, "revised": None}
     # 30 is DEFAULT_MAX_TURNS, pinned literally: it is what a reader compares
@@ -435,7 +432,7 @@ def test_an_unattributable_turn_is_named_as_such_and_moves_nothing(run2):
     # nobody spoke, nobody holds the floor, and no stance was recorded
     assert {row["state"] for row in data["roster"]} == {"idle"}
     assert data["progress"]["holder"] is None
-    assert data["stances"] == {}
+    assert all(row["stance"] is None for row in data["roster"])
 
 
 def test_view_data_does_not_raise_on_a_reduction_no_reduce_would_write(run2):

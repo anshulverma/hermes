@@ -51,7 +51,6 @@ describe('playbook view UMD boundary', () => {
           verified: null,
         },
       ],
-      stances: {},
       verdict: null,
       artifacts: { original: null, revised: null },
     };
