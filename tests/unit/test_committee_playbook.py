@@ -2691,8 +2691,14 @@ def test_no_reduction_carries_needs_human_ticket_ids():
 # a turn and are not.
 
 
-def test_a_turn_reduction_carries_the_prose_and_both_artifact_paths():
-    """The reduction is the view's only channel; `thread.md` is not in the DB."""
+def test_a_turn_reduction_carries_the_prose_both_artifact_paths_and_the_cap():
+    """The reduction is the view's only channel; `thread.md` is not in the DB.
+
+    The cap rides here for the same reason the two paths do. `view_data` runs in
+    the SERVER process: reading HERMES_COMMITTEE_MAX_TURNS there gets that
+    process's value, and a `hermes serve` started without it rendered "turn 20
+    of 30" for a run that capped at 20 and used all of it.
+    """
     pb = _committee()
     run = _run(phase="t03-staff_ic")
     s = pb._state(run)
@@ -2702,6 +2708,7 @@ def test_a_turn_reduction_carries_the_prose_and_both_artifact_paths():
         opening=[],
         artifact="/srv/proposals/migration.md",
         revised="/var/hermes/runs/r1/revised/migration.md",
+        max_turns=20,
     )
 
     answer = _turn_answer("The rollout plan is thin.", request_floor="yes")
@@ -2714,6 +2721,7 @@ def test_a_turn_reduction_carries_the_prose_and_both_artifact_paths():
     assert "hermes-turn" not in red.json["body"]  # stripped, as the transcript is
     assert red.json["artifact"] == "/srv/proposals/migration.md"
     assert red.json["revised"] == "/var/hermes/runs/r1/revised/migration.md"
+    assert red.json["cap"] == 20
 
 
 def test_a_turn_reduction_body_distinguishes_signals_only_from_silence():

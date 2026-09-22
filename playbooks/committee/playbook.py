@@ -583,6 +583,12 @@ class CommitteePlaybook:
             # Do not "optimise" these away to the decision reduction alone.
             "artifact": s["artifact"],
             "revised": s["revised"],
+            # The turn cap `seed` resolved, for the same reason and by the same
+            # route as the two paths above: `view_data` runs in the SERVER
+            # process, and reading HERMES_COMMITTEE_MAX_TURNS there gets THAT
+            # process's value. A `hermes serve` started without it rendered
+            # "turn 20 of 30" for a run that capped at 20 and used all of it.
+            "cap": s["max_turns"],
             # what the speaker ASKED for; whether it was honoured is visible in
             # the run's queue / closed / delegation state.
             "request_floor": bool(block.get("request_floor")),

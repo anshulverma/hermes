@@ -7,8 +7,9 @@ playbook instance state. Every number on screen comes off the reductions
 ``reduce`` already wrote, in the order the queue returns them (``ORDER BY id``),
 which is the order they happened in.
 
-Two reads are not pure and are stated rather than hidden: the size of the two
-artifacts, and the turn cap, which no reduction carries.
+One read is not pure and is stated rather than hidden: the size of the two
+artifacts. The turn cap rides on the turn reductions; the environment is read
+only as a fallback for runs captured before that key existed.
 
 Stdlib-only.
 """
@@ -42,7 +43,7 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
         "roster": _roster(spoken, holder, queue, stances),
         "progress": {
             "turn": _turn_no(turns[-1].json) if turns else 0,
-            "cap": _cap(),
+            "cap": _cap(reductions),
             "holder": holder,
             "queue": queue,
             "ended": (decision or {}).get("ended"),
@@ -72,22 +73,37 @@ def _floor(
 
     for reduction in turns:
         doc = reduction.json
-        role = doc.get("role") or ""
+        role = _role(doc)
         if role not in cast.CAST:
             # Fail closed, the way `_reduce_turn` does: a turn nobody can be
             # named for is attributed to nobody here either.
             continue
+        if role in queue:
+            # `next_phase` pops the queue when it MINTS the turn, so the floor
+            # was granted whether or not the worker then delivered. Above the
+            # `delivered` guard for exactly that reason.
+            queue.remove(role)
+        if not doc.get("delivered"):
+            # `_apply_block` (playbook.py:63-65) runs none of the gates on a
+            # turn nobody delivered and hands the floor back to the owner.
+            # Mirror it: the seat never spoke, so badging it "spoke" -- or
+            # leaving it holding the floor -- contradicts the transcript entry
+            # directly below, which says no turn was delivered.
+            last = cast.OWNER
+            continue
         if role not in spoken:
             spoken.append(role)
-        if role in queue:
-            queue.remove(role)  # they were granted the floor
         # `_apply_block`: the owner, the junior IC and the chair never queue.
         if doc.get("request_floor") and role not in (cast.OWNER, cast.JUNIOR, cast.CHAIR):
             queue.append(role)
         last = role
 
     if decision is not None:
-        holder = None  # the meeting is over
+        # The meeting is over, so nobody holds the floor and nobody is waiting
+        # for it: a seat still badged "waiting to speak" is waiting for a turn
+        # that will never come. The verdict card tells that story in the past
+        # tense, off the decision's own `dropped_floor_requests`.
+        holder, queue = None, []
     elif run.phase == "decision":
         holder = cast.CHAIR  # the chair is writing the verdict
     else:
@@ -127,7 +143,7 @@ def _roster(
 
 def _entry(doc: dict) -> dict:
     """One turn, as the timeline reads it."""
-    role = doc.get("role") or ""
+    role = _role(doc)
     who = cast.persona(role) if role in cast.CAST else None
     action = doc.get("action")
     return {
@@ -192,7 +208,7 @@ def _stances(turns: list[Reduction]) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {}
     for reduction in turns:
         doc = reduction.json
-        role = doc.get("role") or ""
+        role = _role(doc)
         text = doc.get("stance")
         if role in cast.CAST and isinstance(text, str) and text.strip():
             out.setdefault(role, []).append({"turn": _turn_no(doc), "text": text.strip()})
@@ -265,24 +281,45 @@ def _size(target: Path | None) -> int:
 
 # --- odds and ends ---------------------------------------------------------
 
+def _role(doc: dict) -> str:
+    """The speaker a reduction names, or "" for anything that is not a name.
+
+    ``isinstance`` rather than ``or ""``: a ``role`` that is a list or a dict --
+    only reachable by hand-editing the database, but reachable -- makes
+    ``role not in cast.CAST`` a ``TypeError: unhashable type`` out of a route.
+    """
+    role = doc.get("role")
+    return role if isinstance(role, str) else ""
+
+
 def _turn_no(doc: dict) -> int:
     """The turn number a reduction carries, or 0 if it carries junk."""
     value = doc.get("turn")
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
-def _cap() -> int:
-    """The turn cap, read off the environment.
+def _cap(reductions: list[Reduction]) -> int:
+    """The turn cap this run actually ran under.
 
-    ``seed`` resolved this once per run into per-run state, which this process
-    cannot see, and no reduction carries it. The environment is the one channel
-    every process shares -- the reason ``driver`` reads its own configuration
-    there -- and the clamping matches ``seed``'s, so the number on screen is the
-    number the state machine used unless an operator moved the variable mid-run.
+    ``seed`` resolves it once per run into per-run state, which this process
+    cannot see, so ``reduce`` puts it on every turn reduction -- the same
+    channel, and for the same reason, as the two artifact paths.
+
+    The environment is the FALLBACK, for runs captured before that key existed.
+    It is a guess and must not be read as anything else: this function runs in
+    the server process, started by a separate ``hermes serve`` that need never
+    have had ``HERMES_COMMITTEE_MAX_TURNS`` set, so a run that capped at 20
+    rendered "turn 20 of 30".
     """
     # Imported here rather than at module scope: playbook.py imports this
     # module, so importing it back at module scope would be a cycle.
     from playbooks.committee.playbook import DEFAULT_MAX_TURNS, ENV_MAX_TURNS
+
+    for reduction in reversed(reductions):
+        doc = reduction.json if isinstance(reduction.json, dict) else {}
+        cap = doc.get("cap")
+        if isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1:
+            return cap
 
     try:
         cap = int(os.environ.get(ENV_MAX_TURNS, DEFAULT_MAX_TURNS))

@@ -5,12 +5,12 @@ is all 21 reductions run-2 wrote -- twenty turns and the chair's decision --
 copied out of the run database unedited, so these assertions are against what
 the playbook really produces rather than against a shape invented here.
 
-That capture predates the five keys ``reduce`` learned for the view (``body``,
-``stance``, ``artifact``, ``revised``, ``ended``), so the fixtures below
-synthesise those five onto the rows and leave every other value byte-for-byte
-as run-2 wrote it. Where a test needs a state run-2 never reached -- a pending
-floor request, a meeting still sitting -- it slices or edits the capture and
-says so.
+That capture predates the six keys ``reduce`` learned for the view (``body``,
+``stance``, ``artifact``, ``revised``, ``cap``, ``ended``), so the fixtures
+below synthesise those six onto the rows and leave every other value
+byte-for-byte as run-2 wrote it. Where a test needs a state run-2 never reached
+-- a pending floor request, a meeting still sitting -- it slices or edits the
+capture and says so.
 """
 from __future__ import annotations
 
@@ -25,9 +25,14 @@ from playbooks.committee.view import view_data
 
 FIXTURE = Path(__file__).parent.parent / "data" / "committee-run-2-reductions.json"
 
+# Run-2's cap, as the live run was launched: HERMES_COMMITTEE_MAX_TURNS=20.
+_CAP = 20
+
 # Synthesised onto three of run-2's turns: the owner speaks at 02 and 20, the
-# manager at 04. Every other turn carries no `stance` key at all -- absent, the
-# way turnblock leaves an unwritten key.
+# manager at 04. Every other turn is left with no `stance` key at all. The real
+# reduction writes `"stance": None` there rather than omitting it (`_reduce_turn`
+# assigns `block.get("stance")` unconditionally); `view.py` reads absent and
+# None identically, which is what these turns pin.
 _STANCES = {
     2: "conceding the trigger table, holding the line on the delegation half",
     4: "cannot staff it this half; defer",
@@ -70,11 +75,16 @@ def run2(artifacts):
         doc["revised"] = str(revised)
         if row["kind"] == "turn":
             doc["body"] = f"Turn {doc['turn']:02d}, in the speaker's own words."
+            doc["cap"] = _CAP
             if doc["turn"] in _STANCES:
                 doc["stance"] = _STANCES[doc["turn"]]
         else:
-            # Run-2 reached turn 20 under HERMES_COMMITTEE_MAX_TURNS=20.
-            doc["ended"] = "turn cap"
+            # Run-2's turn 20 carries `close: true`, and an owner close outranks
+            # the cap even when the cap would have stopped the meeting on the
+            # next hop: `next_phase` is `"owner closed" if s["closed"] else
+            # "turn cap"`. So the meeting ended because the owner closed it --
+            # turn 20 is headed "Closing: the record." -- not because it ran out.
+            doc["ended"] = "owner closed"
         out.append(Reduction(kind=row["kind"], json=doc, phase=row["phase"]))
     return out
 
@@ -237,6 +247,61 @@ def test_a_granted_floor_request_leaves_the_queue(run2):
     assert data["progress"]["holder"] == "senior_director"
 
 
+def _copy(reductions: list[Reduction]) -> list[Reduction]:
+    """The slice, with its docs copied, so an edit cannot leak between tests."""
+    return [Reduction(kind=r.kind, json=dict(r.json), phase=r.phase) for r in reductions]
+
+
+def test_a_turn_nobody_delivered_neither_spoke_nor_holds_the_floor(run2):
+    """The roster must not contradict the transcript on the same screen.
+
+    ``_apply_block`` runs none of the gates on an undelivered turn and hands the
+    floor back to the owner, precisely so ``next_phase`` moves on instead of
+    sending someone to answer a stub. Without the same guard here the seat is
+    badged "spoke" -- above a transcript entry reading "no turn delivered" --
+    and mid-run it is handed the floor as well.
+    """
+    mid = _copy(run2[:4])
+    mid[-1].json.update(delivered=False, body="")  # t04-manager produced nothing
+
+    data = view_data(_run("t04-manager"), mid)
+    state = {row["role"]: row["state"] for row in data["roster"]}
+
+    assert state["manager"] == "idle"                  # never spoke
+    assert data["progress"]["holder"] == cast.OWNER    # the floor went back
+    assert state["owner"] == "holds_floor"
+    assert data["timeline"][-1]["badges"] == ["no_turn"]
+
+
+def test_a_granted_floor_request_leaves_the_queue_even_when_the_turn_fails(run2):
+    """``next_phase`` pops the queue when it MINTS the turn, so a worker that
+    then produced nothing still burned the floor it was granted. The decision's
+    ``dropped_floor_requests`` reads the same way, and these two must agree."""
+    mid = _copy(run2[:4])
+    mid[0].json["request_floor"] = True
+    failed = dict(mid[0].json, turn=5, request_floor=False, delivered=False, body="")
+
+    data = view_data(
+        _run("t05-senior_director"), mid + [Reduction(kind="turn", json=failed)]
+    )
+
+    assert data["progress"]["queue"] == []
+    assert data["progress"]["holder"] == cast.OWNER
+
+
+def test_the_floor_queue_closes_with_the_meeting(run2):
+    """A seat still "waiting to speak" after the verdict is waiting for a turn
+    that will never come. The verdict card already tells that story in the past
+    tense, off the decision's own ``dropped_floor_requests``."""
+    run2[0].json["request_floor"] = True  # never granted; the meeting ended first
+
+    data = view_data(_run("decision"), run2)
+
+    assert data["progress"]["queue"] == []
+    assert data["progress"]["holder"] is None
+    assert [row["role"] for row in data["roster"] if row["state"] == "queued"] == []
+
+
 def test_the_chair_holds_the_floor_while_the_decision_is_running(run2):
     """Between the last turn and the verdict the chair is speaking, and the
     seat they chair from is the one that lights up."""
@@ -248,15 +313,34 @@ def test_the_chair_holds_the_floor_while_the_decision_is_running(run2):
     assert data["verdict"] is None
 
 
-def test_progress_counts_the_turns_against_the_cap(run2, monkeypatch):
-    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "20")
+def test_progress_counts_the_turns_against_the_cap_the_run_used(run2, monkeypatch):
+    """The cap rides on the reductions, NOT on this process's environment.
+
+    ``view_data`` runs in the server process, which is a separate
+    ``hermes serve`` that need never have seen the master's environment. The
+    env is set to a different value here on purpose: reading it would render
+    "turn 20 of 30" for a run that capped at 20 and used all of it.
+    """
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "30")
 
     progress = view_data(_run("decision"), run2)["progress"]
 
     assert progress["turn"] == 20
-    assert progress["cap"] == 20
+    assert progress["cap"] == _CAP == 20
     assert progress["holder"] is None  # the meeting is over
-    assert progress["ended"] == "turn cap"
+    assert progress["ended"] == "owner closed"
+
+
+def test_a_run_captured_before_the_cap_key_falls_back_to_the_environment(
+    run2, monkeypatch
+):
+    """Legacy runs -- every committee run already in the database -- carry no
+    `cap`, and the environment is all there is. Stated, not hidden."""
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "12")
+    for reduction in run2:
+        reduction.json.pop("cap", None)
+
+    assert view_data(_run("decision"), run2)["progress"]["cap"] == 12
 
 
 # --- stances ----------------------------------------------------------------
@@ -304,7 +388,7 @@ def test_the_verdict_carries_the_chairs_text_the_rechecks_and_the_disclaimer(run
     "ended", ["owner closed", "queue empty", "turn cap", "chair turn failed"]
 )
 def test_progress_names_why_the_meeting_stopped(run2, ended):
-    """Criterion 11. Run-2 hit the cap and nothing on screen said so."""
+    """Criterion 11. The first live run ended with nothing on screen saying why."""
     run2[-1].json["ended"] = ended
 
     assert view_data(_run("decision"), run2)["progress"]["ended"] == ended
