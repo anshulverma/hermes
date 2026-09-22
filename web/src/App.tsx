@@ -11,6 +11,7 @@ import MetricsView from './views/MetricsView';
 import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
 import Outputs from './views/Outputs';
+import PlaybookView from './views/PlaybookView';
 import { fetchReductions } from './api/client';
 import { normalizeReduction } from './api/normalize';
 import { awaitsDecision } from './util/reduction';
@@ -153,6 +154,7 @@ export default function App() {
         selectedRunId={runDetail?.id ?? selectedRunId}
         onRunChange={setSelectedRunId}
         reviewCount={reviewCount}
+        hasPlaybookView={runDetail?.has_view ?? false}
       />
 
       <div
@@ -222,9 +224,15 @@ export default function App() {
           </div>
         )}
 
-        {!loading && !error && runDetail && view === 'overview' && (
-          <RunOverview run={runDetail} onRunUpdate={() => refreshRunDetail(runDetail.id)} />
-        )}
+        {/* `#playbook` on a run whose playbook ships no view has no tab to click
+            and no page to show, so it falls back here rather than leaving an
+            empty pane -- a bookmarked hash outlives the run it was taken on. */}
+        {!loading &&
+          !error &&
+          runDetail &&
+          (view === 'overview' || (view === 'playbook' && !runDetail.has_view)) && (
+            <RunOverview run={runDetail} onRunUpdate={() => refreshRunDetail(runDetail.id)} />
+          )}
 
         {!loading && !error && runDetail && view === 'metrics' && (
           <MetricsView runId={runDetail.id} />
@@ -256,6 +264,20 @@ export default function App() {
 
         {!loading && !error && view === 'activity' && (
           <ActivityFeed />
+        )}
+
+        {/* Keyed on the run so switching runs remounts rather than reusing the
+            loaded component and the previous run's data: the loader only blanks
+            its pane on the FIRST load, so without this the pane would show run
+            B's id over run A's view_data for one round trip. */}
+        {!loading && !error && runDetail && view === 'playbook' && (
+          <PlaybookView
+            key={`${runDetail.playbook}:${runDetail.id}`}
+            runId={runDetail.id}
+            playbook={runDetail.playbook}
+            hasView={runDetail.has_view}
+            liveTick={findingLiveTick}
+          />
         )}
       </div>
     </div>

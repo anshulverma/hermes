@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import App from './App';
 import * as client from './api/client';
 import type { RunDetail } from './api/client';
@@ -7,6 +7,14 @@ import * as useEventStreamModule from './hooks/useEventStream';
 
 vi.mock('./api/client');
 vi.mock('./hooks/useEventStream');
+
+// The real loader injects a <script> tag and reads a window global; neither is
+// what this file is testing. The stub keeps the one rule App depends on: it
+// renders nothing unless the run has a view.
+vi.mock('./views/PlaybookView', () => ({
+  default: ({ runId, hasView }: { runId: string; hasView: boolean }) =>
+    hasView ? <div data-testid="playbook-view">playbook view for {runId}</div> : null,
+}));
 
 const mockRunDetail: RunDetail = {
   id: 'run-001',
@@ -258,6 +266,105 @@ describe('App', () => {
 
       await waitFor(() => {
         expect(window.location.hash).toBe('#crew');
+      });
+    });
+  });
+
+  describe('the playbook tab', () => {
+    const withView: RunDetail = { ...mockRunDetail, playbook: 'committee', has_view: true };
+
+    function mockRuns(...ids: string[]) {
+      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
+        status: 'ok',
+        version: '0.1.0',
+        home: '/tmp/hermes',
+      });
+      vi.spyOn(client, 'fetchRuns').mockResolvedValue(
+        ids.map((id) => ({
+          id,
+          playbook: 'committee',
+          site: 'local',
+          state: 'running',
+          phase: 'work',
+          base_ref: 'main',
+          created_at: '2026-07-29T10:00:00Z',
+          tickets: { queued: 5 },
+        })),
+      );
+    }
+
+    afterEach(() => {
+      window.location.hash = '';
+    });
+
+    it('is absent for a run whose playbook ships no view', async () => {
+      mockRuns('run-001');
+      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/example run/i)).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId('tab-playbook')).toBeNull();
+    });
+
+    it('is present, and opens the view, for a run whose playbook has one', async () => {
+      mockRuns('run-001');
+      vi.spyOn(client, 'fetchRun').mockResolvedValue(withView);
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
+      });
+
+      screen.getByTestId('tab-playbook').click();
+
+      await waitFor(() => {
+        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
+      });
+      expect(window.location.hash).toBe('#playbook');
+    });
+
+    it('falls back to the run overview when #playbook names a run with no view', async () => {
+      // A bookmarked hash outlives the run it was taken on. Blank pane, no tab
+      // to click your way out of: the one outcome the fallback exists to avoid.
+      window.location.hash = '#playbook';
+      mockRuns('run-001');
+      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByText(/example run/i)).toBeInTheDocument();
+      });
+      expect(screen.queryByTestId('playbook-view')).toBeNull();
+      expect(screen.queryByTestId('tab-playbook')).toBeNull();
+    });
+
+    it('appears and disappears as the reader switches runs', async () => {
+      mockRuns('run-001', 'run-002');
+      vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) =>
+        id === 'run-001' ? withView : { ...mockRunDetail, id: 'run-002' },
+      );
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
+      });
+
+      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
+
+      await waitFor(() => {
+        expect(screen.queryByTestId('tab-playbook')).toBeNull();
+      });
+
+      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-001' } });
+
+      await waitFor(() => {
+        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
       });
     });
   });

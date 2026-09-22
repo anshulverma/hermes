@@ -114,3 +114,32 @@ describe('TopBar — the review queue is visible before you go looking', () => {
     expect(screen.queryByTestId('review-count')).toBeNull();
   });
 });
+
+describe('TopBar — the playbook tab', () => {
+  it('shows no playbook tab for a run whose playbook ships no view', () => {
+    render(<TopBar connected hasPlaybookView={false} />);
+
+    expect(screen.queryByTestId('tab-playbook')).toBeNull();
+  });
+
+  it('shows no playbook tab when the caller says nothing', () => {
+    render(<TopBar connected />);
+
+    expect(screen.queryByTestId('tab-playbook')).toBeNull();
+  });
+
+  it('shows the playbook tab when the run has a view', () => {
+    render(<TopBar connected hasPlaybookView />);
+
+    expect(screen.getByTestId('tab-playbook')).toHaveTextContent('Playbook');
+  });
+
+  it('reports a click on it as the playbook view', () => {
+    const onViewChange = vi.fn();
+    render(<TopBar connected hasPlaybookView onViewChange={onViewChange} />);
+
+    fireEvent.click(screen.getByTestId('tab-playbook'));
+
+    expect(onViewChange).toHaveBeenCalledWith('playbook');
+  });
+});

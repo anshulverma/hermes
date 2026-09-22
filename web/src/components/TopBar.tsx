@@ -83,6 +83,8 @@ type TopBarProps = {
   onRunChange?: (runId: string) => void;
   /** How many reductions are holding a ticket for a human, if known. */
   reviewCount?: number | null;
+  /** Whether the run being viewed has a playbook-owned view to show. */
+  hasPlaybookView?: boolean;
 };
 
 export default function TopBar({
@@ -93,6 +95,7 @@ export default function TopBar({
   selectedRunId,
   onRunChange,
   reviewCount,
+  hasPlaybookView = false,
 }: TopBarProps) {
   const handleTabClick = (newView: View) => {
     if (onViewChange) {
@@ -256,6 +259,30 @@ export default function TopBar({
         >
           Activity
         </button>
+        {/* The one tab that comes and goes, against the Review policy three
+            buttons up. That policy is about transient state -- an empty review
+            queue fills again, so hiding the tab would teach nothing. This is
+            about whether the run's playbook ships a view at all, which is fixed
+            for the life of a run: for a playbook without one there is no page
+            behind the tab, ever. */}
+        {hasPlaybookView && (
+          <button
+            onClick={() => handleTabClick('playbook')}
+            data-testid="tab-playbook"
+            style={{
+              padding: '6px 12px',
+              fontSize: 13,
+              color: view === 'playbook' ? 'var(--text-primary)' : 'var(--text-muted)',
+              background: view === 'playbook' ? 'var(--wash-subtle)' : 'transparent',
+              border: 'none',
+              borderRadius: 'var(--radius-md)',
+              cursor: 'pointer',
+              transition: 'all 120ms ease-out',
+            }}
+          >
+            Playbook
+          </button>
+        )}
       </nav>
 
       <div style={{ flex: 1 }} />

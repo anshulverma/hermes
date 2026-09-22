@@ -19,6 +19,12 @@ describe('parseViewHash', () => {
     }
   });
 
+  it('reads the playbook view, which is only reachable by URL if it is declared', () => {
+    // A slug missing from VIEWS falls back to the default, so the tab would be
+    // unreachable by URL however the nav is wired.
+    expect(parseViewHash('#playbook')).toBe('playbook');
+  });
+
   it('falls back to the default for empty/unknown/garbage hashes', () => {
     expect(parseViewHash('')).toBe('overview');
     expect(parseViewHash('#')).toBe('overview');

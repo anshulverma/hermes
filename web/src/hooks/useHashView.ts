@@ -14,7 +14,16 @@
 
 import { useCallback, useEffect, useState } from 'react';
 
-export const VIEWS = ['overview', 'metrics', 'board', 'crew', 'outputs', 'review', 'activity'] as const;
+export const VIEWS = [
+  'overview',
+  'metrics',
+  'board',
+  'crew',
+  'outputs',
+  'review',
+  'activity',
+  'playbook',
+] as const;
 
 /**
  * Slugs that used to name a view, mapped to what replaced them.
