@@ -6,9 +6,11 @@
 //
 //   cd web && ./node_modules/.bin/vite build --config vite.playbook-view.config.ts
 //
-// The cwd is load-bearing. The emitted `//#region <entry>` comment is written
-// relative to the process cwd, so a build launched anywhere else produces
-// different bytes and tests/unit/test_committee_view_build.py reports drift.
+// The cwd is load-bearing. `entry` and `outDir` below are relative to the
+// process cwd, so a build launched from the repo root cannot resolve the entry
+// at all -- it fails with UNRESOLVED_ENTRY rather than emitting different
+// bytes. (From a sibling directory it is byte-identical.) Either way,
+// tests/unit/test_committee_view_build.py is what notices.
 //
 // This config must live in web/ — outside it, `@vitejs/plugin-react` does not
 // resolve, because web/node_modules is the only node_modules in the repo.
@@ -31,7 +33,8 @@ export default defineConfig({
       // window.HermesView_committee — where the SPA loader reads the component.
       name: 'HermesView_committee',
       formats: ['umd'],
-      // A function, because a bare string fileName emits an extensionless file.
+      // A function, because a bare string fileName emits committee.umd.umd.cjs
+      // -- Vite appends the format and its own extension to the name given.
       fileName: () => 'committee.umd.js',
     },
     rollupOptions: {

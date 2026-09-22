@@ -4,7 +4,7 @@ import react from '@vitejs/plugin-react'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
-  // The committee view's source sits outside web/, where Node resolution finds
+  // A playbook view's source sits outside web/, where Node resolution finds
   // no node_modules. Resolve React from here instead — which is also the rule
   // the view depends on at runtime: one React instance, never two.
   resolve: {

@@ -24,14 +24,19 @@ def test_committed_view_bundle_matches_a_fresh_build():
         pytest.skip("node / web dev dependencies unavailable; cannot rebuild the view")
 
     with tempfile.TemporaryDirectory() as out:
-        # cwd is web/ on purpose: the emitted //#region comment names the entry
-        # relative to the cwd, so building from elsewhere changes the bytes.
+        # cwd is web/ on purpose. The entry and outDir in the config are relative
+        # to the process cwd, so a build launched from the repo root cannot
+        # resolve the entry at all (UNRESOLVED_ENTRY) -- it produces no build
+        # rather than a different one.
         built = subprocess.run(
             [
                 str(VITE), "build",
                 "--config", "vite.playbook-view.config.ts",
                 "--outDir", out,
-                "--logLevel", "silent",
+                # NOT "silent": that blanks the one message that matters. With a
+                # broken entry the assertion below printed "view build failed:"
+                # and two empty lines.
+                "--logLevel", "error",
             ],
             cwd=REPO / "web",
             capture_output=True,
@@ -40,11 +45,16 @@ def test_committed_view_bundle_matches_a_fresh_build():
         )
         assert built.returncode == 0, f"view build failed:\n{built.stdout}\n{built.stderr}"
 
-        fresh = Path(out) / "committee.umd.js"
-        assert fresh.exists(), (
-            f"build emitted no committee.umd.js, only "
+        # Exactly one file: `publicDir: false` in the config is load-bearing and
+        # was otherwise unguarded -- drop it and web/public/* (favicon.svg,
+        # icons.svg) lands inside the playbook package. This also pins the
+        # `fileName` function, which a bare string would turn into
+        # committee.umd.umd.cjs.
+        assert sorted(p.name for p in Path(out).iterdir()) == ["committee.umd.js"], (
+            f"the build emitted more than the bundle: "
             f"{sorted(p.name for p in Path(out).iterdir())}"
         )
+        fresh = Path(out) / "committee.umd.js"
         assert fresh.read_bytes() == ARTIFACT.read_bytes(), (
             f"{ARTIFACT.relative_to(REPO)} is stale. Rebuild it with: {REBUILD}"
         )

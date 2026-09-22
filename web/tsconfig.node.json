@@ -2,7 +2,9 @@
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "target": "es2023",
-    "lib": ["ES2023"],
+    // DOM because a Playwright spec's page.evaluate() callback is browser code:
+    // it reads `window`, and without the lib every one of them is a type error.
+    "lib": ["ES2023", "DOM"],
     "types": ["node"],
     "skipLibCheck": true,
 
@@ -19,5 +21,14 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts"]
+  // Everything in web/ that tsconfig.app.json's "src" does not reach. Until
+  // this listed more than vite.config.ts, `tsc -b` type-checked zero Playwright
+  // specs and not the playbook-view build config either -- a 246-line new spec
+  // passed a green typecheck that never opened it.
+  "include": [
+    "vite.config.ts",
+    "vite.playbook-view.config.ts",
+    "playwright.config.ts",
+    "tests-ui"
+  ]
 }

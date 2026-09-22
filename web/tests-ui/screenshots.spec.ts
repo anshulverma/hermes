@@ -29,8 +29,11 @@ test('@shot wordmark-closeup', async ({ page }) => {
   await page.goto('/');
   await settle(page);
   // Crop tight on the lockup and blow it up: the spacing being checked is a
-  // couple of px, invisible in a full-page shot.
-  await page.locator('header').screenshot({
+  // couple of px, invisible in a full-page shot. `clip` is a Page option, not
+  // a Locator one -- on locator.screenshot() it was never applied. Found by
+  // putting tests-ui/ into tsconfig.node.json, which had type-checked zero
+  // Playwright specs until now.
+  await page.screenshot({
     path: `${DIR}/wordmark.png`,
     clip: { x: 0, y: 0, width: 260, height: 56 },
   });

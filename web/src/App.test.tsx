@@ -22,24 +22,23 @@ vi.mock('./hooks/useEventStream');
 // test in PlaybookView.test.tsx would only be testing React's reconciler.
 vi.mock('./views/PlaybookView', async () => {
   const { useState } = await import('react');
-  return {
-    default: ({
-      runId,
-      hasView,
-      liveTick,
-    }: {
-      runId: string;
-      hasView: boolean;
-      liveTick?: number;
-    }) => {
-      const [mountedWith] = useState(runId);
-      return hasView ? (
-        <div data-testid="playbook-view">
-          playbook view for {mountedWith} · tick {String(liveTick)}
-        </div>
-      ) : null;
-    },
+  const PlaybookViewStub = ({
+    runId,
+    hasView,
+    liveTick,
+  }: {
+    runId: string;
+    hasView: boolean;
+    liveTick?: number;
+  }) => {
+    const [mountedWith] = useState(runId);
+    return hasView ? (
+      <div data-testid="playbook-view">
+        playbook view for {mountedWith} · tick {String(liveTick)}
+      </div>
+    ) : null;
   };
+  return { default: PlaybookViewStub };
 });
 
 const mockRunDetail: RunDetail = {

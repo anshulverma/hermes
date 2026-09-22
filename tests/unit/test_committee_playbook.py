@@ -3058,15 +3058,29 @@ def test_wiring_adds_nothing_to_engine_server_or_web():
 
     workspace = Path(__file__).parent.parent.parent
 
+    candidates = [
+        p for tree in ("engine", "server", "web/src")
+        for p in sorted((workspace / tree).rglob("*"))
+    ]
+    # web/ ROOT as well, non-recursively: the config files there are not `src`,
+    # and that is exactly where committee-specific wiring hid from this guard.
+    candidates += sorted(p for p in (workspace / "web").glob("*"))
+
     hits = []
-    for tree in ("engine", "server", "web/src"):
-        for path in sorted((workspace / tree).rglob("*")):
-            if not path.is_file() or path.suffix not in (".py", ".sql", ".ts", ".tsx"):
-                continue
-            if path.name.endswith((".test.ts", ".test.tsx")):
-                continue
-            text = path.read_text(encoding="utf-8", errors="replace").lower()
-            if "committee" in text:
-                hits.append(str(path.relative_to(workspace)))
+    for path in candidates:
+        if not path.is_file() or path.suffix not in (".py", ".sql", ".ts", ".tsx"):
+            continue
+        if path.name.endswith((".test.ts", ".test.tsx")):
+            continue
+        # The one knowing exception, and the whole reason the scan was widened
+        # to see it at all: this config hardcodes the global name, the entry and
+        # the outDir. Spec §2 defers a second playbook view, and a build needs
+        # somewhere concrete to point until there is one. When the second view
+        # arrives this becomes a loop over a registry and the exemption goes.
+        if path.name == "vite.playbook-view.config.ts":
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace").lower()
+        if "committee" in text:
+            hits.append(str(path.relative_to(workspace)))
 
     assert hits == [], f"committee is named inside engine/server/web: {hits}"
