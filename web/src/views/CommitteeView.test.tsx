@@ -19,6 +19,20 @@ import Verdict from '../../../playbooks/committee/view/src/Verdict';
 
 const noop = () => {};
 
+// Every mount of the whole view mounts <Stamp>, which fetches on mount. With no
+// stub the lookup rejects (Node's fetch cannot parse a relative URL) and the
+// catch writes state outside act() — 21 warnings vitest's console interception
+// swallows, so the suite only looks clean. The plan's Step 18 prescribed this
+// stub and it was never added. A promise that never settles is the right one:
+// the describes that care about the lookup install their own over the top.
+beforeEach(() => {
+  vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 function show(data = run2) {
   return render(<CommitteeView runId="run-2" data={data} refetch={noop} />);
 }
@@ -285,7 +299,10 @@ describe('Verdict', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    fetchMock = vi.fn(() => ok([DECISION_ROW]));
+    // Never settles. These tests are about what the card says, not about the
+    // stamp lookup, and a lookup that resolves after a synchronous test has
+    // ended writes state outside act(). `not.toHaveBeenCalled()` still works.
+    fetchMock = vi.fn(() => new Promise(() => {}));
     vi.stubGlobal('fetch', fetchMock);
   });
 
@@ -450,7 +467,7 @@ describe('ArtifactDiff', () => {
   });
 
   it('states that the original is never modified, before any diff is loaded', () => {
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} />);
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
     const banner = screen.getByTestId('diff-original-untouched');
     expect(banner).toHaveTextContent('The original is never modified');
     expect(banner).toHaveTextContent('docs/specs/federation-future.md');
@@ -458,8 +475,27 @@ describe('ArtifactDiff', () => {
     expect(banner).toHaveTextContent('a recommendation, not a landed change');
   });
 
+  it('says a delegated edit lands in the revised copy, not that it landed', () => {
+    // WB-I2, and finding 3.2's defect reprinted in the UI: the past tense is a
+    // claim about THIS run's outcome, and the e2e screenshot printed it
+    // directly under `turn 07 · junior_ic DID NOT APPLY`.
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
+    const banner = screen.getByTestId('diff-original-untouched');
+    expect(banner).toHaveTextContent('Every delegated edit lands in the revised copy');
+    expect(banner).not.toHaveTextContent('landed in the revised copy');
+  });
+
+  it('does not promise byte-for-byte before a decision has re-checked it', () => {
+    // null is "nothing has checked", which is not "yes". The design rule is
+    // still true and still worth saying; the measurement is not in yet.
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={null} />);
+    const banner = screen.getByTestId('diff-original-untouched');
+    expect(banner).toHaveTextContent('is meant to be byte-for-byte');
+    expect(banner).not.toHaveTextContent('federation-future.md is byte-for-byte');
+  });
+
   it('does not fetch either artifact until asked', () => {
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} />);
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: /show the diff/i })).toHaveTextContent(
       '11.1 KB → 18.7 KB',
@@ -467,7 +503,7 @@ describe('ArtifactDiff', () => {
   });
 
   it('fetches both sides and renders the changed lines', async () => {
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} />);
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
     fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
 
     await waitFor(() =>
@@ -494,14 +530,14 @@ describe('ArtifactDiff', () => {
     fetchMock.mockImplementation(() =>
       Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ detail: 'bad which' }) }),
     );
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} />);
+    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
     fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
 
     expect(await screen.findByTestId('diff-error')).toHaveTextContent('bad which');
   });
 
   it('says there is no revised copy rather than showing an empty one', () => {
-    render(<ArtifactDiff runId="run-2" artifacts={{ original: ARTIFACTS.original, revised: null }} />);
+    render(<ArtifactDiff runId="run-2" artifacts={{ original: ARTIFACTS.original, revised: null }} intact={null} />);
     expect(screen.getByTestId('diff-no-revised')).toHaveTextContent(
       'No edit has been delegated yet',
     );
@@ -513,11 +549,55 @@ describe('ArtifactDiff', () => {
     // carries a path — which is every run in phase `open`, and `original.name`
     // would throw straight into the error boundary. The whole view's empty state
     // normally catches this, but the type says null, so the branch must exist.
-    render(<ArtifactDiff runId="run-2" artifacts={{ original: null, revised: null }} />);
+    render(<ArtifactDiff runId="run-2" artifacts={{ original: null, revised: null }} intact={null} />);
     expect(screen.getByTestId('diff-no-artifacts')).toHaveTextContent(
       'No artifact has been recorded for this run yet',
     );
     expect(screen.queryByTestId('diff-original-untouched')).toBeNull();
     expect(screen.queryByRole('button', { name: /show the diff/i })).toBeNull();
+  });
+});
+
+describe('CommitteeView when the original changed under the committee', () => {
+  // The test WB-C1 says was missing. `artifact_intact: false` was only ever
+  // rendered against <Verdict> in isolation, so nothing ever put the two cards
+  // on one page — and the diff card was guaranteeing the file untouched, in the
+  // calmest colour available, beside a red card saying it CHANGED.
+  const changed = { ...run2, verdict: { ...run2.verdict!, artifact_intact: false } };
+
+  it('drops the untouched guarantee from the diff card', () => {
+    show(changed);
+
+    expect(screen.queryByTestId('diff-original-untouched')).toBeNull();
+    expect(screen.getByTestId('diff-original-changed')).toHaveTextContent(
+      'The original CHANGED during this review',
+    );
+  });
+
+  it('stops claiming no repository was written to', () => {
+    show(changed);
+
+    const sim = screen.getByTestId('verdict-simulation');
+    expect(sim).not.toHaveTextContent('No repository was written to');
+    expect(sim).toHaveTextContent('A repository file DID change during this review');
+  });
+
+  it('leaves the two cards saying the same thing about the same file', () => {
+    show(changed);
+
+    expect(screen.getByTestId('artifact-intact')).toHaveTextContent('CHANGED DURING THE REVIEW');
+    expect(screen.getByTestId('diff-original-changed')).toHaveTextContent(
+      'CHANGED during this review',
+    );
+    expect(screen.queryByText(/is never modified/)).toBeNull();
+    // The one sentence that must not survive: the unqualified byte-for-byte
+    // promise. The failure card says "is NOT byte-for-byte", which is the point.
+    expect(screen.queryByText(/ is byte-for-byte what the committee was handed/)).toBeNull();
+  });
+
+  it('still says nothing landed, because nothing this playbook does can', () => {
+    show(changed);
+
+    expect(screen.getByTestId('verdict-simulation')).toHaveTextContent('Nothing was landed');
   });
 });

@@ -261,7 +261,14 @@
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "verdict-simulation",
 					style: note("attention"),
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Simulation — not an approval." }), " This verdict is a simulation produced by AI personas reading one file. It is not an approval, not a sign-off, and carries no authority: a human decides. No repository was written to, nothing was landed, and nothing here binds any person, team or budget."]
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Simulation — not an approval." }),
+						" This verdict is a simulation produced by AI personas reading one file. It is not an approval, not a sign-off, and carries no authority: a human decides.",
+						" ",
+						verdict.artifact_intact === false ? "A repository file DID change during this review — see below. Nothing was landed," : "No repository was written to, nothing was landed,",
+						" ",
+						"and nothing here binds any person, team or budget."
+					]
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Rechecks, { checks: verdict.checks }),
 				verdict.artifact_intact !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -415,7 +422,7 @@
 			color: "var(--text-primary)"
 		}
 	};
-	function ArtifactDiff({ runId, artifacts }) {
+	function ArtifactDiff({ runId, artifacts, intact }) {
 		const [rows, setRows] = (0, react.useState)(null);
 		const [loading, setLoading] = (0, react.useState)(false);
 		const [error, setError] = (0, react.useState)(null);
@@ -449,9 +456,33 @@
 				children: "No artifact has been recorded for this run yet. The committee names the file it is reviewing on its first reduction; until then there is nothing to show either side of."
 			})
 		});
+		const name = (a) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
+			style: {
+				fontFamily: "var(--font-mono)",
+				fontSize: 11.5
+			},
+			children: a.name
+		});
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			style: shell,
-			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			children: [intact === false ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				"data-testid": "diff-original-changed",
+				style: {
+					padding: "8px 12px",
+					borderRadius: "var(--radius-sm)",
+					background: "var(--status-danger-tint)",
+					border: "1px solid var(--status-danger-edge)",
+					fontSize: 12.5,
+					lineHeight: 1.55,
+					color: "var(--text-primary)"
+				},
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "The original CHANGED during this review." }),
+					" ",
+					name(original),
+					" is not byte-for-byte what the committee was handed: the playbook re-checked its digest at the decision and it did not match. The safety guarantee this card normally states did not hold on this run, so read the diff below against a file that moved under it, and treat every re-check in the verdict as unreliable."
+				]
+			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				"data-testid": "diff-original-untouched",
 				style: {
 					padding: "8px 12px",
@@ -465,22 +496,12 @@
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "The original is never modified." }),
 					" ",
-					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
-						style: {
-							fontFamily: "var(--font-mono)",
-							fontSize: 11.5
-						},
-						children: original.name
-					}),
-					" is byte-for-byte what the committee was handed; the playbook re-checks its digest at the decision and says so in the verdict. Every delegated edit landed in the revised copy,",
+					name(original),
 					" ",
-					revised ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
-						style: {
-							fontFamily: "var(--font-mono)",
-							fontSize: 11.5
-						},
-						children: revised.name
-					}) : "which does not exist yet",
+					intact === true ? "is" : "is meant to be",
+					" byte-for-byte what the committee was handed; the playbook re-checks its digest at the decision and says so in the verdict. Every delegated edit lands in the revised copy,",
+					" ",
+					revised ? name(revised) : "which does not exist yet",
 					", which the committee offers as a recommendation, not a landed change. Reading the repository file and finding it unchanged does not mean the edits failed."
 				]
 			}), !revised ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -1009,7 +1030,8 @@
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArtifactDiff, {
 					runId,
-					artifacts: data.artifacts
+					artifacts: data.artifacts,
+					intact: data.verdict?.artifact_intact ?? null
 				})
 			]
 		});

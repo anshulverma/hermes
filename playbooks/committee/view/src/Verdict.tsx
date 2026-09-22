@@ -218,8 +218,14 @@ export default function Verdict({
       <div data-testid="verdict-simulation" style={note('attention')}>
         <strong>Simulation — not an approval.</strong> This verdict is a simulation produced by AI
         personas reading one file. It is not an approval, not a sign-off, and carries no
-        authority: a human decides. No repository was written to, nothing was landed, and nothing
-        here binds any person, team or budget.
+        authority: a human decides.{' '}
+        {/* "No repository was written to" cannot be printed above a card that
+            says a repository file changed mid-review. The landing claim still
+            holds either way: nothing this playbook does can land. */}
+        {verdict.artifact_intact === false
+          ? 'A repository file DID change during this review — see below. Nothing was landed,'
+          : 'No repository was written to, nothing was landed,'}{' '}
+        and nothing here binds any person, team or budget.
       </div>
 
       <Rechecks checks={verdict.checks} />

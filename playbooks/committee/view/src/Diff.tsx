@@ -106,9 +106,23 @@ const ROW_STYLE: Record<DiffRow['kind'], { sign: string; background: string; col
 export default function ArtifactDiff({
   runId,
   artifacts,
+  intact,
 }: {
   runId: string;
   artifacts: Artifacts;
+  /**
+   * `verdict.artifact_intact`, passed down rather than assumed.
+   *
+   * The headline below used to guarantee the original was untouched
+   * unconditionally, while the verdict card two cards up could be saying in red
+   * that it CHANGED DURING THE REVIEW. `_reduce_decision` computes that flag
+   * precisely because the guarantee is one sentence of prose against a worker
+   * running bypassPermissions, so the one surface built to stop a confident
+   * false claim about a file has to read it.
+   *
+   * null is "no decision has re-checked it yet", which is not the same as yes.
+   */
+  intact: boolean | null;
 }) {
   const [rows, setRows] = useState<DiffRow[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -158,32 +172,55 @@ export default function ArtifactDiff({
     );
   }
 
+  const name = (a: Artifact) => (
+    <code style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>{a.name}</code>
+  );
+
   return (
     <div style={shell}>
-      <div
-        data-testid="diff-original-untouched"
-        style={{
-          padding: '8px 12px',
-          borderRadius: 'var(--radius-sm)',
-          background: 'var(--status-live-tint)',
-          border: '1px solid var(--status-live-edge)',
-          fontSize: 12.5,
-          lineHeight: 1.55,
-          color: 'var(--text-primary)',
-        }}
-      >
-        <strong>The original is never modified.</strong>{' '}
-        <code style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>{original.name}</code> is
-        byte-for-byte what the committee was handed; the playbook re-checks its digest at the
-        decision and says so in the verdict. Every delegated edit landed in the revised copy,{' '}
-        {revised ? (
-          <code style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>{revised.name}</code>
-        ) : (
-          'which does not exist yet'
-        )}
-        , which the committee offers as a recommendation, not a landed change. Reading the
-        repository file and finding it unchanged does not mean the edits failed.
-      </div>
+      {intact === false ? (
+        <div
+          data-testid="diff-original-changed"
+          style={{
+            padding: '8px 12px',
+            borderRadius: 'var(--radius-sm)',
+            background: 'var(--status-danger-tint)',
+            border: '1px solid var(--status-danger-edge)',
+            fontSize: 12.5,
+            lineHeight: 1.55,
+            color: 'var(--text-primary)',
+          }}
+        >
+          <strong>The original CHANGED during this review.</strong> {name(original)} is not
+          byte-for-byte what the committee was handed: the playbook re-checked its digest at the
+          decision and it did not match. The safety guarantee this card normally states did not
+          hold on this run, so read the diff below against a file that moved under it, and treat
+          every re-check in the verdict as unreliable.
+        </div>
+      ) : (
+        <div
+          data-testid="diff-original-untouched"
+          style={{
+            padding: '8px 12px',
+            borderRadius: 'var(--radius-sm)',
+            background: 'var(--status-live-tint)',
+            border: '1px solid var(--status-live-edge)',
+            fontSize: 12.5,
+            lineHeight: 1.55,
+            color: 'var(--text-primary)',
+          }}
+        >
+          <strong>The original is never modified.</strong> {name(original)}{' '}
+          {/* Only the decision's digest re-check can promise this in the past tense.
+              Before it lands the honest word is the design rule, not the measurement. */}
+          {intact === true ? 'is' : 'is meant to be'} byte-for-byte what the committee was handed;
+          the playbook re-checks its digest at the decision and says so in the verdict. Every
+          delegated edit lands in the revised copy,{' '}
+          {revised ? name(revised) : 'which does not exist yet'}, which the committee offers as a
+          recommendation, not a landed change. Reading the repository file and finding it unchanged
+          does not mean the edits failed.
+        </div>
+      )}
 
       {!revised ? (
         <div

@@ -504,7 +504,13 @@ export default function CommitteeView({ runId, data }: CommitteeViewProps) {
       <Roster roster={data.roster} />
       <Timeline timeline={data.timeline} />
       <Verdict runId={runId} verdict={data.verdict} />
-      <ArtifactDiff runId={runId} artifacts={data.artifacts} />
+      {/* `intact` and not just `artifacts`: the diff card guarantees the
+          original was untouched, and only the verdict knows whether it was. */}
+      <ArtifactDiff
+        runId={runId}
+        artifacts={data.artifacts}
+        intact={data.verdict?.artifact_intact ?? null}
+      />
     </div>
   );
 }
