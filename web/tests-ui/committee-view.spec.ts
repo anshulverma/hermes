@@ -22,7 +22,12 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 const HOME = process.env.HERMES_E2E_HOME ?? '';
 /** The same directory as the SERVER sees it. The container bind-mounts the home
  *  at /hermes-home, and view_data stats the artifact paths off the reductions
- *  inside that process, so the paths stored below must be the server's. */
+ *  inside that process, so the paths stored below must be the server's.
+ *
+ *  `make ui-test-committee` sets this explicitly. It used to be read, defaulted
+ *  and set by nothing, so running the spec against a non-container server on
+ *  the same home stored paths no process could stat and the artifact
+ *  assertions threw on `null` with no clue why. */
 const SERVER_HOME = process.env.HERMES_E2E_SERVER_HOME ?? '/hermes-home';
 
 const RUN = 'committee-e2e';
@@ -40,6 +45,15 @@ const ACTION_2 = 'Name the Q3 migration freeze in the sequencing section.';
 // Seven turns, not the twenty of the measured run: enough to prove ordering, a
 // delegation that applied, one that did not, a turn nobody delivered, a floor
 // request nobody got to, and two personas holding stances.
+//
+// CAP is 7, not the default 30, so the meeting really did run out of turns:
+// with cap 30 the Progress card read "turn 7 of 30" directly above "Ended: turn
+// cap. The meeting ran out of turns", the component's own gate disagreed with
+// the note it was printing, and line 205 below asserted that incoherence as
+// passing. `reduce` puts the cap on every turn reduction (`_cap` prefers it
+// over the environment), so seeding it here is what a real run does.
+const CAP = 7;
+
 const TURNS = [
   { turn: 1, role: 'senior_director', delivered: true,
     body: 'The bet is plausible. The staffing line is fiction.',
@@ -80,7 +94,9 @@ const DECISION = {
     'Approve with conditions: the ask is two engineers and the freeze is acknowledged.',
     `- re-check of turn 03 (junior_ic): APPLIED — delegated: ${ACTION_1}`,
     `- re-check of turn 07 (junior_ic): DID NOT APPLY — delegated: ${ACTION_2}`,
-    '- dropped_floor_requests (the review ended before their turn came): pm',
+    // tpm, because turn 5 is the only `request_floor` in the fixture. It said
+    // `pm`, so the verdict card and the roster named different people.
+    '- dropped_floor_requests (the review ended before their turn came): tpm',
     SIMULATION,
   ].join('\n\n'),
   delivered: true,
@@ -90,7 +106,7 @@ const DECISION = {
   ],
   artifact_intact: true,
   dropped_delegation: null,
-  dropped_floor_requests: ['pm'],
+  dropped_floor_requests: ['tpm'],
   error: null,
   artifact: ORIGINAL,
   revised: REVISED,
@@ -128,7 +144,7 @@ function seed(): void {
        VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
     );
     TURNS.forEach((t, i) => {
-      const json = { ...t, error: null, artifact: ORIGINAL, revised: REVISED };
+      const json = { ...t, cap: CAP, error: null, artifact: ORIGINAL, revised: REVISED };
       const phase = `t${String(t.turn).padStart(2, '0')}-${t.role}`;
       insert.run(RUN, phase, 'turn', JSON.stringify(json), now + i, now + i);
     });
@@ -174,7 +190,14 @@ test('the seeded run is served with a view', async ({ request }) => {
   expect(data.timeline).toHaveLength(7);
   expect(data.timeline[0].name).toBe('Dana Whitfield');
   expect(data.progress.ended).toBe('turn cap');
-  expect(data.verdict.simulation).toBe(true);
+  // The cap rides on the reduction, so the server process answers with the
+  // run's own cap and not with whatever HERMES_COMMITTEE_MAX_TURNS it was
+  // started without. turn === cap is what makes "turn cap" a true sentence.
+  expect(data.progress.cap).toBe(CAP);
+  expect(data.progress.turn).toBe(CAP);
+  // Reconstructed from the turns by `_floor`, not read from the decision: the
+  // one request_floor in the fixture is tpm's.
+  expect(data.verdict.dropped_floor_requests).toEqual(['tpm']);
   expect(data.artifacts.original.bytes).toBe(ORIGINAL_TEXT.length);
   expect(data.artifacts.revised.bytes).toBe(REVISED_TEXT.length);
 
@@ -202,7 +225,10 @@ test('the committee tab renders the meeting oldest-first', async ({ page }) => {
   // A stance that was stated, and the verdict's disclaimer.
   await expect(page.getByText('Leaning no while the ask is six engineers.').first()).toBeVisible();
   await expect(page.getByText(/simulation/i).first()).toBeVisible();
+  // "Ended: turn cap" AND "turn 7 of 7" on the same card. Asserting the note
+  // alone pinned a state the progress bar contradicted.
   await expect(page.getByText(/turn cap/i).first()).toBeVisible();
+  await expect(page.locator('[data-testid="turn-count"]')).toHaveText(`turn ${CAP} of ${CAP}`);
 
   // The delegated action on the turn that delegated it -- criterion 7's first
   // half, and the one surface that exists only mid-run.
