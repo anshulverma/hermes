@@ -93,6 +93,7 @@ function Stamp({ runId }: { runId: string }) {
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reloads, setReloads] = useState(0);
 
   useEffect(() => {
     let live = true;
@@ -100,7 +101,12 @@ function Stamp({ runId }: { runId: string }) {
       `/api/runs/${runId}/reductions?phase=decision`,
     )
       .then((rows) => {
-        const row = rows.find((r) => r.kind === 'decision');
+        // The LAST decision reduction, matching `view_data`, which takes
+        // `next((r.json for r in reversed(reductions) ...))`. The route returns
+        // ORDER BY id ascending, so `find` took the oldest: given two, the card
+        // rendered verdict #2 and stamped reduction #1 — the operator reads one
+        // ruling and stamps another.
+        const row = [...rows].reverse().find((r) => r.kind === 'decision');
         if (!live) return;
         if (row) setStamp({ id: row.id, review_state: row.review_state });
         else setLookupError('no decision reduction is banked for this run');
@@ -111,19 +117,28 @@ function Stamp({ runId }: { runId: string }) {
     return () => {
       live = false;
     };
-  }, [runId]);
+  }, [runId, reloads]);
 
   const decide = async (accept: boolean) => {
-    if (!stamp) return;
+    // Not only `disabled={busy}` on the buttons: that attribute was the entire
+    // double-stamp guard, and an invariant that lives only in JSX is one tidy-up
+    // away from gone. Three rapid clicks send one POST either way.
+    if (!stamp || busy) return;
     setBusy(true);
     setActionError(null);
     try {
       const res = await apiPost<{ review_state: string }>(
         `/api/reductions/${stamp.id}/${accept ? 'accept' : 'reject'}`,
       );
+      // The SERVER's state, never the requested one. An optimistic card would
+      // be indistinguishable here and would lie the moment the two differ.
       setStamp({ id: stamp.id, review_state: res.review_state });
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Could not record the decision');
+      // Re-read it. The lookup ran once on mount, so if another operator
+      // stamped first this card would keep offering a button that can only
+      // ever 409, until the page is reloaded.
+      setReloads((n) => n + 1);
     } finally {
       setBusy(false);
     }
@@ -146,7 +161,9 @@ function Stamp({ runId }: { runId: string }) {
         needs_human ticket — and it lands nothing and reverts nothing. It records that a person
         read the verdict.
       </div>
-      {stamp.review_state !== 'pending' ? (
+      {/* `review_state &&`: a malformed server response with no state rendered
+          "Recorded as ." — falling back to the buttons says less and no lies. */}
+      {stamp.review_state && stamp.review_state !== 'pending' ? (
         <div data-testid="stamp-state" style={note(stamp.review_state === 'accepted' ? 'ok' : 'attention')}>
           Recorded as {stamp.review_state}.
         </div>

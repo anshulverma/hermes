@@ -11,6 +11,7 @@
  */
 import '../ds';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { setToken, clearToken } from '../api/auth';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
@@ -434,6 +435,30 @@ describe('Verdict', () => {
     expect(prose.closest('details')).toHaveAttribute('open');
   });
 
+  it('says NOT CHECKED when a re-check carries no outcome', () => {
+    // 9.4 / WB-m2, resolved by keeping the branch rather than narrowing the
+    // type: `view.py:_verdict` passes `rechecks` through with no validation
+    // beyond `isinstance(c, dict)`, so a malformed or future-shaped reduction
+    // reaches this card. Both two-way collapses are claims — APPLIED and DID
+    // NOT APPLY are each a statement about an edit nobody measured.
+    render(
+      <Verdict
+        runId="run-2"
+        verdict={{ ...VERDICT, checks: [{ turn: 4, action: 'Fold §9 into §8', verified: null }] }}
+      />,
+    );
+    expect(screen.getByTestId('verdict-recheck-4')).toHaveTextContent('NOT CHECKED');
+    expect(screen.getByTestId('verdict-recheck-4')).not.toHaveTextContent('APPLIED');
+  });
+
+  it('says nothing was re-checked when nothing was delegated', () => {
+    // WB-m4: `rechecks-none` was asserted by no test in any of the three suites.
+    render(<Verdict runId="run-2" verdict={{ ...VERDICT, checks: [] }} />);
+    expect(screen.getByTestId('rechecks-none')).toHaveTextContent(
+      'No edit was delegated, so there was nothing to re-check',
+    );
+  });
+
   it('says there is no verdict yet, and offers no decision, mid-run', () => {
     render(<Verdict runId="run-2" verdict={null} />);
     expect(screen.getByTestId('verdict-pending')).toHaveTextContent(
@@ -508,6 +533,142 @@ describe('Verdict accept/reject', () => {
 
     expect(await screen.findByTestId('stamp-state')).toHaveTextContent('Recorded as accepted.');
     expect(screen.queryByRole('button', { name: /accept/i })).toBeNull();
+  });
+
+  it('carries the bearer token on both the lookup and the stamp', async () => {
+    // 9.1. `host.tsx` exists for this and nothing pinned it: replacing the
+    // header builder with `return {};` left all 466 green, and on any
+    // non-loopback bind the lookup and the stamp would 401 with a clean suite.
+    // The existing assertions use expect.anything() and see straight through it.
+    setToken('remote-typed-token');
+    try {
+      render(<Verdict runId="run-2" verdict={VERDICT} />);
+      fireEvent.click(await screen.findByRole('button', { name: /accept/i }));
+
+      await waitFor(() =>
+        expect(fetchMock).toHaveBeenCalledWith(
+          '/api/reductions/21/accept',
+          expect.objectContaining({
+            method: 'POST',
+            headers: { Authorization: 'Bearer remote-typed-token' },
+          }),
+        ),
+      );
+      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-2/reductions?phase=decision', {
+        headers: { Authorization: 'Bearer remote-typed-token' },
+      });
+    } finally {
+      clearToken();
+    }
+  });
+
+  it('sends no Authorization header when there is no token', async () => {
+    // The loopback half: an empty object, not `Bearer null`.
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-2/reductions?phase=decision', {
+        headers: {},
+      }),
+    );
+  });
+
+  it('sends one POST for three rapid clicks', async () => {
+    // 9.2. `disabled={busy}` was the only double-stamp guard: with it three
+    // clicks give 1 POST, without it 3. `decide` now refuses re-entry too, so
+    // the invariant does not live only in JSX.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('/reductions?')
+        ? ok([DECISION_ROW])
+        : held.then(() => ({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ review_state: 'accepted' }),
+          })),
+    );
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+    const accept = await screen.findByRole('button', { name: /accept/i });
+
+    fireEvent.click(accept);
+    fireEvent.click(accept);
+    fireEvent.click(accept);
+
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).includes('/accept'))).toHaveLength(1);
+    release();
+    expect(await screen.findByTestId('stamp-state')).toHaveTextContent('Recorded as accepted.');
+  });
+
+  it('shows the state the server recorded, not the one it was asked for', async () => {
+    // 9.3. Both existing stamp tests stub the server to echo the request, so an
+    // optimistic card is indistinguishable from an honest one. Make them differ.
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('/reductions?') ? ok([DECISION_ROW]) : ok({ review_state: 'rejected' }),
+    );
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+    fireEvent.click(await screen.findByRole('button', { name: /accept/i }));
+
+    expect(await screen.findByTestId('stamp-state')).toHaveTextContent('Recorded as rejected.');
+  });
+
+  it('stamps the last decision reduction, the one the verdict was read from', async () => {
+    // 9.5. The route returns ORDER BY id ascending and `view_data` deliberately
+    // takes the LAST; `rows.find` took the first. Given two, the operator reads
+    // one ruling and stamps another.
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('/reductions?')
+        ? ok([{ ...DECISION_ROW, id: 7 }, { ...DECISION_ROW, id: 21 }])
+        : ok({ review_state: 'accepted' }),
+    );
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+    fireEvent.click(await screen.findByRole('button', { name: /accept/i }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith('/api/reductions/21/accept', expect.anything()),
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/reductions/7/accept', expect.anything());
+  });
+
+  it('re-reads the review state after a stamp the server refused', async () => {
+    // 9.9 and WB-m4's second orphan testid. Another operator stamped first, so
+    // the POST 409s; with the lookup pinned to [runId] the card kept offering a
+    // button that could only ever 409 again until the page was reloaded.
+    let stamped = false;
+    fetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/reductions?')) {
+        return ok([{ ...DECISION_ROW, review_state: stamped ? 'accepted' : 'pending' }]);
+      }
+      stamped = true;
+      return Promise.resolve({
+        ok: false,
+        status: 409,
+        json: () => Promise.resolve({ detail: 'reduction 21 is already resolved' }),
+      });
+    });
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+    fireEvent.click(await screen.findByRole('button', { name: /accept/i }));
+
+    expect(await screen.findByTestId('stamp-action-error')).toHaveTextContent(
+      'reduction 21 is already resolved',
+    );
+    expect(await screen.findByTestId('stamp-state')).toHaveTextContent('Recorded as accepted.');
+    expect(screen.queryByRole('button', { name: /accept/i })).toBeNull();
+  });
+
+  it('offers the buttons rather than "Recorded as ." on a stateless reply', async () => {
+    // 9.8
+    fetchMock.mockImplementation((url: string) =>
+      String(url).includes('/reductions?') ? ok([DECISION_ROW]) : ok({}),
+    );
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+    fireEvent.click(await screen.findByRole('button', { name: /accept/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.queryByTestId('stamp-state')).toBeNull();
+    expect(screen.getByRole('button', { name: /accept/i })).toBeInTheDocument();
   });
 });
 

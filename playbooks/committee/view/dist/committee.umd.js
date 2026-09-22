@@ -140,10 +140,11 @@
 		const [lookupError, setLookupError] = (0, react.useState)(null);
 		const [actionError, setActionError] = (0, react.useState)(null);
 		const [busy, setBusy] = (0, react.useState)(false);
+		const [reloads, setReloads] = (0, react.useState)(0);
 		(0, react.useEffect)(() => {
 			let live = true;
 			apiGet(`/api/runs/${runId}/reductions?phase=decision`).then((rows) => {
-				const row = rows.find((r) => r.kind === "decision");
+				const row = [...rows].reverse().find((r) => r.kind === "decision");
 				if (!live) return;
 				if (row) setStamp({
 					id: row.id,
@@ -156,9 +157,9 @@
 			return () => {
 				live = false;
 			};
-		}, [runId]);
+		}, [runId, reloads]);
 		const decide = async (accept) => {
-			if (!stamp) return;
+			if (!stamp || busy) return;
 			setBusy(true);
 			setActionError(null);
 			try {
@@ -169,6 +170,7 @@
 				});
 			} catch (err) {
 				setActionError(err instanceof Error ? err.message : "Could not record the decision");
+				setReloads((n) => n + 1);
 			} finally {
 				setBusy(false);
 			}
@@ -195,7 +197,7 @@
 					},
 					children: "Accepting or rejecting stamps this reduction in the audit trail and emits an event. It settles no tickets and changes no run state — the committee’s decision holds no needs_human ticket — and it lands nothing and reverts nothing. It records that a person read the verdict."
 				}),
-				stamp.review_state !== "pending" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				stamp.review_state && stamp.review_state !== "pending" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "stamp-state",
 					style: note(stamp.review_state === "accepted" ? "ok" : "attention"),
 					children: [
