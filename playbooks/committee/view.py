@@ -29,6 +29,11 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
     and its phase name is compared against the static ``"decision"``, never
     parsed for a speaker (the runtime phase name is display-only, §5.6).
     """
+    # Nothing `reduce` writes reaches the out-of-contract shapes guarded below
+    # and in `_role`/`_as_list` -- they need a hand-edited database. But this
+    # runs inside a route, so a raise here is a 500 on a run's page rather than
+    # a view that says less than it hoped to.
+    reductions = reductions or []
     turns = [r for r in reductions if r.kind == "turn" and isinstance(r.json, dict)]
     decision = next(
         (r.json for r in reversed(reductions)
@@ -221,10 +226,10 @@ def _verdict(decision: dict | None) -> dict | None:
         return None
     return {
         "text": decision.get("verdict") or "",
-        "checks": [dict(c) for c in (decision.get("rechecks") or []) if isinstance(c, dict)],
+        "checks": [dict(c) for c in _as_list(decision.get("rechecks")) if isinstance(c, dict)],
         "artifact_intact": decision.get("artifact_intact"),
         "dropped_delegation": decision.get("dropped_delegation"),
-        "dropped_floor_requests": list(decision.get("dropped_floor_requests") or []),
+        "dropped_floor_requests": _as_list(decision.get("dropped_floor_requests")),
         # Criterion 8, carried as data rather than inferred from the chair's
         # prose: `_SIMULATION` is a sentence a chair could fail to write.
         "simulation": True,
@@ -252,6 +257,13 @@ def _artifacts(reductions: list[Reduction]) -> dict:
     revised = Path(latest["revised"]) if latest["revised"] else None
     revised_bytes = _size(revised)
     return {
+        # DELIBERATELY not symmetric with `revised` below. `original` is null
+        # only when no reduction named a path at all; a path that names nothing
+        # readable renders 0 bytes rather than null, because spec §6 types this
+        # non-nullable and the diff panel has a file name to show either way.
+        # The asymmetry is real: "0 bytes" is a claim and absence is not, so an
+        # original that has vanished reads as an empty file. `revised` cannot
+        # afford that -- a zero-byte revised copy is a state the run can reach.
         "original": (
             {"name": original.name, "bytes": max(_size(original), 0)}
             if original is not None else None
@@ -280,6 +292,16 @@ def _size(target: Path | None) -> int:
 
 
 # --- odds and ends ---------------------------------------------------------
+
+def _as_list(value: object) -> list:
+    """``value`` when it is a list, otherwise an empty one.
+
+    ``or []`` is not enough: a ``rechecks`` or ``dropped_floor_requests`` that
+    is a scalar is truthy and then not iterable, which is a ``TypeError`` out
+    of a route.
+    """
+    return list(value) if isinstance(value, list) else []
+
 
 def _role(doc: dict) -> str:
     """The speaker a reduction names, or "" for anything that is not a name.

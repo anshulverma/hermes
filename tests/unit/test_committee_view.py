@@ -15,6 +15,7 @@ capture and says so.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -437,13 +438,74 @@ def test_an_unattributable_turn_is_named_as_such_and_moves_nothing(run2):
     assert data["stances"] == {}
 
 
-def test_the_revised_copy_is_none_until_the_file_exists(run2, artifacts):
-    """`seed` records the revised path on every run, delegation or not, so the
-    path proves nothing about whether a copy was ever made."""
-    original, revised = artifacts
+def test_view_data_does_not_raise_on_a_reduction_no_reduce_would_write(run2):
+    """Four out-of-contract shapes, all reachable only by hand-editing the DB.
+
+    `view_data` runs inside a route, so a raise here is a 500 on a run's page.
+    Every one of these was a TypeError before: `reductions=None`; a `role` that
+    is unhashable; and `rechecks` / `dropped_floor_requests` as scalars, which
+    are truthy and then not iterable.
+    """
+    assert view_data(_run("open"), None)["timeline"] == []
+
+    hostile = [
+        Reduction(kind="turn", json=dict(run2[0].json, role=["senior_director"])),
+        Reduction(kind="turn", json=dict(run2[1].json, role={"role": "owner"})),
+        Reduction(kind="decision", json=dict(
+            run2[-1].json, rechecks=7, dropped_floor_requests="tpm")),
+    ]
+
+    data = view_data(_run("decision"), hostile)
+
+    assert [entry["name"] for entry in data["timeline"]] == ["unattributed"] * 2
+    assert data["verdict"]["checks"] == []
+    assert data["verdict"]["dropped_floor_requests"] == []
+
+
+def _gone(revised: Path) -> None:
     revised.unlink()
 
-    artifacts_block = view_data(_run("decision"), run2)["artifacts"]
+
+def _a_directory(revised: Path) -> None:
+    revised.unlink()
+    revised.mkdir()
+
+
+def _empty(revised: Path) -> None:
+    revised.write_bytes(b"")
+
+
+def _unreachable(revised: Path) -> None:
+    revised.unlink()
+    revised.parent.chmod(0o000)
+
+
+@pytest.mark.parametrize("prepare, expected", [
+    # `seed` records the revised path on EVERY run, delegation or not, so the
+    # path proves nothing about whether a copy was ever made.
+    (_gone, None),
+    # Without `_size`'s `is_file()` this renders {"bytes": 4096} -- a directory
+    # reported as a revised copy 4 KB long.
+    (_a_directory, None),
+    # The whole reason `_size` answers -1 rather than 0: a zero-byte revised
+    # copy is a real state and must not read as "no copy was ever made".
+    (_empty, {"name": "federation-future.md", "bytes": 0}),
+    # And the one path that reaches `_size`'s `except OSError`: `is_file()`
+    # raises PermissionError rather than answering False. Answering 0 there
+    # would render a revised copy that cannot even be looked at.
+    (_unreachable, None),
+])
+def test_the_revised_copy_is_none_unless_a_readable_file_is_really_there(
+    run2, artifacts, prepare, expected
+):
+    original, revised = artifacts
+    if prepare is _unreachable and os.geteuid() == 0:
+        pytest.skip("root traverses a 0o000 directory, so is_file() never raises")
+    prepare(revised)
+    try:
+        artifacts_block = view_data(_run("decision"), run2)["artifacts"]
+    finally:
+        revised.parent.chmod(0o755)
 
     assert artifacts_block["original"] == {"name": original.name, "bytes": 11397}
-    assert artifacts_block["revised"] is None
+    assert artifacts_block["revised"] == expected

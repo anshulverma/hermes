@@ -2818,6 +2818,18 @@ def test_a_turn_reduction_carries_a_stance_and_absent_stays_absent():
         _NamedSite("local"),
     )
 
+    # An unattributable turn files no stance. Without the `role and` guard this
+    # grows a "" key, which the roster surface renders as a nameless persona.
+    s.update(current_role="", current_turn=9)
+    orphan = pb.reduce(
+        run, "t09-nobody",
+        [_finding(run, f"{run.id}/t09-nobody",
+                  _turn_answer("Who am I?", stance="drop it"))],
+        _NamedSite("local"),
+    )[0]
+    assert orphan.json["stance"] == "drop it"  # the reduction still records it
+    assert "" not in s["stances"]
+
     assert s["stances"] == {
         "senior_director": [
             {"turn": 1, "text": "against until the dates are funded"},
