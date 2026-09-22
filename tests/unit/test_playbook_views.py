@@ -4,6 +4,7 @@ tests.unit.test_playbook_views — the playbook view seam, playbook-agnostic.
 A stub playbook stands in for the committee: the seam is two duck-typed methods
 and the server must not care which playbook supplies them.
 """
+import os
 from pathlib import Path
 
 import pytest
@@ -188,9 +189,9 @@ def test_artifact_route_reads_the_path_off_the_newest_reduction(
                    {"artifact": str(original), "revised": str(revised)})
 
     assert client.get(f"/api/runs/{run_id}/view/artifact?which=original").json() == {
-        "text": "the original\n"}
+        "text": "the original\n", "truncated": False}
     assert client.get(f"/api/runs/{run_id}/view/artifact?which=revised").json() == {
-        "text": "the revised copy\n"}
+        "text": "the revised copy\n", "truncated": False}
 
 
 def test_artifact_route_400s_an_unknown_which(client, temp_home, viewed):
@@ -213,23 +214,158 @@ def test_artifact_route_400s_an_unknown_which(client, temp_home, viewed):
 def test_artifact_route_404s_a_revised_copy_that_does_not_exist(
     client, temp_home, viewed, tmp_path
 ):
+    """The original is READABLE here on purpose: serving it when the operator
+    asked for the revised copy is exactly the confusion spec §8 says changed a
+    live verdict, and with an unreadable original that fallback 404s anyway."""
+    original = tmp_path / "proposal.md"
+    original.write_text("the original\n", encoding="utf-8")
     run_id = _run_row(temp_home, "run-view", "stubview")
-    _reduction_row(temp_home, run_id,
-                   {"artifact": str(tmp_path / "gone.md"), "revised": ""})
+    _reduction_row(temp_home, run_id, {"artifact": str(original), "revised": ""})
+
+    response = client.get(f"/api/runs/{run_id}/view/artifact?which=revised")
+    assert response.status_code == 404
+    assert "the original" not in response.text
+
+
+def test_artifact_route_404s_a_playbook_without_a_view(
+    client, temp_home, blind, tmp_path
+):
+    """The other side of the kill-switch test: a readable artifact, and the
+    route still refuses because this playbook ships no view."""
+    art = tmp_path / "blind.md"
+    art.write_text("readable\n", encoding="utf-8")
+    run_id = _run_row(temp_home, "run-blind", "stubblind")
+    _reduction_row(temp_home, run_id, {"artifact": str(art), "revised": str(art)})
+
+    assert client.get(
+        f"/api/runs/{run_id}/view/artifact?which=original").status_code == 404
+
+
+def test_artifact_route_refuses_anything_that_is_not_a_regular_file(
+    client, temp_home, viewed, tmp_path
+):
+    """A FIFO blocks the worker thread until somebody writes to it -- measured,
+    killed at 45s -- and a character device is an unbounded read. The route
+    stats before it reads, so both are simply "no artifact"."""
+    fifo = tmp_path / "pipe.md"
+    os.mkfifo(fifo)
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    _reduction_row(temp_home, run_id, {"artifact": str(fifo), "revised": str(tmp_path)})
+
+    assert client.get(
+        f"/api/runs/{run_id}/view/artifact?which=original").status_code == 404
+    # ...and a directory, which `read_text` raises IsADirectoryError on.
     assert client.get(
         f"/api/runs/{run_id}/view/artifact?which=revised").status_code == 404
 
 
-def test_kill_switch_404s_all_three_routes_and_clears_has_view(
-    client, temp_home, viewed, monkeypatch
+def test_artifact_route_truncates_a_file_larger_than_the_cap(
+    client, temp_home, viewed, tmp_path
 ):
+    """The committee's artifact is an operator-chosen file of unbounded size and
+    the revised copy is a byte copy of it, so "large" needs no malice and no
+    bug. The response says it was cut rather than lying by omission."""
+    from server.app import ARTIFACT_MAX_CHARS
+
+    big = tmp_path / "big.md"
+    big.write_text("x" * (ARTIFACT_MAX_CHARS + 500), encoding="utf-8")
     run_id = _run_row(temp_home, "run-view", "stubview")
+    _reduction_row(temp_home, run_id, {"artifact": str(big)})
+
+    body = client.get(f"/api/runs/{run_id}/view/artifact?which=original").json()
+    assert body["truncated"] is True
+    assert len(body["text"]) == ARTIFACT_MAX_CHARS
+
+
+def test_kill_switch_404s_all_three_routes_and_clears_has_view(
+    client, temp_home, viewed, monkeypatch, tmp_path
+):
+    """The artifact must be one the route WOULD serve, or the 404 proves nothing.
+
+    Without a reduction naming a readable file this route 404s on "no original
+    artifact" whether the switch is on or off, and three mutations to the route
+    -- bypassing the switch, deleting the has-view gate outright, and falling
+    back to the original when `revised` names nothing -- all survive.
+    """
+    art = tmp_path / "served.md"
+    art.write_text("would be served\n", encoding="utf-8")
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    _reduction_row(temp_home, run_id, {"artifact": str(art), "revised": str(art)})
+    assert client.get(
+        f"/api/runs/{run_id}/view/artifact?which=revised").status_code == 200
+
     monkeypatch.setenv("HERMES_PLAYBOOK_VIEWS", "0")
     assert client.get("/api/playbooks/stubview/view.js").status_code == 404
     assert client.get(f"/api/runs/{run_id}/view").status_code == 404
     assert client.get(
         f"/api/runs/{run_id}/view/artifact?which=original").status_code == 404
+    assert client.get(
+        f"/api/runs/{run_id}/view/artifact?which=revised").status_code == 404
+    # Including a bad `which`: the gate is above the enum check, so a server
+    # with the feature off never answers 400 and confirms the route is live.
+    assert client.get(
+        f"/api/runs/{run_id}/view/artifact?which=evil").status_code == 404
     assert client.get(f"/api/runs/{run_id}").json()["has_view"] is False
+
+
+@pytest.mark.parametrize("value", ["0", "false", "FALSE", "No", " off "])
+def test_every_falsy_kill_switch_value_turns_the_feature_off(
+    client, temp_home, viewed, monkeypatch, value
+):
+    """An operator reaching for a kill switch writes `false` as readily as `0`,
+    and getting the feature fully ENABLED for it is the silent footgun."""
+    monkeypatch.setenv("HERMES_PLAYBOOK_VIEWS", value)
+    assert client.get("/api/playbooks/stubview/view.js").status_code == 404
+
+
+@pytest.mark.parametrize("value", ["", "  ", "1", "true", "00"])
+def test_a_value_that_is_not_falsy_leaves_the_feature_on(
+    client, temp_home, viewed, monkeypatch, value
+):
+    """Empty is NOT off: `-e HERMES_PLAYBOOK_VIEWS` with nothing behind it is a
+    variable the operator did not set, and must read the way unset does."""
+    monkeypatch.setenv("HERMES_PLAYBOOK_VIEWS", value)
+    assert client.get("/api/playbooks/stubview/view.js").status_code == 200
+
+
+def test_a_broken_view_seam_costs_the_run_page_nothing(client, temp_home):
+    """Acceptance criterion 1 says an absent seam changes nothing; a BROKEN seam
+    must be the same as an absent one, not a dead run page. `GET /api/runs/{id}`
+    is a pre-existing core route that could not 500 before the seam existed."""
+    class Exploding:
+        name = "stubboom"
+        phases = ["open"]
+
+        def view_asset(self):
+            raise RuntimeError("the view seam is broken")
+
+        def view_data(self, run, reductions):
+            return {}
+
+    class NotAPath:
+        name = "stubjunk"
+        phases = ["open"]
+
+        def view_asset(self):
+            return 12345
+
+        def view_data(self, run, reductions):
+            return {}
+
+    from engine import playbook as playbook_module
+    playbook_module.register("stubboom", Exploding())
+    playbook_module.register("stubjunk", NotAPath())
+    try:
+        for name in ("stubboom", "stubjunk"):
+            run_id = _run_row(temp_home, f"run-{name}", name)
+            response = client.get(f"/api/runs/{run_id}")
+            assert response.status_code == 200, name
+            assert response.json()["has_view"] is False, name
+            assert client.get(
+                f"/api/playbooks/{name}/view.js").status_code == 404, name
+    finally:
+        playbook_module._REGISTRY.pop("stubboom", None)
+        playbook_module._REGISTRY.pop("stubjunk", None)
 
 
 def test_non_loopback_gates_all_three_routes(temp_home, viewed):

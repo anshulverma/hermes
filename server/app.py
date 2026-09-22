@@ -47,20 +47,37 @@ def is_loopback(bind: str | None) -> bool:
 # past loopback can stop executing playbook-authored JS in the browser (spec §9).
 VIEWS_ENV = "HERMES_PLAYBOOK_VIEWS"
 
+# All-or-nothing, which is what §9 demands: no value half-disables anything.
+# A set rather than the literal "0" because an operator reaching for a kill
+# switch writes `false` or `off` as readily as `0`, and getting the feature
+# fully ENABLED for their trouble is a silent footgun. The empty string is NOT
+# here: `-e HERMES_PLAYBOOK_VIEWS` with nothing behind it is a variable an
+# operator did not set, and must read as unset does.
+VIEWS_OFF = frozenset({"0", "false", "no", "off"})
+
+# An artifact is read whole into a JSON response, so the read is bounded twice:
+# the path must name a regular file (a FIFO blocks the worker thread forever;
+# /dev/zero is a MemoryError), and the read stops here. A playbook's artifact is
+# typically an operator-chosen file of unbounded size, so "large" needs no
+# malice and no bug. Over the cap the response says so rather than lying by
+# omission.
+ARTIFACT_MAX_CHARS = 2 * 1024 * 1024
+
 
 def view_playbook(name: str):
     """The registered playbook behind ``name``'s view, or None if there is none.
 
     One function so the four call sites cannot disagree about what "has a view"
     means. None covers every way a view can be absent: the kill switch, a name
-    that is not in the registry, a playbook without the seam, and a seam whose
-    built asset is not on disk.
+    that is not in the registry, a playbook without the seam, a seam whose built
+    asset is not on disk, and a seam that raises or hands back something that is
+    not a path.
 
     The name is a registry key and never a path component, which is the whole
     traversal defence: a name carrying ``../`` misses the registry and gets the
     same None as any other unknown name.
     """
-    if os.environ.get(VIEWS_ENV) == "0":
+    if (os.environ.get(VIEWS_ENV) or "").strip().casefold() in VIEWS_OFF:
         return None
     from engine import playbook as playbook_module
     try:
@@ -71,8 +88,15 @@ def view_playbook(name: str):
         return None
     if not callable(getattr(obj, "view_data", None)):
         return None
-    asset = obj.view_asset()
-    if asset is None or not Path(asset).exists():
+    # A BROKEN seam is an absent seam. This is the one call into playbook code
+    # made from `GET /api/runs/{id}`, a core route that could not 500 before the
+    # seam existed -- a view_asset that raises, or returns something that is not
+    # a path, must cost that run's page nothing.
+    try:
+        asset = obj.view_asset()
+        if asset is None or not Path(asset).exists():
+            return None
+    except Exception:
         return None
     return obj
 
@@ -2084,12 +2108,6 @@ def create_app(bind: str | None = None) -> FastAPI:
         ``which`` therefore chooses between two literal dict keys and is never
         itself any part of a path.
         """
-        if which not in ("original", "revised"):
-            raise HTTPException(
-                status_code=400,
-                detail=f"which must be 'original' or 'revised', not {which!r}",
-            )
-        key = "artifact" if which == "original" else "revised"
         home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
@@ -2099,21 +2117,41 @@ def create_app(bind: str | None = None) -> FastAPI:
             ).fetchone()
             if row is None:
                 raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+            # The gate goes ABOVE the `which` check: with the kill switch on,
+            # all three routes 404 (criterion 3), and a 400 here would tell a
+            # caller the route is live on a server that has turned it off.
             if view_playbook(row[0]) is None:
                 raise HTTPException(status_code=404, detail=f"Run {run_id!r} has no view")
+            if which not in ("original", "revised"):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"which must be 'original' or 'revised', not {which!r}",
+                )
             rows = conn.execute(
                 "SELECT json FROM reductions WHERE run_id=? ORDER BY id DESC", (run_id,)
             ).fetchall()
         finally:
             conn.close()
 
+        key = "artifact" if which == "original" else "revised"
         for (raw,) in rows:
             path = json.loads(raw).get(key)
             if isinstance(path, str) and path:
                 try:
-                    return {"text": Path(path).read_text(encoding="utf-8", errors="replace")}
-                except OSError:
+                    target = Path(path)
+                    # A regular file and nothing else. `read_text` on a FIFO
+                    # never returns -- it blocks this worker thread for as long
+                    # as nobody writes -- and on /dev/zero it is a MemoryError.
+                    if not target.is_file():
+                        break
+                    with target.open(encoding="utf-8", errors="replace") as handle:
+                        text = handle.read(ARTIFACT_MAX_CHARS + 1)
+                except (OSError, ValueError):
                     break
+                return {
+                    "text": text[:ARTIFACT_MAX_CHARS],
+                    "truncated": len(text) > ARTIFACT_MAX_CHARS,
+                }
         raise HTTPException(
             status_code=404, detail=f"Run {run_id!r} has no {which} artifact"
         )
