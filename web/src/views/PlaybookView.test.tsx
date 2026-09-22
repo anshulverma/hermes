@@ -24,6 +24,14 @@ async function injectedScript(playbook: string): Promise<HTMLScriptElement> {
   });
 }
 
+/** Every <script> the loader has injected for `playbook` so far. */
+const scriptCount = (playbook: string) =>
+  document.querySelectorAll(`script[src^="/api/playbooks/${playbook}/view.js"]`).length;
+
+/** Renders whatever `data.kind` the loader handed it -- enough to tell two
+ *  runs' payloads apart on screen. */
+const namesItsData = ({ data }: any) => <div>payload {data.kind}</div>;
+
 describe('PlaybookView', () => {
   beforeEach(() => {
     mockFetch.mockReset();
@@ -157,5 +165,170 @@ describe('PlaybookView', () => {
     } finally {
       quiet.mockRestore();
     }
+  });
+
+  it('clears a caught throw when the operator retries', async () => {
+    let explode = true;
+    (window as any).HermesView_flaky_pb = () => {
+      if (explode) throw new Error('boom on turn 3');
+      return <div>rendered fine</div>;
+    };
+
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { rerender } = render(
+        <PlaybookView runId="run-2" playbook="flaky_pb" hasView liveTick={1} />,
+      );
+      const script = await injectedScript('flaky_pb');
+      await act(async () => {
+        script.dispatchEvent(new Event('load'));
+      });
+      await waitFor(() => {
+        expect(screen.getByText('The flaky_pb view failed to render')).toBeInTheDocument();
+      });
+
+      // A poll does NOT clear it -- keying the boundary on liveTick would
+      // remount the view every tick and lose its scroll and expansion state.
+      explode = false;
+      rerender(<PlaybookView runId="run-2" playbook="flaky_pb" hasView liveTick={2} />);
+      await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+      expect(screen.getByText('The flaky_pb view failed to render')).toBeInTheDocument();
+
+      // The retry does.
+      await act(async () => {
+        screen.getByTestId('playbook-view-retry').click();
+      });
+      await waitFor(() => expect(screen.getByText('rendered fine')).toBeInTheDocument());
+    } finally {
+      quiet.mockRestore();
+    }
+  });
+
+  // --- the module's own load-bearing claims (finding 7.4) -------------------
+
+  it('injects one <script> per playbook, not one per mount', async () => {
+    (window as any).HermesView_once_pb = namesItsData;
+
+    const first = render(<PlaybookView runId="run-2" playbook="once_pb" hasView />);
+    const script = await injectedScript('once_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('load'));
+    });
+    await waitFor(() => expect(screen.getByText('payload committee')).toBeInTheDocument());
+    first.unmount();
+
+    render(<PlaybookView runId="run-9" playbook="once_pb" hasView />);
+    await waitFor(() => expect(screen.getByText('payload committee')).toBeInTheDocument());
+    expect(scriptCount('once_pb')).toBe(1);
+  });
+
+  it('re-injects after a failed load, so the next mount retries', async () => {
+    const first = render(<PlaybookView runId="run-2" playbook="evict_pb" hasView />);
+    const script = await injectedScript('evict_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('error'));
+    });
+    await waitFor(() => expect(screen.getByText('Error loading playbook view')).toBeInTheDocument());
+    first.unmount();
+
+    (window as any).HermesView_evict_pb = namesItsData;
+    render(<PlaybookView runId="run-2" playbook="evict_pb" hasView />);
+    await waitFor(() => expect(scriptCount('evict_pb')).toBe(2));
+    await act(async () => {
+      document
+        .querySelectorAll('script[src^="/api/playbooks/evict_pb/view.js"]')[1]
+        .dispatchEvent(new Event('load'));
+    });
+    await waitFor(() => expect(screen.getByText('payload committee')).toBeInTheDocument());
+  });
+
+  it('drops a superseded in-flight response rather than clobbering the new run', async () => {
+    (window as any).HermesView_race_pb = namesItsData;
+    const pending: Array<(value: any) => void> = [];
+    mockFetch.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+
+    const { rerender } = render(<PlaybookView runId="run-A" playbook="race_pb" hasView />);
+    const script = await injectedScript('race_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('load'));
+    });
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    rerender(<PlaybookView runId="run-B" playbook="race_pb" hasView />);
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    // B answers, then A's superseded request lands second.
+    await act(async () => {
+      pending[1]({ ok: true, json: async () => ({ kind: 'B' }) });
+      pending[0]({ ok: true, json: async () => ({ kind: 'A' }) });
+    });
+
+    await waitFor(() => expect(screen.getByText('payload B')).toBeInTheDocument());
+    expect(screen.queryByText('payload A')).toBeNull();
+  });
+
+  it('drops a superseded in-flight FAILURE rather than reddening the new run', async () => {
+    (window as any).HermesView_race2_pb = namesItsData;
+    const pending: Array<(value: any) => void> = [];
+    mockFetch.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+
+    const { rerender } = render(<PlaybookView runId="run-A" playbook="race2_pb" hasView />);
+    const script = await injectedScript('race2_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('load'));
+    });
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    rerender(<PlaybookView runId="run-B" playbook="race2_pb" hasView />);
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    await act(async () => {
+      pending[1]({ ok: true, json: async () => ({ kind: 'B' }) });
+      pending[0]({ ok: false, status: 500, json: async () => ({ detail: 'run A is gone' }) });
+    });
+
+    await waitFor(() => expect(screen.getByText('payload B')).toBeInTheDocument());
+    expect(screen.queryByText('Error loading playbook view')).toBeNull();
+  });
+
+  it('re-fetches the data on a liveTick bump', async () => {
+    (window as any).HermesView_tick_pb = namesItsData;
+
+    const { rerender } = render(
+      <PlaybookView runId="run-2" playbook="tick_pb" hasView liveTick={1} />,
+    );
+    const script = await injectedScript('tick_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('load'));
+    });
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+
+    rerender(<PlaybookView runId="run-2" playbook="tick_pb" hasView liveTick={2} />);
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+    expect(scriptCount('tick_pb')).toBe(1);
+  });
+
+  it('never re-injects the asset on a tick, even after the load failed', async () => {
+    // Finding 7.1, measured: with the asset load sharing the data effect, a
+    // failing bundle evicted the cache and every poll re-injected -- five dead
+    // tags and two GETs a tick, unbounded while the tab is open.
+    const { rerender } = render(
+      <PlaybookView runId="run-2" playbook="storm_pb" hasView liveTick={1} />,
+    );
+    const script = await injectedScript('storm_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('error'));
+    });
+    await waitFor(() => expect(screen.getByText('Error loading playbook view')).toBeInTheDocument());
+
+    for (let tick = 2; tick <= 6; tick++) {
+      rerender(<PlaybookView runId="run-2" playbook="storm_pb" hasView liveTick={tick} />);
+      await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(tick));
+    }
+
+    expect(scriptCount('storm_pb')).toBe(1);
+    // And the card is still the card -- a successful poll must not clear a
+    // standing asset failure.
+    expect(screen.getByText('Error loading playbook view')).toBeInTheDocument();
   });
 });

@@ -15,7 +15,7 @@ import { Component, useCallback, useEffect, useState } from 'react';
 import type { ComponentType, ReactNode } from 'react';
 import { fetchViewData } from '../api/client';
 import { getToken, isRemote } from '../api/auth';
-import { EmptyState } from '../ds';
+import { Button, EmptyState } from '../ds';
 import { LoadingOverlay } from '../components/Spinner';
 
 /** What a playbook's own component is handed. */
@@ -68,43 +68,79 @@ function loadViewScript(playbook: string): Promise<void> {
 export default function PlaybookView({ runId, playbook, hasView, liveTick }: PlaybookViewProps) {
   const [View, setView] = useState<ComponentType<PlaybookViewComponentProps> | null>(null);
   const [data, setData] = useState<Record<string, any> | null>(null);
-  const [error, setError] = useState<Error | null>(null);
+  // Two slots, not one: a poll that succeeds must not clear a standing asset
+  // failure, and an asset failure must not be cleared by the next tick's data.
+  const [assetError, setAssetError] = useState<Error | null>(null);
+  const [dataError, setDataError] = useState<Error | null>(null);
   const [reloads, setReloads] = useState(0);
 
   const refetch = useCallback(() => setReloads((n) => n + 1), []);
 
+  // The asset, keyed on the playbook and an EXPLICIT retry -- never on runId and
+  // never on liveTick. Sharing one effect with the data fetch meant a failed
+  // load evicted the cache and every poll tick then re-injected a <script>:
+  // five dead tags and two GETs per tick after five ticks, unbounded while the
+  // tab is open. `reloads` is in here (the reviewer's sketch had only
+  // [hasView, playbook]) because otherwise the error card's Retry is a dead
+  // button for the one failure it is most likely to be shown for.
   useEffect(() => {
     if (!hasView) return;
     let live = true;
-    setError(null);
-    Promise.all([loadViewScript(playbook), fetchViewData(runId)])
-      .then(([, payload]) => {
+    setAssetError(null);
+    loadViewScript(playbook)
+      .then(() => {
         if (!live) return;
         const found = (window as any)[`HermesView_${playbook}`];
         if (typeof found !== 'function') {
-          setError(
+          setAssetError(
             new Error(`The ${playbook} view loaded but registered no component on window.HermesView_${playbook}.`),
           );
           return;
         }
         // Set it through the updater form: React calls a bare function value.
         setView(() => found as ComponentType<PlaybookViewComponentProps>);
-        setData(payload);
       })
       .catch((err) => {
-        if (live) setError(err as Error);
+        if (live) setAssetError(err as Error);
       });
     return () => {
       live = false;
     };
-  }, [hasView, playbook, runId, liveTick, reloads]);
+  }, [hasView, playbook, reloads]);
+
+  // The data, which is what a tick is for.
+  useEffect(() => {
+    if (!hasView) return;
+    let live = true;
+    setDataError(null);
+    fetchViewData(runId)
+      .then((payload) => {
+        if (live) setData(payload);
+      })
+      .catch((err) => {
+        if (live) setDataError(err as Error);
+      });
+    return () => {
+      live = false;
+    };
+  }, [hasView, runId, liveTick, reloads]);
 
   if (!hasView) return null;
 
+  const error = assetError ?? dataError;
   if (error) {
     return (
       <div style={{ padding: 32 }}>
-        <EmptyState title="Error loading playbook view" description={error.message} icon="alert-circle" />
+        <EmptyState
+          title="Error loading playbook view"
+          description={error.message}
+          icon="alert-circle"
+          action={
+            <Button onClick={refetch} data-testid="playbook-view-retry">
+              Retry
+            </Button>
+          }
+        />
       </div>
     );
   }
@@ -121,14 +157,18 @@ export default function PlaybookView({ runId, playbook, hasView, liveTick }: Pla
 
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
-      <ViewErrorBoundary playbook={playbook}>
+      {/* Keyed so an explicit retry clears a caught throw: `failed` is set once
+          and a boundary has no other way back. NOT keyed on liveTick -- that
+          would remount the view on every poll and lose its scroll and
+          expansion state. */}
+      <ViewErrorBoundary key={`${playbook}:${runId}:${reloads}`} playbook={playbook} onRetry={refetch}>
         <View runId={runId} data={data} refetch={refetch} />
       </ViewErrorBoundary>
     </div>
   );
 }
 
-type BoundaryProps = { playbook: string; children: ReactNode };
+type BoundaryProps = { playbook: string; onRetry: () => void; children: ReactNode };
 type BoundaryState = { failed: Error | null };
 
 /**
@@ -151,6 +191,11 @@ class ViewErrorBoundary extends Component<BoundaryProps, BoundaryState> {
           title={`The ${this.props.playbook} view failed to render`}
           description={this.state.failed.message}
           icon="alert-circle"
+          action={
+            <Button onClick={this.props.onRetry} data-testid="playbook-view-retry">
+              Retry
+            </Button>
+          }
         />
       );
     }
