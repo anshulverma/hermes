@@ -60,6 +60,13 @@ LOCAL_MOUNT := $(if $(wildcard $(LOCAL_DIR)/.),-e HERMES_LOCAL_DIR=/hermes-local
 # false, no tab appears, and the phase rail falls back to deriving phases from
 # tickets. `hermes run` has always needed this variable; the server never got it.
 # Empty is valid -- `make up PLAYBOOK_MODULES=` starts a server with none.
+#
+# It is a TRADE, not a free win. Setting it also collapses the Run tab's phase
+# rail for a committee run to the playbook's declared phases, `open`/`decision`
+# -- so all twenty turn phases vanish from that rail. Unset, the server derives
+# the rail from tickets and shows every turn. The turn-by-turn reading now lives
+# on the Playbook tab, which is the better home for it, but the Run tab is
+# strictly worse than it was and that is worth knowing before you go looking.
 PLAYBOOK_MODULES ?= playbooks.committee
 PROXY  ?= with-proxy
 URL    := http://127.0.0.1:$(PORT)
@@ -100,6 +107,7 @@ ui-test-committee: ## committee view end-to-end in a real browser (needs `make b
 	  HERMES_HOME=$(E2E_HOME) LOCAL_DIR=$(E2E_HOME)/local
 	@$(MAKE) --no-print-directory health PORT=$(E2E_PORT)
 	@cd web && HERMES_URL=http://127.0.0.1:$(E2E_PORT) HERMES_E2E_HOME=$(E2E_HOME) \
+	  HERMES_E2E_SERVER_HOME=/hermes-home \
 	  npx playwright test committee-view; \
 	  status=$$?; podman rm -f $(E2E_NAME) >/dev/null 2>&1 || true; exit $$status
 

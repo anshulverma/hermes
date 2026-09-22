@@ -164,6 +164,20 @@ The server must have the playbook registered, so the control-plane process needs
 `PLAYBOOK_MODULES` variable); a server started by hand does not, and an unregistered playbook is a
 404 on the view routes and `has_view: false` — no tab, no error.
 
+Setting it is a trade. A registered playbook also means `GET /api/runs/{id}` reports the playbook's
+*declared* phases, so the **Run tab's phase rail collapses to `open` / `decision`** and the twenty
+turn phases disappear from it. Unregistered, the server derives that rail from tickets and lists
+every turn. The turn-by-turn reading now lives on the Playbook tab — a better home for it, with
+names and prose attached — but the Run tab is strictly worse than it was before the view existed.
+
+**Runs created before the view renders as a legacy run, and says so.** `ended`, the artifact paths,
+the per-turn `stance` and the turn body are all carried on the reductions, and a run reduced by an
+older build has none of them. The view does not guess: the progress card says *"This run predates
+the committee view: its reductions never recorded why the meeting ended, so the record does not
+say"*, each persona reads *"stance not recorded — this run predates the signal"*, and the diff
+panel says no artifact path was recorded rather than that no artifact exists. Re-running is the
+only way to get the full surface for an old run.
+
 **`HERMES_PLAYBOOK_VIEWS=0` turns the feature off entirely.** All three view routes 404 and
 `has_view` is false on every run, so no tab appears and no view data is served. There is no partial
 setting: half-disabled is a worse state than either end. The comparison is against the literal
