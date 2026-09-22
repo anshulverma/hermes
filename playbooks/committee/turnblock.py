@@ -167,6 +167,11 @@ def instruction(owner: bool = False) -> str:
         "```\n\n"
         "Set request_floor: yes only if you need a second turn after hearing "
         f"the others; the chair grants the floor in request order. {_STANCE_SENTENCE}"
-        "Omit the line if you do not mean it: an omitted line is read as "
-        "unstated, never as yes."
+        # "the line" dangled: it sat immediately after an imperative to ADD a
+        # stance line, so a model could read it as permission to omit the stance
+        # it had just been told to write -- and "never as yes" is meaningless
+        # for free text. Name the line it is about, the way the owner branch's
+        # "Omit a line you do not mean" does.
+        "Omit the request_floor line if you do not mean it: an omitted line is "
+        "read as unstated, never as yes."
     )

@@ -297,6 +297,35 @@ _GUARDRAIL_EDIT = (
     "delegated and leave the rest of it alone."
 )
 
+# The first live run: the chair inspected the REPOSITORY file, found it
+# unchanged, called six landed delegations "zero bytes" and ruled partly against
+# the proposal on that reading. All six had landed — the revised copy went
+# 11,397 -> 19,100 bytes and every re-check reported APPLIED.
+#
+# One sentence to EVERY speaker, not just the chair, because the chair did not
+# mint that reading: the thread has it minted by reviewers five turns earlier
+# and the chair citing them. The one persona that got it right — "this review
+# writes only the revised copy" — is the one whose goal already names the
+# revised copy, and the reviewer and owner goals never mention it at all.
+#
+# An unchanged original is criterion 6, the guarantee _GUARDRAIL exists to keep.
+# But the guardrail tells a speaker what IT may not do; it does not say how to
+# read a repository nobody was allowed to touch. Say that outright, before
+# anyone infers a broken edit mechanism from a working one.
+#
+# Present tense on purpose. "every delegated edit LANDED" is a claim about THIS
+# run that the goal cannot know: `_reduce_decision` appends `DID NOT APPLY` for
+# a re-check that failed, and it appends it UNDER the chair's prose, so the
+# chair is told the edits landed while the footer beneath its own verdict says
+# one did not. That is the same defect as the one this paragraph fixes, pointed
+# the other way.
+_UNCHANGED_ORIGINAL = (
+    "The original artifact is never modified: every delegated edit lands in a "
+    "separate revised copy, and that is by design — an unchanged original is "
+    "the guarantee holding, not an edit that failed. What this committee "
+    "produces is a recommendation plus that copy, not a landed change."
+)
+
 _FLOOR_OWNER = (
     "You wrote this proposal and you are accountable for it. Answer the member "
     "who spoke last, directly and in your own voice: concede what their "
@@ -374,20 +403,10 @@ def goal(
             "The revised copy, which exists only if the committee delegated an "
             f"edit: {revised}\n"
             f"The whole thread: {thread}\n\n"
-            # The first live run: the chair checked the repository file, found
-            # it unchanged, called six landed delegations "zero bytes" and ruled
-            # partly against the proposal on that reading. An unmodified
-            # original is criterion 6 (`docs/specs/committee-playbook.md:154`),
-            # the guarantee _GUARDRAIL below exists to keep -- but the guardrail
-            # tells the chair what IT may not do, not how to read a repository
-            # that no one was allowed to touch. Say it outright, before the
-            # chair infers a broken edit mechanism from a working one.
-            "The original artifact is never modified: every delegated edit "
-            "landed in the revised copy named above, and that is by design — "
-            "an unchanged original is the guarantee holding, not an edit that "
-            "failed. What this committee produces is a recommendation plus "
-            "that copy, not a landed change. Judge the delegated edits by the "
-            "copy.\n\n"
+            # The chair is the one speaker handed the revised copy's path, and
+            # the one asked to weigh what is in it.
+            f"{_UNCHANGED_ORIGINAL} Judge the delegated edits by the copy "
+            "named above.\n\n"
             # No "weigh what was said, name who is owed an answer, say what
             # would change your mind": that is a review procedure, and spec 9
             # puts methodology behind HERMES_COMMITTEE_DRIVER. The two carve-outs
@@ -414,6 +433,7 @@ def goal(
             f"The thread the request came out of: {thread}\n\n"
             "The owner delegated this to you: "
             f"{clip(action, _turnblock.ACTION_MAX)}\n\n"
+            f"{_UNCHANGED_ORIGINAL}\n\n"
             f"{_GUARDRAIL_EDIT}\n\n"
             f"{_DONE_EDIT.format(revised=revised)}"
         )
@@ -430,6 +450,7 @@ def goal(
         "appended in order. Your answer becomes the next entry -- Hermes "
         "appends it for you. Read the artifact and the thread first.\n\n"
         f"{floor}\n\n"
+        f"{_UNCHANGED_ORIGINAL}\n\n"
         f"{_GUARDRAIL}\n\n"
         f"{instruction}\n\n"
         f"{_DONE_TURN}"

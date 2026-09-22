@@ -116,12 +116,16 @@ def test_a_delegation_with_an_empty_action_carries_no_action():
 
 
 def test_an_action_longer_than_the_cap_is_clipped():
-    action = T.parse(_fenced("action: " + "x" * 500))["action"]
+    # A distinguishable head: with a payload of one repeated character `[:200]`
+    # and `[-200:]` are the same string, and clipping from the wrong end
+    # survives the whole suite.
+    action = T.parse(_fenced("action: keep-this " + "x" * 500))["action"]
 
     # Pinned literally: cast.py reads ACTION_MAX into the 3600-character goal
     # budget, so a silent change here silently changes what a worker is handed.
     assert T.ACTION_MAX == 200
     assert len(action) == T.ACTION_MAX
+    assert action.startswith("keep-this ")
 
 
 def test_a_junk_flag_value_is_dropped_rather_than_read_as_no():
@@ -159,13 +163,15 @@ def test_a_stance_nobody_stated_stays_absent():
 
 
 def test_a_stance_longer_than_the_cap_is_clipped():
-    stance = T.parse(_fenced("stance: " + "y" * 500))["stance"]
+    # A distinguishable head, for the reason the action test gives.
+    stance = T.parse(_fenced("stance: keep-this " + "y" * 500))["stance"]
 
     # Pinned literally: a stance rides in the same 3600-character goal budget
     # an action does, so a silent change here silently changes what a worker
     # is handed.
     assert T.STANCE_MAX == 200
     assert len(stance) == T.STANCE_MAX
+    assert stance.startswith("keep-this ")
 
 
 # --- turnblock: stripping ------------------------------------------------
@@ -526,20 +532,59 @@ def test_chair_goal_is_the_decision_and_calls_the_verdict_a_simulation():
         assert procedure not in g, procedure
 
 
-def test_chair_goal_says_an_unchanged_original_is_the_design_not_a_failure():
-    """The one defect the whole test suite could not find, pinned.
+@pytest.mark.parametrize("role", list(cast.CAST) + [cast.CHAIR])
+def test_every_goal_says_an_unchanged_original_is_the_design_not_a_failure(role):
+    """The one defect the whole test suite could not find, pinned for everyone.
 
     In the first live run the chair inspected the *repository* file, found it
     unchanged, wrote "six delegations, zero bytes ... I will not fund a
     deferral whose enforcement mechanism has a measured yield of zero", and
     ruled partly against the proposal on that reading. All six delegations had
     landed: the revised copy went 11,397 -> 19,100 bytes and every re-check
-    reported APPLIED. The original was unchanged because that is the
-    playbook's criterion 6 (`docs/specs/committee-playbook.md:154`) -- the
-    guarantee working, not the edit mechanism failing. Nothing in the goal said
-    so, and ~200 mutants and 1033 tests could not find it because every test
-    double does exactly what it is told.
+    reported APPLIED. The original was unchanged because that is the playbook's
+    criterion 6 -- the guarantee working, not the edit mechanism failing.
+
+    Parametrised over every speaker, not just the chair, because the chair did
+    not originate the reading: the thread has reviewers minting it five turns
+    earlier and the chair citing them. The one persona that got it right is the
+    one whose goal already named the revised copy.
     """
+    g = cast.goal(
+        role,
+        charge=_CHARGE,
+        artifact=_ARTIFACT,
+        thread=_THREAD,
+        revised=_REVISED,
+        action="add a rollback section naming who pages",
+    )
+
+    # Four separate claims, asserted separately: a mutant that drops any one of
+    # them leaves a speaker able to reach the wrong reading again.
+    assert "The original artifact is never modified" in g
+    assert "that is by design" in g
+    assert "not an edit that failed" in g
+    assert "a recommendation plus that copy, not a landed change" in g
+
+    # Present tense. "every delegated edit LANDED" is a claim about this run
+    # that the goal cannot know -- `_reduce_decision` appends `DID NOT APPLY`
+    # for a failed re-check, beneath the chair's own prose.
+    assert "every delegated edit lands in" in g
+    assert "landed in" not in g
+
+    # It goes ABOVE the guardrail and the completion condition, which are the
+    # contract with the worker and stay where they are.
+    guardrail = (
+        "The revised copy named above is the only file you may write"
+        if role == cast.JUNIOR else _GUARDRAIL
+    )
+    assert guardrail in g
+    assert g.index("The original artifact is never modified") < g.index(guardrail)
+
+
+def test_the_chair_is_told_to_judge_the_edits_by_the_copy_it_is_handed():
+    """Only the chair is handed the revised copy's path, and only the chair is
+    asked to weigh what is in it. Pinned because it is the one sentence of the
+    paragraph spec §8 does not ask for, so nothing else would notice it going."""
     g = cast.goal(
         cast.CHAIR,
         charge=_CHARGE,
@@ -548,27 +593,16 @@ def test_chair_goal_says_an_unchanged_original_is_the_design_not_a_failure():
         revised=_REVISED,
     )
 
-    # Three separate claims, asserted separately: a mutant that drops any one
-    # of them leaves the chair able to reach the wrong reading again.
-    assert "The original artifact is never modified" in g
-    assert "that is by design" in g
-    assert "not an edit that failed" in g
-    assert "a recommendation plus that copy, not a landed change" in g
-
+    assert "Judge the delegated edits by the copy named above." in g
     # The sentence is worthless if the chair cannot find the copy it points at,
-    # so the path stays on its own labelled line (whole, not merely contained).
+    # so the path stays on its own labelled line -- label and value together, so
+    # that swapping the two paths in the template is caught.
     _labelled(
         g,
         "The revised copy, which exists only if the committee delegated an "
         f"edit: {_REVISED}",
     )
-
-    # The new paragraph goes ABOVE the guardrail and the completion condition,
-    # which are the contract with the worker and stay where they are.
-    assert _GUARDRAIL in g
     assert g.endswith(_DONE_DECISION)
-    assert g.index("The original artifact is never modified") < g.index(_GUARDRAIL)
-    assert len(g) < cast.GOAL_MAX
 
 
 def test_the_guardrail_survives_a_maximal_charge():
