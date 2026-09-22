@@ -180,8 +180,9 @@ only way to get the full surface for an old run.
 
 **`HERMES_PLAYBOOK_VIEWS=0` turns the feature off entirely.** All three view routes 404 and
 `has_view` is false on every run, so no tab appears and no view data is served. There is no partial
-setting: half-disabled is a worse state than either end. The comparison is against the literal
-string `0` and nothing else — `false`, `no` and `off` all leave the feature fully ON.
+setting: half-disabled is a worse state than either end. `0`, `false`, `no` and `off` all turn it
+off, case and surrounding space ignored. An empty value does not: `-e HERMES_PLAYBOOK_VIEWS` with
+nothing behind it is a variable you did not set, and it reads as unset.
 
 Set it if the control plane is bound anywhere but loopback. A playbook already runs Python in the
 master process under the operator's account, so on a loopback bind its JavaScript running in the
@@ -190,6 +191,15 @@ anyone holding the read token now also executes playbook-authored JavaScript wit
 plane's origin. The asset is served `text/javascript` with `X-Content-Type-Options: nosniff`, and
 its path comes from the registered playbook object rather than from the URL — the URL only names a
 playbook, and an unregistered name 404s before anything touches the filesystem.
+
+One consequence worth knowing rather than discovering. A `<script>` tag carries no `Authorization`
+header, so the SPA passes the token on the asset URL and the tag stays in `document.head` for the
+session. On a loopback bind that changes nothing — the server already puts the token on
+`window.__HERMES_TOKEN__`. Past loopback the token is otherwise held in a module closure and never
+written to the DOM, and this is the one thing that materialises it there, readable by any script on
+the page including the playbook's own bundle. That bundle can then make write calls. It is inside
+the trust already stated above, not beyond it, but it means "a playbook you trust to run Python in
+the master" also means "a playbook you trust with the operator's API token".
 
 ## Limitations
 
