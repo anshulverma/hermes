@@ -12,8 +12,11 @@
  * because run-2 never produced it.
  *
  * `stance` postdates that run, so those are written to the shape the playbook
- * emits now. Three personas state no stance on purpose: absent has to stay
- * absent.
+ * emits now — but the TEXTS are the positions those personas actually took, off
+ * `fixtures/thread.md`, at the turns they took them. A fixture that inverts what
+ * the transcript says is the same defect class as the view it is testing.
+ * `junior_ic` is the one seat that filed nothing: absent has to stay absent, and
+ * he is the only honest place to prove it.
  */
 import type { CommitteeData, Entry, Persona } from './CommitteeView';
 
@@ -75,31 +78,77 @@ const TURNS: Array<[number, string, string[], boolean | null, string]> = [
 ];
 
 /**
- * The delegated edit named on each owner turn that delegated one, off the same
- * run's `action` keys. Kept as a lookup rather than a sixth column on TURNS:
- * six of twenty rows carry one, and widening every tuple to say `null` fourteen
- * times is diff for nothing.
+ * The six re-checks off the real decision reduction, truncation and all.
+ *
+ * The junior IC re-checks on turn N+1 the edit the owner delegated on turn N,
+ * so one list is both the verdict card's `checks` and the timeline's `action`
+ * keys. They used to be paraphrases sitting beside these exact texts, which had
+ * the two halves of one fixture disagreeing about what was delegated.
  */
-const ACTIONS: Record<number, string> = {
-  2: 'Rewrite §2 "When to reach for it" so each trigger is a measurable threshold with a named declarer.',
-  5: 'Rewrite §14.1 — delete the batch-submit claim and restate the remaining seam as the events-since-cursor invariant.',
-  8: 'Delete the false "same endpoint the UI uses to inject externally-created tickets" claim from §4\'s Push bullet.',
-  11: 'Record the amendments already conceded on the floor, in §2 and §14.1.',
-  14: 'Cut the delegation half from the spec — §5, §8, the delegation ledger, capability advertisement.',
-  17: 'Record the DESIGN correction in §14.1: drop the batch-submit endpoint from the federation-seam bullet.',
+const CHECKS: Array<{ turn: number; action: string; verified: boolean }> = [
+  { turn: 3, action: "Rewrite §2 \"When to reach for it\" so each trigger is a measurable threshold with a named declarer, folding the organizat…", verified: true },
+  { turn: 6, action: "Rewrite §14.1 — delete the batch-submit claim (it is federation-build cost, not a seam), restate the remaining seam as t…", verified: true },
+  { turn: 9, action: "Delete the false \"same endpoint the UI uses to inject externally-created tickets\" claim from §4's Push bullet — state pl…", verified: true },
+  { turn: 12, action: "Record the amendments already conceded on the floor — in §2 restore trigger 2's reachability half as a discovered predic…", verified: true },
+  { turn: 15, action: "Cut the delegation half from the spec — §5, §8, the delegation ledger, capability advertisement, the shard-submit endpoi…", verified: true },
+  { turn: 18, action: "In DESIGN.md's \"Control plane & status\" section (lines 575-579), delete the false claim that a batch-submit endpoint for…", verified: true },
+];
+
+/** turn that delegated it → the edit, keyed off the turn that re-checked it. */
+const ACTIONS: Record<number, string> = Object.fromEntries(
+  CHECKS.map((c) => [c.turn - 1, c.action]),
+);
+
+/**
+ * Every position anyone took, in turn order, quoted from `fixtures/thread.md`.
+ *
+ * A list and not one string per seat, because `_roster` renders the LAST stance
+ * as the current one and the owner moved: defer at turn 02, drop from turn 14
+ * on. Collapsing her to one line is how the fixture came to say she wanted to
+ * defer a document she spent six turns arguing to drop.
+ */
+const STANCES: Record<string, Array<{ turn: number; text: string }>> = {
+  senior_director: [
+    { turn: 1, text: "Position: defer. But put a date and a named owner on the deferral this time. Not fund, not drop." },
+  ],
+  owner: [
+    { turn: 2, text: "My position is defer — but defer a smaller document than the one in front of you, with the trigger made falsifiable." },
+    { turn: 14, text: "Position: drop, and you're right that the rename was the weakest version of your point." },
+    { turn: 17, text: "Position unchanged: drop. Your two additions go in the record." },
+    { turn: 20, text: "Position: drop the artifact. docs/specs/federation-future.md is retired whole — frame included, not renamed." },
+  ],
+  manager: [
+    { turn: 4, text: "I'm with Dana on defer, but not for Dana's reason: this work lands on a pair of hands I've already committed, and nobody in this thread has said whose." },
+  ],
+  tpm: [
+    { turn: 7, text: "My position is defer, same as Dana and Ruth, with one amendment: the deferral needs an expiry date, not just an expiry condition." },
+  ],
+  pm: [
+    { turn: 10, text: "My vote: defer. My amendment is about what is being deferred: defer the roll-up, and treat delegation as a separate, later, separately-justified proposal." },
+  ],
+  tl: [
+    { turn: 13, text: "My position: drop this artifact. Not defer it smaller — let aggregation re-enter as a read-layer item sized against sub-project 3." },
+  ],
+  staff_ic: [
+    { turn: 16, text: "Position: drop. And what I'd have the chair write down." },
+  ],
+  data_scientist: [
+    { turn: 19, text: "My position is drop, and my reasons are measurement reasons that don't overlap much with Marcus's or Priya's." },
+  ],
 };
 
-const STANCES: Record<string, string> = {
-  senior_director: "Drop it — every reason I had for deferring died in this thread.",
-  owner: "Defer a smaller document, with the trigger made falsifiable.",
-  manager: "Defer; I cannot staff it this half and a solo build is not a plan.",
-  pm: "Cut the delegation half and keep aggregation, or drop the whole thing.",
-  tl: "The two halves are separable and the delegation half fails its own trigger.",
-  staff_ic: "Do not fund: §4 asserts a credential scoping this system does not have.",
-};
+/** The stances filed on or before `upTo`, in the shape `_stances` emits. */
+const stancesThrough = (upTo: number) =>
+  Object.fromEntries(
+    Object.entries(STANCES)
+      .map(([role, said]) => [role, said.filter((s) => s.turn <= upTo)] as const)
+      .filter(([, said]) => said.length > 0),
+  );
 
-const STANCE_TURN: Record<string, number> = {
-  senior_director: 1, owner: 14, manager: 4, pm: 10, tl: 13, staff_ic: 16,
+/** What `_roster` shows: the last position filed by `upTo`, or none. */
+const stanceAt = (role: string, upTo: number): string | null => {
+  const said = (STANCES[role] ?? []).filter((s) => s.turn <= upTo);
+  return said.length > 0 ? said[said.length - 1].text : null;
 };
 
 const timeline: Entry[] = TURNS.map(([n, role, badges, verified, body]) => ({
@@ -118,7 +167,7 @@ const roster: Persona[] = Object.keys(CAST).map((role) => ({
   name: CAST[role][0],
   title: CAST[role][1],
   state: 'spoke',
-  stance: STANCES[role] ?? null,
+  stance: stanceAt(role, 20),
 }));
 
 export const run2: CommitteeData = {
@@ -126,19 +175,10 @@ export const run2: CommitteeData = {
   roster,
   progress: { turn: 20, cap: 20, holder: null, queue: [], ended: 'owner closed' },
   timeline,
-  stances: Object.fromEntries(
-    Object.entries(STANCES).map(([role, text]) => [role, [{ turn: STANCE_TURN[role], text }]]),
-  ),
+  stances: stancesThrough(20),
   verdict: {
     text: "I've read the artifact, the revised copy, and all twenty turns.\n\n---\n\n# Decision — Hermes federation layer\n\n**Chair: Dana Whitfield, Senior Director of Engineering**\n**Charge: fund now / defer again / drop**\n\n## Verdict: do not approve. Drop.\n\n`docs/specs/federation-future.md` is retired whole — frame included, not renamed, not re-scoped, not deferred a third time. Nothing is funded. The successor, if one exists, is a new proposal with a new author.\n\nI opened this review with defer, a date and a named owner. I am ruling against my own turn-01 position, and I'll say why in the record rather than let it be inferred.\n\n---\n\n## Why defer no longer survives\n\nMy turn-01 defer rested on three things\n\n…",
-    checks: [
-      { turn: 3, action: "Rewrite §2 \"When to reach for it\" so each trigger is a measurable threshold with a named declarer, folding the organizat…", verified: true },
-      { turn: 6, action: "Rewrite §14.1 — delete the batch-submit claim (it is federation-build cost, not a seam), restate the remaining seam as t…", verified: true },
-      { turn: 9, action: "Delete the false \"same endpoint the UI uses to inject externally-created tickets\" claim from §4's Push bullet — state pl…", verified: true },
-      { turn: 12, action: "Record the amendments already conceded on the floor — in §2 restore trigger 2's reachability half as a discovered predic…", verified: true },
-      { turn: 15, action: "Cut the delegation half from the spec — §5, §8, the delegation ledger, capability advertisement, the shard-submit endpoi…", verified: true },
-      { turn: 18, action: "In DESIGN.md's \"Control plane & status\" section (lines 575-579), delete the false claim that a batch-submit endpoint for…", verified: true },
-    ],
+    checks: CHECKS,
     artifact_intact: true,
     dropped_delegation: null,
     dropped_floor_requests: [],
@@ -151,9 +191,27 @@ export const run2: CommitteeData = {
 };
 
 /**
- * The same committee eight turns in: the TPM has the floor, two members are
- * queued behind him, three have not spoken, and there is no verdict yet.
+ * The same committee seven turns in, in a shape `view_data` can actually emit.
+ *
+ * Every field is derived from the truncated timeline the way `_floor` derives
+ * it, because the previous version was three impossibilities at once: it marked
+ * `junior_ic` idle above his own turns 3 and 6, gave the floor to `tpm` when
+ * the most recent speaker was the owner, and queued two seats no `request_floor`
+ * had earned. Truncating at 07 makes the TPM the last speaker honestly, and the
+ * manager's floor request on turn 04 is midRun's own — run-2 has none, so the
+ * badge is added here rather than to the shared TURNS table.
  */
+const MID_TURN = 7;
+
+const midTimeline: Entry[] = run2.timeline
+  .filter((e) => e.n <= MID_TURN)
+  .map((e) => (e.n === 4 ? { ...e, badges: [...e.badges, 'request_floor'] } : e));
+
+// `_floor`: spoken comes off the delivered turns themselves, the queue off
+// `request_floor` minus whoever has since been granted it, the holder is the
+// most recent speaker. The owner and the junior IC never queue.
+const midSpoke = new Set(midTimeline.map((e) => e.role));
+
 export const midRun: CommitteeData = {
   ...run2,
   roster: run2.roster.map((p) => ({
@@ -161,15 +219,16 @@ export const midRun: CommitteeData = {
     state:
       p.role === 'tpm'
         ? 'holds_floor'
-        : p.role === 'tl' || p.role === 'staff_ic'
+        : p.role === 'manager'
           ? 'queued'
-          : p.role === 'pm' || p.role === 'data_scientist' || p.role === 'junior_ic'
-            ? 'idle'
-            : 'spoke',
-    stance: p.role === 'tpm' || p.role === 'tl' ? null : p.stance,
+          : midSpoke.has(p.role)
+            ? 'spoke'
+            : 'idle',
+    stance: stanceAt(p.role, MID_TURN),
   })),
-  progress: { turn: 8, cap: 20, holder: 'tpm', queue: ['tl', 'staff_ic'], ended: null },
-  timeline: run2.timeline.filter((e) => e.n <= 8),
+  progress: { turn: MID_TURN, cap: 20, holder: 'tpm', queue: ['manager'], ended: null },
+  timeline: midTimeline,
+  stances: stancesThrough(MID_TURN),
   verdict: null,
 };
 
@@ -204,7 +263,9 @@ export const edgeTurns: Entry[] = [
     role: 'tl',
     name: 'Marcus Feld',
     title: 'Tech Lead',
-    body: '_(no turn delivered — the worker produced nothing)_',
+    // `playbooks/committee/thread.py:NO_TURN`, verbatim. The invented string it
+    // replaced is one no run can produce.
+    body: '_(no turn delivered — the worker failed; see hermes show)_',
     action: null,
     badges: ['no_turn'],
     verified: null,

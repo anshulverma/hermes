@@ -112,6 +112,20 @@ describe('CommitteeView badges and re-checks', () => {
     expect(screen.queryByTestId('action-1')).toBeNull();
   });
 
+  it('names the same edit on the delegating turn and in its re-check', () => {
+    // 8.9: the timeline's `action` and the verdict's `checks[].action` are one
+    // string off one run — the junior IC re-checks on turn N+1 what the owner
+    // delegated on turn N. They used to be a paraphrase and the real text, so
+    // the two halves of one fixture disagreed about what had been delegated.
+    // Turn 17 was the visible one: its real action is the DESIGN.md correction,
+    // and the fixture wrote turn 18's report of it instead.
+    show();
+
+    const delegated = screen.getByTestId('action-17').textContent!.replace('delegated: ', '');
+    expect(delegated).toContain("In DESIGN.md's");
+    expect(screen.getByTestId('verdict-recheck-18')).toHaveTextContent(delegated);
+  });
+
   it('shows the re-check outcome on a delegated edit and nowhere else', () => {
     show();
 
@@ -137,6 +151,12 @@ describe('CommitteeView badges and re-checks', () => {
       within(screen.getByTestId('entry-22')).getByText('signals only, no prose'),
     ).toBeInTheDocument();
     expect(within(screen.getByTestId('entry-23')).getByText('no turn delivered')).toBeInTheDocument();
+    // 8.8: the body is `thread.NO_TURN` verbatim (playbooks/committee/thread.py).
+    // The fixture used to invent "the worker produced nothing", a string no run
+    // can produce, right beside a signals-only stub that matched exactly.
+    expect(screen.getByTestId('entry-23')).toHaveTextContent(
+      'no turn delivered — the worker failed; see hermes show',
+    );
   });
 });
 
@@ -165,9 +185,11 @@ describe('CommitteeView progress', () => {
   it('shows who holds the floor and who is behind them mid-run', () => {
     show(midRun);
 
-    expect(screen.getByTestId('turn-count')).toHaveTextContent('turn 8 of 20');
+    // Turn 07, the TPM's own: `_floor` returns the most recent speaker, so a
+    // holder who is not the last speaker is a shape the server cannot send.
+    expect(screen.getByTestId('turn-count')).toHaveTextContent('turn 7 of 20');
     expect(screen.getByTestId('floor-holder')).toHaveTextContent('tpm has the floor');
-    expect(screen.getByTestId('floor-queue')).toHaveTextContent('tl · staff_ic');
+    expect(screen.getByTestId('floor-queue')).toHaveTextContent('manager');
     // 8.10: not "Still in session." — `ended: null` also covers a run stopped,
     // parked or failed before the chair ruled, and `view_data` carries no run
     // status to tell them apart. The line has to say which it cannot say.
@@ -251,24 +273,50 @@ describe('CommitteeView roster', () => {
     show(midRun);
 
     expect(screen.getByTestId('roster-tpm')).toHaveTextContent('has the floor');
-    expect(screen.getByTestId('roster-tl')).toHaveTextContent('waiting to speak');
-    expect(screen.getByTestId('roster-pm')).toHaveTextContent('has not spoken');
+    expect(screen.getByTestId('roster-manager')).toHaveTextContent('waiting to speak');
+    expect(screen.getByTestId('roster-tl')).toHaveTextContent('has not spoken');
     expect(screen.getByTestId('roster-owner')).toHaveTextContent('spoke');
+  });
+
+  it('never says a seat has not spoken above its own turns', () => {
+    // 8.1: the old midRun marked `junior_ic` idle while the transcript below
+    // carried his turns 3 and 6 — the roster contradicting the transcript on
+    // one screen, which is the exact failure this view exists to prevent.
+    show(midRun);
+
+    expect(screen.getByTestId('entry-3')).toHaveTextContent('Alex Moreau');
+    expect(screen.getByTestId('roster-junior_ic')).toHaveTextContent('spoke');
+    expect(screen.getByTestId('roster-junior_ic')).not.toHaveTextContent('has not spoken');
   });
 
   it('carries each persona their current stance', () => {
     show();
 
-    expect(screen.getByTestId('stance-staff_ic')).toHaveTextContent(
-      'Do not fund: §4 asserts a credential scoping this system does not have.',
+    // The LAST position, which for the owner is turn 20's drop and not the
+    // defer she opened with at turn 02.
+    expect(screen.getByTestId('stance-owner')).toHaveTextContent(
+      'Position: drop the artifact.',
     );
+    expect(screen.getByTestId('stance-owner')).not.toHaveTextContent('My position is defer');
+    expect(screen.getByTestId('stance-staff_ic')).toHaveTextContent('Position: drop.');
+  });
+
+  it('carries the position a persona held at the turn shown, not a later one', () => {
+    show(midRun);
+
+    expect(screen.getByTestId('stance-owner')).toHaveTextContent('My position is defer');
+    expect(screen.getByTestId('stance-tpm')).toHaveTextContent('the deferral needs an expiry date');
+    // Turn 13 has not happened yet at turn 07.
+    expect(screen.getByTestId('stance-tl')).toHaveTextContent('no stance stated');
   });
 
   it('shows a persona who stated no stance as having none, not as neutral', () => {
+    // `junior_ic` is the only seat in run-2 that filed no position — the tpm,
+    // whom this was anchored on, said "My position is defer" at turn 07.
     show();
 
-    expect(screen.getByTestId('stance-tpm')).toHaveTextContent('no stance stated');
-    expect(screen.getByTestId('stance-tpm')).not.toHaveTextContent('neutral');
+    expect(screen.getByTestId('stance-junior_ic')).toHaveTextContent('no stance stated');
+    expect(screen.getByTestId('stance-junior_ic')).not.toHaveTextContent('neutral');
   });
 });
 
