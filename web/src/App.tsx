@@ -261,7 +261,7 @@ export default function App() {
         )}
 
         {!loading && !error && view === 'crew' && (
-          <CrewPanel liveTick={crewLiveTick} />
+          <CrewPanel liveTick={crewLiveTick} runId={runDetail?.id} />
         )}
 
         {!loading && !error && runDetail && view === 'outputs' && (

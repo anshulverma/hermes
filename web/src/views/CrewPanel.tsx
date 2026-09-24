@@ -11,12 +11,17 @@ import { HealthBadge, EmptyState, Button } from '../ds';
 import { LoadingOverlay } from '../components/Spinner';
 import CrewDrawer from '../components/CrewDrawer';
 import AddHostModal from '../components/AddHostModal';
+import { fmtSeconds } from '../util/time';
+
+const CREW_POLL_MS = 15_000;
 
 type CrewPanelProps = {
   liveTick?: number;
+  /** The run in view. The crew stays fleet-wide; this only decides whose work needs naming. */
+  runId?: string;
 };
 
-export default function CrewPanel({ liveTick }: CrewPanelProps) {
+export default function CrewPanel({ liveTick, runId }: CrewPanelProps) {
   const [crew, setCrew] = useState<CrewMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +44,13 @@ export default function CrewPanel({ liveTick }: CrewPanelProps) {
   useEffect(() => {
     loadCrew();
   }, [liveTick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Ages are counted server-side at fetch time, and a long turn emits no
+  // events, so without this "0s" would stand for the whole turn.
+  useEffect(() => {
+    const id = setInterval(loadCrew, CREW_POLL_MS);
+    return () => clearInterval(id);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Only show the full-page spinner on the initial load (no data yet).
   // Background live refetches must not blank the already-rendered crew list.
@@ -89,6 +101,7 @@ export default function CrewPanel({ liveTick }: CrewPanelProps) {
           </h2>
           <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>
             {crew.length} {crew.length === 1 ? 'host' : 'hosts'}
+            {` · ${crew.filter((m) => m.current_ticket).length} working`}
           </span>
           <div style={{ marginLeft: 'auto' }}>
             <Button variant="primary" size="sm" onClick={() => setShowAddModal(true)}>
@@ -112,7 +125,7 @@ export default function CrewPanel({ liveTick }: CrewPanelProps) {
             <span>state</span>
             <span>health</span>
             <span>resources</span>
-            <span>current ticket</span>
+            <span>working on</span>
           </div>
 
           {/* Crew rows */}
@@ -145,11 +158,16 @@ export default function CrewPanel({ liveTick }: CrewPanelProps) {
                 <StateChip state={member.state} />
               </span>
 
-              <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 {member.health ? (
                   <HealthBadge health={member.health} size="sm" />
                 ) : (
                   <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>unknown</span>
+                )}
+                {member.heartbeat_age_s != null && (
+                  <span title="last heartbeat" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                    {fmtSeconds(member.heartbeat_age_s)} ago
+                  </span>
                 )}
               </div>
 
@@ -175,12 +193,21 @@ export default function CrewPanel({ liveTick }: CrewPanelProps) {
                 ))}
               </div>
 
-              <span style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: 12,
-                color: member.current_ticket ? 'var(--text-secondary)' : 'var(--text-muted)'
-              }}>
-                {member.current_ticket || '—'}
+              <span
+                title={member.current_ticket ?? undefined}
+                style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 12,
+                  color: member.current_ticket ? 'var(--text-secondary)' : 'var(--text-muted)'
+                }}
+              >
+                {member.current_ticket
+                  ? [
+                      member.current_phase,
+                      fmtSeconds(member.current_elapsed_s),
+                      member.current_run !== runId && member.current_run,
+                    ].filter(Boolean).join(' · ')
+                  : '—'}
               </span>
             </div>
           ))}
@@ -189,7 +216,7 @@ export default function CrewPanel({ liveTick }: CrewPanelProps) {
 
       <CrewDrawer
         isOpen={selectedHost !== null}
-        host={selectedHost}
+        host={selectedHost && (crew.find((m) => m.id === selectedHost.id) ?? selectedHost)}
         onClose={() => setSelectedHost(null)}
         onRefresh={loadCrew}
       />

@@ -136,7 +136,11 @@ describe('AddHostModal', () => {
         latency_ms: 40,
       },
       current_ticket: null,
+      current_run: null,
+      current_phase: null,
+      current_elapsed_s: null,
       last_heartbeat: 1234567890,
+      heartbeat_age_s: 0,
     };
 
     vi.spyOn(client, 'probeCrew').mockResolvedValue(mockChecklist);

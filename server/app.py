@@ -853,31 +853,52 @@ def create_app(bind: str | None = None) -> FastAPI:
         - id, site, state (idle|busy|down|draining)
         - resources: parsed resources_json
         - capabilities: parsed capabilities
-        - current_ticket, last_heartbeat
+        - current_ticket, current_run, current_phase, current_elapsed_s: the
+          ticket dispatched to the host, or null
+        - last_heartbeat, heartbeat_age_s
         - health: parsed health_json (may be null if never set)
+
+        Fleet-wide: a host outlives a run. What a host is working on is derived
+        from tickets.worker_host; the engine never writes crew.current_ticket or
+        a 'busy' state. An idle host with a ticket reads busy; draining and
+        down outrank a ticket still finishing.
         """
+        import time
         home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
+            # worker_host stays set once a ticket leaves dispatched, so only
+            # in-flight states count. Two masters can each have a ticket on
+            # one host; the row shows the latest claim.
             rows = conn.execute(
-                """SELECT id, site, state, capabilities, resources_json, health_json,
-                          current_ticket, last_heartbeat
-                   FROM crew
-                   ORDER BY id"""
+                """SELECT c.id, c.site, c.state, c.capabilities, c.resources_json,
+                          c.health_json, c.last_heartbeat,
+                          t.id, t.run_id, t.phase, t.updated_at
+                   FROM crew c
+                   LEFT JOIN tickets t ON t.id = (
+                       SELECT id FROM tickets
+                        WHERE worker_host = c.id AND state IN ('dispatched', 'running')
+                        ORDER BY updated_at DESC LIMIT 1)
+                   ORDER BY c.id"""
             ).fetchall()
+            now = time.time()
 
             crew = []
             for row in rows:
                 (
                     host_id, site, state, capabilities_json, resources_json,
-                    health_json, current_ticket, last_heartbeat
+                    health_json, last_heartbeat,
+                    ticket_id, run_id, phase, claimed_at
                 ) = row
 
                 # Parse JSON fields
                 capabilities = json.loads(capabilities_json)
                 resources = json.loads(resources_json)
                 health = json.loads(health_json) if health_json else None
+
+                if ticket_id and state == "idle":
+                    state = "busy"
 
                 crew.append({
                     "id": host_id,
@@ -886,8 +907,14 @@ def create_app(bind: str | None = None) -> FastAPI:
                     "capabilities": capabilities,
                     "resources": resources,
                     "health": health,
-                    "current_ticket": current_ticket,
+                    "current_ticket": ticket_id,
+                    "current_run": run_id,
+                    "current_phase": phase,
+                    "current_elapsed_s": max(0, now - claimed_at) if ticket_id else None,
                     "last_heartbeat": last_heartbeat,
+                    "heartbeat_age_s": (
+                        max(0, now - last_heartbeat) if last_heartbeat is not None else None
+                    ),
                 })
 
             return crew
@@ -1474,35 +1501,11 @@ def create_app(bind: str | None = None) -> FastAPI:
         finally:
             conn.close()
 
-        # Fetch and return the admitted crew member
-        conn = connect(db_path)
-        try:
-            row = conn.execute(
-                """SELECT id, site, state, capabilities, resources_json, health_json,
-                          current_ticket, last_heartbeat
-                   FROM crew WHERE id=?""",
-                (host,)
-            ).fetchone()
-
-            if row is None:
-                raise HTTPException(status_code=500, detail="Crew member admitted but not found")
-
-            capabilities = json.loads(row[3])
-            resources = json.loads(row[4])
-            health = json.loads(row[5]) if row[5] else None
-
-            return {
-                "id": row[0],
-                "site": row[1],
-                "state": row[2],
-                "capabilities": capabilities,
-                "resources": resources,
-                "health": health,
-                "current_ticket": row[6],
-                "last_heartbeat": row[7],
-            }
-        finally:
-            conn.close()
+        # Return the admitted crew member exactly as the crew list shows it
+        for member in get_crew(None):
+            if member["id"] == host:
+                return member
+        raise HTTPException(status_code=500, detail="Crew member admitted but not found")
 
     @app.post("/api/crew/{host}/reprobe")
     def reprobe_crew_member(

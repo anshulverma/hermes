@@ -302,8 +302,13 @@ export type CrewMember = {
   capabilities: string[];
   resources: Record<string, number>;
   health: HealthReport | null;
+  /** The ticket dispatched to this host, its run and phase, and how long ago it was claimed. */
   current_ticket: string | null;
-  last_heartbeat: number;
+  current_run: string | null;
+  current_phase: string | null;
+  current_elapsed_s: number | null;
+  last_heartbeat: number | null;
+  heartbeat_age_s: number | null;
 };
 
 export type Lease = {

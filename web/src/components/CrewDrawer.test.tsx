@@ -20,13 +20,33 @@ describe('CrewDrawer', () => {
       latency_ms: 42,
     },
     current_ticket: null,
+    current_run: null,
+    current_phase: null,
+    current_elapsed_s: null,
     last_heartbeat: 1234567890,
+    heartbeat_age_s: 8,
   };
 
   beforeEach(() => {
     vi.restoreAllMocks();
     // Mock fetchLeases to return empty array by default
     vi.spyOn(client, 'fetchLeases').mockResolvedValue([]);
+  });
+
+  it('says what the host is working on and how old its health is', async () => {
+    const busy: client.CrewMember = {
+      ...mockHost,
+      state: 'busy',
+      current_ticket: 'run-a/t-7',
+      current_run: 'run-a',
+      current_phase: 'review',
+      current_elapsed_s: 125,
+    };
+    render(<CrewDrawer isOpen={true} host={busy} onClose={vi.fn()} onRefresh={vi.fn()} />);
+
+    expect(await screen.findByText('run-a/t-7')).toBeInTheDocument();
+    expect(screen.getByText('review · 2m 5s')).toBeInTheDocument();
+    expect(screen.getByText('8s ago')).toBeInTheDocument();
   });
 
   it('should render drain button', async () => {

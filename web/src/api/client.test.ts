@@ -366,7 +366,11 @@ describe('API client', () => {
           resources: { cpu: 8 },
           health: { reachable: true, agent_ok: true, auth_ok: true, workspace_ready: true, guard_installed: true, latency_ms: 42 },
           current_ticket: null,
+          current_run: null,
+          current_phase: null,
+          current_elapsed_s: null,
           last_heartbeat: 1234567890,
+          heartbeat_age_s: 0,
         };
 
         globalThis.fetch = vi.fn().mockResolvedValue({

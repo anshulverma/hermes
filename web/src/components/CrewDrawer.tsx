@@ -9,6 +9,7 @@ import { fetchLeases, reprobeCrew, drainCrew, removeCrew, AuthError } from '../a
 import type { CrewMember, Lease, HealthChecklist } from '../api/client';
 import { Drawer, EmptyState, HealthBadge, Badge, Button } from '../ds';
 import { TOPBAR_HEIGHT } from './TopBar';
+import { fmtSeconds } from '../util/time';
 
 type CrewDrawerProps = {
   isOpen: boolean;
@@ -53,7 +54,8 @@ export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDra
     };
 
     loadLeases();
-  }, [isOpen, host]);
+    // Keyed on the id: the panel hands in a fresh copy of the host on every refetch.
+  }, [isOpen, host?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleReprobe = async () => {
     if (!host) return;
@@ -157,6 +159,14 @@ export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDra
                 </span>
               </div>
             )}
+            {host.current_ticket && (
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Working on</span>
+                <span style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+                  {`${host.current_phase} · ${fmtSeconds(host.current_elapsed_s)}`}
+                </span>
+              </div>
+            )}
           </div>
         </section>
 
@@ -165,11 +175,18 @@ export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDra
           <h3 style={{ margin: '0 0 12px 0', fontSize: 13, fontWeight: 500, color: 'var(--text-muted)' }}>
             Health
           </h3>
-          {host.health ? (
-            <HealthBadge health={host.health} size="md" />
-          ) : (
-            <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>No health data available</span>
-          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {host.health ? (
+              <HealthBadge health={host.health} size="md" />
+            ) : (
+              <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>No health data available</span>
+            )}
+            {host.heartbeat_age_s != null && (
+              <span title="last heartbeat" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                {fmtSeconds(host.heartbeat_age_s)} ago
+              </span>
+            )}
+          </div>
         </section>
 
         {/* Resources */}

@@ -912,117 +912,79 @@ def test_ticket_detail_not_found(client: TestClient, temp_home: Path):
     assert "detail" in data
 
 
-def test_crew_endpoint_returns_all_members(client: TestClient, temp_home: Path):
-    """GET /api/crew returns all crew members with parsed resources, capabilities, and health."""
+def test_crew_endpoint_derives_what_each_host_is_working_on(client: TestClient, temp_home: Path):
+    """GET /api/crew returns every host with parsed resources, capabilities and health,
+    and derives what each one is working on from the tickets dispatched to it. The
+    engine never writes crew.current_ticket or a 'busy' state, so neither is read."""
     import time
     now = time.time()
-    db_path = str(temp_home / "queue.db")
-    conn = sqlite3.connect(db_path)
-
-    # Seed crew members with varied states and health
-    members = [
-        {
-            "id": "host-1",
-            "site": "local",
-            "state": "idle",
-            "capabilities": '["python", "gpu"]',
-            "resources_json": '{"cpu": 8, "gpu": 2}',
-            "health_json": json.dumps({
-                "reachable": True,
-                "agent_ok": True,
-                "auth_ok": True,
-                "workspace_ready": True,
-                "guard_installed": True,
-                "latency_ms": 42
-            }),
-            "current_ticket": None,
-            "last_heartbeat": now - 10,
-            "registered_at": now - 3600
-        },
-        {
-            "id": "host-2",
-            "site": "local",
-            "state": "busy",
-            "capabilities": '["python"]',
-            "resources_json": '{"cpu": 4}',
-            "health_json": json.dumps({
-                "reachable": True,
-                "agent_ok": False,
-                "auth_ok": True,
-                "workspace_ready": True,
-                "guard_installed": True,
-                "latency_ms": 150
-            }),
-            "current_ticket": "test-run/t-1",
-            "last_heartbeat": now - 5,
-            "registered_at": now - 7200
-        },
-        {
-            "id": "host-3",
-            "site": "local",
-            "state": "down",
-            "capabilities": '[]',
-            "resources_json": '{"cpu": 16}',
-            "health_json": None,  # Never set
-            "current_ticket": None,
-            "last_heartbeat": now - 600,
-            "registered_at": now - 1800
-        }
-    ]
-
-    for m in members:
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    healthy = {"reachable": True, "agent_ok": True, "auth_ok": True,
+               "workspace_ready": True, "guard_installed": True, "latency_ms": 42}
+    degraded = {**healthy, "agent_ok": False, "latency_ms": 150}
+    for host, state, caps, resources, health, beat in [
+        ("host-1", "idle", '["python", "gpu"]', '{"cpu": 8, "gpu": 2}', healthy, now - 10),
+        ("host-2", "idle", '["python"]', '{"cpu": 4}', degraded, now - 5),
+        ("host-3", "down", '[]', '{"cpu": 16}', None, now - 600),
+        ("host-4", "draining", '[]', '{"cpu": 4}', None, now - 30),
+    ]:
         conn.execute(
-            """INSERT INTO crew
-               (id, site, state, capabilities, resources_json, health_json,
-                current_ticket, last_heartbeat, registered_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (m["id"], m["site"], m["state"], m["capabilities"],
-             m["resources_json"], m["health_json"], m["current_ticket"],
-             m["last_heartbeat"], m["registered_at"])
+            """INSERT INTO crew (id, site, state, capabilities, resources_json,
+                                 health_json, last_heartbeat, registered_at)
+               VALUES (?, 'local', ?, ?, ?, ?, ?, 0)""",
+            (host, state, caps, resources, json.dumps(health) if health else None, beat),
+        )
+    for run_id in ("r0", "r1", "r2"):
+        _insert_run(conn, run_id, "dexter", "solve", [])
+    for tid, run_id, phase, state, host, claimed in [
+        # Finished work keeps its worker_host; it is not current.
+        ("r1/t-old", "r1", "solve", "done", "host-1", now - 900),
+        # Two claims on one host (an older run's straggler): the latest wins.
+        ("r0/t-stale", "r0", "solve", "dispatched", "host-2", now - 7200),
+        ("r1/t-1", "r1", "solve", "dispatched", "host-2", now - 120),
+        # A draining host finishing a ticket still reads draining.
+        ("r2/t-2", "r2", "pitch", "dispatched", "host-4", now - 60),
+    ]:
+        conn.execute(
+            """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority,
+                                    payload_json, worker_host, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'cpu', 0, '{}', ?, 0, ?)""",
+            (tid, run_id, phase, state, host, claimed),
         )
     conn.commit()
-
-    # Fetch crew
-    response = client.get("/api/crew")
-    assert response.status_code == 200
-
-    crew = response.json()
-    assert len(crew) == 3
-
-    # Verify against direct sqlite query
-    db_crew = conn.execute(
-        """SELECT id, site, state, capabilities, resources_json, health_json,
-                  current_ticket, last_heartbeat
-           FROM crew ORDER BY id"""
-    ).fetchall()
     conn.close()
 
-    # Sort both by id for comparison
-    crew_sorted = sorted(crew, key=lambda x: x["id"])
+    response = client.get("/api/crew")
+    assert response.status_code == 200
+    crew = response.json()
+    assert [c["id"] for c in crew] == ["host-1", "host-2", "host-3", "host-4"]
+    h1, h2, h3, h4 = crew
 
-    for c, db_row in zip(crew_sorted, db_crew):
-        assert c["id"] == db_row[0]
-        assert c["site"] == db_row[1]
-        assert c["state"] == db_row[2]
+    assert h1["capabilities"] == ["python", "gpu"]
+    assert h1["resources"] == {"cpu": 8, "gpu": 2}
+    assert h1["health"] == healthy
+    assert h1["state"] == "idle"
+    assert h1["current_ticket"] is None
+    assert h1["current_run"] is None
+    assert h1["current_phase"] is None
+    assert h1["current_elapsed_s"] is None
+    assert h1["heartbeat_age_s"] == pytest.approx(10, abs=5)
 
-        # Capabilities and resources should be parsed
-        assert c["capabilities"] == json.loads(db_row[3])
-        assert c["resources"] == json.loads(db_row[4])
+    assert h2["health"] == degraded
+    assert h2["state"] == "busy"
+    assert h2["current_ticket"] == "r1/t-1"
+    assert h2["current_run"] == "r1"
+    assert h2["current_phase"] == "solve"
+    assert h2["current_elapsed_s"] == pytest.approx(120, abs=5)
 
-        # Health should be parsed (or null)
-        if db_row[5]:
-            health = json.loads(db_row[5])
-            assert c["health"]["reachable"] == health["reachable"]
-            assert c["health"]["agent_ok"] == health["agent_ok"]
-            assert c["health"]["auth_ok"] == health["auth_ok"]
-            assert c["health"]["workspace_ready"] == health["workspace_ready"]
-            assert c["health"]["guard_installed"] == health["guard_installed"]
-            assert c["health"]["latency_ms"] == health["latency_ms"]
-        else:
-            assert c["health"] is None
+    assert h3["state"] == "down"
+    assert h3["health"] is None
+    assert h3["current_ticket"] is None
+    assert h3["heartbeat_age_s"] == pytest.approx(600, abs=5)
 
-        assert c["current_ticket"] == db_row[6]
-        assert c["last_heartbeat"] == db_row[7]
+    assert h4["state"] == "draining"
+    assert h4["current_ticket"] == "r2/t-2"
+    assert h4["current_phase"] == "pitch"
 
 
 def test_leases_endpoint_returns_only_live_leases(client: TestClient, seeded_run: str, temp_home: Path):
@@ -2447,6 +2409,10 @@ def test_crew_add_healthy_host(loopback_client: TestClient, temp_home: Path, tes
     assert data["site"] == "test-site"
     assert data["state"] == "idle"
     assert data["resources"]["cpu"] == 4
+    # The admitted host reads the same as it will in the crew list.
+    listed = loopback_client.get("/api/crew", headers={"Authorization": f"Bearer {token}"}).json()
+    assert data.keys() == listed[0].keys()
+    assert data["current_ticket"] is None
 
     # Verify crew row exists in database
     conn = sqlite3.connect(db_path)
