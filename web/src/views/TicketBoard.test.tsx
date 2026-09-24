@@ -219,6 +219,51 @@ describe('TicketBoard', () => {
   });
 });
 
+describe('TicketBoard — filters offer what the run has', () => {
+  const optionsOf = (select: HTMLElement) =>
+    Array.from(select.querySelectorAll('option')).map((o) => o.textContent);
+
+  beforeEach(() => {
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockTickets });
+  });
+
+  it("offers the run's own phases, not a fixed list", async () => {
+    render(<TicketBoard runId="test-run" phases={['t01-pm', 't02-eng', 'decision']} />);
+    await waitFor(() => expect(screen.getByText('Investigate issue #1')).toBeInTheDocument());
+
+    const [phaseSelect] = screen.getAllByRole('combobox');
+    expect(optionsOf(phaseSelect)).toEqual(['all phases', 't01-pm', 't02-eng', 'decision']);
+
+    mockFetch.mockClear();
+    fireEvent.change(phaseSelect, { target: { value: 't02-eng' } });
+    await waitFor(() =>
+      expect(mockFetch.mock.calls[0][0]).toBe('/api/runs/test-run/tickets?phase=t02-eng'),
+    );
+  });
+
+  it('offers the resource classes seen on the tickets, and keeps them once one is picked', async () => {
+    const onSite = [
+      { ...mockTickets[0], resource_req: 'cpu' },
+      { ...mockTickets[1], resource_req: 'a100' },
+    ];
+    mockFetch.mockResolvedValue({ ok: true, json: async () => onSite });
+    render(<TicketBoard runId="test-run" />);
+    await waitFor(() => expect(screen.getByText('Investigate issue #1')).toBeInTheDocument());
+
+    const resourceSelect = screen.getAllByRole('combobox')[1];
+    expect(optionsOf(resourceSelect)).toEqual(['all resources', 'a100', 'cpu']);
+
+    // The refetch is filtered server-side, so it returns a100 rows only; cpu
+    // must stay offered or picking one class would hide every other.
+    mockFetch.mockResolvedValue({ ok: true, json: async () => [onSite[1]] });
+    fireEvent.change(resourceSelect, { target: { value: 'a100' } });
+    await waitFor(() => expect(screen.queryByText('Investigate issue #1')).toBeNull());
+
+    expect(optionsOf(screen.getAllByRole('combobox')[1])).toEqual(['all resources', 'a100', 'cpu']);
+  });
+});
+
 describe('TicketBoard — state chips earn their place', () => {
   beforeEach(() => {
     mockFetch.mockReset();

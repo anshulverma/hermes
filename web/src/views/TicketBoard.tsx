@@ -181,10 +181,12 @@ function TicketLane({ lane, tickets, stateFilter, onStateFilter, onOpen, filteri
 
 type TicketBoardProps = {
   runId: string;
+  /** The run's phase names, from the run detail: the phase filter's options. */
+  phases?: string[];
   liveTick?: number;
 };
 
-export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
+export default function TicketBoard({ runId, phases = [], liveTick }: TicketBoardProps) {
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -201,6 +203,11 @@ export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
   // Bumped after a modal action mutates a ticket, to refetch the board.
   const [refreshTick, setRefreshTick] = useState(0);
 
+  // Resource classes are whatever the site hands out, learned from the rows.
+  // Kept across fetches: the fetch is filtered by the active choice, so the
+  // current rows alone would drop every other class the moment one is picked.
+  const [resources, setResources] = useState<string[]>([]);
+
   // Fetch tickets
   useEffect(() => {
     const filters: TicketFilters = {};
@@ -214,6 +221,7 @@ export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
     fetchTickets(runId, filters)
       .then((data) => {
         setTickets(data);
+        setResources((seen) => [...new Set([...seen, ...data.map((t) => t.resource_req)])].sort());
         setLoading(false);
       })
       .catch((err) => {
@@ -317,10 +325,9 @@ export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
           }}
         >
           <option>all phases</option>
-          <option>diagnose</option>
-          <option>work</option>
-          <option>reduce</option>
-          <option>fix</option>
+          {phases.map((p) => (
+            <option key={p}>{p}</option>
+          ))}
         </select>
         <select
           value={resource}
@@ -335,8 +342,9 @@ export default function TicketBoard({ runId, liveTick }: TicketBoardProps) {
           }}
         >
           <option>all resources</option>
-          <option>cpu</option>
-          <option>gpu</option>
+          {resources.map((r) => (
+            <option key={r}>{r}</option>
+          ))}
         </select>
         <span style={{ color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono)' }}>
           {tickets.length} shown

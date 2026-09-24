@@ -238,8 +238,15 @@ export default function App() {
           <MetricsView runId={runDetail.id} />
         )}
 
+        {/* Keyed on the run: a phase or resource picked on one run names
+            nothing on the next, and would filter its board to empty. */}
         {!loading && !error && runDetail && view === 'board' && (
-          <TicketBoard runId={runDetail.id} liveTick={ticketLiveTick} />
+          <TicketBoard
+            key={runDetail.id}
+            runId={runDetail.id}
+            phases={runDetail.phases.map((p) => p.name)}
+            liveTick={ticketLiveTick}
+          />
         )}
 
         {!loading && !error && view === 'crew' && (

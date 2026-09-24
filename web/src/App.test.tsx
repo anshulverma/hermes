@@ -454,4 +454,69 @@ describe('App', () => {
       expect(screen.getByTestId('tab-run')).toHaveStyle({ color: 'var(--text-primary)' });
     });
   });
+
+  describe('the tickets tab', () => {
+    function mockRuns(...ids: string[]) {
+      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
+        status: 'ok',
+        version: '0.1.0',
+        home: '/tmp/hermes',
+      });
+      vi.spyOn(client, 'fetchRuns').mockResolvedValue(
+        ids.map((id) => ({
+          id,
+          playbook: 'example',
+          site: 'local',
+          state: 'running',
+          phase: 'work',
+          base_ref: 'main',
+          created_at: '2026-07-29T10:00:00Z',
+          tickets: {},
+        })),
+      );
+      vi.mocked(client.fetchTickets).mockResolvedValue([]);
+    }
+
+    const phaseSelect = () =>
+      screen.getByRole('option', { name: 'all phases' }).closest('select') as HTMLElement;
+    const phaseOptions = () =>
+      Array.from(phaseSelect().querySelectorAll('option')).map((o) => o.textContent);
+
+    afterEach(() => {
+      window.location.hash = '';
+    });
+
+    it("filters by the viewed run's phases", async () => {
+      window.location.hash = '#board';
+      mockRuns('run-001');
+      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+
+      render(<App />);
+
+      await waitFor(() => expect(phaseOptions()).toEqual(['all phases', 'work', 'reduce']));
+    });
+
+    it('drops the phase filter when the reader switches runs', async () => {
+      // Another run's phase names filter this run's board to nothing.
+      window.location.hash = '#board';
+      mockRuns('run-001', 'run-002');
+      vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) =>
+        id === 'run-001'
+          ? mockRunDetail
+          : { ...mockRunDetail, id, phases: [{ name: 'solve', counts: {}, current: true }] },
+      );
+
+      render(<App />);
+      await waitFor(() => expect(phaseOptions()).toContain('work'));
+      fireEvent.change(phaseSelect(), { target: { value: 'work' } });
+      await waitFor(() =>
+        expect(client.fetchTickets).toHaveBeenLastCalledWith('run-001', { phase: 'work' }),
+      );
+
+      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
+
+      await waitFor(() => expect(client.fetchTickets).toHaveBeenLastCalledWith('run-002', {}));
+      expect(phaseOptions()).toEqual(['all phases', 'solve']);
+    });
+  });
 });
