@@ -329,20 +329,30 @@ def test_brief_carries_every_persona_field():
         assert f"{field}: {p[field]}" in text, field
 
 
-def test_title_names_the_speaker_and_the_kind():
-    assert cast.title("tpm", "turn") == (
-        "Sam Iyer (tpm) takes the floor in the committee thread"
+def test_title_names_the_turn_the_speaker_and_the_kind():
+    # Seven owner rows that all read "Maya Okonkwo (owner) takes the floor" are
+    # one row seven times on a board. The turn number tells them apart.
+    assert cast.title("tpm", "turn", turn=5) == "turn 5 — Sam Iyer (tpm) takes the floor"
+    assert cast.title(cast.JUNIOR, "edit", turn=15, action="tighten the rollout section") == (
+        "turn 15 — Alex Moreau (junior_ic) edits: tighten the rollout section"
     )
-    assert cast.title(cast.JUNIOR, "edit") == (
-        "Alex Moreau (junior_ic) applies the edit the owner delegated"
-    )
-    assert cast.title(cast.CHAIR, "decision") == (
+    # The decision is not a turn, so it does not claim a number.
+    assert cast.title(cast.CHAIR, "decision", turn=20) == (
         "Dana Whitfield (chair) delivers the committee decision"
     )
     # An unknown kind fails loudly. A fallback to "turn" would title the
-    # DECISION ticket "takes the floor in the committee thread".
+    # DECISION ticket "takes the floor".
     with pytest.raises(KeyError):
-        cast.title("pm", "vote")
+        cast.title("pm", "vote", turn=1)
+
+
+def test_an_edit_title_clips_the_action_to_fit_a_card():
+    # A delegated action may run to turnblock.ACTION_MAX; a card title may not.
+    long = "rewrite " + "the rollout section " * 20
+    t = cast.title(cast.JUNIOR, "edit", turn=9, action=long)
+    assert t.startswith("turn 9 — Alex Moreau (junior_ic) edits: rewrite the rollout")
+    assert t.endswith("…")
+    assert len(t) <= 110
 
 
 # --- goal assembly ----------------------------------------------------------
@@ -1689,6 +1699,7 @@ def test_turn_ticket_carries_exactly_the_frozen_payload_keys(artifact):
     assert t.attempts == 0
     assert set(t.payload) == {"role", "title", "goal", "kind", "action"}
     assert t.payload["role"] == "senior_director"
+    assert t.payload["title"] == "turn 1 — Dana Whitfield (senior_director) takes the floor"
     assert t.payload["kind"] == "turn"
     assert t.payload["action"] is None
     assert str(artifact) in t.payload["goal"]
@@ -1711,6 +1722,7 @@ def test_junior_seed_byte_copies_the_original_and_leaves_it_untouched(artifact):
 
     s = pb._state(run)
     s["current_role"] = cast.JUNIOR
+    s["current_turn"] = 4
     s["pending_action"] = "cut the roadmap section to one paragraph"
 
     tickets = pb.seed(_run(phase="t04-junior_ic"), site)
@@ -1726,6 +1738,9 @@ def test_junior_seed_byte_copies_the_original_and_leaves_it_untouched(artifact):
     t = tickets[0]
     assert set(t.payload) == {"role", "title", "goal", "kind", "action"}
     assert t.payload["role"] == "junior_ic"
+    assert t.payload["title"] == (
+        "turn 4 — Alex Moreau (junior_ic) edits: cut the roadmap section to one paragraph"
+    )
     assert t.payload["kind"] == "edit"
     assert t.payload["action"] == "cut the roadmap section to one paragraph"
     assert str(revised) in t.payload["goal"]
@@ -1808,6 +1823,7 @@ def test_decision_ticket_is_built_for_the_chair(artifact):
     assert t.phase == "decision"
     assert t.payload["role"] == cast.CHAIR
     assert cast.CHAIR == "chair"
+    assert t.payload["title"] == "Dana Whitfield (chair) delivers the committee decision"
     assert t.payload["kind"] == "decision"
     assert t.payload["action"] is None
     assert t.payload["goal"] == cast.goal(

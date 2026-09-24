@@ -226,10 +226,14 @@ SENIORITY: tuple[str, ...] = (
 )
 
 _TITLES = {
-    "turn": "{name} ({role}) takes the floor in the committee thread",
-    "edit": "{name} ({role}) applies the edit the owner delegated",
+    "turn": "turn {n} — {name} ({role}) takes the floor",
+    "edit": "turn {n} — {name} ({role}) edits: {action}",
     "decision": "{name} ({role}) delivers the committee decision",
 }
+
+# A title is a board card's heading, not the brief: the full action is in the
+# goal, so the card gets enough of it to tell one edit from the next.
+_TITLE_ACTION_MAX = 60
 
 
 def persona(role: str) -> dict:
@@ -262,17 +266,21 @@ def brief(role: str) -> str:
     )
 
 
-def title(role: str, kind: str) -> str:
+def title(role: str, kind: str, *, turn: int, action: str | None = None) -> str:
     """The ticket payload's one-line title, for a turn, an edit or the decision.
 
     The parenthetical is the role as the state machine knows it, so the chair's
     decision ticket reads ``(chair)`` even though the name comes from the
-    ``senior_director`` persona.
+    ``senior_director`` persona. ``turn`` has no default because a title that
+    says "turn 0" is wrong. The decision is not a turn, so its title ignores it.
 
     An unknown ``kind`` raises ``KeyError``, like ``persona``: a fallback to
     ``turn`` would title the DECISION ticket "takes the floor".
     """
-    return _TITLES[kind].format(name=persona(role)["name"], role=role)
+    return _TITLES[kind].format(
+        name=persona(role)["name"], role=role, n=turn,
+        action=clip(action, _TITLE_ACTION_MAX),
+    )
 
 
 # --- the goal ---------------------------------------------------------------

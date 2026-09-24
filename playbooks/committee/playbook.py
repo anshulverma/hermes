@@ -348,7 +348,7 @@ class CommitteePlaybook:
             attempts=0,
             payload={
                 "role": role,
-                "title": cast.title(role, kind),
+                "title": cast.title(role, kind, turn=s["current_turn"], action=action),
                 "goal": cast.goal(
                     role,
                     charge=s["charge"],
