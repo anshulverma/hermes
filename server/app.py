@@ -438,7 +438,9 @@ def create_app(bind: str | None = None) -> FastAPI:
                 params.extend([search_pattern, search_pattern])
 
             # p0 is highest priority (lowest number first), matching claim order.
-            query += " ORDER BY t.priority ASC, t.id"
+            # Within a priority, seed order: ids carry unpadded counters, so
+            # sorting on t.id would put solve-10 before solve-2.
+            query += " ORDER BY t.priority ASC, t.rowid"
 
             rows = conn.execute(query, params).fetchall()
 

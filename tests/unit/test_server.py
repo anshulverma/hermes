@@ -247,6 +247,30 @@ def test_tickets_endpoint_returns_tickets(client: TestClient, seeded_run: str, t
         assert t["priority"] == db_row[6]
 
 
+def test_tickets_list_in_seed_order_not_id_order(client: TestClient, temp_home: Path):
+    """Unpadded counters sort solve-10 before solve-2 as text; the list reads in seed order."""
+    conn = connect(str(temp_home / "queue.db"))
+    conn.execute(
+        """INSERT INTO runs
+           (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('seed-order', 'dexter', 'local', 'running', 'solve', 'main', '{}', 0, 0)""",
+    )
+    seeded = [f"solve-{i}" for i in range(12)]
+    for tid in seeded:
+        conn.execute(
+            """INSERT INTO tickets
+               (id, run_id, phase, state, resource_req, priority, created_at, updated_at, payload_json)
+               VALUES (?, 'seed-order', 'solve', 'queued', 'cpu', 0, 0, 0, '{}')""",
+            (tid,),
+        )
+    conn.commit()
+    conn.close()
+
+    response = client.get("/api/runs/seed-order/tickets")
+    assert response.status_code == 200
+    assert [t["id"] for t in response.json()] == seeded
+
+
 def _record_attempt(conn, ticket_id: str, attempt: int, outcome: str) -> None:
     """Append one row to the append-only attempts audit table."""
     import time
