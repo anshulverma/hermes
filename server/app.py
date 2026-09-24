@@ -307,49 +307,39 @@ def create_app(bind: str | None = None) -> FastAPI:
             ).fetchall()
             tickets = {state: count for state, count in ticket_rows}
 
-            # Try to load playbook to get canonical phase order
+            # The rail: phases that minted tickets, in the order they first
+            # did, then the declared phases not reached yet.
             from engine import playbook as playbook_module
 
-            phases = []
+            minted = [r[0] for r in conn.execute(
+                """SELECT phase FROM tickets
+                   WHERE run_id=? GROUP BY phase ORDER BY MIN(rowid)""",
+                (run_id,),
+            ).fetchall()]
             try:
-                playbook_obj = playbook_module.load(playbook_name)
-                # Playbook registered - use canonical phase order
-                for phase_name in playbook_obj.phases:
-                    phase_counts = phase_ticket_counts(conn, run_id, phase_name)
-                    phases.append({
-                        "name": phase_name,
-                        "counts": phase_counts,
-                        "current": phase_name == current_phase,
-                    })
+                declared = list(playbook_module.load(playbook_name).phases)
             except KeyError:
-                # Playbook not registered - derive phases from tickets
-                # SELECT DISTINCT phase FROM tickets WHERE run_id=? ORDER BY MIN(rowid)
-                # This gives us phases in order of first appearance
-                distinct_phases = conn.execute(
-                    """SELECT phase FROM tickets
-                       WHERE run_id=?
-                       GROUP BY phase
-                       ORDER BY MIN(rowid)""",
-                    (run_id,),
-                ).fetchall()
+                declared = []  # unregistered: the tickets are all we have
+            # No phase yet: the whole plan is ahead. A phase the plan does not
+            # name: the run has left the declared list behind.
+            if current_phase in declared:
+                ahead = declared.index(current_phase)
+            else:
+                ahead = len(declared) if current_phase else 0
+            phase_names = minted + [p for p in declared[ahead:] if p not in minted]
+            # The run sets its phase before seeding it, so it can be current
+            # with no tickets yet.
+            if current_phase and current_phase not in phase_names:
+                phase_names.append(current_phase)
 
-                # If no tickets, fall back to current_phase
-                if not distinct_phases:
-                    if current_phase:
-                        phase_names = [current_phase]
-                    else:
-                        phase_names = []
-                else:
-                    phase_names = [row[0] for row in distinct_phases]
-
-                # Build phases array from derived list
-                for phase_name in phase_names:
-                    phase_counts = phase_ticket_counts(conn, run_id, phase_name)
-                    phases.append({
-                        "name": phase_name,
-                        "counts": phase_counts,
-                        "current": phase_name == current_phase,
-                    })
+            phases = [
+                {
+                    "name": name,
+                    "counts": phase_ticket_counts(conn, run_id, name),
+                    "current": name == current_phase,
+                }
+                for name in phase_names
+            ]
 
             return {
                 "id": rid,

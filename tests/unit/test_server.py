@@ -1861,6 +1861,67 @@ def test_run_detail_registered_playbook_uses_canonical_phases(
     assert phases[0]["counts"]["done"] == 1
 
 
+def _insert_run(conn, run_id: str, playbook: str, phase, tickets) -> None:
+    """A run row plus (id, phase, state) tickets, inserted in the order given."""
+    conn.execute(
+        """INSERT INTO runs
+           (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES (?, ?, 'local', 'running', ?, 'main', '{}', 0, 0)""",
+        (run_id, playbook, phase),
+    )
+    for tid, tphase, tstate in tickets:
+        conn.execute(
+            """INSERT INTO tickets
+               (id, run_id, phase, state, resource_req, priority, created_at, updated_at, payload_json)
+               VALUES (?, ?, ?, ?, 'cpu', 0, 0, 0, '{}')""",
+            (tid, run_id, tphase, tstate),
+        )
+    conn.commit()
+
+
+def test_run_detail_rail_shows_phases_a_registered_playbook_minted(
+    client: TestClient, temp_home: Path
+):
+    """A registered playbook that mints a phase per turn gets those turns on the rail,
+    in the order they ran, with the current one marked even before it seeds a ticket.
+    Its declared phases are behind it once it runs a phase the plan does not name."""
+    conn = connect(str(temp_home / "queue.db"))
+    # "research" declares four phases; this run minted its own phases instead,
+    # pitch before critique (the reverse of text order), and is now on "vote".
+    _insert_run(conn, "minted-run", "research", "vote", [
+        ("minted-run/1", "pitch", "done"),
+        ("minted-run/2", "critique", "done"),
+        ("minted-run/3", "pitch", "failed"),
+    ])
+    conn.close()
+
+    phases = client.get("/api/runs/minted-run").json()["phases"]
+    assert [(p["name"], p["current"]) for p in phases] == [
+        ("pitch", False),
+        ("critique", False),
+        ("vote", True),
+    ]
+    assert phases[0]["counts"] == {"done": 1, "failed": 1}
+    assert phases[2]["counts"] == {}
+
+
+def test_run_detail_rail_with_no_phase_yet_previews_the_whole_plan(
+    client: TestClient, temp_home: Path
+):
+    """A registered run that has not set a phase yet still shows every declared phase ahead."""
+    conn = connect(str(temp_home / "queue.db"))
+    _insert_run(conn, "fresh-run", "research", None, [])
+    conn.close()
+
+    phases = client.get("/api/runs/fresh-run").json()["phases"]
+    assert [(p["name"], p["current"]) for p in phases] == [
+        ("research", False),
+        ("synthesize", False),
+        ("report", False),
+        ("complete", False),
+    ]
+
+
 def test_websocket_auth_correct_token_receives_hello(loopback_client: TestClient, temp_home: Path, monkeypatch):
     """WS /api/ws with CORRECT token => receives hello (C1 behavior preserved)."""
     from server.auth import read_token
