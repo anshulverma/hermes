@@ -279,6 +279,32 @@ describe('App', () => {
       expect(screen.queryByText(/example run/i)).not.toBeInTheDocument();
     });
 
+    it('does not name the run in view on a host working on it', async () => {
+      window.location.hash = '#crew';
+      mockLoadedRun();
+      vi.spyOn(client, 'fetchCrew').mockResolvedValue([
+        {
+          id: 'host-a',
+          site: 'local',
+          state: 'busy',
+          capabilities: [],
+          resources: {},
+          health: null,
+          current_ticket: 'run-001/t1',
+          current_run: 'run-001',
+          current_phase: 'work',
+          current_elapsed_s: 240,
+          last_heartbeat: null,
+          heartbeat_age_s: null,
+        },
+      ]);
+
+      render(<App />);
+
+      await waitFor(() => expect(screen.getByTitle('run-001/t1')).toHaveTextContent('work'));
+      expect(screen.getByTitle('run-001/t1')).not.toHaveTextContent('run-001');
+    });
+
     it('writes the tab into the URL when a tab is clicked', async () => {
       mockLoadedRun();
 
