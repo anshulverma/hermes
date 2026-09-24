@@ -245,6 +245,22 @@ def test_resume_wait_drives_the_run_it_names(cli_home, loop_calls, state):
     assert _state(cli_home, "r1") == "running"
 
 
+def test_resume_wait_takes_a_site_given_on_the_command_line(cli_home, loop_calls, monkeypatch):
+    from engine import site as site_module
+    from sites.local.site import LocalSite
+
+    elsewhere = LocalSite()
+    monkeypatch.setitem(site_module._REGISTRY, "elsewhere", elsewhere)
+    c = connect(cli_home)
+    _run(c, run_id="r1", phase="work", playbook="example")
+    c.close()
+
+    assert main(["run", "resume", "r1", "--wait", "--agent", "mock", "--site", "elsewhere"]) == 0
+
+    (call,) = loop_calls
+    assert call["site"] is elsewhere
+
+
 def test_plain_resume_of_a_running_run_is_still_an_error(cli_home, loop_calls):
     c = connect(cli_home)
     _run(c, run_id="r1", phase="work", playbook="example")

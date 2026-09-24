@@ -1884,6 +1884,23 @@ def test_run_detail_rail_with_no_phase_yet_previews_the_whole_plan(
     ]
 
 
+def test_run_detail_rail_puts_a_current_declared_phase_before_the_rest_of_the_plan(
+    client: TestClient, temp_home: Path
+):
+    """A declared phase that is current but has seeded nothing yet keeps its place in the plan."""
+    conn = connect(str(temp_home / "queue.db"))
+    _insert_run(conn, "mid-run", "research", "synthesize", [("mid-run/1", "research", "done")])
+    conn.close()
+
+    phases = client.get("/api/runs/mid-run").json()["phases"]
+    assert [(p["name"], p["current"]) for p in phases] == [
+        ("research", False),
+        ("synthesize", True),
+        ("report", False),
+        ("complete", False),
+    ]
+
+
 def test_websocket_auth_correct_token_receives_hello(loopback_client: TestClient, temp_home: Path, monkeypatch):
     """WS /api/ws with CORRECT token => receives hello (C1 behavior preserved)."""
     from server.auth import read_token
