@@ -139,11 +139,11 @@ export default function PlaybookView({ runId, playbook, hasView, liveTick, varia
   if (!hasView) return null;
 
   // On another tab the view is a guest: nothing until it has loaded, said it
-  // has this section, and has data for it. A failed load is its own tab's to
-  // report.
+  // has this section, and has data for it. A failed load or poll is its own
+  // tab's to report; here the last good data stays up.
   if (variant && !(View?.variants?.includes(variant) && data)) return null;
 
-  const error = assetError ?? dataError;
+  const error = variant ? null : assetError ?? dataError;
   if (error) {
     return (
       <div style={{ padding: 32 }}>

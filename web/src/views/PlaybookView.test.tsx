@@ -376,6 +376,31 @@ describe('PlaybookView', () => {
     expect(container.innerHTML).toBe('');
   });
 
+  it('keeps a loaded section on another tab through a failed poll', async () => {
+    // The card would replace the host's tab body, not sit in the 380px column.
+    (window as any).HermesView_varpoll_pb = Object.assign(
+      ({ data }: any) => <div>section of {data.kind}</div>,
+      { variants: ['metrics'] },
+    );
+
+    const { rerender } = render(
+      <PlaybookView runId="run-2" playbook="varpoll_pb" hasView variant="metrics" liveTick={1} />,
+    );
+    const script = await injectedScript('varpoll_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('load'));
+    });
+    await waitFor(() => expect(screen.getByText('section of committee')).toBeInTheDocument());
+
+    mockFetch.mockResolvedValue({ ok: false, status: 503, json: async () => ({ detail: 'busy' }) });
+    rerender(<PlaybookView runId="run-2" playbook="varpoll_pb" hasView variant="metrics" liveTick={2} />);
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(2));
+    await act(async () => {});
+
+    expect(screen.queryByText('Error loading playbook view')).toBeNull();
+    expect(screen.getByText('section of committee')).toBeInTheDocument();
+  });
+
   it('never re-injects the asset on a tick, even after the load failed', async () => {
     // Finding 7.1, measured: with the asset load sharing the data effect, a
     // failing bundle evicted the cache and every poll re-injected -- five dead
