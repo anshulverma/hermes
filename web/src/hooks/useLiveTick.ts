@@ -14,9 +14,14 @@ export const TICKET_EVENT_KINDS: ReadonlySet<string> = Object.freeze(new Set([
   'needs_human', 'attention', 'phase_advanced', 'lease_acquired', 'lease_reclaimed',
 ]));
 
-/** Event kinds that signal a crew state change. */
+/**
+ * Event kinds that signal a crew state change: a host's own state, or a ticket
+ * landing on or leaving a host. The ticket kinds tick the board too, on purpose.
+ */
 export const CREW_EVENT_KINDS: ReadonlySet<string> = Object.freeze(new Set([
   'crew_added', 'crew_health', 'crew_down', 'crew_drained',
+  'ticket_claimed', 'result_recorded', 'ticket_requeued', 'ticket_parked',
+  'ticket_failed', 'ticket_abandoned',
 ]));
 
 /** Event kinds that signal a findings (reduction) state change. */

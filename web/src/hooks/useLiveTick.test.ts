@@ -94,17 +94,32 @@ describe('useLiveTick', () => {
     expect(result.current).toBe(3);
   });
 
-  it('CREW_EVENT_KINDS: increments on crew_added, ignores ticket kinds', () => {
+  it('CREW_EVENT_KINDS: increments on crew_added and on work changing hands', () => {
     const { result, rerender } = renderHook(
       ({ evt }: HookProps) => useLiveTick(evt, CREW_EVENT_KINDS),
       { initialProps: { evt: null } as HookProps },
     );
 
     act(() => { rerender({ evt: makeEvent(1, 'ticket_claimed') }); });
-    expect(result.current).toBe(0); // ticket kind, not crew
+    expect(result.current).toBe(1); // a host took work: the crew view is stale
 
     act(() => { rerender({ evt: makeEvent(2, 'crew_added') }); });
-    expect(result.current).toBe(1);
+    expect(result.current).toBe(2);
+
+    act(() => { rerender({ evt: makeEvent(3, 'reduction_created') }); });
+    expect(result.current).toBe(2); // no host gained or lost work
+  });
+
+  it('CREW_EVENT_KINDS: every engine kind that gives a host work or takes it away', () => {
+    // claim, result, requeue (penalty, host lost, lease expired), park, and the
+    // two failures that end in-flight work with no result: a contract violation
+    // and an operator abandon.
+    for (const kind of [
+      'ticket_claimed', 'result_recorded', 'ticket_requeued', 'ticket_parked',
+      'ticket_failed', 'ticket_abandoned',
+    ]) {
+      expect(CREW_EVENT_KINDS.has(kind), kind).toBe(true);
+    }
   });
 
   it('FINDING_EVENT_KINDS: increments on reduction_created, ignores others', () => {
