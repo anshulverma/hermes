@@ -15,37 +15,62 @@ type PhaseTimelineProps = {
   phases: Phase[];
 };
 
+/**
+ * What a phase's tickets have come to, worst first.
+ *
+ * Read from the counts, not from `current`: a finished run still names its last
+ * phase as current, and a phase that fans out stays current while its tickets
+ * fail. Claimed work waits in `dispatched` until its result lands, so that is
+ * active too; `running` alone is almost never written.
+ */
+function phaseState(counts: Record<string, number>): string {
+  const n = (s: string) => counts[s] || 0;
+  if (n('needs_human')) return 'needs-human';
+  if (n('failed')) return 'failed';
+  if (n('dispatched') || n('running') || n('reducing')) return 'running';
+  if (n('parked')) return 'parked';
+  if (n('queued')) return 'queued';
+  if (n('done')) return 'done';
+  return 'queued';
+}
+
 function PhaseTimeline({ phases }: PhaseTimelineProps) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ display: 'flex', gap: 4 }}>
-        {phases.map((p) => (
-          <div
-            key={p.name}
-            style={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 6,
-            }}
-          >
+      {/* Wraps: a playbook that mints a phase per step has dozens of them. */}
+      <div data-testid="phase-rail" style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+        {phases.map((p) => {
+          const state = phaseState(p.counts);
+          const total = Object.values(p.counts).reduce((a, b) => a + b, 0);
+          return (
             <div
+              key={p.name}
               style={{
-                height: 6,
-                borderRadius: 'var(--radius-full)',
-                background: p.current ? 'var(--status-live)' : 'var(--wash-active)',
-                animation: p.current ? 'fm-pulse 1.6s ease-out infinite' : 'none',
+                flex: '1 1 120px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
               }}
-            />
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <StatusPill
-                state={p.current ? 'running' : 'queued'}
-                label={p.name}
-                size="sm"
+            >
+              <div
+                style={{
+                  height: 6,
+                  borderRadius: 'var(--radius-full)',
+                  background: p.current ? 'var(--status-live)' : 'var(--wash-active)',
+                  animation: p.current ? 'fm-pulse 1.6s ease-out infinite' : 'none',
+                }}
               />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <StatusPill
+                  state={state}
+                  data-state={state}
+                  label={total > 1 ? `${p.name} ${total}` : p.name}
+                  size="sm"
+                />
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

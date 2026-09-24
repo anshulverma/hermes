@@ -56,9 +56,67 @@ describe('RunOverview', () => {
   it('should render phase timeline with current phase highlighted', () => {
     render(<RunOverview run={mockRun} />);
 
-    // Both phases should be present
-    expect(screen.getByText('work')).toBeInTheDocument();
-    expect(screen.getByText('reduce')).toBeInTheDocument();
+    // Both phases should be present, each carrying its ticket total
+    expect(screen.getByText('work 58')).toBeInTheDocument();
+    expect(screen.getByText('reduce 12')).toBeInTheDocument();
+  });
+
+  it('colours each phase pill by what its tickets came to, not by whether it is current', () => {
+    const run: RunDetail = {
+      ...mockRun,
+      phase: 't04-ops',
+      phases: [
+        { name: 't01-pm', counts: { done: 1 }, current: false },
+        { name: 't02-eng', counts: { failed: 1 }, current: false },
+        { name: 't03-qa', counts: { needs_human: 1 }, current: false },
+        // `running` is a state the engine barely writes: claimed work sits in
+        // `dispatched` until its result lands, then in `reducing`.
+        { name: 't04-ops', counts: { dispatched: 1 }, current: true },
+        { name: 't05-sre', counts: { reducing: 1 }, current: false },
+        { name: 't06-sec', counts: { parked: 1 }, current: false },
+        { name: 'fan', counts: { done: 3, queued: 2 }, current: false },
+        { name: 'report', counts: {}, current: false },
+      ],
+    };
+    render(<RunOverview run={run} />);
+
+    const stateOf = (label: string) => screen.getByText(label).getAttribute('data-state');
+    expect(stateOf('t01-pm')).toBe('done');
+    expect(stateOf('t02-eng')).toBe('failed');
+    expect(stateOf('t03-qa')).toBe('needs-human');
+    expect(stateOf('t04-ops')).toBe('running');
+    expect(stateOf('t05-sre')).toBe('running');
+    expect(stateOf('t06-sec')).toBe('parked');
+    expect(stateOf('fan 5')).toBe('queued');
+    expect(stateOf('report')).toBe('queued');
+  });
+
+  it('keeps a finished run\'s last phase from reading as running', () => {
+    // A run that is over still names its last phase as current.
+    const run: RunDetail = {
+      ...mockRun,
+      state: 'done',
+      phases: [{ name: 'solve', counts: { done: 11, failed: 1 }, current: true }],
+    };
+    render(<RunOverview run={run} />);
+
+    expect(screen.getByText('solve 12').getAttribute('data-state')).toBe('failed');
+  });
+
+  it('lets the phase rail wrap rather than squeeze many phases into one row', () => {
+    const run: RunDetail = {
+      ...mockRun,
+      phases: Array.from({ length: 17 }, (_, i) => ({
+        name: `t${i + 1}`,
+        counts: { done: 1 },
+        current: false,
+      })),
+    };
+    render(<RunOverview run={run} />);
+
+    const rail = screen.getByText('t1').closest('[data-testid="phase-rail"]') as HTMLElement;
+    expect(rail.style.flexWrap).toBe('wrap');
+    expect(rail.children).toHaveLength(17);
   });
 
   it('should render playbook name and allow opening playbook dialog', () => {
