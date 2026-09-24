@@ -196,13 +196,13 @@ def reclaim_expired(conn: sqlite3.Connection, now: Optional[float] = None) -> No
         if ticket_id:
             # Check ticket state: requeue only if still non-terminal
             trow = conn.execute(
-                "SELECT run_id, state, attempts FROM tickets WHERE id=?",
+                "SELECT run_id, state, attempts, worker_host FROM tickets WHERE id=?",
                 (ticket_id,),
             ).fetchone()
             if trow is None:
                 # Ticket gone; lease is freed, nothing to requeue
                 continue
-            run_id, state, attempts = trow
+            run_id, state, attempts, worker_host = trow
 
             # Non-terminal states: queued, dispatched, running, parked, reducing
             # Terminal: done, failed, needs_human
@@ -219,7 +219,7 @@ def reclaim_expired(conn: sqlite3.Connection, now: Optional[float] = None) -> No
                 from engine import events
                 events.emit(
                     conn, "ticket_requeued", run_id=run_id, ticket_id=ticket_id,
-                    message="lease reclaimed (expired)",
+                    host=worker_host, message="lease reclaimed (expired)",
                     data={"no_penalty": True, "lease_id": lease_id},
                 )
 

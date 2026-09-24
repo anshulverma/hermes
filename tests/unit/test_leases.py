@@ -308,6 +308,29 @@ def test_reclaim_expired_requeues_non_terminal(conn):
     assert state2 == "done", "terminal ticket not requeued"
 
 
+def test_reclaim_expired_requeue_event_names_the_host_the_ticket_came_off(conn):
+    """worker_host is cleared by the same write, so it has to be read first."""
+    from engine import leases
+
+    run_id = _mk_run(conn)
+    _mk_crew(conn, "h1", {"cpu": 1}, state="idle")
+    t1 = _mk_ticket(conn, "r1/t-1", state="running")
+
+    now = time.time()
+    lease1 = leases.acquire(conn, run_id, "cpu", t1, "h1", now=now)
+    conn.execute(
+        "UPDATE tickets SET lease_id=?, worker_host='h1' WHERE id=?", (lease1.id, t1)
+    )
+    conn.commit()
+
+    leases.reclaim_expired(conn, now=now + 1801)
+
+    hosts = [r[0] for r in conn.execute(
+        "SELECT host FROM events WHERE kind='ticket_requeued'"
+    )]
+    assert hosts == ["h1"]
+
+
 def test_reclaim_expired_unparks(conn):
     """reclaim_expired calls unpark_ready after freeing slots."""
     from engine import leases
