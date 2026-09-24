@@ -69,6 +69,8 @@ describe('RunOverview', () => {
         { name: 't01-pm', counts: { done: 1 }, current: false },
         { name: 't02-eng', counts: { failed: 1 }, current: false },
         { name: 't03-qa', counts: { needs_human: 1 }, current: false },
+        // work waiting in Needs you outranks a failure beside it
+        { name: 'solve', counts: { failed: 1, needs_human: 1 }, current: false },
         // `running` is a state the engine barely writes: claimed work sits in
         // `dispatched` until its result lands, then in `reducing`.
         { name: 't04-ops', counts: { dispatched: 1 }, current: true },
@@ -84,6 +86,7 @@ describe('RunOverview', () => {
     expect(stateOf('t01-pm')).toBe('done');
     expect(stateOf('t02-eng')).toBe('failed');
     expect(stateOf('t03-qa')).toBe('needs-human');
+    expect(stateOf('solve 2')).toBe('needs-human');
     expect(stateOf('t04-ops')).toBe('running');
     expect(stateOf('t05-sre')).toBe('running');
     expect(stateOf('t06-sec')).toBe('parked');
@@ -101,6 +104,34 @@ describe('RunOverview', () => {
     render(<RunOverview run={run} />);
 
     expect(screen.getByText('solve 12').getAttribute('data-state')).toBe('failed');
+  });
+
+  it.each(['done', 'failed'])(
+    'ends a %s run\'s zero-ticket last phase as the run did, without a live pulse',
+    (state) => {
+      // committee's `ruling` and research's `complete` mint no tickets.
+      const run: RunDetail = {
+        ...mockRun,
+        state,
+        phases: [
+          { name: 'decision', counts: { [state]: 1 }, current: false },
+          { name: 'ruling', counts: {}, current: true },
+        ],
+      };
+      render(<RunOverview run={run} />);
+
+      const pill = screen.getByText('ruling');
+      expect(pill.getAttribute('data-state')).toBe(state);
+      const bar = pill.parentElement!.parentElement!.firstChild as HTMLElement;
+      expect(bar.style.animation).toBe('none');
+    },
+  );
+
+  it('pulses the current phase of a live run', () => {
+    render(<RunOverview run={mockRun} />);
+
+    const bar = screen.getByText('work 58').parentElement!.parentElement!.firstChild as HTMLElement;
+    expect(bar.style.animation).toContain('fm-pulse');
   });
 
   it('lets the phase rail wrap rather than squeeze many phases into one row', () => {

@@ -13,6 +13,7 @@ import { fmtTime } from '../util/time';
 
 type PhaseTimelineProps = {
   phases: Phase[];
+  runState: string;
 };
 
 /**
@@ -34,14 +35,17 @@ function phaseState(counts: Record<string, number>): string {
   return 'queued';
 }
 
-function PhaseTimeline({ phases }: PhaseTimelineProps) {
+function PhaseTimeline({ phases, runState }: PhaseTimelineProps) {
+  const ended = ['done', 'stopped', 'failed'].includes(runState);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       {/* Wraps: a playbook that mints a phase per step has dozens of them. */}
       <div data-testid="phase-rail" style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
         {phases.map((p) => {
-          const state = phaseState(p.counts);
           const total = Object.values(p.counts).reduce((a, b) => a + b, 0);
+          // A zero-ticket phase has no counts to read, so a finished run speaks
+          // for its last one (a sentinel such as research's `complete`).
+          const state = phaseState(p.current && ended && !total ? { [runState]: 1 } : p.counts);
           return (
             <div
               key={p.name}
@@ -57,7 +61,7 @@ function PhaseTimeline({ phases }: PhaseTimelineProps) {
                   height: 6,
                   borderRadius: 'var(--radius-full)',
                   background: p.current ? 'var(--status-live)' : 'var(--wash-active)',
-                  animation: p.current ? 'fm-pulse 1.6s ease-out infinite' : 'none',
+                  animation: p.current && !ended ? 'fm-pulse 1.6s ease-out infinite' : 'none',
                 }}
               />
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -228,7 +232,7 @@ export default function RunOverview({ run, onRunUpdate }: RunOverviewProps) {
           <Divider />
 
           {/* Phase timeline */}
-          <PhaseTimeline phases={run.phases} />
+          <PhaseTimeline phases={run.phases} runState={run.state} />
 
           {/* Run controls (Pause/Resume/Stop) - Phase D1b */}
           <Divider />
