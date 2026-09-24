@@ -356,10 +356,13 @@ Cross-host synthesis:
   only consults `is_done` from `_reduce_and_advance` **after** the phase has fully
   settled to `done`/`failed` (no active, no `needs_human`, no `reducing`). Because
   "reduce(run, \"solve\", findings, site) → list[Reduction]" routes members to `needs_human`, this settlement is reached only **after the
-  human has accepted/rejected every cluster**; then `is_done` returns `True` and
-  the queue transitions the run `running → done`. Learnings are already banked in
-  `reduce`. (If `is_done` returned `False` here the engine would mark the run
-  `failed` as "stuck", so it must return `True`.)
+  human has accepted/rejected every cluster**; then `is_done` returns `True` and,
+  if at least one solve ticket is `done` (at least one cluster accepted), the
+  queue transitions the run `running → done`. If the human rejected **every**
+  cluster, no ticket is `done` and at least one is `failed`, so the engine ends
+  the run `failed` whatever `is_done` says (engine-core §5). Learnings are already
+  banked in `reduce` either way. (If `is_done` returned `False` here the engine
+  would mark the run `failed` as "stuck", so it must return `True`.)
 
 **Blocking / operator caveat (engine reality).** A verify-failed ticket (see "verify(run, ticket, result, site) → bool")
 enters `needs_human` with **no** `reduction_id` link. The only operator command
@@ -456,7 +459,7 @@ reduce (phase settled, nh==0) ─▶ fold latest finding/ticket; cluster by
           root_cause.signature; best-effort bank 1 learning/cluster (dexter kb);
           record_reduction ⇒ cluster reductions (pending) + route members to needs_human
 review ─▶ human accept/reject each cluster (hermes reduction accept|reject / control plane)
-done  ─▶ phase settled (done/failed only); is_done ⇒ run done; learnings banked
+done  ─▶ phase settled (done/failed only); is_done ⇒ run done (failed if every cluster was rejected); learnings banked
 ```
 
 ---
