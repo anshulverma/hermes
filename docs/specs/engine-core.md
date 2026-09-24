@@ -561,7 +561,7 @@ filters (test/demo source).
 
 ## 10. CLI (`hermes`)
 
-- `hermes run <playbook> --site <site> [--base-ref R] [--hosts a,b] [--dry-run]`
+- `hermes run <playbook> --site <site> [--base-ref R] [--hosts a,b] [--dry-run] [--wait]`
   — create a run, seed phase 0, add the given hosts (defaulting to the local host
   for the `local` site when `--hosts` is omitted), and start the master loop. For
   every host served **in-process** (the `local` site's single box) it **also
@@ -569,9 +569,24 @@ filters (test/demo source).
   `hermes run --site local` without `--dry-run` actually claims and executes
   tickets and drives the run to a terminal state (AC2, see "Acceptance criteria"); on a distributed
   site, remote worker boxes run their own `hermes serve --host` (below) instead.
+  Without `--wait` the master loop is bounded (1000 cycles), so a run blocked on
+  `needs_human` hands the shell back still `running`; the CLI says so and names
+  `hermes run resume <run_id> --wait`. `--wait` loops until the run is `done`,
+  `failed` or `stopped`, sleeping 1s after every cycle that served no ticket and
+  did not finish the run (an unbounded loop without the sleep spins on a blocked
+  run). It is opt-in: a playbook that routes work to a human (dexter routes every
+  cluster) would otherwise hold the shell, and CI, until someone decides. Ctrl-C
+  stops the loop at the next boundary and leaves the run `running` and resumable.
 - `hermes run {pause|resume|stop} <run_id>` — apply a run control action via
   `queue.set_run_state` (see "Ticket state machine" and "Queue, dispatch, leases, crew, drivers"); prints the resulting `runs.state` and errors on
   an illegal transition (e.g. resume of a terminal run).
+- `hermes run resume <run_id> --wait [--site S] [--agent A] [--hosts a,b]` —
+  re-enter the master loop on an existing run with `--wait`'s settings. A `paused`
+  run is resumed first; a `running` run that no loop is driving (its `hermes run`
+  returned, or the board resumed it) is picked up as it is. The playbook, base
+  ref and (unless `--site` is given) site come from the run. `--wait` with
+  `pause`/`stop`/`reopen` is an error; a finished run takes `reopen`, then
+  `resume --wait`.
 - `hermes reduction {accept|reject} <reduction_id>` — apply the human decision via
   `queue.accept_reduction`/`reject_reduction` (see "Queue, dispatch, leases, crew, drivers"): transitions the reduction
   `pending → accepted`/`rejected` and settles every ticket it routed to

@@ -171,6 +171,7 @@ def master_loop(
     now: Optional[float] = None,
     max_cycles: Optional[int] = None,
     stop_event: Optional[threading.Event] = None,
+    idle_sleep_s: float = 0.0,
 ) -> str:
     """Orchestrate a run to a terminal state.
 
@@ -181,6 +182,11 @@ def master_loop(
 
     Bounded by ``max_cycles`` (``None`` = run until the run reaches a terminal
     state). Returns the run's final observed state.
+
+    ``idle_sleep_s`` is slept after a cycle that served no ticket and did not
+    finish the run — a paused run, or one whose tickets all wait on a human.
+    Unbounded loops need it: without it a blocked run spins as fast as the db
+    answers. ``0`` never sleeps.
 
     Checks ``stop_event`` at safe boundaries to enable graceful shutdown:
     - After heartbeat_sweep (before the progression block): if set, return
@@ -217,12 +223,15 @@ def master_loop(
             return state
         if state != "running":
             # paused: only housekeeping continues (pause freeze,).
+            if idle_sleep_s:
+                time.sleep(idle_sleep_s)
             continue
 
         # (b) Progression — running only. Drive the serve loops for each host.
         run = queue.load_run(conn, run_id)
+        served = 0
         for host in hosts:
-            serve_loop(conn, site, agent, host, run, playbook, base_ref, now=t, stop_event=ev)
+            served += serve_loop(conn, site, agent, host, run, playbook, base_ref, now=t, stop_event=ev)
 
         # Check stop flag AFTER serve fanout, BEFORE reduce/advance. If set,
         # skip reduce/advance (so shutdown seeds no new work) and continue to
@@ -234,6 +243,12 @@ def master_loop(
         # Reduce a fully-settled phase and advance / terminate.
         if _reduce_and_advance(conn, run_id, playbook, site, now=t):
             return _run_state(conn, run_id)
+
+        if not served and idle_sleep_s:
+            # time.sleep, not ev.wait: the SIGINT handler sets ev, and setting
+            # an Event from a handler can deadlock against a wait on the same
+            # thread. A Ctrl-C lands at most idle_sleep_s late.
+            time.sleep(idle_sleep_s)
 
     return _run_state(conn, run_id)
 

@@ -420,7 +420,16 @@ def cmd_run(args):
 
     # Non-dry-run: drive to terminal via master_loop
     print(f"Run {run_id} starting (local mode)...")
+    return _drive(conn, run_id, pb, st, ag, base_ref, args)
 
+
+def _drive(conn, run_id, pb, st, ag, base_ref, args):
+    """Admit the hosts and run the master loop on ``run_id``; returns the exit code.
+
+    ``--wait`` loops until the run is done, failed or stopped, sleeping between
+    idle cycles. Without it the loop is bounded, so a run waiting on a human
+    hands the shell back instead of holding it.
+    """
     # Determine hosts (for local site, use the local host)
     hosts = getattr(args, 'hosts', None)
     if not hosts:
@@ -440,6 +449,7 @@ def cmd_run(args):
             return 1
 
     # For local site, drive master_loop which launches in-process serve loops
+    wait = getattr(args, 'wait', False)
     dispatch.master_loop(
         conn=conn,
         run_id=run_id,
@@ -448,7 +458,8 @@ def cmd_run(args):
         agent=ag,
         base_ref=base_ref,
         hosts=hosts,
-        max_cycles=1000,  # bounded to avoid infinite loops
+        max_cycles=None if wait else 1000,  # bounded unless asked to wait
+        idle_sleep_s=1.0 if wait else 0.0,
     )
 
     # Log graceful shutdown if the stop flag was set
@@ -457,28 +468,51 @@ def cmd_run(args):
 
     # Check final state
     final_state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
-    print(f"Run {run_id} finished: {final_state}")
+    if final_state in queue.TERMINAL_RUN_STATES:
+        print(f"Run {run_id} finished: {final_state}")
+    else:
+        print(f"Run {run_id} is still {final_state}; "
+              f"`hermes run resume {run_id} --wait` picks it up again")
     conn.close()
     return 0
 
 
 def cmd_run_control(args):
-    """hermes run {pause|resume|stop|reopen} <run_id>."""
+    """hermes run {pause|resume|stop|reopen} <run_id>, or run resume <run_id> --wait."""
     action = args.action
     run_id = args.run_id
+    wait = getattr(args, 'wait', False)
+    if wait and action != 'resume':
+        print(f"Error: --wait goes with 'run <playbook>' or 'run resume', not 'run {action}'",
+              file=sys.stderr)
+        return 1
+    if wait:
+        # Before anything slow, so a Ctrl-C from here on stops the loop cleanly.
+        shutdown.install_handlers()
 
     conn = _connect()
 
     try:
-        queue.apply_run_action(conn, run_id, action)
+        state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()
+        # resume --wait also picks up a run that is running with no loop driving
+        # it: its `hermes run` returned, or the board resumed it.
+        if not (wait and state == ('running',)):
+            queue.apply_run_action(conn, run_id, action)
         final_state = conn.execute("SELECT state FROM runs WHERE id=?", (run_id,)).fetchone()[0]
         print(f"Run {run_id}: {final_state}")
-        conn.close()
-        return 0
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         conn.close()
         return 1
+    if not wait:
+        conn.close()
+        return 0
+
+    run = queue.load_run(conn, run_id)
+    args.playbook = run.playbook
+    args.site = args.site or run.site
+    pb, st, ag = _load_playbook_site_agent(args)
+    return _drive(conn, run_id, pb, st, ag, run.base_ref, args)
 
 
 def cmd_reduction(args):
@@ -1098,6 +1132,9 @@ def main(argv=None):
     run_parser.add_argument('--hosts', help='Comma-separated hosts (default: localhost for local site)')
     run_parser.add_argument('--goals', help='Path to goals file (one goal per line, # for comments)')
     run_parser.add_argument('--dry-run', action='store_true', help='Seed only, no dispatch')
+    run_parser.add_argument('--wait', action='store_true',
+                            help='Keep driving until the run is done, failed or stopped '
+                                 '(run <playbook>, run resume <run_id>)')
 
     # --- reduction ---
     red_parser = subparsers.add_parser('reduction', help='Reduction control')
