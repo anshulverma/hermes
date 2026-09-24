@@ -10,8 +10,9 @@ This module is the state machine. ``next_phase`` decides who speaks next and
 ``is_done`` decides how the run ends. The meeting lives in a per-run dict on the
 instance (``_state``), because ``run.config`` is read-only and ``run.reductions``
 reaches only one phase back. So the meeting itself cannot be resumed: its turns
-must all run in one master process against the one registry singleton. The
-ruling can: ``is_done`` reads only the decision's reduction from the database.
+must all run in one master process against the one registry singleton, and a
+process that finds one under way ends the run ``failed`` (``_lost``). The ruling
+can be: ``is_done`` reads only the decision's reduction from the database.
 
 Ordering is load-bearing. A pending delegation outranks ``close`` — an edit the
 owner asked for still happens, and costs one turn — and the turn cap outranks
@@ -116,6 +117,11 @@ _SIMULATION = (
 # stands and the loss is visible (spec 5.3). The run then ends `failed`.
 _NO_DECISION = "_(no decision delivered — the chair's turn failed; see hermes show)_"
 
+_LOST = (
+    "the meeting cannot be resumed: its floor queue and cast lived in the process "
+    "that held it, which is gone. thread.md keeps every turn up to here."
+)
+
 
 class CommitteePlaybook:
     """A committee of personas reviewing one artifact, one speaker per phase."""
@@ -189,6 +195,16 @@ class CommitteePlaybook:
             }
             self._state_by_run[run.id] = s
         return s
+
+    def _lost(self, run: Run, s: dict) -> bool:
+        """This process never held the meeting (a ``resume --wait`` after Ctrl-C).
+
+        Past ``open``, a process that held it always has a speaker on record:
+        ``_turn`` and ``_decision`` set one before the phase is dispatched. Without
+        one the floor queue and the cast are gone, and ``next_phase`` would
+        re-mint ``t01`` over a ticket that exists.
+        """
+        return run.phase not in (None, "open") and s["current_role"] is None
 
     def _turn(self, s: dict, role: str) -> str:
         """Mint the next turn phase for `role` and advance the counter."""
@@ -486,6 +502,8 @@ class CommitteePlaybook:
         if phase in ("open", "ruling"):
             return []  # a zero-ticket phase: nothing was dispatched
         s = self._state(run)
+        if self._lost(run, s):
+            return [Reduction(kind="lost", json={"error": _LOST})]
         if phase == "decision":
             return self._reduce_decision(run, s, findings)
         return self._reduce_turn(run, s, findings)
@@ -495,11 +513,7 @@ class CommitteePlaybook:
     ) -> list[Reduction]:
         """One speaker's turn: the thread entry, then the gates."""
         errors: list[str] = []
-        # `_turn` sets `current_role` before the phase is dispatched, so an empty
-        # one means the turn cannot be attributed. Fail CLOSED -- no entry under
-        # someone else's name, no gates. A fallback to `cast.OWNER` would hand
-        # owner authority (`close`, `delegate`) to a speaker nobody can name.
-        role = s["current_role"] or ""
+        role = s["current_role"]  # never None here: `reduce` checked `_lost`
         turn = s["current_turn"]
         answer = _latest_answer(findings)
         body = turnblock.strip(answer)
@@ -511,19 +525,15 @@ class CommitteePlaybook:
 
         # An empty body makes `append_turn` write the NO_TURN stub, so a failed
         # turn is visible in the transcript rather than missing from it.
-        if role:
-            try:
-                thread.append_turn(run.id, turn=turn, role=role, body=body)
-            except Exception as exc:  # never raise out of reduce
-                errors.append(f"thread: {exc}")
-        else:
-            errors.append("speaker: the turn could not be attributed")
+        try:
+            thread.append_turn(run.id, turn=turn, role=role, body=body)
+        except Exception as exc:  # never raise out of reduce
+            errors.append(f"thread: {exc}")
 
         block = turnblock.parse(answer)
 
-        # The gates of spec 5.4. An unattributable turn runs none of them.
-        if role:
-            _apply_block(s, role, block, delivered=bool(answer))
+        # The gates of spec 5.4.
+        _apply_block(s, role, block, delivered=bool(answer))
 
         # `stance` is not a gate -- it steers nothing, so it is not in
         # `_apply_block`. It rides on the turn reduction below and nowhere else:
@@ -695,6 +705,8 @@ class CommitteePlaybook:
         if run.phase == "ruling":
             return None  # -> is_done
         s = self._state(run)
+        if self._lost(run, s):
+            return None  # -> is_done, which has no verdict: the run ends failed
         # a delegation outranks `close`: an edit the owner asked for still happens,
         # and costs one turn. The cap outranks BOTH, so this can never mint t31.
         if s["delegation"] and s["turn"] <= s["max_turns"]:

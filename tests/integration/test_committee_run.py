@@ -569,6 +569,32 @@ def test_a_process_that_never_saw_the_meeting_finishes_the_ruling(
     ) == ends
 
 
+def test_a_process_that_never_saw_the_meeting_ends_it_failed_and_says_why(
+    home, source_repo, artifact, conn, local_site
+):
+    """The meeting lives in one process's memory. A fresh process picking it up
+    mid-way (`hermes run resume <id> --wait` after Ctrl-C) used to re-mint `t01`
+    over a ticket that exists -- UNIQUE constraint failed -- and strand the run
+    `running` with nothing driving it."""
+    agent = ScriptedCommitteeAgent()
+    run_id = "committee-20260918-000014"
+    host = _start(conn, run_id, committee.CommitteePlaybook(), local_site, agent)
+    dispatch.master_loop(
+        conn, run_id, committee.CommitteePlaybook(), local_site, agent, "HEAD",
+        hosts=[host], now=1000.0, max_cycles=3,
+    )
+    assert _run_state(conn, run_id) == "running"
+    stopped_at = queue.load_run(conn, run_id).phase
+    assert stopped_at not in ("open", "decision", "ruling"), stopped_at
+
+    assert _drive(conn, run_id, committee.CommitteePlaybook(), local_site, agent, host) == "failed"
+    lost = conn.execute(
+        "SELECT phase, json FROM reductions WHERE run_id=? AND kind='lost'", (run_id,)
+    ).fetchall()
+    assert [phase for phase, _ in lost] == [stopped_at]
+    assert "cannot be resumed" in json.loads(lost[0][1])["error"]
+
+
 def test_delegated_edit_writes_only_the_revised_copy(
     home, source_repo, artifact, conn, local_site
 ):

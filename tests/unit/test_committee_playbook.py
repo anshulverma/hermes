@@ -2205,21 +2205,28 @@ def test_reduce_records_a_block_only_answer_as_delivered_not_as_a_failure():
     assert thread.NO_TURN not in text
 
 
-def test_reduce_grants_no_owner_authority_to_an_unattributable_turn():
-    """A turn with no speaker fails closed: no gates, and the reason recorded."""
+@pytest.mark.parametrize("phase", ["t04-owner", "decision"])
+def test_a_process_that_never_held_the_meeting_grants_nothing_and_ends_it(phase):
+    """Past `open` with no speaker on record, this instance never held the
+    meeting: no thread entry under anyone's name, no owner authority, no
+    verdict, and no re-minted `t01` -- the run ends failed, saying why."""
+    from playbooks.committee import thread
+
     pb = _committee()
-    run = _run(phase="t04-owner")
-    s = pb._state(run)
-    s.update(current_role=None, current_turn=4, opening=[])
+    run = _run(phase=phase)
 
     answer = _turn_answer("Closing this.", close="yes", delegate="yes", action="x")
     reductions = pb.reduce(
-        run, "t04-owner", [_finding(run, f"{run.id}/t04-owner", answer)],
-        _NamedSite("local"),
+        run, phase, [_finding(run, f"{run.id}/{phase}", answer)], _NamedSite("local"),
     )
 
+    s = pb._state(run)
     assert s["closed"] is False and s["delegation"] is None
-    assert "speaker" in reductions[0].json["error"]
+    assert [r.kind for r in reductions] == ["lost"]
+    assert "cannot be resumed" in reductions[0].json["error"]
+    assert not thread.path(run.id).exists()
+    if phase != "decision":  # decision -> ruling reads the database, not this instance
+        assert pb.next_phase(run) is None
 
 
 def test_reduce_never_raises_when_the_thread_cannot_be_written():

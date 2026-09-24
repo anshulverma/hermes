@@ -240,12 +240,12 @@ the master" also means "a playbook you trust with the operator's API token".
 - **The turn cap is literal.** At a low `HERMES_COMMITTEE_MAX_TURNS` the run stops mid-exchange —
   at `3`, on a reviewer's turn, with no owner reply after it — and goes straight to the decision.
   That is the cap working, not a lost turn.
-- **The turn cap has no upper bound, but `hermes run` does.** `master_loop` is called with
-  `max_cycles=1000` (`engine/cli.py:451`), so a `MAX_TURNS` in the high hundreds can exhaust the
-  cycle budget and leave the run `running` with no decision. Nothing rejects such a value; pick one
-  the loop can actually reach.
-- **A chair turn that produces no result ends the run `failed`** — the one deliberate non-`done`
-  terminal state. A committee that produced no decision did not finish, and fabricating a verdict
+- **The turn cap has no upper bound, but `hermes run` without `--wait` does.** Its loop stops
+  after `max_cycles=1000` (`engine/cli.py`, `_drive`), so a `MAX_TURNS` in the high hundreds can
+  exhaust the cycle budget mid-meeting, and the meeting cannot be resumed (below). Nothing rejects
+  such a value; for a long meeting use `hermes run --wait`, which has no cycle limit.
+- **A chair turn that produces no result ends the run `failed`**, as do a rejected verdict and a
+  lost meeting (below). A committee that produced no decision did not finish, and fabricating a verdict
   would be worse; `thread.md` survives either way.
 - **`--dry-run` deletes the run's state directory when it settles**, so the seeded header is not
   there to read afterwards.
@@ -253,7 +253,9 @@ the master" also means "a playbook you trust with the operator's API token".
   Once the verdict is written, the chair's ticket waits in `needs_human` with the run `running`:
   accept ends the run `done`, reject ends it `failed`. One artifact per run, one cast.
 - **The meeting is not resumable; the ruling is.** The floor queue and the cast live in the
-  master's memory, so a process lost mid-meeting cannot pick the meeting up again. Once the verdict
+  master's memory, so a process lost mid-meeting cannot pick the meeting up again: a
+  `hermes run resume <id> --wait` there records a `lost` reduction saying so and ends the run
+  `failed`, with `thread.md` intact up to the last turn. Once the verdict
   waits, nothing in memory is needed: without `--wait`, `hermes run` returns and
   `hermes run resume <id> --wait` finishes the run after the ruling, reading it from the database.
 - `MockAgent` cannot serve this playbook — it echoes the request payload back as the result — so
