@@ -3297,6 +3297,55 @@ def test_run_metrics_unknown_run_404(loopback_client: TestClient, temp_home: Pat
     assert response.status_code == 404
 
 
+def _metrics_run(temp_home: Path, created_at: float, attempts) -> None:
+    """Run 'm' with ticket 'm/t' and (host, started_at, ended_at, outcome) attempts."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('m', 'example', 'local', 'running', 'work', 'main', '{}', ?, ?)""",
+        (created_at, created_at),
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, payload_json, created_at, updated_at)
+           VALUES ('m/t', 'm', 'work', 'done', 'cpu', 0, '{}', ?, ?)""",
+        (created_at, created_at),
+    )
+    for n, (host, started, ended, outcome) in enumerate(attempts, 1):
+        conn.execute(
+            """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome)
+               VALUES ('m/t', 'work', ?, ?, ?, ?, ?)""",
+            (host, n, started, ended, outcome),
+        )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("bucket_s", [0, -300])
+def test_run_metrics_rejects_a_bucket_width_below_one(client: TestClient, temp_home: Path, bucket_s: int):
+    _metrics_run(temp_home, 1000.0, [("h1", 1100.0, 1200.0, "ok")])
+    assert client.get(f"/api/runs/m/metrics?bucket_s={bucket_s}").status_code == 422
+
+
+def test_run_metrics_bucket_count_is_bounded(client: TestClient, temp_home: Path):
+    """Two days of 1s buckets (or a run row created at epoch 0) does not build a
+    bucket per second: the width grows to fit, and the response says what it used."""
+    _metrics_run(temp_home, 0.0, [("h1", 172_740.0, 172_800.0, "ok")])
+    data = client.get("/api/runs/m/metrics?bucket_s=1").json()
+    assert 0 < len(data["buckets"]) <= 1440
+    assert len(data["buckets"]) * data["bucket_s"] >= 172_800
+    assert data["buckets"][-1]["done_cumulative"] == 1
+
+
+def test_run_metrics_counts_an_attempt_ending_on_the_last_bucket_edge(
+    client: TestClient, temp_home: Path
+):
+    """The cumulative line ends at the attempt totals, even when the last attempt
+    ends exactly where the last bucket does."""
+    _metrics_run(temp_home, 1000.0, [("h1", 1100.0, 1300.0, "ok")])
+    data = client.get("/api/runs/m/metrics?bucket_s=300").json()
+    assert data["buckets"][-1]["done_cumulative"] == data["totals"]["done"] == 1
+
+
 # --- Ticket Detail Enrichments (history / reason / reduction / available_actions) ---
 
 def test_ticket_detail_includes_history(loopback_client: TestClient, temp_home: Path):

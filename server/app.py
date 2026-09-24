@@ -63,6 +63,11 @@ VIEWS_OFF = frozenset({"0", "false", "no", "off"})
 # omission.
 ARTIFACT_MAX_CHARS = 2 * 1024 * 1024
 
+# A metrics chart never needs more bars than a day of minutes. Past this the
+# bucket widens instead, so a run row with a bad created_at (or ?bucket_s=1 on
+# a long run) cannot ask for millions of buckets.
+METRICS_MAX_BUCKETS = 1440
+
 
 def view_playbook(name: str):
     """The registered playbook behind ``name``'s view, or None if there is none.
@@ -1090,7 +1095,7 @@ def create_app(bind: str | None = None) -> FastAPI:
     @app.get("/api/runs/{run_id}/metrics")
     def get_run_metrics(
         run_id: str,
-        bucket_s: int = 300,
+        bucket_s: int = Query(300, ge=1),
         _: None = Depends(require_auth_read)
     ) -> dict[str, Any]:
         """Get time-bucketed metrics for a run.
@@ -1099,7 +1104,9 @@ def create_app(bind: str | None = None) -> FastAPI:
 
         Args:
             run_id: Run ID
-            bucket_s: Bucket width in seconds (default 300 = 5 minutes)
+            bucket_s: Bucket width in seconds (default 300 = 5 minutes). Widened
+                when the run would need more than METRICS_MAX_BUCKETS; the response's
+                bucket_s is the width actually used.
 
         Returns:
             {
@@ -1184,7 +1191,9 @@ def create_app(bind: str | None = None) -> FastAPI:
                 }
 
             # Generate buckets from run_created_at to range_end
-            num_buckets = math.ceil((range_end - run_created_at) / bucket_s)
+            span = range_end - run_created_at
+            bucket_s = max(bucket_s, math.ceil(span / METRICS_MAX_BUCKETS))
+            num_buckets = math.ceil(span / bucket_s)
             if num_buckets == 0:
                 num_buckets = 1  # At least one bucket if there's any data
 
@@ -1198,8 +1207,19 @@ def create_app(bind: str | None = None) -> FastAPI:
                 (run_id,)
             ).fetchall()
 
-            # Filter for bucketing (only attempts with ended_at)
-            attempts = [(row[5], row[6]) for row in all_attempts if row[5] is not None]  # (ended_at, outcome)
+            # One pass puts each ended attempt in its bucket as [done, failed,
+            # ended]. The last attempt defines range_end, so it can land exactly
+            # on the final edge; it belongs to the last bucket, not past it.
+            ended_counts = [[0, 0, 0] for _ in range(num_buckets)]
+            for row in all_attempts:
+                if row[5] is None:
+                    continue
+                i = min(max(int((row[5] - run_created_at) // bucket_s), 0), num_buckets - 1)
+                ended_counts[i][2] += 1
+                if row[6] == 'ok':
+                    ended_counts[i][0] += 1
+                elif row[6] in ('driver_failed', 'infra_failed'):
+                    ended_counts[i][1] += 1
 
             # Fetch all crew events (global, not run-scoped - crew is fleet-wide)
             # But for deterministic test behavior, scope to this run's events or use all
@@ -1225,15 +1245,10 @@ def create_app(bind: str | None = None) -> FastAPI:
                 bucket_end = bucket_start + bucket_s
 
                 # Throughput: attempts ended in [bucket_start, bucket_end)
-                bucket_ended = [a for a in attempts if bucket_start <= a[0] < bucket_end]
-                throughput = len(bucket_ended)
-
-                # Per-bucket failed/done counts (for error_rate)
-                bucket_done = sum(1 for a in bucket_ended if a[1] == 'ok')
-                bucket_failed = sum(1 for a in bucket_ended if a[1] in ('driver_failed', 'infra_failed'))
+                bucket_done, bucket_failed, throughput = ended_counts[i]
 
                 # Error rate for this bucket
-                error_rate = (bucket_failed / len(bucket_ended)) if bucket_ended else 0.0
+                error_rate = (bucket_failed / throughput) if throughput else 0.0
 
                 # Update cumulative done/failed (all attempts up to bucket_end)
                 done_cumulative += bucket_done
