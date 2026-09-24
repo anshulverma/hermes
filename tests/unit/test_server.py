@@ -3152,7 +3152,7 @@ def test_run_metrics_endpoint_deterministic_buckets(loopback_client: TestClient,
     """GET /api/runs/{id}/metrics aggregates REAL time-bucketed metrics with deterministic range.
 
     Throughput = attempts ended in bucket; done/failed cumulative from terminal outcomes;
-    error_rate = failed/total per bucket; crew_online tracks crew events.
+    error_rate = failed/total per bucket; busy_hosts counts hosts with an attempt in the bucket.
     Buckets span from run.created_at to latest event/attempt ts (deterministic, no wall-clock).
     """
     import sqlite3
@@ -3241,32 +3241,32 @@ def test_run_metrics_endpoint_deterministic_buckets(loopback_client: TestClient,
     # Latest event/attempt ts = 1800, so range [1000, 1900) = 3 buckets
     assert len(buckets) == 3
 
-    # Bucket 0 [1000, 1300): throughput=2, done_cum=1, failed_cum=1, error_rate=0.5 (1/2), crew_online=2
+    # Bucket 0 [1000, 1300): throughput=2, done_cum=1, failed_cum=1, error_rate=0.5 (1/2), busy_hosts=1
     b0 = buckets[0]
     assert b0["t_start"] == 1000.0
     assert b0["throughput"] == 2  # 2 attempts ended
     assert b0["done_cumulative"] == 1  # 1 ok
     assert b0["failed_cumulative"] == 1  # 1 failed
     assert abs(b0["error_rate"] - 0.5) < 0.01  # 1/2
-    assert b0["crew_online"] == 2  # h1+h2 online by end of bucket
+    assert b0["busy_hosts"] == 1  # both attempts ran on h1
 
-    # Bucket 1 [1300, 1600): throughput=1, done_cum=2, failed_cum=1, error_rate=0 (1 ok), crew_online=1 (h1 down at 1500)
+    # Bucket 1 [1300, 1600): throughput=1, done_cum=2, failed_cum=1, error_rate=0 (1 ok), busy_hosts=1
     b1 = buckets[1]
     assert b1["t_start"] == 1300.0
     assert b1["throughput"] == 1
     assert b1["done_cumulative"] == 2  # cumulative: 1+1
     assert b1["failed_cumulative"] == 1  # cumulative: still 1
     assert abs(b1["error_rate"] - 0.0) < 0.01  # 0/1
-    assert b1["crew_online"] == 1  # only h2 by end of bucket
+    assert b1["busy_hosts"] == 1  # h2
 
-    # Bucket 2 [1600, 1900): throughput=1, done_cum=2, failed_cum=2, error_rate=1.0 (1 failed), crew_online=1
+    # Bucket 2 [1600, 1900): throughput=1, done_cum=2, failed_cum=2, error_rate=1.0 (1 failed), busy_hosts=1
     b2 = buckets[2]
     assert b2["t_start"] == 1600.0
     assert b2["throughput"] == 1
     assert b2["done_cumulative"] == 2  # cumulative: still 2
     assert b2["failed_cumulative"] == 2  # cumulative: 1+1
     assert abs(b2["error_rate"] - 1.0) < 0.01  # 1/1
-    assert b2["crew_online"] == 1
+    assert b2["busy_hosts"] == 1
 
 
 def test_run_metrics_empty_run(loopback_client: TestClient, temp_home: Path):
@@ -3344,6 +3344,40 @@ def test_run_metrics_counts_an_attempt_ending_on_the_last_bucket_edge(
     _metrics_run(temp_home, 1000.0, [("h1", 1100.0, 1300.0, "ok")])
     data = client.get("/api/runs/m/metrics?bucket_s=300").json()
     assert data["buckets"][-1]["done_cumulative"] == data["totals"]["done"] == 1
+
+
+def test_run_metrics_busy_hosts_are_this_runs_hosts_at_work(client: TestClient, temp_home: Path):
+    """busy_hosts per bucket = distinct hosts with one of this run's attempts
+    overlapping it. Another run's attempts and fleet-wide crew events do not
+    show up on this run's chart, and do not stretch its time range."""
+    _metrics_run(temp_home, 1000.0, [
+        ("h1", 1000.0, 1650.0, "ok"),   # spans buckets 0, 1, 2
+        ("h2", 1100.0, 1200.0, "ok"),   # bucket 0
+        ("h3", 1350.0, 1400.0, "ok"),   # bucket 1
+    ])
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('other', 'example', 'local', 'running', 'work', 'main', '{}', 1000, 1000)"""
+    )
+    conn.execute(
+        """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, payload_json, created_at, updated_at)
+           VALUES ('other/t', 'other', 'work', 'done', 'cpu', 0, '{}', 1000, 1000)"""
+    )
+    conn.execute(
+        """INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome)
+           VALUES ('other/t', 'work', 'h9', 1, 1000, 1200, 'ok')"""
+    )
+    conn.execute(
+        """INSERT INTO events (ts, kind, run_id, host, message, data_json)
+           VALUES (9000, 'crew_added', NULL, 'h8', 'Crew h8 added', '{}')"""
+    )
+    conn.commit()
+    conn.close()
+
+    buckets = client.get("/api/runs/m/metrics?bucket_s=300").json()["buckets"]
+    assert [b["busy_hosts"] for b in buckets] == [2, 2, 1]
+    assert all("crew_online" not in b for b in buckets)
 
 
 def _add_tickets(temp_home: Path, run_id: str, states) -> None:

@@ -567,7 +567,8 @@ export type MetricsBucket = {
   done_cumulative: number;
   failed_cumulative: number;
   error_rate: number;
-  crew_online: number;
+  /** Distinct hosts with one of this run's attempts in the bucket. */
+  busy_hosts: number;
 };
 
 export type RunMetrics = {

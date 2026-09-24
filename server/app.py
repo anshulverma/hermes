@@ -1119,14 +1119,15 @@ def create_app(bind: str | None = None) -> FastAPI:
                         done_cumulative: int,  # cumulative done outcomes
                         failed_cumulative: int,  # cumulative failed outcomes
                         error_rate: float,  # failed/total per bucket
-                        crew_online: int  # hosts online as of bucket end
+                        busy_hosts: int  # distinct hosts with one of this run's attempts in the bucket
                     }
                 ]
             }
 
         Buckets span from run.created_at to latest event/attempt timestamp (deterministic).
         Done/failed cumulative derived from attempts.outcome (ok vs driver_failed/infra_failed).
-        Crew online tracks crew_added/crew_health (online) vs crew_down/crew_drained (offline).
+        Busy hosts come from this run's own recorded attempts, [started_at, ended_at];
+        an attempt still in flight has no row yet, so it shows once it ends.
 
         Returns 404 if run not found.
         """
@@ -1152,12 +1153,12 @@ def create_app(bind: str | None = None) -> FastAPI:
             ).fetchall())
 
             # Find latest timestamp across events and attempts for this run
-            # Events: scope by run_id (crew events may have null run_id - include all for global crew tracking)
+            # Events: scope by run_id; the fleet's crew events are not this run's
             # Attempts: scope via tickets join
 
-            # Latest event ts (all events, including crew events)
+            # Latest event ts for this run
             event_ts_row = conn.execute(
-                "SELECT MAX(ts) FROM events WHERE run_id=? OR kind IN ('crew_added', 'crew_health', 'crew_down', 'crew_drained')",
+                "SELECT MAX(ts) FROM events WHERE run_id=?",
                 (run_id,)
             ).fetchone()
             max_event_ts = event_ts_row[0] if event_ts_row and event_ts_row[0] else None
@@ -1207,7 +1208,8 @@ def create_app(bind: str | None = None) -> FastAPI:
 
             # Fetch all attempts for this run (with all required columns for both buckets and aggregates)
             all_attempts = conn.execute(
-                """SELECT a.id, a.phase, a.ticket_id, a.attempt, a.started_at, a.ended_at, a.outcome
+                """SELECT a.id, a.phase, a.ticket_id, a.attempt, a.started_at, a.ended_at, a.outcome,
+                          a.host
                    FROM attempts a
                    JOIN tickets t ON a.ticket_id = t.id
                    WHERE t.run_id=?
@@ -1215,42 +1217,37 @@ def create_app(bind: str | None = None) -> FastAPI:
                 (run_id,)
             ).fetchall()
 
-            # One pass puts each ended attempt in its bucket as [done, failed,
-            # ended]. The last attempt defines range_end, so it can land exactly
-            # on the final edge; it belongs to the last bucket, not past it.
+            def bucket_of(ts: float) -> int:
+                # The last attempt defines range_end, so it can land exactly on
+                # the final edge; it belongs to the last bucket, not past it.
+                return min(max(int((ts - run_created_at) // bucket_s), 0), num_buckets - 1)
+
+            # One pass: each ended attempt counts in the bucket it ended in as
+            # [done, failed, ended], and marks its host busy in every bucket its
+            # [started_at, ended_at] overlaps.
+            # ponytail: O(attempts x buckets spanned), bounded by METRICS_MAX_BUCKETS.
             ended_counts = [[0, 0, 0] for _ in range(num_buckets)]
+            busy: list[set[str]] = [set() for _ in range(num_buckets)]
             for row in all_attempts:
                 if row[5] is None:
                     continue
-                i = min(max(int((row[5] - run_created_at) // bucket_s), 0), num_buckets - 1)
-                ended_counts[i][2] += 1
+                last = bucket_of(row[5])
+                ended_counts[last][2] += 1
                 if row[6] == 'ok':
-                    ended_counts[i][0] += 1
+                    ended_counts[last][0] += 1
                 elif row[6] in ('driver_failed', 'infra_failed'):
-                    ended_counts[i][1] += 1
-
-            # Fetch all crew events (global, not run-scoped - crew is fleet-wide)
-            # But for deterministic test behavior, scope to this run's events or use all
-            # CHOICE: Include all crew events (global crew tracking)
-            crew_events = conn.execute(
-                """SELECT ts, kind, host
-                   FROM events
-                   WHERE kind IN ('crew_added', 'crew_health', 'crew_down', 'crew_drained')
-                   ORDER BY ts"""
-            ).fetchall()
+                    ended_counts[last][1] += 1
+                first = bucket_of(row[4]) if row[4] is not None else last
+                for j in range(first, last + 1):
+                    busy[j].add(row[7])
 
             buckets = []
             # Cumulative done/failed are monotonic non-decreasing (accumulated from non-negative per-bucket counts)
             done_cumulative = 0
             failed_cumulative = 0
 
-            # Track crew state: dict of host -> online/offline
-            crew_state: dict[str, bool] = {}
-            crew_event_idx = 0  # Advancing cursor across buckets (single-pass O(events))
-
             for i in range(num_buckets):
                 bucket_start = run_created_at + i * bucket_s
-                bucket_end = bucket_start + bucket_s
 
                 # Throughput: attempts ended in [bucket_start, bucket_end)
                 bucket_done, bucket_failed, throughput = ended_counts[i]
@@ -1262,27 +1259,13 @@ def create_app(bind: str | None = None) -> FastAPI:
                 done_cumulative += bucket_done
                 failed_cumulative += bucket_failed
 
-                # Update crew state up to bucket_end (single-cursor advancing from last position)
-                while crew_event_idx < len(crew_events):
-                    event_ts, event_kind, event_host = crew_events[crew_event_idx]
-                    if event_ts >= bucket_end:
-                        break
-                    if event_kind in ('crew_added', 'crew_health'):
-                        crew_state[event_host] = True
-                    elif event_kind in ('crew_down', 'crew_drained'):
-                        crew_state[event_host] = False
-                    crew_event_idx += 1
-
-                # Crew online count at bucket end
-                crew_online = sum(1 for online in crew_state.values() if online)
-
                 buckets.append({
                     "t_start": bucket_start,
                     "throughput": throughput,
                     "done_cumulative": done_cumulative,
                     "failed_cumulative": failed_cumulative,
                     "error_rate": error_rate,
-                    "crew_online": crew_online,
+                    "busy_hosts": len(busy[i]),
                 })
 
             # Compute aggregates from all_attempts

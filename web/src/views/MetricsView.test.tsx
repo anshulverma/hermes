@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import MetricsView from './MetricsView';
 
 // Mock fetch
@@ -29,7 +29,7 @@ describe('MetricsView', () => {
             done_cumulative: 5,
             failed_cumulative: 2,
             error_rate: 0.2,
-            crew_online: 3,
+            busy_hosts: 3,
           },
           {
             t_start: 1300,
@@ -37,7 +37,7 @@ describe('MetricsView', () => {
             done_cumulative: 18,
             failed_cumulative: 4,
             error_rate: 0.15,
-            crew_online: 4,
+            busy_hosts: 4,
           },
           {
             t_start: 1600,
@@ -45,7 +45,7 @@ describe('MetricsView', () => {
             done_cumulative: 24,
             failed_cumulative: 6,
             error_rate: 0.25,
-            crew_online: 2,
+            busy_hosts: 2,
           },
         ],
         totals: { attempts: 4, done: 3, failed: 1, results: 4, tickets: 3 },
@@ -72,7 +72,14 @@ describe('MetricsView', () => {
     expect(screen.getByText('Progress over time')).toBeInTheDocument();
     expect(screen.getAllByText(/throughput/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/error rate/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/crew online/i).length).toBeGreaterThan(0);
+    // Hosts this run kept busy, not the fleet: no fleet-wide crew chart, and
+    // hovering reads the busy hosts for the bucket. (jsdom has no layout, so
+    // any positive clientX lands on the last bucket.)
+    for (const plot of document.querySelectorAll<HTMLElement>('[style*="crosshair"]')) {
+      fireEvent.mouseMove(plot, { clientX: 10 });
+    }
+    expect(screen.getByText('2 hosts').parentElement).toHaveTextContent('busy hosts');
+    expect(screen.queryByText(/crew online/i)).not.toBeInTheDocument();
 
     // Readability affordances: X-axis time labels and final values.
     expect(screen.getAllByText('now').length).toBeGreaterThan(0);
@@ -104,7 +111,7 @@ describe('MetricsView', () => {
         run_id: 'held-run',
         bucket_s: 300,
         buckets: [
-          { t_start: 1000, throughput: 12, done_cumulative: 12, failed_cumulative: 0, error_rate: 0, crew_online: 1 },
+          { t_start: 1000, throughput: 12, done_cumulative: 12, failed_cumulative: 0, error_rate: 0, busy_hosts: 1 },
         ],
         totals: { attempts: 12, done: 12, failed: 0, results: 12, tickets: 12 },
         retry_rate: 0,

@@ -461,12 +461,12 @@ export default function MetricsView({ runId }: MetricsViewProps) {
   const failedPts = buckets.map((b) => b.failed_cumulative);
   const throughputPts = buckets.map((b) => b.throughput);
   const errorPts = buckets.map((b) => b.error_rate * 100);
-  const crewPts = buckets.map((b) => b.crew_online);
+  const busyPts = buckets.map((b) => b.busy_hosts);
 
   const maxProgress = Math.max(...donePts, ...failedPts, 1);
   const maxThroughput = Math.max(...throughputPts, 1);
   const maxError = Math.max(...errorPts, 1);
-  const maxCrew = Math.max(...crewPts, 1);
+  const maxBusy = Math.max(...busyPts, 1);
 
   // Stat tiles — all backed by real bucket data (latest bucket / cumulative).
   // The buckets count attempts; by_state counts tickets. A retried ticket is
@@ -584,7 +584,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
             <Legend
               items={[
                 { label: 'throughput', color: 'var(--status-live)' },
-                { label: 'crew online', color: 'rgba(255,255,255,0.5)' },
+                { label: 'busy hosts', color: 'rgba(255,255,255,0.5)' },
               ]}
             />
           }
@@ -598,24 +598,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
             bucketS={bucketWidth}
             format={(v) => String(v)}
             yFormat={(v) => Math.round(v * 10) / 10}
-            overlay={{ points: crewPts, max: maxCrew, color: 'rgba(255,255,255,0.5)', label: 'crew online' }}
-          />
-        </ChartFrame>
-
-        <ChartFrame
-          title="Crew online"
-          meta="hosts over time"
-          height={170}
-          legend={<Legend items={[{ label: 'crew online', color: 'var(--text-secondary)' }]} />}
-        >
-          <LineChart
-            height={130}
-            max={maxCrew}
-            labels={labels}
-            bucketS={bucketWidth}
-            format={(v) => `${v} hosts`}
-            yFormat={(v) => Math.round(v)}
-            series={[{ label: 'crew online', points: crewPts, color: 'var(--text-secondary)' }]}
+            overlay={{ points: busyPts, max: maxBusy, color: 'rgba(255,255,255,0.5)', label: 'busy hosts' }}
           />
         </ChartFrame>
       </div>
