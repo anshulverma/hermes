@@ -244,6 +244,10 @@ running ──no actionable tickets left & not is_done──▶ failed
                                           (no ticket is queued/dispatched/running/
                                            reducing/parked/needs_human — i.e. every
                                            ticket is done or failed — and next_phase==None)
+running ──no actionable tickets left & last phase has 0 done, ≥1 failed──▶ failed
+                                          (even if is_done: nothing succeeded, e.g.
+                                           a human rejected every reduction; a last
+                                           phase with no tickets defers to is_done)
 running ──control: pause──▶ paused ──control: resume──▶ running
 running|paused ──control: stop──▶ stopped              (terminal)
 ```
@@ -259,7 +263,8 @@ running|paused ──control: stop──▶ stopped              (terminal)
   function that transitions `runs.state` (initial `running` set at creation) and
   enforces every legal edge above — the control edges
   (running↔paused, running|paused→stopped) plus the automatic terminal edges
-  `master_loop` drives (running→done on `is_done`, running→failed when stuck) — and
+  `master_loop` drives (running→done on `is_done`, running→failed when stuck or
+  when no last-phase ticket succeeded) — and
   rejects any other transition (e.g. resuming a `stopped`/`done`/`failed` run) with
   an error; pause/resume/stop raise on an already-terminal run.
 - **Dispatch halting & pause freeze:** `claim_ticket` only considers tickets whose
@@ -542,7 +547,10 @@ filters (test/demo source).
   the run is stuck (no ticket is `queued`/`dispatched`/`running`/`reducing`/
   `parked`/`needs_human` — every ticket is `done` or `failed` —
   `next_phase` is `None`, and `is_done` is `False`; a `dispatched` ticket is still
-  in flight and a `needs_human` ticket still awaits a human, so neither is stuck).
+  in flight and a `needs_human` ticket still awaits a human, so neither is stuck),
+  or when that last phase settled with no `done` ticket and at least one `failed`
+  one, whatever `is_done` says (every ticket failed or had its reduction
+  rejected; a last phase with no tickets at all defers to `is_done`).
   Because DESIGN froze
   `seed(run, site)` without a findings/reductions argument, `master_loop` passes a
   `Run` snapshot carrying `run.phase` (the phase to seed) and `run.reductions` (the

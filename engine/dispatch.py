@@ -287,11 +287,14 @@ def _reduce_and_advance(
         queue.seed_tickets(conn, next_run, playbook, site)
         return False
 
-    if playbook.is_done(run):
+    # A last phase where nothing succeeded (every ticket failed, e.g. a human
+    # rejected every reduction) failed, whatever is_done says about the phase.
+    nothing_done = counts.get("done", 0) == 0 and counts.get("failed", 0) > 0
+    if playbook.is_done(run) and not nothing_done:
         queue.set_run_state(conn, run_id, "done", now=now)
         return True
 
-    # Stuck: no next phase, not done, and no actionable tickets remain.
+    # Stuck, or nothing succeeded: no next phase and no actionable tickets remain.
     queue.set_run_state(conn, run_id, "failed", now=now)
     return True
 

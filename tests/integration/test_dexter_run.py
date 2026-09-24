@@ -512,7 +512,7 @@ def test_dexter_reduction_reject(
     assert _state_of(conn, f"{run_id}/solve-0") == "failed"
     assert _state_of(conn, f"{run_id}/solve-1") == "failed"
 
-    # 2. Run transitions to done (phase settled, all tickets terminal)
+    # 2. Run settles once the phase does (all tickets terminal)
     for _ in range(10):
         dispatch.master_loop(
             conn, run_id, pb, dexter_site, dexter_agent, "HEAD",
@@ -522,8 +522,9 @@ def test_dexter_reduction_reject(
             break
         t += STEP
 
-    # Run should be done (phase fully settled)
-    assert _run_state(conn, run_id) == "done"
+    # Every cluster rejected, nothing done: the run failed, even though dexter's
+    # is_done is true for any settled solve phase.
+    assert _run_state(conn, run_id) == "failed"
 
     # 3. reduction_rejected event emitted
     reject_event = conn.execute(
