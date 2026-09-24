@@ -379,11 +379,12 @@ def requeue(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
     now = _now(now)
     try:
         row = conn.execute(
-            "SELECT run_id, attempts, lease_id FROM tickets WHERE id=?", (ticket.id,)
+            "SELECT run_id, attempts, lease_id, worker_host FROM tickets WHERE id=?",
+            (ticket.id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"unknown ticket {ticket.id!r}")
-        run_id, attempts, lease_id = row
+        run_id, attempts, lease_id, worker_host = row
         # Release the ticket's lease here (leaving running).
         if lease_id:
             from engine import leases
@@ -397,7 +398,7 @@ def requeue(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
         )
         events.emit(
             conn, "ticket_requeued", run_id=run_id, ticket_id=ticket.id,
-            message="requeue (penalty)",
+            host=worker_host, message="requeue (penalty)",
             data={"attempts": new_attempts, "available_at": available_at},
         )
         conn.commit()
@@ -481,11 +482,11 @@ def _requeue_transport_nocommit(
     """
     now = _now(now)
     row = conn.execute(
-        "SELECT run_id, lease_id FROM tickets WHERE id=?", (ticket.id,)
+        "SELECT run_id, lease_id, worker_host FROM tickets WHERE id=?", (ticket.id,)
     ).fetchone()
     if row is None:
         raise ValueError(f"unknown ticket {ticket.id!r}")
-    run_id, lease_id = row
+    run_id, lease_id, worker_host = row
     # Release the ticket's lease here (leaving running).
     if lease_id:
         from engine import leases
@@ -497,7 +498,7 @@ def _requeue_transport_nocommit(
     )
     events.emit(
         conn, "ticket_requeued", run_id=run_id, ticket_id=ticket.id,
-        message="requeue (transport, no penalty)",
+        host=worker_host, message="requeue (transport, no penalty)",
         data={"no_penalty": True},
     )
 
@@ -548,7 +549,7 @@ def park_ticket(conn: sqlite3.Connection, ticket: Ticket, now=None) -> None:
             (json.dumps(tried), now, ticket.id),
         )
         events.emit(conn, "ticket_parked", run_id=run_id, ticket_id=ticket.id,
-                    message="parked (no lease)")
+                    host=worker_host, message="parked (no lease)")
         conn.commit()
     except Exception:
         conn.rollback()

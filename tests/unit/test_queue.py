@@ -538,6 +538,25 @@ def test_park_ticket_reverts_dispatched(conn):
     assert "ticket_parked" in _kinds(conn)
 
 
+@pytest.mark.parametrize("writer, state, kind", [
+    ("requeue", "running", "ticket_requeued"),
+    ("requeue_transport", "running", "ticket_requeued"),
+    ("park_ticket", "dispatched", "ticket_parked"),
+])
+def test_the_event_names_the_host_the_ticket_came_off(conn, writer, state, kind):
+    """worker_host is cleared by the same write, so it has to be read first."""
+    from engine import queue
+
+    _mk_run(conn, "r1")
+    _mk_ticket(conn, "r1/t-0", state=state, worker_host="host-A",
+               tried_hosts=["host-A"])
+
+    getattr(queue, writer)(conn, _mk_ticket_ref("r1/t-0", "r1"), now=100.0)
+
+    hosts = [r[0] for r in conn.execute("SELECT host FROM events WHERE kind=?", (kind,))]
+    assert hosts == ["host-A"]
+
+
 # --- set_run_state: run state machine ------------------------------------
 
 @pytest.mark.parametrize(
