@@ -244,14 +244,25 @@ the master" also means "a playbook you trust with the operator's API token".
   would be worse; `thread.md` survives either way.
 - **`--dry-run` deletes the run's state directory when it settles**, so the seeded header is not
   there to read afterwards.
-- A run is not resumable. One artifact per run, one cast, no human in the loop mid-run.
+- **A human rules at the end, never mid-run.** Nobody is asked anything while the committee talks.
+  Once the verdict is written, the chair's ticket waits in `needs_human` with the run `running`:
+  accept ends the run `done`, reject ends it `failed`. One artifact per run, one cast.
+- **A run is not resumable, so finish it with `hermes run --wait`.** The verdict `is_done` reads
+  lives in the master's memory. Without `--wait`, `hermes run` returns while the verdict waits;
+  `hermes run resume <id> --wait` then starts a fresh process that has lost it, and the run ends
+  `failed` even on accept.
 - `MockAgent` cannot serve this playbook — it echoes the request payload back as the result — so
   exercising a whole run needs an agent double that actually talks.
 
 ## Invariants
 
-- `verify()` returns `True` unconditionally and no reduction carries `needs_human_ticket_ids`: a
-  `needs_human` ticket would block advancement for good. The re-check lives in `reduce` instead.
+- `verify()` returns `True` unconditionally, and no turn's reduction carries
+  `needs_human_ticket_ids`: a `needs_human` ticket mid-conversation blocks advancement for good.
+  The re-check lives in `reduce` instead.
+- **Only the decision reduction routes to review**, and only the chair's own ticket
+  (`<run>/decision`). The decision is terminal and the verdict is written before the hold, so
+  holding it blocks nothing but `done`. A chair turn that failed routes nothing: there is nothing to
+  rule on, and the run ends `failed`.
 - `reduce` never raises; file-IO failures ride on the reduction as `error`.
 - No phase name and no ticket id repeats, and the highest turn never exceeds the cap.
 - **The turn counter advances in `next_phase` and never in `reduce`.** Advanced in `reduce` it

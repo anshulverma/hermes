@@ -194,6 +194,26 @@ def _drive(conn, run_id, pb, site, agent, host, rounds=40):
     return _run_state(conn, run_id)
 
 
+def _rule(conn, run_id, pb, site, agent, host, *, accept):
+    """A human rules on the held verdict, then the loop drives on.
+
+    What the Review tab (or `hermes reduction accept|reject`) does while
+    `hermes run --wait` keeps the loop alive. The held ticket must be the chair's
+    and linked to the decision reduction: a wrong id in `needs_human_ticket_ids`
+    routes nothing, silently, and the run would have ended `done` unreviewed.
+    """
+    assert _run_state(conn, run_id) == "running"
+    state, reduction_id = conn.execute(
+        "SELECT state, reduction_id FROM tickets WHERE id=?", (f"{run_id}/decision",)
+    ).fetchone()
+    assert state == "needs_human"
+    assert reduction_id == conn.execute(
+        "SELECT id FROM reductions WHERE run_id=? AND phase='decision'", (run_id,)
+    ).fetchone()[0]
+    (queue.accept_reduction if accept else queue.reject_reduction)(conn, reduction_id)
+    return _drive(conn, run_id, pb, site, agent, host)
+
+
 def _start(conn, run_id, pb, site, agent):
     """Insert the run, seed the zero-ticket `open` phase, admit the host."""
     _mk_run(conn, run_id)
@@ -371,7 +391,7 @@ class ScriptedCommitteeAgent:
 
 # --- tests -----------------------------------------------------------------
 
-def test_full_conversation_reaches_done_with_no_human(
+def test_full_conversation_runs_unattended_and_holds_the_verdict_for_a_human(
     home, source_repo, artifact, conn, local_site
 ):
     """Criteria 2, 3, 4, 5, 6, 8 and 9 over one sixteen-turn conversation.
@@ -379,7 +399,8 @@ def test_full_conversation_reaches_done_with_no_human(
     The opening round runs in seniority order, the owner answers every reviewer,
     one reviewer (t09-tl) asks for the floor and is granted it once the opening
     round drains, then the chair closes. Nobody delegates an edit, so no revised
-    copy is ever created.
+    copy is ever created. The verdict is banked, then waits on a human; accepting
+    it ends the run `done`.
     """
     pb = committee.CommitteePlaybook()
     agent = ScriptedCommitteeAgent(floor_phases={"t09-tl"})
@@ -387,7 +408,7 @@ def test_full_conversation_reaches_done_with_no_human(
     original = thread.digest(artifact)
 
     host = _start(conn, run_id, pb, local_site, agent)
-    assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
 
     # criteria 4 + 5: the exact turn order, one dispatch per phase, no repeats.
     expected_phases = [
@@ -436,14 +457,14 @@ def test_full_conversation_reaches_done_with_no_human(
     assert not thread.revised_path(run_id, str(artifact)).exists()
     assert _reduction_for(conn, run_id, "decision")["artifact_intact"] is True
 
-    # criterion 8: nothing ever waited on a human.
+    # criterion 8: nothing waited on a human mid-run; only the verdict does.
     reductions = _reductions(conn, run_id)
     assert [kind for _, kind, _ in reductions] == ["turn"] * 16 + ["decision"]
-    assert all("needs_human_ticket_ids" not in doc for _, _, doc in reductions)
+    assert all("needs_human_ticket_ids" not in doc for _, _, doc in reductions[:-1])
+    assert reductions[-1][2]["needs_human_ticket_ids"] == [f"{run_id}/decision"]
     assert conn.execute(
-        "SELECT COUNT(*) FROM tickets WHERE run_id=? AND state='needs_human'",
-        (run_id,),
-    ).fetchone()[0] == 0
+        "SELECT id FROM tickets WHERE run_id=? AND state='needs_human'", (run_id,)
+    ).fetchall() == [(f"{run_id}/decision",)]
 
     # The floor grant came from t09-tl's block; only a junior IC gets re-checked.
     granted = _reduction_for(conn, run_id, "t09-tl")
@@ -452,6 +473,8 @@ def test_full_conversation_reaches_done_with_no_human(
     assert _reduction_for(conn, run_id, "decision")["verdict"].startswith(
         "Approve with changes"
     )
+
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
 
 
 def test_failed_turn_still_gets_a_stub_and_the_run_advances(
@@ -475,7 +498,8 @@ def test_failed_turn_still_gets_a_stub_and_the_run_advances(
     run_id = "committee-20260918-000002"
 
     host = _start(conn, run_id, pb, local_site, agent)
-    assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
 
     assert _dispatched_phases(conn, run_id) == [
         "t01-senior_director", "t02-manager", "t03-owner", "t04-tpm", "decision",
@@ -513,7 +537,8 @@ def test_turn_cap_ends_the_conversation_at_the_cap(
     run_id = "committee-20260918-000003"
 
     host = _start(conn, run_id, pb, local_site, agent)
-    assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
 
     phases = _dispatched_phases(conn, run_id)
     assert phases == ["t01-senior_director", "t02-owner", "t03-manager", "decision"]
@@ -543,7 +568,8 @@ def test_delegated_edit_writes_only_the_revised_copy(
     original = thread.digest(artifact)
 
     host = _start(conn, run_id, pb, local_site, agent)
-    assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
 
     assert _dispatched_phases(conn, run_id) == [
         *OPENING_ROUND, "t15-junior_ic", "decision",
@@ -586,6 +612,9 @@ def test_failed_recheck_is_named_in_the_decision(
     still hashes to the original and the master-side re-check in reduce()
     fails. A committee whose edits silently did not apply is worse than one
     that made none, so the failure must reach the decision.
+
+    A human reading that verdict rejects it, and the run ends `failed`: the
+    chair's prose is still on record, but nobody signed it off.
     """
     pb = committee.CommitteePlaybook()
     agent = ScriptedCommitteeAgent(
@@ -595,7 +624,12 @@ def test_failed_recheck_is_named_in_the_decision(
     original = thread.digest(artifact)
 
     host = _start(conn, run_id, pb, local_site, agent)
-    assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=False) == "failed"
+    assert conn.execute(
+        "SELECT t.state, r.review_state FROM tickets t JOIN reductions r"
+        " ON r.id = t.reduction_id WHERE t.id=?", (f"{run_id}/decision",)
+    ).fetchone() == ("failed", "rejected")
 
     assert _dispatched_phases(conn, run_id) == [
         *OPENING_ROUND, "t15-junior_ic", "decision",
@@ -640,7 +674,8 @@ def test_the_cap_drops_a_delegation_and_the_decision_says_so(
     original = thread.digest(artifact)
 
     host = _start(conn, run_id, pb, local_site, agent)
-    assert _drive(conn, run_id, pb, local_site, agent, host) == "done"
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
 
     # No junior-IC turn: the cap fell before one could be minted.
     assert _dispatched_phases(conn, run_id) == [
@@ -690,6 +725,8 @@ def test_failed_chair_turn_fails_the_run(
     decision = _reduction_for(conn, run_id, "decision")
     assert decision["delivered"] is False
     assert decision["verdict"] == ""
+    # Nothing to rule on, so nothing waits in the review queue.
+    assert decision["needs_human_ticket_ids"] == []
 
     # The transcript still stands: turn 01 was delivered.
     assert [h for h, _ in _turns(run_id)] == [_heading(1, "senior_director")]

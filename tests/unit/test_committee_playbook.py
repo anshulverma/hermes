@@ -2709,28 +2709,43 @@ def test_reduce_decision_never_raises_when_the_thread_cannot_be_written():
     assert s["verdict"] == "Approve."  # the run still finishes
 
 
-def test_no_reduction_carries_needs_human_ticket_ids():
-    """Criterion 8: that key routes the ticket to needs_human and wedges the run."""
+def test_only_the_decision_reduction_routes_to_review(artifact):
+    """The decision routes the chair's own ticket; no mid-run reduction may.
+
+    That key sends the ticket to needs_human, which blocks advancement. On a turn
+    that wedges the conversation; on the decision it holds only `done`. The id
+    has to be the ticket `seed` minted: a wrong one routes nothing, silently.
+    """
     pb = _committee()
+    site = _NamedSite("local")
+    pb.seed(_run(phase="open"), site)
+    decision_ticket = pb.seed(_run(phase="decision"), site)[0]
     run = _run(phase="t03-tl")
     s = pb._state(run)
     s.update(current_role="tl", current_turn=3, opening=[])
 
-    produced = []
-    produced += pb.reduce(run, "open", [], _NamedSite("local"))
+    mid_run = pb.reduce(run, "open", [], site)
     answer = _turn_answer("Ship it.", request_floor="no")
-    produced += pb.reduce(
-        run, "t03-tl", [_finding(run, f"{run.id}/t03-tl", answer)], _NamedSite("local")
-    )
+    mid_run += pb.reduce(run, "t03-tl", [_finding(run, f"{run.id}/t03-tl", answer)], site)
     s["current_role"] = "chair"
-    produced += pb.reduce(
-        run, "decision", [_finding(run, f"{run.id}/decision", "Approve.")],
-        _NamedSite("local"),
+    decision = pb.reduce(
+        run, "decision", [_finding(run, decision_ticket.id, "Approve.")], site
     )
 
-    assert len(produced) == 2
-    for reduction in produced:
-        assert "needs_human_ticket_ids" not in reduction.json
+    assert len(mid_run) == 1
+    assert "needs_human_ticket_ids" not in mid_run[0].json
+    assert decision[0].json["needs_human_ticket_ids"] == [decision_ticket.id]
+
+
+def test_a_failed_chair_routes_nothing_to_review():
+    """No verdict, nothing to rule on: the run ends failed, not held."""
+    pb = _committee()
+    run = _run(phase="decision")
+    pb._state(run)["current_role"] = "chair"
+
+    reductions = pb.reduce(run, "decision", [], _NamedSite("local"))
+
+    assert reductions[0].json["needs_human_ticket_ids"] == []
 
 
 # --- what a reduction carries for the view (spec 6, 7) ---------------------

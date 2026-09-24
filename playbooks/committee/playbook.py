@@ -464,10 +464,16 @@ class CommitteePlaybook:
         ``False`` there sets the ticket ``needs_human`` (``engine/queue.py:283-286``),
         which blocks advancement with nothing able to re-drive the loop.
 
-        For the same reason no reduction this method returns may ever carry
+        For the same reason no turn's reduction may ever carry
         ``needs_human_ticket_ids``, the one key the engine reads inside a
-        reduction (``engine/queue.py:920``). Do not "fix" this (acceptance
-        criterion 8).
+        reduction (``engine/queue.py:920``): a held ticket mid-conversation
+        wedges the run. Only the decision carries it, routing the chair's own
+        ticket. The decision is terminal and its verdict is already written,
+        so the hold blocks nothing but the run's end state: accept ends the
+        run ``done``, reject ends it ``failed`` (the engine's nothing-done
+        rule). Finishing needs the loop that ran the meeting, so
+        ``hermes run --wait``: the verdict ``is_done`` reads lives in this
+        process's memory.
 
         It MUST NEVER RAISE. An exception here propagates out of
         ``engine/dispatch.py:305`` and kills the master loop mid-run, so every
@@ -656,6 +662,12 @@ class CommitteePlaybook:
             errors.append(f"thread: {exc}")
 
         return [Reduction(kind="decision", json={
+            # The verdict goes to a human: the chair's own ticket (seed mints
+            # it as `<run>/decision`) is held `needs_human`, so the run ends
+            # `done` on accept and `failed` on reject. Everything above is
+            # already banked; only the terminal state waits. A failed chair
+            # has nothing to rule on and routes nothing.
+            "needs_human_ticket_ids": [f"{run.id}/decision"] if body else [],
             # the assembled text, so the reduction a reviewer reads carries the
             # re-checks and the disclaimer; empty iff the chair delivered
             # nothing, which is what ends the run failed.
