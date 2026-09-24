@@ -52,6 +52,7 @@ describe('MetricsView', () => {
         retry_rate: 0.25,
         mean_time_to_result_s: 125,
         by_phase: [{ phase: 'work', tickets: 3, mean_time_s: 12, failure_pct: 10 }],
+        by_state: { done: 3 },
       }),
     });
 
@@ -75,7 +76,7 @@ describe('MetricsView', () => {
 
     // Readability affordances: X-axis time labels and final values.
     expect(screen.getAllByText('now').length).toBeGreaterThan(0);
-    expect(screen.getByText('done 24')).toBeInTheDocument();
+    expect(screen.getByText('ok 24')).toBeInTheDocument();
     expect(screen.getByText('failed 6')).toBeInTheDocument();
 
     // New metrics tiles
@@ -93,6 +94,42 @@ describe('MetricsView', () => {
     expect(screen.queryByText(/budget/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/token/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/spend/i)).not.toBeInTheDocument();
+  });
+
+  it('counts attempts as attempts, and shows the tickets waiting on a human', async () => {
+    // Twelve ok attempts, every ticket held for review: nothing is done yet.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        run_id: 'held-run',
+        bucket_s: 300,
+        buckets: [
+          { t_start: 1000, throughput: 12, done_cumulative: 12, failed_cumulative: 0, error_rate: 0, crew_online: 1 },
+        ],
+        totals: { attempts: 12, done: 12, failed: 0, results: 12, tickets: 12 },
+        retry_rate: 0,
+        mean_time_to_result_s: 60,
+        by_phase: [],
+        by_state: { needs_human: 12 },
+      }),
+    });
+
+    render(<MetricsView runId="held-run" />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/run metrics/i)).toBeInTheDocument();
+    });
+
+    expect(screen.getByText('ok attempts')).toBeInTheDocument();
+    expect(screen.getByText('failed attempts')).toBeInTheDocument();
+    expect(screen.getByText('0 tickets done')).toBeInTheDocument();
+    expect(screen.getByText('cumulative attempts')).toBeInTheDocument();
+    expect(screen.queryByText('cumulative tickets')).not.toBeInTheDocument();
+    expect(screen.queryByText('completed')).not.toBeInTheDocument();
+
+    const heldTile = screen.getByText('tickets held for review').parentElement!;
+    expect(heldTile).toHaveTextContent('needs human');
+    expect(heldTile).toHaveTextContent('12');
   });
 
   it('shows empty state when buckets are empty', async () => {

@@ -578,6 +578,8 @@ export type RunMetrics = {
   retry_rate: number;
   mean_time_to_result_s: number | null;
   by_phase: Array<{ phase: string; tickets: number; mean_time_s: number | null; failure_pct: number }>;
+  /** Tickets per state. Everything above counts attempts; this counts tickets. */
+  by_state: Record<string, number>;
 };
 
 export async function fetchRunMetrics(runId: string, bucketS?: number): Promise<RunMetrics> {

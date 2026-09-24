@@ -3346,6 +3346,43 @@ def test_run_metrics_counts_an_attempt_ending_on_the_last_bucket_edge(
     assert data["buckets"][-1]["done_cumulative"] == data["totals"]["done"] == 1
 
 
+def _add_tickets(temp_home: Path, run_id: str, states) -> None:
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    for n, state in enumerate(states):
+        conn.execute(
+            """INSERT INTO tickets (id, run_id, phase, state, resource_req, priority, payload_json, created_at, updated_at)
+               VALUES (?, ?, 'work', ?, 'cpu', 0, '{}', 0, 0)""",
+            (f"{run_id}/s{n}", run_id, state),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_run_metrics_by_state_counts_tickets_including_needs_human(
+    client: TestClient, temp_home: Path
+):
+    """One ok attempt per ticket reads "done" in the attempt totals; by_state says
+    how many tickets are actually done and how many wait on a human."""
+    _metrics_run(temp_home, 1000.0, [("h1", 1100.0, 1200.0, "ok")])  # ticket m/t: done
+    _add_tickets(temp_home, "m", ["needs_human", "needs_human", "failed"])
+    data = client.get("/api/runs/m/metrics").json()
+    assert data["by_state"] == {"done": 1, "needs_human": 2, "failed": 1}
+
+
+def test_run_metrics_by_state_before_any_attempt(client: TestClient, temp_home: Path):
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    conn.execute(
+        """INSERT INTO runs (id, playbook, site, state, phase, base_ref, config_json, created_at, updated_at)
+           VALUES ('fresh', 'example', 'local', 'running', 'work', 'main', '{}', 1000, 1000)"""
+    )
+    conn.commit()
+    conn.close()
+    _add_tickets(temp_home, "fresh", ["queued", "queued"])
+    data = client.get("/api/runs/fresh/metrics").json()
+    assert data["buckets"] == []
+    assert data["by_state"] == {"queued": 2}
+
+
 # --- Ticket Detail Enrichments (history / reason / reduction / available_actions) ---
 
 def test_ticket_detail_includes_history(loopback_client: TestClient, temp_home: Path):

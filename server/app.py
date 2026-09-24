@@ -1144,6 +1144,13 @@ def create_app(bind: str | None = None) -> FastAPI:
 
             run_created_at = run_row[1]
 
+            # Tickets by state: totals count attempts, and a ticket held in
+            # needs_human has an ok attempt behind it but is not done.
+            by_state = dict(conn.execute(
+                "SELECT state, COUNT(*) FROM tickets WHERE run_id=? GROUP BY state",
+                (run_id,),
+            ).fetchall())
+
             # Find latest timestamp across events and attempts for this run
             # Events: scope by run_id (crew events may have null run_id - include all for global crew tracking)
             # Attempts: scope via tickets join
@@ -1188,6 +1195,7 @@ def create_app(bind: str | None = None) -> FastAPI:
                     "retry_rate": 0.0,
                     "mean_time_to_result_s": None,
                     "by_phase": [],
+                    "by_state": by_state,
                 }
 
             # Generate buckets from run_created_at to range_end
@@ -1372,6 +1380,7 @@ def create_app(bind: str | None = None) -> FastAPI:
                 "retry_rate": retry_rate,
                 "mean_time_to_result_s": mean_time_to_result_s,
                 "by_phase": by_phase,
+                "by_state": by_state,
             }
         finally:
             conn.close()

@@ -469,10 +469,15 @@ export default function MetricsView({ runId }: MetricsViewProps) {
   const maxCrew = Math.max(...crewPts, 1);
 
   // Stat tiles — all backed by real bucket data (latest bucket / cumulative).
+  // The buckets count attempts; by_state counts tickets. A retried ticket is
+  // two attempts, and an ok attempt held for review is not a done ticket.
+  const byState = metrics.by_state;
+  const heldForReview = byState.needs_human ?? 0;
   const tiles = [
     { label: 'throughput', value: String(last.throughput), delta: 'attempts / bucket', tone: 'live', live: true },
-    { label: 'done', value: String(last.done_cumulative), delta: 'completed', tone: undefined },
-    { label: 'failed', value: String(last.failed_cumulative), delta: 'failed', tone: last.failed_cumulative > 0 ? 'danger' : undefined },
+    { label: 'ok attempts', value: String(last.done_cumulative), delta: `${byState.done ?? 0} tickets done`, tone: undefined },
+    { label: 'failed attempts', value: String(last.failed_cumulative), delta: `${byState.failed ?? 0} tickets failed`, tone: last.failed_cumulative > 0 ? 'danger' : undefined },
+    { label: 'needs human', value: String(heldForReview), delta: 'tickets held for review', tone: heldForReview > 0 ? 'attention' : undefined },
     { label: 'error rate', value: `${(last.error_rate * 100).toFixed(1)}%`, delta: 'of results', tone: last.error_rate > 0 ? 'danger' : undefined },
     { label: 'retry rate', value: `${Math.round(metrics.retry_rate * 100)}%`, delta: 'tickets retried once+', tone: undefined },
     { label: 'time to result', value: fmtSeconds(metrics.mean_time_to_result_s), delta: 'mean claim→result', tone: undefined },
@@ -530,12 +535,12 @@ export default function MetricsView({ runId }: MetricsViewProps) {
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.5fr) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
         <ChartFrame
           title="Progress over time"
-          meta="cumulative tickets"
+          meta="cumulative attempts"
           height={170}
           legend={
             <Legend
               items={[
-                { label: `done ${last.done_cumulative}`, color: 'var(--status-ok)' },
+                { label: `ok ${last.done_cumulative}`, color: 'var(--status-ok)' },
                 { label: `failed ${last.failed_cumulative}`, color: 'var(--status-danger)' },
               ]}
             />
@@ -548,7 +553,7 @@ export default function MetricsView({ runId }: MetricsViewProps) {
             bucketS={bucketWidth}
             yFormat={(v) => Math.round(v)}
             series={[
-              { label: 'done', points: donePts, color: 'var(--status-ok)' },
+              { label: 'ok', points: donePts, color: 'var(--status-ok)' },
               { label: 'failed', points: failedPts, color: 'var(--status-danger)' },
             ]}
           />
