@@ -57,16 +57,9 @@ LOCAL_DIR ?= $(if $(HERMES_LOCAL_DIR),$(HERMES_LOCAL_DIR),$(HOME_DIR)/local)
 LOCAL_MOUNT := $(if $(wildcard $(LOCAL_DIR)/.),-e HERMES_LOCAL_DIR=/hermes-local -v $(LOCAL_DIR):/hermes-local:ro,)
 # Playbooks the server imports at startup. Without `committee` here the server
 # cannot resolve a committee run's playbook: its view routes 404, `has_view` is
-# false, no tab appears, and the phase rail falls back to deriving phases from
-# tickets. `hermes run` has always needed this variable; the server never got it.
+# false, no tab appears, and the phase rail cannot list the phases still ahead.
+# `hermes run` has always needed this variable; the server never got it.
 # Empty is valid -- `make up PLAYBOOK_MODULES=` starts a server with none.
-#
-# It is a TRADE, not a free win. Setting it also collapses the Run tab's phase
-# rail for a committee run to the playbook's declared phases, `open`/`decision`
-# -- so all twenty turn phases vanish from that rail. Unset, the server derives
-# the rail from tickets and shows every turn. The turn-by-turn reading now lives
-# on the Playbook tab, which is the better home for it, but the Run tab is
-# strictly worse than it was and that is worth knowing before you go looking.
 PLAYBOOK_MODULES ?= playbooks.committee
 PROXY  ?= with-proxy
 URL    := http://127.0.0.1:$(PORT)
