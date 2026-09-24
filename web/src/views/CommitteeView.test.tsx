@@ -993,3 +993,199 @@ describe('CommitteeView when the original changed under the committee', () => {
     expect(screen.getByTestId('verdict-simulation')).toHaveTextContent('Nothing was landed');
   });
 });
+
+// --- the Metrics tab ----------------------------------------------------------
+
+describe('CommitteeView on the Metrics tab', () => {
+  const metrics = (data = run2) =>
+    render(<CommitteeView runId="run-2" data={data} refetch={noop} variant="metrics" />);
+
+  // Turn 8 is an owner reply and turn 9 is the manager's floor request being
+  // granted: the queue pops on the turn it mints.
+  const granted = {
+    ...midRun,
+    timeline: [
+      ...midRun.timeline,
+      { ...run2.timeline[1], n: 8, badges: [], action: null },
+      { ...run2.timeline[3], n: 9, badges: [] },
+    ],
+  };
+
+  it('declares the section on the component itself, the only export there is', () => {
+    expect((CommitteeView as any).variants).toEqual(['metrics']);
+  });
+
+  it('draws only its numbers there, not the whole tab a second time', () => {
+    metrics();
+
+    expect(screen.getByTestId('committee-metrics')).toBeInTheDocument();
+    expect(screen.queryByTestId('committee-view')).toBeNull();
+    expect(screen.queryByTestId('entry-1')).toBeNull();
+  });
+
+  it('keeps the numbers off the tab that already has the transcript', () => {
+    show();
+
+    expect(screen.queryByTestId('committee-metrics')).toBeNull();
+  });
+
+  it('counts every seat, the ones that never spoke included', () => {
+    metrics(midRun);
+
+    expect(screen.getByTestId('turns-owner')).toHaveTextContent(/^Maya Okonkwo\s*2$/);
+    expect(screen.getByTestId('turns-junior_ic')).toHaveTextContent(/2$/);
+    expect(screen.getByTestId('turns-tpm')).toHaveTextContent(/1$/);
+    expect(screen.getByTestId('turns-staff_ic')).toHaveTextContent(/0$/);
+  });
+
+  it('counts turns per persona over the whole run-2 meeting', () => {
+    metrics();
+
+    expect(screen.getByTestId('turns-owner')).toHaveTextContent(/7$/);
+    expect(screen.getByTestId('turns-junior_ic')).toHaveTextContent(/6$/);
+    for (const role of ['senior_director', 'manager', 'tpm', 'pm', 'tl', 'staff_ic', 'data_scientist']) {
+      expect(screen.getByTestId(`turns-${role}`)).toHaveTextContent(/1$/);
+    }
+    expect(screen.queryByTestId('turns-unattributed')).toBeNull();
+  });
+
+  it('says which turns a seat took but never delivered', () => {
+    metrics({ ...run2, timeline: [...run2.timeline, ...edgeTurns] });
+
+    expect(screen.getByTestId('turns-tl')).toHaveTextContent('2 · 1 not delivered');
+  });
+
+  it('counts a turn nobody can be named for on its own row, not a persona\'s', () => {
+    const ghost = { ...run2.timeline[0], n: 21, role: 'ghost', name: 'unattributed', badges: ['unattributed'] };
+    metrics({ ...run2, timeline: [...run2.timeline, ghost] });
+
+    expect(screen.getByTestId('turns-unattributed')).toHaveTextContent(/1$/);
+    expect(screen.getByTestId('turns-senior_director')).toHaveTextContent(/1$/);
+  });
+
+  it('rates delegation against the owner turns that could have delegated', () => {
+    metrics();
+
+    expect(screen.getByTestId('delegation-rate')).toHaveTextContent(
+      '6 of 7 delivered owner turns delegated an edit',
+    );
+  });
+
+  it('counts a delegation only when it named the edit, as the gate does', () => {
+    // `_apply_block` wants `delegate` AND a non-empty action; the badge alone
+    // is what the owner asked for, not what the meeting did.
+    const unnamed = { ...run2.timeline[1], n: 25, action: null };
+    metrics({ ...run2, timeline: [...run2.timeline, unnamed] });
+
+    expect(screen.getByTestId('delegation-rate')).toHaveTextContent('6 of 8 delivered owner turns');
+  });
+
+  it('leaves an owner turn nobody delivered out of the denominator', () => {
+    const silent = { ...run2.timeline[1], n: 25, body: '', badges: ['no_turn'], action: null };
+    metrics({ ...run2, timeline: [...run2.timeline, silent] });
+
+    expect(screen.getByTestId('delegation-rate')).toHaveTextContent('6 of 7 delivered owner turns');
+  });
+
+  it('counts the edits that passed and failed the independent re-check', () => {
+    metrics({ ...run2, timeline: [...run2.timeline, ...edgeTurns] });
+
+    expect(screen.getByTestId('edit-rechecks')).toHaveTextContent('7 re-checked: 6 applied · 1 did not apply');
+  });
+
+  it('names a delegation the turn cap cut off', () => {
+    metrics({ ...run2, verdict: { ...run2.verdict!, dropped_delegation: 'add a rollback plan' } });
+
+    expect(screen.getByTestId('edit-dropped')).toHaveTextContent('add a rollback plan');
+  });
+
+  it('measures floor latency in turns, because the record has no clock', () => {
+    metrics(granted);
+
+    expect(screen.getByTestId('floor-ask-4')).toHaveTextContent(
+      'Ruth Delgado asked on turn 4 · got the floor on turn 9, 5 turns later',
+    );
+  });
+
+  it('grants the floor on the turn it was minted, delivered or not', () => {
+    const silent = { ...granted.timeline[8], body: '', badges: ['no_turn'] };
+    metrics({ ...granted, timeline: [...granted.timeline.slice(0, 8), silent] });
+
+    expect(screen.getByTestId('floor-ask-4')).toHaveTextContent('got the floor on turn 9');
+  });
+
+  it('says nobody asked rather than showing an empty list', () => {
+    metrics();
+
+    expect(screen.getByTestId('floor-asks')).toHaveTextContent('Nobody asked for the floor.');
+  });
+
+  it('shows a request still waiting mid-run, and one the meeting ended on', () => {
+    const waiting = metrics(midRun);
+    expect(screen.getByTestId('floor-ask-4')).toHaveTextContent('Ruth Delgado asked on turn 4 · still waiting');
+    waiting.unmount();
+
+    metrics({ ...midRun, verdict: { ...run2.verdict!, dropped_floor_requests: ['manager'] } });
+    expect(screen.getByTestId('floor-ask-4')).toHaveTextContent('asked on turn 4 · the meeting ended first');
+  });
+
+  it('ignores a floor request from a seat the state machine never queues', () => {
+    const owner = { ...run2.timeline[1], n: 8, badges: ['request_floor'], action: null };
+    // `_floor` skips a turn nobody can be named for, as `_reduce_turn` does.
+    const ghost = { ...run2.timeline[3], n: 9, role: 'ghost', name: 'unattributed', badges: ['unattributed', 'request_floor'] };
+    metrics({ ...midRun, timeline: [...midRun.timeline, owner, ghost] });
+
+    expect(screen.queryByTestId('floor-ask-8')).toBeNull();
+    expect(screen.queryByTestId('floor-ask-9')).toBeNull();
+  });
+
+  it('grows the thread by the prose each turn added, cumulatively', () => {
+    metrics(midRun);
+    const total = midRun.timeline.reduce((sum, e) => sum + e.body.length, 0);
+
+    expect(screen.getByTestId('thread-growth')).toHaveTextContent(
+      `${total.toLocaleString('en-US')} characters of prose over 7 turns`,
+    );
+    expect(screen.getByTestId('growth-1')).toHaveAttribute(
+      'title',
+      `turn 1: ${midRun.timeline[0].body.length.toLocaleString('en-US')} characters so far`,
+    );
+    expect(screen.getByTestId('growth-7')).toHaveAttribute(
+      'title',
+      `turn 7: ${total.toLocaleString('en-US')} characters so far`,
+    );
+  });
+
+  it('counts no prose for a signals-only or an undelivered turn', () => {
+    const twoEdges = edgeTurns.filter((e) => e.n === 22 || e.n === 23);
+    metrics({ ...midRun, timeline: [...midRun.timeline, ...twoEdges] });
+    const total = midRun.timeline.reduce((sum, e) => sum + e.body.length, 0);
+
+    expect(screen.getByTestId('growth-23')).toHaveAttribute(
+      'title',
+      `turn 23: ${total.toLocaleString('en-US')} characters so far`,
+    );
+  });
+
+  it('says a run with no recorded prose has none, rather than drawing a flat line', () => {
+    metrics({ ...run2, timeline: run2.timeline.map((e) => ({ ...e, body: '' })) });
+
+    expect(screen.getByTestId('thread-growth')).toHaveTextContent('No prose recorded for these turns.');
+    expect(screen.queryByTestId('growth-1')).toBeNull();
+  });
+
+  it('marks an unfinished meeting as partial', () => {
+    metrics(midRun);
+    expect(screen.getByTestId('metrics-partial')).toHaveTextContent('Through turn 7; no verdict yet.');
+  });
+
+  it('does not mark a finished meeting as partial', () => {
+    metrics();
+    expect(screen.queryByTestId('metrics-partial')).toBeNull();
+  });
+
+  it('says nothing was said yet on a run that has no turns', () => {
+    metrics({ ...midRun, timeline: [] });
+    expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
+  });
+});

@@ -23,6 +23,15 @@ export type PlaybookViewComponentProps = {
   runId: string;
   data: Record<string, any>;
   refetch: () => void;
+  /** Absent on the view's own tab; names the section another tab asks for. */
+  variant?: string;
+};
+
+/** A view opts in to another tab by listing it on the function itself, so the
+ *  bundle stays default-export-only. A view that lists nothing renders only on
+ *  its own tab, whatever it does with `variant`. */
+type PlaybookViewComponent = ComponentType<PlaybookViewComponentProps> & {
+  variants?: readonly string[];
 };
 
 type PlaybookViewProps = {
@@ -32,6 +41,8 @@ type PlaybookViewProps = {
   /** RunDetail.has_view — false means this playbook ships no view. */
   hasView: boolean;
   liveTick?: number;
+  /** Set by a tab other than the view's own: a section beside the host's. */
+  variant?: string;
 };
 
 // One injection per playbook, not one per mount: leaving the tab and coming
@@ -65,8 +76,8 @@ function loadViewScript(playbook: string): Promise<void> {
   return pending;
 }
 
-export default function PlaybookView({ runId, playbook, hasView, liveTick }: PlaybookViewProps) {
-  const [View, setView] = useState<ComponentType<PlaybookViewComponentProps> | null>(null);
+export default function PlaybookView({ runId, playbook, hasView, liveTick, variant }: PlaybookViewProps) {
+  const [View, setView] = useState<PlaybookViewComponent | null>(null);
   const [data, setData] = useState<Record<string, any> | null>(null);
   // Two slots, not one: a poll that succeeds must not clear a standing asset
   // failure, and an asset failure must not be cleared by the next tick's data.
@@ -98,7 +109,7 @@ export default function PlaybookView({ runId, playbook, hasView, liveTick }: Pla
           return;
         }
         // Set it through the updater form: React calls a bare function value.
-        setView(() => found as ComponentType<PlaybookViewComponentProps>);
+        setView(() => found as PlaybookViewComponent);
       })
       .catch((err) => {
         if (live) setAssetError(err as Error);
@@ -126,6 +137,11 @@ export default function PlaybookView({ runId, playbook, hasView, liveTick }: Pla
   }, [hasView, runId, liveTick, reloads]);
 
   if (!hasView) return null;
+
+  // On another tab the view is a guest: nothing until it has loaded, said it
+  // has this section, and has data for it. A failed load is its own tab's to
+  // report.
+  if (variant && !(View?.variants?.includes(variant) && data)) return null;
 
   const error = assetError ?? dataError;
   if (error) {
@@ -156,13 +172,14 @@ export default function PlaybookView({ runId, playbook, hasView, liveTick }: Pla
   }
 
   return (
-    <div style={{ flex: 1, overflow: 'auto', padding: 20 }}>
+    // A variant is a fixed column beside the host's own section, not half the pane.
+    <div style={variant ? { width: 380, flexShrink: 0, overflow: 'auto', padding: 20 } : { flex: 1, overflow: 'auto', padding: 20 }}>
       {/* Keyed so an explicit retry clears a caught throw: `failed` is set once
           and a boundary has no other way back. NOT keyed on liveTick -- that
           would remount the view on every poll and lose its scroll and
           expansion state. */}
       <ViewErrorBoundary key={`${playbook}:${runId}:${reloads}`} playbook={playbook} onRetry={refetch}>
-        <View runId={runId} data={data} refetch={refetch} />
+        <View runId={runId} data={data} refetch={refetch} variant={variant} />
       </ViewErrorBoundary>
     </div>
   );

@@ -1077,13 +1077,225 @@
 			}, entry.n))]
 		});
 	}
-	function CommitteeView({ runId, data }) {
+	function Bar({ value, max }) {
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"aria-hidden": true,
+			style: {
+				flex: 1,
+				height: 4,
+				borderRadius: 2,
+				background: "var(--wash-subtle)"
+			},
+			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { style: {
+				width: `${max > 0 ? value / max * 100 : 0}%`,
+				height: "100%",
+				borderRadius: 2,
+				background: "var(--status-live, #6ea8fe)"
+			} })
+		});
+	}
+	var quiet = {
+		fontSize: 12,
+		color: "var(--text-secondary)"
+	};
+	var row = {
+		display: "flex",
+		alignItems: "center",
+		gap: 8,
+		fontSize: 12
+	};
+	function MeetingMetrics({ data }) {
+		const turns = [...data.timeline].sort((a, b) => a.n - b.n);
+		const delivered = (e) => !e.badges.includes("no_turn");
+		const over = data.verdict !== null;
+		const seats = [...data.roster.map((p) => ({
+			key: p.role,
+			name: p.name,
+			of: (e) => e.role === p.role
+		})), {
+			key: "unattributed",
+			name: "speaker not identified",
+			of: (e) => e.badges.includes("unattributed")
+		}].map((s) => ({
+			...s,
+			took: turns.filter(s.of)
+		})).filter((s) => s.key !== "unattributed" || s.took.length > 0);
+		const most = Math.max(...seats.map((s) => s.took.length));
+		const ownerTurns = turns.filter((e) => e.role === "owner" && delivered(e));
+		const delegated = ownerTurns.filter((e) => e.badges.includes("delegate") && e.action !== null);
+		const checked = turns.filter((e) => e.verified !== null);
+		const applied = checked.filter((e) => e.verified).length;
+		const asks = [];
+		for (const e of turns) {
+			if (e.badges.includes("unattributed")) continue;
+			const waiting = asks.find((a) => a.role === e.role && a.got === null);
+			if (waiting) waiting.got = e.n;
+			if (delivered(e) && e.badges.includes("request_floor") && !["owner", "junior_ic"].includes(e.role)) asks.push({
+				name: e.name,
+				role: e.role,
+				asked: e.n,
+				got: null
+			});
+		}
+		let sofar = 0;
+		const growth = turns.map((e) => {
+			if (delivered(e) && !e.badges.includes("signals_only")) sofar += Array.from(e.body).length;
+			return {
+				n: e.n,
+				sofar
+			};
+		});
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": "committee-metrics",
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 16
+			},
+			children: [
+				!over && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "metrics-partial",
+					style: quiet,
+					children: [
+						"Through turn ",
+						turns[turns.length - 1].n,
+						"; no verdict yet."
+					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
+					title: "Turns taken",
+					children: seats.map((s) => {
+						const missed = s.took.filter((e) => !delivered(e)).length;
+						return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							"data-testid": `turns-${s.key}`,
+							style: row,
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									style: {
+										width: 130,
+										flex: "none",
+										color: "var(--text-primary)"
+									},
+									children: s.name
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Bar, {
+									value: s.took.length,
+									max: most
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+									style: {
+										...mono,
+										flex: "none"
+									},
+									children: [s.took.length, missed > 0 && ` · ${missed} not delivered`]
+								})
+							]
+						}, s.key);
+					})
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
+					title: "Delegated edits",
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							"data-testid": "delegation-rate",
+							style: quiet,
+							children: ownerTurns.length > 0 ? `${delegated.length} of ${ownerTurns.length} delivered owner turns delegated an edit` : "The owner has not spoken yet."
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							"data-testid": "edit-rechecks",
+							style: quiet,
+							children: checked.length > 0 ? `${checked.length} re-checked: ${applied} applied · ${checked.length - applied} did not apply` : "No edit has been re-checked yet."
+						}),
+						data.verdict?.dropped_delegation && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							"data-testid": "edit-dropped",
+							style: quiet,
+							children: ["Cut off by the turn cap: ", data.verdict.dropped_delegation]
+						})
+					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
+					title: "Floor requests",
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "floor-asks",
+						style: {
+							display: "flex",
+							flexDirection: "column",
+							gap: 4
+						},
+						children: [asks.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							style: quiet,
+							children: "Nobody asked for the floor."
+						}), asks.map((a) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							"data-testid": `floor-ask-${a.asked}`,
+							style: quiet,
+							children: [
+								a.name,
+								" asked on turn ",
+								a.asked,
+								" ·",
+								" ",
+								a.got !== null ? `got the floor on turn ${a.got}, ${a.got - a.asked} turns later` : over ? "the meeting ended first" : "still waiting"
+							]
+						}, a.asked))]
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						style: {
+							fontSize: 11,
+							color: "var(--text-muted)"
+						},
+						children: "Counted in turns: the record keeps no clock."
+					})]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
+					title: "Thread growth",
+					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						"data-testid": "thread-growth",
+						style: {
+							display: "flex",
+							flexDirection: "column",
+							gap: 8
+						},
+						children: sofar === 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							style: quiet,
+							children: "No prose recorded for these turns."
+						}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							style: quiet,
+							children: [
+								sofar.toLocaleString("en-US"),
+								" characters of prose over ",
+								turns.length,
+								" turns"
+							]
+						}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+							style: {
+								display: "flex",
+								alignItems: "flex-end",
+								gap: 2,
+								height: 48
+							},
+							children: growth.map((g) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+								"data-testid": `growth-${g.n}`,
+								title: `turn ${g.n}: ${g.sofar.toLocaleString("en-US")} characters so far`,
+								style: {
+									flex: 1,
+									height: `${g.sofar / sofar * 100}%`,
+									minHeight: 1,
+									background: "var(--status-live, #6ea8fe)"
+								}
+							}, g.n))
+						})] })
+					})
+				})
+			]
+		});
+	}
+	function CommitteeView({ runId, data, variant }) {
 		const { EmptyState } = ds();
 		if (data.timeline.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
 			title: "Nothing said yet",
 			description: "The committee view fills in as each member takes the floor.",
 			icon: "inbox"
 		});
+		if (variant === "metrics") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, { data });
 		const legacy = data.timeline.length > 0 && data.artifacts.original === null || data.verdict !== null && data.progress.ended === null;
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "committee-view",
@@ -1115,6 +1327,7 @@
 			]
 		});
 	}
+	CommitteeView.variants = ["metrics"];
 	//#endregion
 	return CommitteeView;
 });

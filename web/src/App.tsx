@@ -235,7 +235,18 @@ export default function App() {
           )}
 
         {!loading && !error && runDetail && view === 'metrics' && (
-          <MetricsView runId={runDetail.id} />
+          <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+            <MetricsView runId={runDetail.id} />
+            {/* Renders only a section the view declares for this tab. */}
+            <PlaybookView
+              key={`${runDetail.playbook}:${runDetail.id}`}
+              runId={runDetail.id}
+              playbook={runDetail.playbook}
+              hasView={runDetail.has_view}
+              liveTick={findingLiveTick}
+              variant="metrics"
+            />
+          </div>
         )}
 
         {/* Keyed on the run: a phase or resource picked on one run names

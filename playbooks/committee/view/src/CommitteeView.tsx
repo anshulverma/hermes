@@ -95,6 +95,8 @@ export type CommitteeViewProps = {
   runId: string;
   data: CommitteeData;
   refetch: () => void;
+  /** Set by the host on another tab; only the ones in `variants` are drawn. */
+  variant?: string;
 };
 
 // --- host globals, read at render time --------------------------------------
@@ -506,9 +508,166 @@ function Timeline({ timeline }: { timeline: Entry[] }) {
   );
 }
 
+// --- the Metrics tab ---------------------------------------------------------
+//
+// Counts over the same turns the transcript shows, and nothing else: the
+// reductions carry no timestamps, so every interval here is in turns.
+
+function Bar({ value, max }: { value: number; max: number }) {
+  return (
+    <div aria-hidden style={{ flex: 1, height: 4, borderRadius: 2, background: 'var(--wash-subtle)' }}>
+      <div
+        style={{
+          width: `${max > 0 ? (value / max) * 100 : 0}%`,
+          height: '100%',
+          borderRadius: 2,
+          background: 'var(--status-live, #6ea8fe)',
+        }}
+      />
+    </div>
+  );
+}
+
+const quiet = { fontSize: 12, color: 'var(--text-secondary)' } as const;
+const row = { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } as const;
+
+function MeetingMetrics({ data }: { data: CommitteeData }) {
+  const turns = [...data.timeline].sort((a, b) => a.n - b.n);
+  const delivered = (e: Entry) => !e.badges.includes('no_turn');
+  const over = data.verdict !== null;
+
+  // Turns per seat, every seat included; a turn nobody can be named for gets
+  // its own row rather than vanishing from the total.
+  const seats = [
+    ...data.roster.map((p) => ({ key: p.role, name: p.name, of: (e: Entry) => e.role === p.role })),
+    { key: 'unattributed', name: 'speaker not identified', of: (e: Entry) => e.badges.includes('unattributed') },
+  ]
+    .map((s) => ({ ...s, took: turns.filter(s.of) }))
+    .filter((s) => s.key !== 'unattributed' || s.took.length > 0);
+  const most = Math.max(...seats.map((s) => s.took.length));
+
+  // Only a delivered owner turn could have delegated, and `_apply_block` wants
+  // the badge AND a named edit before it counts.
+  const ownerTurns = turns.filter((e) => e.role === 'owner' && delivered(e));
+  const delegated = ownerTurns.filter((e) => e.badges.includes('delegate') && e.action !== null);
+  const checked = turns.filter((e) => e.verified !== null);
+  const applied = checked.filter((e) => e.verified).length;
+
+  // The floor queue replayed: `next_phase` grants a request on the asker's next
+  // turn, minted whether or not it was then delivered.
+  const asks: Array<{ name: string; role: string; asked: number; got: number | null }> = [];
+  for (const e of turns) {
+    if (e.badges.includes('unattributed')) continue;
+    const waiting = asks.find((a) => a.role === e.role && a.got === null);
+    if (waiting) waiting.got = e.n;
+    if (delivered(e) && e.badges.includes('request_floor') && !['owner', 'junior_ic'].includes(e.role)) {
+      asks.push({ name: e.name, role: e.role, asked: e.n, got: null });
+    }
+  }
+
+  // A signals-only turn's body is a placeholder, not prose anyone wrote.
+  let sofar = 0;
+  const growth = turns.map((e) => {
+    if (delivered(e) && !e.badges.includes('signals_only')) sofar += Array.from(e.body).length;
+    return { n: e.n, sofar };
+  });
+
+  return (
+    <div data-testid="committee-metrics" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {!over && (
+        <div data-testid="metrics-partial" style={quiet}>
+          Through turn {turns[turns.length - 1].n}; no verdict yet.
+        </div>
+      )}
+
+      <Section title="Turns taken">
+        {seats.map((s) => {
+          const missed = s.took.filter((e) => !delivered(e)).length;
+          return (
+            <div key={s.key} data-testid={`turns-${s.key}`} style={row}>
+              <span style={{ width: 130, flex: 'none', color: 'var(--text-primary)' }}>{s.name}</span>
+              <Bar value={s.took.length} max={most} />
+              <span style={{ ...mono, flex: 'none' }}>
+                {s.took.length}
+                {missed > 0 && ` · ${missed} not delivered`}
+              </span>
+            </div>
+          );
+        })}
+      </Section>
+
+      <Section title="Delegated edits">
+        <div data-testid="delegation-rate" style={quiet}>
+          {ownerTurns.length > 0
+            ? `${delegated.length} of ${ownerTurns.length} delivered owner turns delegated an edit`
+            : 'The owner has not spoken yet.'}
+        </div>
+        <div data-testid="edit-rechecks" style={quiet}>
+          {checked.length > 0
+            ? `${checked.length} re-checked: ${applied} applied · ${checked.length - applied} did not apply`
+            : 'No edit has been re-checked yet.'}
+        </div>
+        {data.verdict?.dropped_delegation && (
+          <div data-testid="edit-dropped" style={quiet}>
+            Cut off by the turn cap: {data.verdict.dropped_delegation}
+          </div>
+        )}
+      </Section>
+
+      <Section title="Floor requests">
+        <div data-testid="floor-asks" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {asks.length === 0 && <div style={quiet}>Nobody asked for the floor.</div>}
+          {asks.map((a) => (
+            <div key={a.asked} data-testid={`floor-ask-${a.asked}`} style={quiet}>
+              {a.name} asked on turn {a.asked} ·{' '}
+              {a.got !== null
+                ? `got the floor on turn ${a.got}, ${a.got - a.asked} turns later`
+                : over
+                  ? 'the meeting ended first'
+                  : 'still waiting'}
+            </div>
+          ))}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          Counted in turns: the record keeps no clock.
+        </div>
+      </Section>
+
+      <Section title="Thread growth">
+        <div data-testid="thread-growth" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {sofar === 0 ? (
+            <div style={quiet}>No prose recorded for these turns.</div>
+          ) : (
+            <>
+              <div style={quiet}>
+                {sofar.toLocaleString('en-US')} characters of prose over {turns.length} turns
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 48 }}>
+                {growth.map((g) => (
+                  <div
+                    key={g.n}
+                    data-testid={`growth-${g.n}`}
+                    title={`turn ${g.n}: ${g.sofar.toLocaleString('en-US')} characters so far`}
+                    style={{
+                      flex: 1,
+                      height: `${(g.sofar / sofar) * 100}%`,
+                      minHeight: 1,
+                      background: 'var(--status-live, #6ea8fe)',
+                    }}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      </Section>
+    </div>
+  );
+}
+
 // --- the view ----------------------------------------------------------------
 
-export default function CommitteeView({ runId, data }: CommitteeViewProps) {
+export default function CommitteeView({ runId, data, variant }: CommitteeViewProps) {
   const { EmptyState } = ds();
 
   // The timeline alone, NOT `&& roster.length === 0`. `view_data`'s `_roster`
@@ -529,6 +688,8 @@ export default function CommitteeView({ runId, data }: CommitteeViewProps) {
       />
     );
   }
+
+  if (variant === 'metrics') return <MeetingMetrics data={data} />;
 
   // A run captured before this view existed. Its reductions predate `body`,
   // `stance`, `ended`, `artifact` and `revised`, so `view_data` returns those
@@ -564,3 +725,7 @@ export default function CommitteeView({ runId, data }: CommitteeViewProps) {
     </div>
   );
 }
+
+// On the function, not a second export: the UMD global IS this function, and
+// the host reads the sections it may ask for off it.
+CommitteeView.variants = ['metrics'];

@@ -308,6 +308,74 @@ describe('PlaybookView', () => {
     expect(scriptCount('tick_pb')).toBe(1);
   });
 
+  // --- variants: a view's section on another tab ----------------------------
+
+  it('hands a variant to a view that declares it', async () => {
+    (window as any).HermesView_var_pb = Object.assign(
+      ({ variant, data }: any) => <div>section {variant} of {data.kind}</div>,
+      { variants: ['metrics'] },
+    );
+
+    render(<PlaybookView runId="run-2" playbook="var_pb" hasView variant="metrics" />);
+    const script = await injectedScript('var_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('load'));
+    });
+
+    await waitFor(() => expect(screen.getByText('section metrics of committee')).toBeInTheDocument());
+  });
+
+  it('shows no loading overlay on another tab while the data is in flight', async () => {
+    (window as any).HermesView_varwait_pb = Object.assign((props: any) => namesItsData(props), {
+      variants: ['metrics'],
+    });
+    mockFetch.mockImplementation(() => new Promise(() => {}));
+
+    const { container } = render(
+      <PlaybookView runId="run-2" playbook="varwait_pb" hasView variant="metrics" />,
+    );
+    const script = await injectedScript('varwait_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('load'));
+    });
+    await act(async () => {});
+
+    expect(container.innerHTML).toBe('');
+  });
+
+  it('renders nothing for a variant the view does not declare', async () => {
+    // A view that ignores `variant` would otherwise draw its whole tab again on
+    // the Metrics tab.
+    (window as any).HermesView_novar_pb = namesItsData;
+
+    const { container } = render(
+      <PlaybookView runId="run-2" playbook="novar_pb" hasView variant="metrics" />,
+    );
+    const script = await injectedScript('novar_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('load'));
+    });
+    await waitFor(() => expect(mockFetch).toHaveBeenCalledTimes(1));
+    await act(async () => {});
+
+    expect(screen.queryByText('payload committee')).toBeNull();
+    expect(container.innerHTML).toBe('');
+  });
+
+  it('leaves a failed asset to the view\'s own tab rather than carding it on another', async () => {
+    const { container } = render(
+      <PlaybookView runId="run-2" playbook="vargone_pb" hasView variant="metrics" />,
+    );
+    const script = await injectedScript('vargone_pb');
+    await act(async () => {
+      script.dispatchEvent(new Event('error'));
+    });
+    await act(async () => {});
+
+    expect(screen.queryByText('Error loading playbook view')).toBeNull();
+    expect(container.innerHTML).toBe('');
+  });
+
   it('never re-injects the asset on a tick, even after the load failed', async () => {
     // Finding 7.1, measured: with the asset load sharing the data effect, a
     // failing bundle evicted the cache and every poll re-injected -- five dead

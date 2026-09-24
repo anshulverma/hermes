@@ -159,6 +159,19 @@ running it needs no Node — only rebuilding does
 finds it through two optional methods on the registered playbook object, `view_asset()` and
 `view_data()`; `engine/` knows nothing about either, and a playbook without them simply has no tab.
 
+**A view can also put a section on another tab, but only one it declares.** The bundle's global is
+the component itself, so the one way to say more without a named export is a static property on
+it: `View.variants = ['metrics']`. The host renders the view on its own tab with no `variant`
+prop. On another tab it passes `variant="<tab>"` — today only the Metrics tab, as `"metrics"` —
+and renders the view there only if that name is in `View.variants`, in a fixed 380px column beside
+the host's own section. A view that declares nothing, or ignores `variant`, never appears outside
+its own tab, so it cannot draw its whole tab a second time. On another tab the section shows
+nothing until the view and its data have loaded, and a failed asset load is left for the view's
+own tab to report. The committee view declares `metrics` and shows the meeting's numbers there:
+turns per seat (undelivered ones called out), delegations out of delivered owner turns, junior
+edits applied or not by the master's re-check, floor latency in turns (reductions carry no
+timestamps), and cumulative prose per turn, with signals-only and undelivered turns adding none.
+
 The server must have the playbook registered, so the control-plane process needs
 `HERMES_PLAYBOOK_MODULES=playbooks.committee` exactly as `hermes run` does. `make up` sets it (the
 `PLAYBOOK_MODULES` variable); a server started by hand does not, and an unregistered playbook is a
