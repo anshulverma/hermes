@@ -1,15 +1,17 @@
 """CommitteePlaybook — a simulated review committee over a single artifact.
 
-Nine personas read one file and argue about it in one thread. The engine sees two
-static phases (``open``, ``decision``); every turn between them is a phase minted
-at runtime as ``t{NN:02d}-{role}`` — one ticket, one speaker, strictly serial.
+Nine personas read one file and argue about it in one thread. The engine sees three
+static phases (``open``, ``decision``, ``ruling``); every turn between the first two
+is a phase minted at runtime as ``t{NN:02d}-{role}`` — one ticket, one speaker,
+strictly serial. ``ruling`` is the human's: it seeds nothing, and a run reaches it
+once the chair's verdict has been accepted or rejected.
 
 This module is the state machine. ``next_phase`` decides who speaks next and
-``is_done`` decides when the meeting is over. Everything they need lives in a
-per-run dict on the instance (``_state``), because ``run.config`` is read-only and
-``run.reductions`` reaches only one phase back. That is safe: a run is never
-resumed, and ``seed``/``reduce``/``next_phase``/``is_done`` all run in the master
-process against the one registry singleton.
+``is_done`` decides how the run ends. The meeting lives in a per-run dict on the
+instance (``_state``), because ``run.config`` is read-only and ``run.reductions``
+reaches only one phase back. So the meeting itself cannot be resumed: its turns
+must all run in one master process against the one registry singleton. The
+ruling can: ``is_done`` reads only the decision's reduction from the database.
 
 Ordering is load-bearing. A pending delegation outranks ``close`` — an edit the
 owner asked for still happens, and costs one turn — and the turn cap outranks
@@ -102,10 +104,9 @@ def _latest_answer(findings: list[Finding] | None) -> str:
     return answer
 
 
-# Criterion 9. The run reaches `done` unattended, and `hermes reduction accept`
-# afterwards is an audit stamp rather than a gate (it only checks
-# `review_state == 'pending'`, engine/queue.py:649) -- so nothing downstream
-# distinguishes this from a sign-off unless the text itself does.
+# Criterion 9. Only a human's accept ends the run `done`, but the verdict is
+# read in thread.md and the Outputs tab, which never pass through that gate --
+# so nothing there distinguishes it from a sign-off unless the text itself does.
 _SIMULATION = (
     "This verdict is a simulation produced by AI personas reading one file. It is "
     "not an approval, not a sign-off, and carries no authority: a human decides."
@@ -124,7 +125,9 @@ class CommitteePlaybook:
     def __init__(self) -> None:
         """Initialize the playbook with per-instance state."""
         # Instance attributes (not class attributes) so mutation stays isolated.
-        self.phases = ["open", "decision"]
+        # `ruling` seeds nothing: it exists so the engine hands `is_done` the
+        # decision's reductions as prior-phase data (research's `complete`).
+        self.phases = ["open", "decision", "ruling"]
         self._state_by_run: dict[str, dict] = {}
 
     # --- per-run state (master-only) ------------------------------------
@@ -132,9 +135,9 @@ class CommitteePlaybook:
     def _state(self, run: Run) -> dict:
         """The run's mutable committee state, created on first use.
 
-        Master-only: seed, reduce, next_phase and is_done all run in the process
-        that owns the run, so this dict is the run's memory. The transport-path
-        methods never read it.
+        Master-only: seed, reduce and next_phase run in the process that holds
+        the meeting, so this dict is the meeting's memory. The transport-path
+        methods and ``is_done`` never read it.
 
         Unbounded on purpose. Evicting a live run would make ``next_phase``
         re-mint ``t01-…`` (``UNIQUE constraint failed: tickets.id`` on an
@@ -155,7 +158,6 @@ class CommitteePlaybook:
                 # the opening round and mints t01-owner -- a reply to an empty thread.
                 "last_speaker": cast.OWNER,
                 "closed": False,
-                "verdict": "",
                 "current_role": None,
                 # the turn number reduce() needs; the phase name is never parsed back.
                 "current_turn": 0,
@@ -252,6 +254,8 @@ class CommitteePlaybook:
             )
 
         phase = run.phase or self.phases[0]
+        if phase == "ruling":
+            return []  # the human's step; no worker speaks
         s = self._state(run)
 
         if phase == "open":
@@ -470,18 +474,17 @@ class CommitteePlaybook:
         wedges the run. Only the decision carries it, routing the chair's own
         ticket. The decision is terminal and its verdict is already written,
         so the hold blocks nothing but the run's end state: accept ends the
-        run ``done``, reject ends it ``failed`` (the engine's nothing-done
-        rule). Finishing needs the loop that ran the meeting, so
-        ``hermes run --wait``: the verdict ``is_done`` reads lives in this
-        process's memory.
+        run ``done``, reject ends it ``failed``. Any process can finish it --
+        ``hermes run resume <id> --wait`` after the meeting's loop is gone --
+        because ``is_done`` reads the ruling from the database.
 
         It MUST NEVER RAISE. An exception here propagates out of
         ``engine/dispatch.py:305`` and kills the master loop mid-run, so every
         file touch is wrapped and its failure recorded under ``error`` -- the
         shape ``playbooks/dexter/playbook.py:306-311`` uses for a failed bank.
         """
-        if phase == "open":
-            return []  # the zero-ticket bootstrap: nothing was dispatched
+        if phase in ("open", "ruling"):
+            return []  # a zero-ticket phase: nothing was dispatched
         s = self._state(run)
         if phase == "decision":
             return self._reduce_decision(run, s, findings)
@@ -611,11 +614,6 @@ class CommitteePlaybook:
         answer = _latest_answer(findings)
         body = turnblock.strip(answer)
 
-        # `s["verdict"]` is the chair's prose and nothing else -- `is_done` reads
-        # it, so a failed chair turn must leave it empty and end the run failed
-        # (spec 5.3). The assembled text below is what a human reads.
-        s["verdict"] = body
-
         # The other half of criterion 6, and the half nothing else re-checks: the
         # ORIGINAL is promised inviolate, and in a live run that promise is one
         # sentence of prose against a worker running bypassPermissions. Symmetric
@@ -669,9 +667,9 @@ class CommitteePlaybook:
             # has nothing to rule on and routes nothing.
             "needs_human_ticket_ids": [f"{run.id}/decision"] if body else [],
             # the assembled text, so the reduction a reviewer reads carries the
-            # re-checks and the disclaimer; empty iff the chair delivered
-            # nothing, which is what ends the run failed.
+            # re-checks and the disclaimer; empty iff the chair delivered nothing.
             "verdict": text if body else "",
+            # read by `is_done`: a chair that delivered nothing ends the run failed
             "delivered": bool(body),
             "rechecks": [dict(check) for check in s["rechecks"]],
             "artifact_intact": intact,
@@ -691,10 +689,12 @@ class CommitteePlaybook:
         })]
 
     def next_phase(self, run: Run) -> str | None:
-        """Who speaks next, or None once the decision has been taken."""
-        s = self._state(run)
+        """Who speaks next, then the human's ruling, then None."""
         if run.phase == "decision":
+            return "ruling"  # reached once the human has ruled on the held verdict
+        if run.phase == "ruling":
             return None  # -> is_done
+        s = self._state(run)
         # a delegation outranks `close`: an edit the owner asked for still happens,
         # and costs one turn. The cap outranks BOTH, so this can never mint t31.
         if s["delegation"] and s["turn"] <= s["max_turns"]:
@@ -714,13 +714,16 @@ class CommitteePlaybook:
         return self._decision(s, "queue empty")
 
     def is_done(self, run: Run) -> bool:
-        """Done iff the chair's turn settled and reduce recorded a verdict.
+        """Done iff the chair delivered a verdict and a human accepted it.
 
-        A chair turn that produced no finding leaves the verdict empty and the run
-        ends `failed` (engine/dispatch.py:295) — deliberate: a committee that
-        produced no decision did not finish.
+        Read from the database, never from this instance: the human may rule
+        long after the process that held the meeting is gone. A chair that
+        delivered nothing, or a rejected verdict, ends the run `failed`.
         """
-        return run.phase == "decision" and bool(self._state(run)["verdict"])
+        return run.phase == "ruling" and any(
+            r.kind == "decision" and r.json.get("delivered") and r.review_state == "accepted"
+            for r in run.reductions
+        )
 
     # --- the view seam (spec §4) ----------------------------------------
     # Optional and duck-typed: never declared on the Playbook Protocol, so

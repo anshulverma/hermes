@@ -6,12 +6,13 @@ Review one text file — a doc, an article, a source file — through a cast of 
 distinct altitude, goals and ambitions, talking in a single thread where exactly one participant
 holds the floor at a time. An **owner** persona answers every reviewer and delegates edits to a
 junior IC; a chair closes with a verdict. One `hermes run` drives an opening round, a floor queue
-and a decision phase to `done` unattended, leaving a transcript and, where an edit was delegated,
-a revised copy.
+and a decision phase, then holds the chair's verdict for a human to rule on: accept ends the run
+`done`, reject ends it `failed`. It leaves a transcript and, where an edit was delegated, a
+revised copy.
 
 ## Phases
 
-`phases = ["open", "decision"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01.
+`phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01.
 
 - **open** — zero tickets. `seed` resolves configuration, builds the cast, writes the thread header
   (charge, artifact path, roster) and returns `[]`. No worker runs.
@@ -20,7 +21,10 @@ a revised copy.
   worker produced nothing is answered by nobody — its thread entry is the `NO_TURN` stub, and
   sending the owner to reply to it yields a hallucinated answer or a burnt turn — so the next
   speaker after a failed turn is the next reviewer.
-- **decision** — one ticket for the chair. Terminal.
+- **decision** — one ticket for the chair. Its ticket is held `needs_human` until a human rules.
+- **ruling** — zero tickets, reached once the human has ruled. It exists so the engine hands
+  `is_done` the decision's reduction (`run.reductions` carries only the prior phase): `done` iff
+  the chair delivered a verdict and it was accepted.
 
 One speaker per phase is a rule, not a habit: two would race for the thread file, and a repeated
 phase name deadlocks the run silently. The review ends when the owner closes, the queue empties or
@@ -177,11 +181,11 @@ The server must have the playbook registered, so the control-plane process needs
 `PLAYBOOK_MODULES` variable); a server started by hand does not, and an unregistered playbook is a
 404 on the view routes and `has_view: false` — no tab, no error.
 
-Setting it is a trade. A registered playbook also means `GET /api/runs/{id}` reports the playbook's
-*declared* phases, so the **Run tab's phase rail collapses to `open` / `decision`** and the twenty
-turn phases disappear from it. Unregistered, the server derives that rail from tickets and lists
-every turn. The turn-by-turn reading now lives on the Playbook tab — a better home for it, with
-names and prose attached — but the Run tab is strictly worse than it was before the view existed.
+Registered or not, the **Run tab's phase rail** lists every phase that minted tickets, in the
+order it did — each turn included. A registered run at a declared phase also lists the declared
+phases after it, so at `decision` the rail shows `ruling` ahead; a turn phase is not declared, so
+mid-meeting nothing is listed ahead. The turn-by-turn reading lives on the Playbook tab, with names
+and prose attached.
 
 **Runs created before the view renders as a legacy run, and says so.** `ended`, the artifact paths,
 the per-turn `stance` and the turn body are all carried on the reductions, and a run reduced by an
@@ -229,7 +233,8 @@ the master" also means "a playbook you trust with the operator's API token".
   path calls (`payload_schema`, `driver`, `result_schema`, `verify`) would see an empty state dict
   in a second process. Use `hermes run`, which drives the loop in-process.
 - **The verdict is a simulation, not an approval.** Nothing is ever shipped. The decision text
-  says so itself; `hermes reduction accept|reject` on it is an audit stamp, not a gate.
+  says so itself, because thread.md and the Outputs tab show it before and regardless of any
+  `hermes reduction accept|reject`.
 - **The original artifact is never mutated.** Edits land in the revised copy; a run that delegated
   nothing leaves no copy at all.
 - **The turn cap is literal.** At a low `HERMES_COMMITTEE_MAX_TURNS` the run stops mid-exchange —
@@ -247,10 +252,10 @@ the master" also means "a playbook you trust with the operator's API token".
 - **A human rules at the end, never mid-run.** Nobody is asked anything while the committee talks.
   Once the verdict is written, the chair's ticket waits in `needs_human` with the run `running`:
   accept ends the run `done`, reject ends it `failed`. One artifact per run, one cast.
-- **A run is not resumable, so finish it with `hermes run --wait`.** The verdict `is_done` reads
-  lives in the master's memory. Without `--wait`, `hermes run` returns while the verdict waits;
-  `hermes run resume <id> --wait` then starts a fresh process that has lost it, and the run ends
-  `failed` even on accept.
+- **The meeting is not resumable; the ruling is.** The floor queue and the cast live in the
+  master's memory, so a process lost mid-meeting cannot pick the meeting up again. Once the verdict
+  waits, nothing in memory is needed: without `--wait`, `hermes run` returns and
+  `hermes run resume <id> --wait` finishes the run after the ruling, reading it from the database.
 - `MockAgent` cannot serve this playbook — it echoes the request payload back as the result — so
   exercising a whole run needs an agent double that actually talks.
 

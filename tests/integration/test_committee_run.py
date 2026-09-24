@@ -549,6 +549,26 @@ def test_turn_cap_ends_the_conversation_at_the_cap(
     assert _reduction_for(conn, run_id, "decision")["dropped_delegation"] is None
 
 
+@pytest.mark.parametrize("accept, ends", [(True, "done"), (False, "failed")])
+def test_a_process_that_never_saw_the_meeting_finishes_the_ruling(
+    home, source_repo, artifact, conn, local_site, monkeypatch, accept, ends
+):
+    """The verdict waits on a human for as long as they take. The process that
+    ran the meeting may be gone by then -- a closed terminal, Ctrl-C, the board's
+    resume -- so the ruling must be read back from the database, not from the
+    memory of a playbook instance that held the meeting."""
+    monkeypatch.setenv(committee.ENV_MAX_TURNS, "3")
+    agent = ScriptedCommitteeAgent()
+    run_id = "committee-20260918-000013"
+
+    meeting = committee.CommitteePlaybook()
+    host = _start(conn, run_id, meeting, local_site, agent)
+    assert _drive(conn, run_id, meeting, local_site, agent, host) == "running"
+    assert _rule(
+        conn, run_id, committee.CommitteePlaybook(), local_site, agent, host, accept=accept
+    ) == ends
+
+
 def test_delegated_edit_writes_only_the_revised_copy(
     home, source_repo, artifact, conn, local_site
 ):

@@ -869,12 +869,12 @@ def _committee():
     return CommitteePlaybook()
 
 
-def test_the_playbook_names_itself_and_its_two_static_phases():
+def test_the_playbook_names_itself_and_its_three_static_phases():
     """name and phases are the only attributes the engine reads off a playbook."""
     pb = _committee()
 
     assert pb.name == "committee"
-    assert pb.phases == ["open", "decision"]
+    assert pb.phases == ["open", "decision", "ruling"]
     # phases is per-instance, not shared class state
     assert pb.phases is not _committee().phases
 
@@ -889,7 +889,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
 
     assert set(s) == {
         "turn", "opening", "queue", "delegation", "pending_action", "last_speaker",
-        "closed", "verdict", "current_role", "current_turn", "dropped_delegation",
+        "closed", "current_role", "current_turn", "dropped_delegation",
         "rechecks", "pre_edit_digest", "artifact_digest", "charge", "artifact",
         "revised", "roster", "max_turns", "ended",
     }
@@ -904,7 +904,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     assert s["pre_edit_digest"] == "" and s["artifact_digest"] == ""
     assert s["delegation"] is None and s["pending_action"] is None
     assert s["dropped_delegation"] is None and s["current_role"] is None
-    assert s["closed"] is False and s["verdict"] == "" and s["current_turn"] == 0
+    assert s["closed"] is False and s["current_turn"] == 0
     assert s["charge"] == "" and s["artifact"] == "" and s["revised"] == ""
     # nothing has ended yet
     assert s["ended"] is None
@@ -965,14 +965,13 @@ def _drive(script, max_turns=30):
     delivered = []
     while True:
         nxt = pb.next_phase(run)
-        if nxt is None:
-            break
+        if nxt is None or nxt == "ruling":
+            break  # `ruling` is the human's: no speaker, nothing left to model
         assert nxt not in seen, f"REPEATED PHASE {nxt!r} (seen={seen})"
         assert len(seen) < 400, f"NON-TERMINATION: {seen[:40]}..."
         seen.append(nxt)
         run.phase = nxt
         if nxt == "decision":
-            s["verdict"] = "approve"  # what reduce("decision") will set
             speakers.append("chair")
             delivered.append(True)
             continue
@@ -1068,22 +1067,31 @@ def test_regression_a_turn_with_no_finding_still_advances_the_counter():
     assert max(int(p[1:3]) for p in seen if p.startswith("t")) == 12
 
 
-def test_regression_next_phase_returns_none_at_decision_so_is_done_is_reachable():
+def test_regression_the_decision_leads_to_the_ruling_and_then_to_is_done():
     # 4: is_done is consulted only when next_phase returns None
-    # (engine/dispatch.py:281-292); a machine that kept minting names never finishes.
+    # (engine/dispatch.py:296-313); a machine that kept minting names never finishes.
+    from engine.models import Reduction
+
+    def decision(review_state, delivered=True):
+        return Reduction(kind="decision", json={"delivered": delivered},
+                         review_state=review_state)
+
     pb = _committee()
-    run = _run(phase="decision")
-    s = pb._state(run)
-
+    assert pb.next_phase(_run(phase="decision")) == "ruling"
+    run = _run(phase="ruling")
     assert pb.next_phase(run) is None
-    assert pb.is_done(run) is False  # no verdict yet -> the run ends failed, by design
-    s["verdict"] = "approve with changes"
-    assert pb.is_done(run) is True
 
-    mid = _committee()
-    mid_run = _run(phase="t04-owner")
-    mid._state(mid_run)["verdict"] = "approve"
-    assert mid.is_done(mid_run) is False, "is_done fired before the decision phase"
+    # A fresh instance, as after a restart: the ruling is read off the decision
+    # reduction, which the engine hands `ruling` as its prior phase.
+    run.reductions = [decision("accepted")]
+    assert pb.is_done(run) is True
+    for held in (decision("pending"), decision("rejected"), decision("accepted", delivered=False)):
+        run.reductions = [held]
+        assert pb.is_done(run) is False, held
+
+    early = _run(phase="decision")
+    early.reductions = [decision("accepted")]
+    assert pb.is_done(early) is False, "is_done fired before the ruling"
 
 
 def test_regression_the_floor_queue_is_entered_after_the_opening_round():
@@ -2515,9 +2523,6 @@ def test_reduce_decision_folds_the_verdict_and_calls_it_a_simulation():
     assert "Approve with changes" in text
     assert "simulation" in text
 
-    # `is_done` reads the chair's prose, never the assembled text.
-    assert s["verdict"] == answer
-    assert pb.is_done(run) is True
 
 
 def test_reduce_decision_names_a_failed_recheck():
@@ -2679,9 +2684,7 @@ def test_reduce_decision_with_no_finding_leaves_the_verdict_empty():
     red = reductions[0]
     assert red.kind == "decision"
     assert red.json["verdict"] == ""
-    assert red.json["delivered"] is False
-    assert s["verdict"] == ""
-    assert pb.is_done(run) is False
+    assert red.json["delivered"] is False  # what `is_done` reads: the run ends failed
 
     # the transcript still stands, and still names what happened
     text = thread.path(run.id).read_text()
@@ -2706,7 +2709,7 @@ def test_reduce_decision_never_raises_when_the_thread_cannot_be_written():
 
     assert len(reductions) == 1
     assert "thread" in reductions[0].json["error"]
-    assert s["verdict"] == "Approve."  # the run still finishes
+    assert reductions[0].json["delivered"] is True  # the run still finishes
 
 
 def test_only_the_decision_reduction_routes_to_review(artifact):
@@ -2973,14 +2976,14 @@ def test_registration_instance_satisfies_the_playbook_protocol():
         assert callable(getattr(pb, method)), method
 
 
-def test_registration_phases_are_open_then_decision():
+def test_registration_phases_are_open_decision_ruling():
     """phases[0] is the phase the CLI seeds (engine/cli.py:385)."""
     import playbooks.committee  # noqa: F401
 
     from engine import playbook as _playbook
 
     pb = _playbook.load("committee")
-    assert pb.phases == ["open", "decision"]
+    assert pb.phases == ["open", "decision", "ruling"]
     assert pb.phases[0] == "open"
 
 
@@ -3020,7 +3023,7 @@ pb, st, ag = _load_playbook_site_agent(args)
 
 assert pb.name == "committee", pb.name
 assert type(pb).__name__ == "CommitteePlaybook", type(pb).__name__
-assert pb.phases == ["open", "decision"], pb.phases
+assert pb.phases == ["open", "decision", "ruling"], pb.phases
 assert isinstance(pb, Playbook)
 assert st.name == "local", st.name
 assert ag.name == "claude", ag.name
