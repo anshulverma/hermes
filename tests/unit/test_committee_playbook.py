@@ -356,6 +356,72 @@ def test_seniority_is_the_seven_reviewers_in_order():
     assert len(set(cast.SENIORITY)) == 7
 
 
+def test_the_library_has_nine_complete_personas():
+    """The seat pool the selectors draw from (selection C2, Q1, Q5).
+
+    Five are CAST's own reviewers, by reference, so a library seat is the
+    persona the legacy cast already has and voice's styles hold for both. Four
+    are new functions. The fixed seats (owner, senior_director, manager,
+    junior_ic) are always seated, so none of them is selectable.
+    """
+    assert tuple(cast.LIBRARY) == (
+        "tpm", "pm", "tl", "staff_ic", "data_scientist",
+        "security", "sre", "privacy", "partner_owner",
+    )
+    for slug in ("tpm", "pm", "tl", "staff_ic", "data_scientist"):
+        assert cast.LIBRARY[slug] is cast.CAST[slug], slug
+
+    titles = {
+        "security": "Security Engineer",
+        "sre": "Site Reliability Engineer, on-call",
+        "privacy": "Privacy Engineer",
+        "partner_owner": "Engineering Lead, partner team",
+    }
+    # The derived-seat clip limits (selection C2). The budget test builds its
+    # worst-case reviewer at those limits, so a library persona that fits them
+    # can never be the goal that breaks GOAL_MAX.
+    limits = {"name": 60, "title": 80}
+    cast_names = {p["name"] for p in cast.CAST.values()}
+    new_names = set()
+    new_text = [cast.DERIVED_STYLE, *cast.FIXED_RATIONALE.values()]
+    for slug, want_title in titles.items():
+        p = cast.LIBRARY[slug]
+        # The slug is the role, so a library persona carries no `role` key.
+        assert set(p) == {
+            "name", "title", "altitude", "goal", "ambition", "stake", "lens", "style",
+        }, slug
+        for field, value in p.items():
+            assert isinstance(value, str) and value.strip(), f"{slug}.{field}"
+            assert len(value) <= limits.get(field, 120), f"{slug}.{field}"
+        assert p["title"] == want_title, slug
+        assert p["name"] not in cast_names, slug
+        new_names.add(p["name"])
+        new_text += p.values()
+    assert len(new_names) == 4
+
+    assert set(cast.FIXED_RATIONALE) == {"owner", "senior_director", "manager", "junior_ic"}
+    assert len(cast.DERIVED_STYLE) <= 80
+    # Voice's rule 5 holds for every string this adds: each one reaches a worker
+    # through a brief or through the thread.
+    for text in new_text:
+        assert text.strip() and "\n" not in text, repr(text)
+        assert "\u2013" not in text and "\u2014" not in text, repr(text)
+        assert " -- " not in text and "**" not in text, repr(text)
+
+
+def test_the_manager_is_the_owners_manager():
+    """The manager's brief says whose manager she is. One-on-ones' AC10 reads
+    this test by name: its 1:1 host is "the owner's manager"."""
+    stake = cast.CAST["manager"]["stake"]
+    assert "manages Maya" in stake
+    assert stake == (
+        "manages Maya, the proposal owner; her team's commitments this half "
+        "are already signed."
+    )
+    assert cast.CAST[cast.OWNER]["name"].startswith("Maya ")
+    assert f"stake: {stake}" in cast.brief("manager")
+
+
 def test_persona_resolves_the_chair_sentinel_to_the_chairing_persona():
     assert cast.CHAIR == "chair"
     assert cast.CHAIR_ROLE == "senior_director"

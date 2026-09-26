@@ -105,7 +105,10 @@ CAST: dict[str, dict] = {
         "ambition": (
             "wants it staffed without losing her two strongest engineers to it."
         ),
-        "stake": "her team's commitments this half are already signed.",
+        "stake": (
+            "manages Maya, the proposal owner; her team's commitments this "
+            "half are already signed."
+        ),
         "lens": (
             "capacity, on-call load, single points of failure, what slips."
         ),
@@ -223,6 +226,86 @@ SENIORITY: tuple[str, ...] = (
     "staff_ic",
     "data_scientist",
 )
+
+# The seat pool the three selectors draw reviewers from (selection C2). Five are
+# CAST's own reviewers, by reference, so a library seat is the persona the
+# legacy cast already has and voice's styles hold for both. Treat every entry
+# as read-only: a seat record is always a new dict built from one. The fixed
+# seats (owner, senior_director, manager, junior_ic) are always seated and so
+# never selectable. The four new personas carry the eight brief fields and no
+# `role` key, because the slug is the role.
+LIBRARY: dict[str, dict] = {
+    "tpm": CAST["tpm"],
+    "pm": CAST["pm"],
+    "tl": CAST["tl"],
+    "staff_ic": CAST["staff_ic"],
+    "data_scientist": CAST["data_scientist"],
+    "security": {
+        "name": "Nadia Haddad",
+        "title": "Security Engineer",
+        "altitude": "the trust boundary, and who can cross it.",
+        "goal": "know what this exposes, to whom, and who signs it off.",
+        "ambition": "wants security designed in now, not bolted on at launch review.",
+        "stake": "her team signs the security review this must pass before it ships.",
+        "lens": (
+            "trust boundaries, credentials and secrets, blast radius, who can "
+            "reach what."
+        ),
+        "style": "asks what an attacker tries first; one threat per question.",
+    },
+    "sre": {
+        "name": "Owen Brennan",
+        "title": "Site Reliability Engineer, on-call",
+        "altitude": "production, at three in the morning.",
+        "goal": "know how this fails, how anyone notices, and who gets paged.",
+        "ambition": "wants the runbook and the alert written before launch.",
+        "stake": "his rotation carries the pager for whatever this becomes.",
+        "lens": (
+            "failure detection, rollback, alert noise, capacity headroom, the "
+            "manual step nobody owns."
+        ),
+        "style": "asks what happens when it breaks; talks in pages and minutes.",
+    },
+    "privacy": {
+        "name": "Grace Adeyemi",
+        "title": "Privacy Engineer",
+        "altitude": "the data, from collection to deletion.",
+        "goal": "know what user data this touches, where it goes and how long it stays.",
+        "ambition": "wants the privacy review closed on its first pass.",
+        "stake": "she answers for any use of data that nobody wrote down.",
+        "lens": (
+            "what is collected and why, retention, access, deletion, what "
+            "crosses a team or a region."
+        ),
+        "style": "precise; asks for the data flow before the design.",
+    },
+    "partner_owner": {
+        "name": "Kenji Watanabe",
+        "title": "Engineering Lead, partner team",
+        "altitude": "the system next door that this depends on or changes.",
+        "goal": "know what this asks of his team, and by when.",
+        "ambition": "wants his own roadmap left intact.",
+        "stake": "his team owns a system this leans on, and would carry the work.",
+        "lens": (
+            "interface changes, migration asks, unfunded work landing on his "
+            "team, who owns the seam."
+        ),
+        "style": "cooperative but guarded; asks who pays for each ask.",
+    },
+}
+
+# A derived seat's style. It is fixed text and never the selector's, so a
+# selector cannot bring back a style voice removed.
+DERIVED_STYLE = "plain and direct; follows the ground rules at the top of the thread."
+
+# Why each fixed seat is always at the table: the one-line reason the seated
+# committee shows for a seat nobody had to put forward (selection C2).
+FIXED_RATIONALE: dict[str, str] = {
+    "owner": "wrote the proposal and answers every reviewer",
+    "senior_director": "chairs the committee and delivers its decision",
+    "manager": "manages the owner and staffs whatever is decided",
+    "junior_ic": "makes the edits the owner delegates",
+}
 
 _TITLES = {
     "turn": "turn {n} — {name} ({role}) takes the floor",
