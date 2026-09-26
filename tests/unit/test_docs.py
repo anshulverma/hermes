@@ -81,3 +81,28 @@ def test_committee_spec_documents_the_doc_snapshots_and_the_stepper():
     ):
         assert needle in content, f"committee spec does not document {needle!r}"
     assert "which=" not in content, "committee spec still documents the removed which= parameter"
+
+
+def test_committee_eval_spec_documents_the_cli_and_the_rubric():
+    """docs/specs/committee-eval.md tells the next loops how to score a run and which names they build on."""
+    from playbooks.committee import eval as committee_eval
+
+    specs = Path(__file__).parent.parent.parent / "docs" / "specs"
+    content = (specs / "committee-eval.md").read_text()
+
+    for needle in (
+        "python -m playbooks.committee.eval_cli run",
+        "python -m playbooks.committee.eval_cli compare",
+        "evals.jsonl",
+        "HERMES_COMMITTEE_EVAL_RUN",
+        "HERMES_COMMITTEE_EVAL_HOME",
+        "verdict_grounded", "edits_address_concerns", "concern_coverage",
+        "efficiency", "concision", "verdict_consistency",
+    ):
+        assert needle in content, f"committee-eval spec does not document {needle!r}"
+    # The names later loops build on must be real, and spelled in the doc as the code spells them.
+    for name in ("words", "DIMENSIONS", "dimension_versions", "rubric_version", "compute_metrics", "calibration"):
+        assert hasattr(committee_eval, name), f"playbooks/committee/eval.py has no {name}"
+        assert f"`{name}" in content, f"committee-eval spec does not name `{name}`"
+    assert "](committee-eval.md)" in (specs / "committee-playbook.md").read_text(), \
+        "committee-playbook.md does not link committee-eval.md"

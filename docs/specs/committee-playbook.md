@@ -10,6 +10,8 @@ and a decision phase, then holds the chair's verdict for a human to rule on: acc
 `done`, reject ends it `failed`. It leaves a transcript, every version of the document under
 `doc/`, and, where an edit was delegated, a revised copy.
 
+How good a finished review was is scored by a second playbook, `committee-eval`; see [committee-eval.md](committee-eval.md).
+
 ## Phases
 
 `phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01.
