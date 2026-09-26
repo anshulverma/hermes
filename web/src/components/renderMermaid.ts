@@ -4,15 +4,21 @@
  * On the host shelf (window.HermesUI.renderMermaid) so a playbook view bundle can
  * draw a diagram without inlining mermaid into its committed artifact. The
  * import is dynamic, so the SPA splits mermaid into its own chunk and loads it
- * only when a diagram is drawn. `securityLevel: 'strict'` and root-level
- * `htmlLabels: false` keep script and foreignObject HTML out of the markup; the
- * caller still shows it only as an <img> of a blob, never as inline HTML.
+ * only when a diagram is drawn. `securityLevel: 'strict'` and `htmlLabels: false`
+ * are asked for, and `secure` stops the diagram's own directives from changing
+ * them or from setting CSS (themeCSS, fonts) that the page would apply while it
+ * draws. The caller still shows the markup only as an <img> of a blob, never as
+ * inline HTML.
  *
  * The source is worker-written, and a blob: URL is same-origin: "Open image in
- * new tab" loads it as a document, where an SVG's script would run. So markup
- * that still carries script, a javascript: URL, an event attribute or
- * foreignObject is rejected here, before any caller can make a blob of it, and
- * the caller shows the source as code, as for any failed diagram.
+ * new tab" loads it as a document, where an SVG's script would run. So as a
+ * backstop, markup that still carries script, a javascript: URL, an event
+ * attribute or foreignObject is rejected here, before any caller can make a blob
+ * of it, and so is markup that is not well-formed XML (an <img> could not decode
+ * it); the caller shows the source as code, as for any failed diagram.
+ *
+ * A diagram's <style> (a classDef's `fill:url(...)`) still applies to the page
+ * while it draws; web/index.html's img-src policy keeps that from fetching.
  *
  * Like Markdown, this must not import '../ds': ds/index -> _globals -> here
  * would be a cycle.
@@ -29,7 +35,25 @@ let drawn = 0;
 function load(): Promise<Mermaid> {
   loading ??= import('mermaid').then(
     ({ default: mermaid }) => {
-      mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', htmlLabels: false });
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: 'strict',
+        htmlLabels: false,
+        suppressErrorRendering: true, // else a failed diagram leaves its error graphic in <body>
+        journey: { textPlacement: 'tspan' }, // its default draws labels as foreignObject
+        secure: [
+          'secure',
+          'securityLevel',
+          'startOnLoad',
+          'maxTextSize',
+          'suppressErrorRendering',
+          'maxEdges',
+          'themeCSS',
+          'fontFamily',
+          'altFontFamily',
+          'htmlLabels',
+        ],
+      });
       return mermaid;
     },
     (err: unknown) => {
@@ -45,5 +69,7 @@ export default async function renderMermaid(source: string): Promise<string> {
   drawn += 1;
   const { svg } = await mermaid.render(`hermes-mermaid-${drawn}`, source);
   if (UNSAFE.test(svg)) throw new Error('unsafe markup in the drawn SVG');
+  const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+  if (doc.getElementsByTagName('parsererror').length) throw new Error('the drawn SVG is not well-formed XML');
   return svg;
 }
