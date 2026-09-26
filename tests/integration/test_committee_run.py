@@ -654,14 +654,15 @@ def test_a_process_that_never_saw_the_meeting_ends_it_failed_and_says_why(
     `running` with nothing driving it."""
     agent = ScriptedCommitteeAgent()
     run_id = "committee-20260918-000014"
-    host = _start(conn, run_id, committee.CommitteePlaybook(), local_site, agent)
+    meeting = committee.CommitteePlaybook()  # opens it and holds it until Ctrl-C
+    host = _start(conn, run_id, meeting, local_site, agent)
     dispatch.master_loop(
-        conn, run_id, committee.CommitteePlaybook(), local_site, agent, "HEAD",
-        hosts=[host], now=1000.0, max_cycles=3,
+        conn, run_id, meeting, local_site, agent, "HEAD",
+        hosts=[host], now=1000.0, max_cycles=6,
     )
     assert _run_state(conn, run_id) == "running"
     stopped_at = queue.load_run(conn, run_id).phase
-    assert stopped_at not in ("open", "decision", "ruling"), stopped_at
+    assert stopped_at == "t03-manager", stopped_at  # mid-meeting, past selection
 
     assert _drive(conn, run_id, committee.CommitteePlaybook(), local_site, agent, host) == "failed"
     lost = conn.execute(
@@ -669,6 +670,21 @@ def test_a_process_that_never_saw_the_meeting_ends_it_failed_and_says_why(
     ).fetchall()
     assert [phase for phase, _ in lost] == [stopped_at]
     assert "cannot be resumed" in json.loads(lost[0][1])["error"]
+
+
+def test_a_process_that_never_opened_the_run_ends_it_failed_before_selection(
+    home, source_repo, artifact, conn, local_site
+):
+    """`hermes run` seeded `open` and exited before its loop ran (a failed
+    crew.add); `hermes run resume <id> --wait` must not hold the meeting on a
+    state with no charge, artifact or cap."""
+    agent = ScriptedCommitteeAgent()
+    run_id = "committee-20260918-000024"
+    host = _start(conn, run_id, committee.CommitteePlaybook(), local_site, agent)
+
+    assert _drive(conn, run_id, committee.CommitteePlaybook(), local_site, agent, host) == "failed"
+    assert _dispatched_phases(conn, run_id) == []
+    assert _reductions(conn, run_id) == [("open", "lost", {"error": committee._LOST_OPEN})]
 
 
 def test_delegated_edit_writes_only_the_revised_copy(

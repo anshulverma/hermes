@@ -1981,6 +1981,15 @@ def _selection_take(selection, role, take):
     return value
 
 
+def _past_selection(run, s):
+    """Put ``run`` where a settled s3 leaves it, the default seven reviewing.
+
+    A meeting-only test starts here: at ``open``, a state that ``open`` never
+    touched (``selection_next`` still 4) is ``_lost``.
+    """
+    run.phase, s["current_role"] = "s3-senior_director", "senior_director"
+
+
 def _drive(script, max_turns=30, selection=None, *, reductions=None):
     """Drive a whole run through the real next_phase.
 
@@ -1996,7 +2005,7 @@ def _drive(script, max_turns=30, selection=None, *, reductions=None):
     its answer (see `_selection_take`). With it the run opens with s1-s3, each
     settled through the real `pb.reduce`, so grade, parse and validate run with
     nothing transcribed; selectors never enter `speakers` or `delivered`.
-    Without it `selection_next` stays 4 and no s-phase is minted.
+    Without it the run starts `_past_selection` and no s-phase is minted.
     `reductions`, when a list, collects (phase, reduction) for every s-phase.
     """
     from playbooks.committee import selection as sel  # selection
@@ -2010,6 +2019,8 @@ def _drive(script, max_turns=30, selection=None, *, reductions=None):
     if selection is not None:  # selection
         s["roster"] = sel.fixed_seats()
         s["selection_next"] = 1
+    else:
+        _past_selection(run, s)
     seen = ["open"]
     speakers = []
     delivered = []
@@ -3145,15 +3156,17 @@ def _turn_answer(prose: str, **keys) -> str:
     return f"{prose}\n\n```hermes-turn\n{lines}\n```\n"
 
 
-def test_reduce_open_writes_nothing_and_returns_no_reductions():
+def test_reduce_open_writes_nothing_and_returns_no_reductions(artifact):
     """The zero-ticket bootstrap has nothing to fold."""
     from playbooks.committee import thread
 
     pb = _committee()
     run = _run(phase="open")
+    pb.seed(run, _NamedSite("local"))
+    header = thread.path(run.id).read_bytes()
 
     assert pb.reduce(run, "open", [], _NamedSite("local")) == []
-    assert not thread.path(run.id).exists()
+    assert thread.path(run.id).read_bytes() == header
 
 
 def test_reduce_turn_appends_the_stripped_prose_and_queues_a_floor_request():
@@ -3424,7 +3437,8 @@ def test_reduce_does_not_send_the_owner_to_answer_a_turn_that_said_nothing():
     from playbooks.committee import thread
 
     pb = _committee()
-    run = _run(phase="open")
+    run = _run()
+    _past_selection(run, pb._state(run))
     phase = pb.next_phase(run)
     assert phase == "t01-senior_director"
     run.phase = phase
@@ -3439,7 +3453,8 @@ def test_reduce_does_not_send_the_owner_to_answer_a_turn_that_said_nothing():
 
     # The comparison arm: a turn that DID deliver is answered, as always.
     other = _committee()
-    other_run = _run(phase="open")
+    other_run = _run()
+    _past_selection(other_run, other._state(other_run))
     other_phase = other.next_phase(other_run)
     other_run.phase = other_phase
     other.reduce(
@@ -3505,6 +3520,31 @@ def test_a_process_that_never_held_the_meeting_grants_nothing_and_ends_it(phase)
         assert pb.next_phase(run) is None
 
 
+def test_a_process_that_finds_the_run_at_open_but_never_opened_it_ends_it(artifact):
+    """`hermes run` seeded `open`, then failed (a crew.add health check), and a
+    later `resume --wait` picks the run up. That process never ran `open`: it
+    holds no charge, artifact or cap, and used to skip selection and hold the
+    meeting on an empty state. It ends the run failed instead, saying why; the
+    process that did open it goes on to selection."""
+    from playbooks.committee import thread
+    from playbooks.committee.playbook import _LOST_OPEN
+
+    site = _NamedSite("local")
+    run = _run(phase="open")
+    opener = _committee()
+    assert opener.seed(run, site) == []
+    header = thread.path(run.id).read_text(encoding="utf-8")
+
+    fresh = _committee()
+    reductions = fresh.reduce(run, "open", [], site)
+    assert [(r.kind, r.json) for r in reductions] == [("lost", {"error": _LOST_OPEN})]
+    assert fresh.next_phase(run) is None
+    assert thread.path(run.id).read_text(encoding="utf-8") == header
+
+    assert opener.reduce(run, "open", [], site) == []
+    assert opener.next_phase(run) == "s1-owner"
+
+
 def test_reduce_never_raises_when_the_thread_cannot_be_written():
     """An exception out of reduce kills the master loop; it is recorded instead."""
     from playbooks.committee import thread
@@ -3529,6 +3569,55 @@ def test_reduce_never_raises_when_the_thread_cannot_be_written():
     assert "thread" in reductions[0].json["error"]
     # the gates still ran: a failed write must not swallow the floor request
     assert s["queue"] == ["manager"]
+
+
+def _at_stage_one(pb, run):
+    """``run`` at s1-owner, minted by the real next_phase from what `open` leaves."""
+    from playbooks.committee import selection
+
+    pb._state(run).update(roster=selection.fixed_seats(), selection_next=1)
+    run.phase = pb.next_phase(run)
+    assert run.phase == "s1-owner"
+
+
+def test_reduce_never_raises_when_a_selection_stage_cannot_be_written():
+    """The s-phase sibling: a failed thread write is the stage's `error`, and
+    the stage is still recorded and the run moves on to the next selector."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run()
+    _at_stage_one(pb, run)
+    thread.path(run.id).mkdir(parents=True, exist_ok=True)  # as in the turn test
+
+    reductions = pb.reduce(run, "s1-owner", [_finding(
+        run, f"{run.id}/s1-owner", DEFAULT_SELECTION["owner"])], _NamedSite("local"))
+
+    assert [r.kind for r in reductions] == ["selection"]
+    assert reductions[0].json["error"].startswith("thread:")
+    assert [st["stage"] for st in pb._state(run)["stages"]] == [1]
+    assert pb.next_phase(run) == "s2-manager"
+
+
+def test_reduce_never_raises_when_a_selection_answer_breaks_the_parser(monkeypatch):
+    """A parser that raises is an unparseable list, recorded, never a dead loop."""
+    from playbooks.committee import selection
+
+    def boom(answer):
+        raise RuntimeError("boom")
+
+    pb = _committee()
+    run = _run()
+    _at_stage_one(pb, run)
+    monkeypatch.setattr(selection, "parse", boom)
+
+    [red] = pb.reduce(run, "s1-owner", [_finding(
+        run, f"{run.id}/s1-owner", DEFAULT_SELECTION["owner"])], _NamedSite("local"))
+
+    assert red.kind == "selection"
+    assert (red.json["code"], red.json["parsed"]) == ("unparseable", False)
+    assert red.json["error"].startswith("selection:")
+    assert pb._state(run)["stages"][0]["code"] == "unparseable"
 
 
 def test_reduce_never_raises_on_a_finding_whose_json_is_not_a_dict():
@@ -5387,12 +5476,21 @@ def test_a_selectors_turn_block_is_stripped_and_ignored():
     assert red.json["body"] == "I seat security; the list is below."
     assert red.json["code"] is None and [p["role"] for p in red.json["proposed"]] == ["security"]
     assert s["delegation"] is None and s["pending_action"] is None
-    assert s["closed"] is False and s["queue"] == []
+    assert s["closed"] is False
     assert s["last_speaker"] == "owner" and s["turn"] == 1
     text = thread.path(run.id).read_text(encoding="utf-8")
     assert "hermes-turn" not in text and "hermes-selection" not in text
     assert "delegate: yes" not in text and "Cut the staffing ask." not in text
-    assert pb.next_phase(run) == "s2-manager"
+
+    # The owner is never queued, so request_floor bites only on a reviewer's seat.
+    run.phase = pb.next_phase(run)
+    assert run.phase == "s2-manager"
+    floor = _selection_answer(["security"], prose=_turn_answer(
+        "I seat security as well.", request_floor="yes").strip())
+    [red] = pb.reduce(run, "s2-manager", [_finding(run, f"{run.id}/s2-manager", floor)],
+                      _NamedSite("local"))
+    assert red.kind == "selection" and s["queue"] == []
+    assert pb.next_phase(run) == "s3-senior_director"
 
 
 # --- the ratified committee runs the meeting (selection D1, D2, D4) ----------
@@ -5794,6 +5892,9 @@ def test_a_failed_chair_retake_keeps_the_held_list():
     text = thread.path(run.id).read_text(encoding="utf-8")
     assert text.count("## selection 3:") == 1 and "Fallback:" not in text
     check_invariants(s, seen, sp, delivered=ok, reviewers=s["reviewers"])
+
+
+# --- registration and wiring ---------------------------------------------
 
 
 def test_registration_importing_the_package_registers_committee():

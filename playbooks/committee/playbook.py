@@ -167,6 +167,11 @@ _LOST = (
     "that held it, which is gone. thread.md keeps every turn up to here."
 )
 
+_LOST_OPEN = (
+    "the meeting cannot be started here: the process that opened it, and resolved "
+    "its charge, artifact and turn cap, is gone. Start a new run."
+)
+
 
 class CommitteePlaybook:
     """A committee of personas reviewing one artifact, one speaker per phase."""
@@ -292,15 +297,21 @@ class CommitteePlaybook:
             self._state_by_run[run.id] = s
         return s
 
-    def _lost(self, run: Run, s: dict) -> bool:
-        """This process never held the meeting (a ``resume --wait`` after Ctrl-C).
+    def _lost(self, run: Run, s: dict) -> str | None:
+        """Why this process cannot hold the meeting (a ``resume --wait``), or None.
 
-        Past ``open``, a process that held it always has a speaker on record:
-        ``_select``, ``_turn`` and ``_decision`` set one before the phase is
-        dispatched. Without one the floor queue and the cast are gone, and
-        ``next_phase`` would re-mint ``t01`` over a ticket that exists.
+        At ``open``, this process never ran it when ``selection_next`` is still
+        4: ``open`` sets 1, and only minting s3 sets 4 again, past ``open``.
+        Without it there is no charge, artifact or cap, and ``next_phase`` would
+        skip selection and hold the meeting on an empty state. Past ``open``, a
+        process that held it always has a speaker on record: ``_select``,
+        ``_turn`` and ``_decision`` set one before the phase is dispatched.
+        Without one the floor queue and the cast are gone, and ``next_phase``
+        would re-mint ``t01`` over a ticket that exists.
         """
-        return run.phase not in (None, "open") and s["current_role"] is None
+        if run.phase == "open":
+            return _LOST_OPEN if s["selection_next"] == 4 else None
+        return _LOST if run.phase is not None and s["current_role"] is None else None
 
     def _begin(self, s: dict, base: str) -> None:
         """Start a speaking phase: take 1 of ``base``, nothing pending or held.
@@ -715,11 +726,14 @@ class CommitteePlaybook:
         file touch is wrapped and its failure recorded under ``error`` -- the
         shape ``playbooks/dexter/playbook.py:306-311`` uses for a failed bank.
         """
-        if phase in ("open", "ruling"):
+        if phase == "ruling":
             return []  # a zero-ticket phase: nothing was dispatched
         s = self._state(run)
-        if self._lost(run, s):
-            return [Reduction(kind="lost", json={"error": _LOST})]
+        lost = self._lost(run, s)
+        if lost:
+            return [Reduction(kind="lost", json={"error": lost})]
+        if phase == "open":
+            return []  # zero tickets too, but a process that never opened it is lost
         if phase in DECISION_PHASES:
             return self._reduce_decision(run, s, findings, phase)
         if s["current_kind"] == "select":
