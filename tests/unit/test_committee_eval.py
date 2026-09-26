@@ -2706,3 +2706,254 @@ def test_measure_without_thread_or_copies(tmp_path, monkeypatch):
         assert (entry["line_start"], entry["line_end"]) == (None, None), n
     assert entries["decision"]["chair_prose"] == E.chair_prose(target.decision)
     assert (entries["decision"]["line_start"], entries["decision"]["line_end"]) == (None, None)
+
+
+# --- the CLI: run, show, compare, anchor (spec D9) ----------------------------
+
+
+def _cli_rows(out: str) -> list[list[str]]:
+    """The table lines of CLI output, split on ``|`` into stripped cells."""
+    return [[cell.strip() for cell in line.split("|")] for line in out.splitlines() if "|" in line]
+
+
+def _cli_eval_body(home: str, run: str, created_at: float, eval_run: str,
+                   scores: dict, versions: dict) -> dict:
+    """A synthetic C5 eval.json body, holding what eval_line and show read."""
+    return {
+        "schema": 1,
+        "rubric_version": E.rubric_version(versions),
+        "rubric": dict(versions),
+        "target": {"home": home, "run": run, "created_at": created_at,
+                   "playbook": "committee", "state": "done",
+                   "review_state": "pending", "legacy": False},
+        "eval_run": eval_run,
+        "evaluated_at": created_at + 1.0,
+        "original_source": "snapshot",
+        "metrics": {},
+        "flags": [],
+        "dimensions": {
+            d: {"scorer": "judge" if d in E.JUDGE_DIMS else "deterministic",
+                "score": scores.get(d), "rationale": "", "evidence": [],
+                "error": None if scores.get(d) is not None else "no verifiable evidence"}
+            for d in E.DIMENSIONS
+        },
+        "headline": "",
+        "judge": {"status": "ok", "evidence_rejected": 0, "cost_usd": None,
+                  "tokens": None, "error": None},
+    }
+
+
+def test_anchor_cli(tmp_path, monkeypatch, capsys):
+    """T12: `anchor` rejects bad input with exit 2 and appends exactly one line."""
+    from playbooks.committee import eval_cli
+
+    home, run = build_home(tmp_path, "run-9")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    ledger = E.ledger_path(E.eval_home())
+    db = home / "queue.db"
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+
+    # An unknown id, 0, 6, a non-integer, a bare id, no scores, a missing run (G7).
+    for bad in (["bogus=3"], ["concision=0"], ["concision=6"], ["concision=4.5"],
+                ["concision=x"], ["concision"], []):
+        assert eval_cli.main(["anchor", run, *bad]) == 2, bad
+    assert eval_cli.main(["anchor", "run-404", "concision=3"]) == 2
+    err = capsys.readouterr().err
+    assert "unknown dimension: bogus" in err
+    assert "concision must be an integer from 1 to 5, not '4.5'" in err
+    assert "no scores given" in err
+    assert "run not found: run-404" in err
+    assert not ledger.exists(), "a rejected anchor wrote to the ledger"
+
+    assert eval_cli.main(["anchor", run, "verdict_grounded=3", "concision=2",
+                          "--rater", "av", "--note", "first pass"]) == 0
+    with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as conn:
+        created_at = conn.execute("SELECT created_at FROM runs WHERE id=?", (run,)).fetchone()[0]
+    versions = E.dimension_versions()
+    lines = E.read_ledger(ledger)
+    assert len(lines) == 1
+    line = lines[0]
+    assert line["source"] == "anchor"
+    assert line["target"] == {"home": os.path.realpath(home), "run": run, "created_at": created_at}
+    assert line["dimensions"] == {
+        "verdict_grounded": {"version": versions["verdict_grounded"], "score": 3},
+        "concision": {"version": versions["concision"], "score": 2},
+    }
+    assert line["rubric_version"] == E.rubric_version(versions)
+    assert (line["rater"], line["note"], line["eval_run"]) == ("av", "first pass", None)
+    assert ledger.stat().st_mode & 0o777 == 0o600
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before, "anchor wrote the target's queue.db"
+
+
+def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
+    """T13: one compare row per target from its latest eval line; stars, anchors, --rubric."""
+    from playbooks.committee import eval_cli
+
+    (tmp_path / "hermes").mkdir()
+    (tmp_path / "spin" / "home").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    here = E.eval_home()
+    spin = os.path.realpath(tmp_path / "spin" / "home")
+    current = E.dimension_versions()
+    older = E.dimension_versions(("an older rule",))  # recorded before a concision bump
+    assert older["concision"] != current["concision"]
+    assert all(older[d] == current[d] for d in E.DIMENSIONS if d != "concision")
+    stale_edits = dict(current, edits_address_concerns="edits_address_concerns@0")
+
+    judge = {"verdict_grounded": 2, "edits_address_concerns": 3, "concern_coverage": 3}
+    det = {"efficiency": 4, "concision": 1, "verdict_consistency": 5}
+    for line in (
+        E.eval_line(_cli_eval_body(here, "run-2", 100.0, "run-20", {**judge, **det}, current)),
+        # A resume re-reduced the same eval run: only this second line counts.
+        E.eval_line(_cli_eval_body(here, "run-2", 100.0, "run-20",
+                                   {**judge, "verdict_grounded": 4, **det}, current)),
+        E.eval_line(_cli_eval_body(spin, "run-2", 200.0, "run-21", {**judge, **det}, current)),
+        E.eval_line(_cli_eval_body(here, "run-9", 50.0, "run-19",
+                                   {**judge, **det, "efficiency": 3, "verdict_consistency": 1},
+                                   older)),
+        E.anchor_line({"home": here, "run": "run-2", "created_at": 100.0},
+                      {"verdict_grounded": 3}, current, "av", None),
+        E.anchor_line({"home": spin, "run": "run-2", "created_at": 200.0},
+                      {"edits_address_concerns": 2}, stale_edits, "av", None),
+    ):
+        E.append_ledger(here, line)
+
+    lines = E.read_ledger(E.ledger_path(here))
+    assert sorted({l["target"]["home"] for l in lines
+                   if l["source"] == "eval" and l["target"]["run"] == "run-2"}) == sorted([here, spin])
+
+    def compare(*extra):
+        assert eval_cli.main(["compare", *extra]) == 0
+        out = capsys.readouterr().out
+        return {cells[0]: cells[1:7] for cells in _cli_rows(out)}, out
+
+    rows, out = compare()
+    assert list(rows) == ["target", "run-2", "run-9", "spin/home:run-2", "calibration"]
+    assert rows["target"] == list(E.DIMENSIONS)
+    assert rows["run-2"] == ["4 (a:3)", "3", "3", "4", "1", "5"]
+    assert rows["spin/home:run-2"] == ["2", "3 (re-score needed)", "3", "4", "1", "5"]
+    assert rows["run-9"] == ["2", "3", "3", "3", "1*", "1"]  # only concision is starred
+    assert rows["calibration"] == ["uncalibrated"] * 3 + ["", "", ""]
+    assert "* older definition; re-run `eval run <target>`" in out.splitlines()
+
+    rows, _ = compare("--rubric", E.rubric_version(older))
+    assert list(rows) == ["target", "run-9", "calibration"]
+    rows, out = compare("--rubric", E.rubric_version(current))
+    assert list(rows) == ["target", "run-2", "spin/home:run-2", "calibration"]
+    assert "older definition" not in out
+
+
+def test_run_wrapper_and_dry_run(tmp_path, monkeypatch, capsys):
+    """T31: a bad target exits 2 before anything exists, by either spelling; --dry-run leaves nothing."""
+    from engine import cli as engine_cli
+    from playbooks.committee import eval_cli
+
+    home, run = build_home(tmp_path, "run-9")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv(E.ENV_RUN, raising=False)
+    monkeypatch.delenv(E.ENV_HOME, raising=False)
+
+    def tree():
+        return sorted(str(p.relative_to(home)) for p in home.rglob("*")
+                      if not p.name.endswith(("-shm", "-wal")))
+
+    def runs():
+        with closing(E.connect_ro(str(home))) as conn:
+            return [tuple(r) for r in conn.execute("SELECT id, playbook, state FROM runs ORDER BY id")]
+
+    before_tree, before_runs = tree(), runs()
+    nowhere = tmp_path / "nowhere"
+    assert eval_cli.main(["run", "run-404"]) == 2
+    assert eval_cli.main(["run", run, "--home", str(nowhere)]) == 2
+    err = capsys.readouterr().err
+    assert "run not found: run-404" in err
+    assert f"no queue.db in {os.path.realpath(nowhere)}" in err
+    assert not nowhere.exists()
+    assert E.ENV_RUN not in os.environ, "the wrapper touched the environment before validating"
+    assert (tree(), runs()) == (before_tree, before_runs)
+
+    # The sibling specs' spelling hands off to the same main and never exits 0 having done nothing.
+    workspace = Path(__file__).resolve().parents[2]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_")}
+    env.update({"PYTHONPATH": str(workspace), "HERMES_HOME": str(home)})
+    proc = subprocess.run([sys.executable, "-m", "playbooks.committee.eval", "run", "run-404"],
+                          cwd=workspace, env=env, capture_output=True, text=True)
+    assert proc.returncode == 2, proc.stderr
+    assert "run not found: run-404" in proc.stderr
+    assert (tree(), runs()) == (before_tree, before_runs)
+
+    # --dry-run with the target set: measure seeds nothing, and the preview is torn down.
+    monkeypatch.setenv(E.ENV_RUN, run)
+    monkeypatch.setenv("HERMES_PLAYBOOK_MODULES", "playbooks.committee")
+    assert engine_cli.main(["run", "committee-eval", "--site", "local", "--agent", "mock",
+                            "--dry-run"]) == 0
+    assert "Seeded 0 tickets" in capsys.readouterr().out
+    new = [r for r in runs() if r not in before_runs]
+    assert len(new) == 1 and new[0][1:] == ("committee-eval", "stopped")
+    assert not (home / "runs" / new[0][0]).exists()
+    assert not E.ledger_path(str(home)).exists()
+    assert not (home / "runs" / run / "eval.json").exists()
+    assert not (home / "evals").exists()
+
+
+def test_show_cli(tmp_path, monkeypatch, capsys):
+    """G7: show prints the table, the flags, the headline and the judge line; exit 1 with no eval.json."""
+    from playbooks.committee import eval_cli
+
+    (tmp_path / "hermes").mkdir()
+    (tmp_path / "spin" / "home").mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    here = E.eval_home()
+    body = _cli_eval_body(here, "run-9", 50.0, "run-12",
+                          {"verdict_grounded": 4, "concern_coverage": 3, "efficiency": 3,
+                           "concision": 1, "verdict_consistency": 1}, E.dimension_versions())
+
+    def cite(*quotes):
+        return [{"turn": None, "where": "turn", "line": None, "quote": q, "verified": ok}
+                for q, ok in quotes]
+
+    dims = body["dimensions"]
+    dims["verdict_grounded"]["evidence"] = cite(("invented", False), ("Q" * 100, True))
+    dims["edits_address_concerns"]["evidence"] = cite(("made up", False))
+    dims["concern_coverage"]["evidence"] = cite(("Fair point; here is where I land on it.", True))
+    dims["efficiency"]["evidence"] = cite(("cost_usd=30.3875", True))
+    dims["concision"]["evidence"] = cite(("words.median_reviewer_owner=825.0", True))
+    dims["verdict_consistency"]["evidence"] = cite(("rechecks_verified=8", True))
+    body["flags"] = [{"id": "action_clipped", "turn": 3, "line": 812, "quote": "x"},
+                     {"id": "verdict_count_mismatch", "turn": None, "line": 820,
+                      "quote": "Seven edits landed.", "claimed": 7, "recorded": 8}]
+    body["headline"] = "weakest: concision 1/5: words.median_reviewer_owner=825.0"
+    body["judge"] = {"status": "partial", "evidence_rejected": 2, "cost_usd": 0.5, "tokens": None,
+                     "error": "edits_address_concerns: no verifiable evidence"}
+    same = E.eval_json_path(here, here, "run-9")
+    same.parent.mkdir(parents=True)
+    same.write_text(json.dumps(body), encoding="utf-8")
+
+    assert eval_cli.main(["show", "run-9"]) == 0
+    out = capsys.readouterr().out
+    assert _cli_rows(out) == [
+        ["dimension", "score", "scorer", "calibration", "quote"],
+        ["verdict_grounded", "4", "judge", "uncalibrated", "Q" * 80],
+        ["edits_address_concerns", "—", "judge", "uncalibrated", ""],
+        ["concern_coverage", "3", "judge", "uncalibrated", "Fair point; here is where I land on it."],
+        ["efficiency", "3", "deterministic", "", "cost_usd=30.3875"],
+        ["concision", "1", "deterministic", "", "words.median_reviewer_owner=825.0"],
+        ["verdict_consistency", "1", "deterministic", "", "rechecks_verified=8"],
+    ]
+    lines = out.splitlines()
+    assert "flags: action_clipped@t03, verdict_count_mismatch" in lines
+    assert "headline: weakest: concision 1/5: words.median_reviewer_owner=825.0" in lines
+    assert "judge: partial (edits_address_concerns: no verifiable evidence)" in lines
+
+    # A foreign home's eval.json lives under the eval home's evals/.
+    spin = os.path.realpath(tmp_path / "spin" / "home")
+    foreign = E.eval_json_path(here, spin, "run-2")
+    foreign.parent.mkdir(parents=True)
+    ok = dict(body, flags=[], judge=dict(body["judge"], status="ok", error=None))
+    foreign.write_text(json.dumps(ok), encoding="utf-8")
+    assert eval_cli.main(["show", "run-2", "--home", str(tmp_path / "spin" / "home")]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "flags: none" in lines and "judge: ok" in lines
+
+    assert eval_cli.main(["show", "run-8"]) == 1
+    assert "no eval.json for run-8" in capsys.readouterr().err
