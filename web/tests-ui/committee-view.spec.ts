@@ -31,10 +31,19 @@ const RUN = 'committee-e2e';
 const ORIGINAL = '/nonexistent-host/workspace/proposal.md';
 const REVISED = `${HOME}/runs/${RUN}/revised/proposal.md`;
 
-const ORIGINAL_TEXT =
-  '# Consolidate the ingest pipelines\n\nStaffing: six engineers for two quarters.\n';
-const REVISED_TEXT =
-  '# Consolidate the ingest pipelines\n\nStaffing: two engineers for two quarters.\n';
+/** A real edit's shape: one line deep in a long document, so an unfolded diff
+ *  opened at the top would show only the title, and Edit 1 must open on it. */
+const BODY = (staffing: string) =>
+  [
+    '# Consolidate the ingest pipelines',
+    '',
+    ...Array.from({ length: 150 }, (_, i) => `Background, paragraph ${i + 1}.`),
+    `Staffing: ${staffing} engineers for two quarters.`,
+    ...Array.from({ length: 50 }, (_, i) => `Risks, paragraph ${i + 1}.`),
+    '',
+  ].join('\n');
+const ORIGINAL_TEXT = BODY('six');
+const REVISED_TEXT = BODY('two');
 
 const ACTION_1 = 'Cut the staffing ask from six engineers to two.';
 const ACTION_2 = 'Name the Q3 migration freeze in the sequencing section.';
@@ -291,15 +300,24 @@ test('the document stepper walks every version, served inside the container', as
   const verdict = page.locator('[data-testid="step-verdict"]');
   const whole = page.locator('[data-testid="doc-markdown"]');
 
-  // Edit 1: a diff against the original, raised by turn 1's senior director.
+  // Edit 1: a diff against the original, raised by turn 1's senior director,
+  // delegated by the owner and made by the junior IC, each named.
   await page.locator('[data-testid="step-3"]').click();
   await expect(page.locator('[data-testid="step-3"]')).toHaveAttribute('aria-current', 'step');
   const rows = page.locator('[data-testid="diff-rows"]');
   await expect(rows).toContainText('- Staffing: six engineers for two quarters.');
   await expect(rows).toContainText('+ Staffing: two engineers for two quarters.');
+  // The change is 150 lines down, and it is on screen with nobody scrolling:
+  // the unchanged lines fold away and the step opens on its first change.
+  await expect(rows.getByText('- Staffing: six engineers for two quarters.', { exact: true }))
+    .toBeInViewport();
+  await expect(rows.locator('[data-testid="diff-fold"]').first())
+    .toHaveText('⋯ 149 unchanged lines');
   await expect(verdict).toContainText('APPLIED');
   await expect(page.locator('[data-testid="step-raised"]')).toContainText('Dana Whitfield');
-  await expect(page.locator('[data-testid="step-delegated"]')).toContainText(ACTION_1);
+  await expect(page.locator('[data-testid="step-delegated"]'))
+    .toContainText(`delegated by Maya Okonkwo: ${ACTION_1}`);
+  await expect(page.locator('[data-testid="step-confirmed"]')).toContainText('Alex Moreau:');
   await expect(page.locator('[data-testid="doc-unreadable"]')).toHaveCount(0);
 
   // Edit 2 did not apply: t07 is t03's bytes, so there is nothing to diff.
@@ -315,6 +333,8 @@ test('the document stepper walks every version, served inside the container', as
 
   // Original: the whole document as the committee was handed it.
   await page.locator('[data-testid="step-original"]').click();
+  await expect(page.locator('[data-testid="original-label"]'))
+    .toHaveText('Original — as the committee was handed it');
   await expect(whole).toContainText('Staffing: six engineers for two quarters.');
 });
 

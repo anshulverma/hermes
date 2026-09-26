@@ -7,15 +7,17 @@ distinct altitude, goals and ambitions, talking in a single thread where exactly
 holds the floor at a time. An **owner** persona answers every reviewer and delegates edits to a
 junior IC; a chair closes with a verdict. One `hermes run` drives an opening round, a floor queue
 and a decision phase, then holds the chair's verdict for a human to rule on: accept ends the run
-`done`, reject ends it `failed`. It leaves a transcript and, where an edit was delegated, a
-revised copy.
+`done`, reject ends it `failed`. It leaves a transcript, every version of the document under
+`doc/`, and, where an edit was delegated, a revised copy.
 
 ## Phases
 
 `phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01.
 
-- **open** — zero tickets. `seed` resolves configuration, builds the cast, writes the thread header
-  (charge, artifact path, roster) and returns `[]`. No worker runs.
+- **open** — zero tickets. `seed` resolves configuration, builds the cast, writes
+  `doc/00-original<ext>` and then the thread header (charge, artifact path, roster), and returns
+  `[]`. A failure to write either fails the run, so no header claims a meeting whose original was
+  not kept. No worker runs.
 - **t{NN}-{role}** — one ticket, one speaker: the opening round in seniority order, the owner's
   reply after every *delivered* reviewer turn, then whoever asked for the floor, FIFO. A turn whose
   worker produced nothing is answered by nobody — its thread entry is the `NO_TURN` stub, and
@@ -116,13 +118,17 @@ Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
   `## turn NN — <name>, <title> (<role>)` entry per settled turn, then `## decision`. A turn whose
   worker failed still gets a stub — `_(no turn delivered — the worker failed; see hermes show)_`.
 - `runs/<run_id>/revised/<basename>` — the revised copy, byte-copied from the original before the
-  junior IC's first edit. After each junior-IC turn the master re-checks it — does it exist, did
-  its SHA-256 move — and records `verified: true|false` on that turn's reduction, which the
-  decision repeats when it failed.
+  junior IC's first edit. After each junior-IC turn the master re-checks it — is it a regular file
+  (a symlink or a FIFO is not), did its SHA-256 move — and records `verified: true|false` on that
+  turn's reduction, which the decision repeats when it failed.
 - `runs/<run_id>/doc/` — every version of the document, mode 0600 in a 0700 directory, each
   written as a dot-prefixed temp file and renamed into place. `00-original<ext>` is the bytes
   `open` hashed, written before the thread header; the first edit copies from it rather than from
-  the live file, so an original touched mid-review cannot change what the junior IC edits.
+  the live file, so an original touched mid-review cannot change what the junior IC edits. Only
+  while it still hashes to the digest `open` took, though: workers can write `doc/` too, and a
+  `00-original` that is gone, a symlink or rewritten is not used — the first edit copies the live
+  file, which the decision's `artifact_intact` re-check covers, and that junior turn's `error`
+  says `snapshot: …`.
   `tNN<ext>` is the revised copy as junior-IC turn NN left it, written after every junior-IC turn,
   delivered or not, and overwritten if that turn settles again. `<ext>` is the artifact's suffix
   when it is a dot and 1-16 letters or digits, and nothing otherwise. A revised copy that is
@@ -177,27 +183,49 @@ attributed by name, each delegation and its re-check outcome, the verdict card, 
 it changed. The view states that the original is never modified — reading an unchanged repository
 file as a failed edit mechanism is what swung a live verdict.
 
-**The document card is a stepper: Original · Edit 1 (tNN) … · Final.** An edit step shows that
-edit alone, the previous version against this one, with the re-check's verdict (APPLIED, DID NOT
-APPLY, or re-check not recorded) and its context: who raised it and their stance, the owner's
-delegation line and the junior IC's confirmation, each with a `tNN` link that opens that turn in the
-transcript. When a step is placed by turn order rather than by the recorded keys, its raised-by and
-delegated lines each say "(inferred from turn order)". Original and Final show the whole document,
-rendered as markdown for a `.md` file. Final is the version after the last edit that applied, or
-the original if none did, labelled by the ruling — "Proposed — awaiting your ruling", "Accepted",
-"Rejected", "Latest so far — the meeting is still in session" or "The meeting ended without a
-ruling" — and has an "Original → final diff" toggle, off by default, that shows the whole diff
-instead. Every diff can be unified or side by side, and the choice holds as you step. The owner row
-that delegated an edit and the junior row that applied it each have a "see edit k" link that
-selects that step, scrolls the stepper into view and focuses it, so the arrow keys step from there.
+**The document card is a stepper: Original · Edit 1 (tNN) … · Final.** It is titled like the
+other surfaces, "Document — <name> · N edits". An edit step shows that edit alone, the previous
+version against this one, with the re-check's verdict (APPLIED, DID NOT APPLY, or re-check not
+recorded) and its context, each line with a `tNN` link that opens that turn in the transcript:
+"raised by <reviewer> — <their stance>", "delegated by <owner>: <action>" and "<junior IC>: <their
+confirmation>" (or "no turn delivered"). When a step is placed by turn order rather than by the
+recorded keys, its raised-by and delegated lines each say "(inferred from turn order)".
+
+An edit's diff opens on what changed. It keeps three unchanged lines either side of each change
+and folds every longer unchanged run into a "⋯ N unchanged lines" row that expands in place, and
+it brings the first change into view as each step opens, so pressing Next shows the next edit
+rather than the document's title again. Every diff can be unified or side by side, and the choice
+holds as you step; the folds are cut before lines are paired, so both layouts fold the same lines,
+and the added/removed counts always come from the whole diff. The layout switch appears only where
+a diff is on screen.
+
+Original ("as the committee was handed it") and Final show the whole document, rendered as
+markdown for a `.md` or `.markdown` file. Neither loads an image the document names — every version
+after Edit 1 is text a worker wrote, and a live image would make the operator's browser fetch its
+URL — so its alt text stands in, as a link. Final is the version after the last edit that applied,
+or the original if none did, labelled by the ruling — "Proposed — awaiting your ruling",
+"Accepted", "Rejected", "Latest so far — no verdict yet (in session, or stopped before the chair
+ruled)" or "The meeting ended without a ruling" — and has an "Original → final diff" toggle, off
+by default, that shows the whole diff instead. When the run has snapshots to show, the reviewer row
+that raised an edit, the owner row that delegated it and the junior row that applied it each have a
+"see edit k" link that selects that step, scrolls the stepper into view and focuses it, so the
+arrow keys step from there.
 
 Text is fetched per step from `GET /api/runs/<id>/view/artifact?path=doc/<name>`, which reads only
 `runs/<id>/doc/` under the server's own `HERMES_HOME`, so it works in the container that mounts only
 the home. The server walks there from its `runs/` one directory at a time with `O_NOFOLLOW`, so no
 symlink below `runs/` is followed, and it serves only a regular file; `view_data` sizes each version
 by the same rule. A snapshot the server cannot read says "Could not read …", never that no edit was
-made; a fetch that fails says so with a Retry button; a run from before snapshots says they were not
-captured.
+made; a fetch that fails says so with a Retry button. A run with no readable snapshot at all — one
+from before snapshots, or one whose `doc/` a worker emptied — says none is readable without
+guessing why; one edit still readable is enough to step through, and only the versions that are
+gone say "Could not read". A run with no edits says "No edit was made. The original stands as it
+was.", which stays true beside a note that the turn cap dropped a delegation.
+
+Before the first turn settles no reduction names the document, but `open` has already kept the
+original and the first worker can run for an hour. The view names the file from the thread
+header's artifact line meanwhile, and once `doc/00-original` is readable it shows the card, opened
+on Original, under "Nothing said yet".
 
 The view is the playbook's, not the control plane's. `playbooks/committee/view/dist/committee.umd.js`
 is built from `playbooks/committee/view/src/` with the toolchain in `web/` and committed, so
