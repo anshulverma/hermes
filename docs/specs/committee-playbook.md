@@ -14,17 +14,23 @@ How good a finished review was is scored by a second playbook, `committee-eval`;
 
 ## Phases
 
-`phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01, and a retake of any speaking phase as `{base}-take{k}`.
+`phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01, the three selection phases before them as `s{N}-{role}`, and a retake of any speaking phase as `{base}-take{k}`.
 
-- **open** — zero tickets. `seed` resolves configuration, builds the cast, writes
+- **open** — zero tickets. `seed` resolves configuration, seats the fixed four, writes
   `doc/00-original<ext>`, makes `runs/<run_id>/images/`, then writes the thread header (charge,
-  artifact path, roster, ground rules), and returns `[]`. A failure to write any of them fails the
-  run, so no header claims a meeting whose original was not kept. No worker runs.
-- **t{NN}-{role}** — one ticket, one speaker: the opening round in seniority order, the owner's
-  reply after every *delivered* reviewer turn, then whoever asked for the floor, FIFO. A turn whose
-  worker produced nothing is answered by nobody — its thread entry is the `NO_TURN` stub, and
-  sending the owner to reply to it yields a hallucinated answer or a burnt turn — so the next
-  speaker after a failed turn is the next reviewer.
+  artifact path, the fixed four, the seat library, ground rules), and returns `[]`. A failure to
+  write any of them fails the run, so no header claims a meeting whose original was not kept. No
+  worker runs.
+- **s1-owner, s2-manager, s3-senior_director**: one ticket each, strictly in turn, minted at
+  runtime before the first turn. The owner proposes the committee, her manager amends it and the
+  chair ratifies it. They consume no turn number and none of the cap, so the phase after
+  `s3-senior_director` is `t01-senior_director`, the seated committee's first reviewer. A retake
+  is `s2-manager-take2` and so on. See "Selection".
+- **t{NN}-{role}** — one ticket, one speaker: the opening round in the seated committee's order,
+  the owner's reply after every *delivered* reviewer turn, then whoever asked for the floor, FIFO.
+  A turn whose worker produced nothing is answered by nobody — its thread entry is the `NO_TURN`
+  stub, and sending the owner to reply to it yields a hallucinated answer or a burnt turn — so the
+  next speaker after a failed turn is the next reviewer.
 - **`{base}-take{k}`** — a retake (k = 2, 3) of the speaking phase whose take-1 name is `base`:
   same speaker, same turn number, no turn consumed (`t02-owner-take2`). `decision-take2` and
   `decision-take3` are the chair's; `DECISION_PHASES` is `decision` plus those two, and everything
@@ -55,10 +61,238 @@ Nine personas. Names and titles appear in the transcript, so it reads like a mee
 | `data_scientist` | measurement, evidence quality |
 | `junior_ic` | applies a delegated edit; never speaks unprompted |
 
-`senior_director` through `data_scientist` are the opening round, in that order; `owner` and
-`junior_ic` join neither it nor the floor queue. The chair speaks twice — as the reviewer
-`senior_director`, then as author of the decision under the sentinel role key `chair`. The cast
-is not configurable.
+`senior_director` through `data_scientist` are the default opening round (`cast.SENIORITY`), in
+that order; `owner` and `junior_ic` join neither it nor the floor queue. The chair speaks twice —
+as the reviewer `senior_director`, then as author of the decision under the sentinel role key
+`chair`. These nine (`cast.CAST`) are the default committee, and the seating of every run reduced
+before selection existed. Every new run seats its own committee first: see "Selection".
+
+## Selection
+
+Every run seats its own committee before the first turn. The owner proposes it, her manager
+amends it and the chair ratifies it, in three phases that `next_phase` mints through
+`_select(s, stage)`: `s1-owner`, `s2-manager` and `s3-senior_director`, one ticket each, strictly
+in turn. `_select` calls `_begin(s, base)` like every other minter, so a selector who breaks a
+hard rule is retaken under her own stage's name (`s2-manager-take2`, `s2-manager-take3`), with
+her own `voice.MAX_TAKES` (3) takes and her own image (`s2-manager.svg` or `.png`). All three
+are held to the 150-word cap; the chair's 300 words stay with the decision. `stance_too_long`
+and `action_too_long` never send a selector back, because her `hermes-turn` block is stripped
+and ignored: no `_apply_block` runs on a select phase. A retake that delivers nothing keeps the
+held take's list, with `retake_failed`. `_select` never touches the turn counter, `current_turn`,
+`last_speaker`, the cap, `opening` or the floor queue, so the phase after `s3-senior_director` is
+`t01-senior_director`, numbered as it always was. There is no human gate. A `selection`
+reduction never carries `needs_human_ticket_ids`.
+
+**The fixed seats.** The owner, the senior director (the chair), the manager (the owner's
+manager, and her brief says so) and the junior IC are seated in every run, whatever the selection
+returns (`selection.fixed_seats()`). Selection fills only the reviewer seats: `senior_director`
+and `manager` plus 1-10 others, 3-12 reviewers in all (`selection.MIN_REVIEWERS`,
+`selection.MAX_REVIEWERS`).
+
+**The seat pool.** `cast.LIBRARY` holds nine selectable personas: `tpm`, `pm`, `tl`, `staff_ic`
+and `data_scientist` (CAST's own dicts, by reference), plus `security` (Security Engineer), `sre`
+(Site Reliability Engineer, on-call), `privacy` (Privacy Engineer) and `partner_owner`
+(Engineering Lead, partner team). The thread header lists them. A selector may also seat a
+stakeholder the document justifies under a new slug. That is a derived seat, and its persona is
+the selector's own fields, each made one printable line (a control or invisible character becomes
+a space, U+2013 and U+2014 become `-`) and clipped: `selection.NAME_MAX` = 60 (a missing name is
+the title), `selection.TITLE_MAX` = 80, `selection.FIELD_MAX` = 120 for altitude, goal, ambition,
+stake and lens, and `selection.RATIONALE_MAX` = 200. A missing field is empty. Its style is always
+`cast.DERIVED_STYLE`, a fixed line that defers to the ground rules, and never selector text.
+
+**The block.** Each selector ends her answer with her FULL list, never the changes; her goal puts
+the fence lines at column 0, never inside a list item:
+
+````
+```hermes-selection
+{"seats": [{"role": "security", "rationale": "..."},
+           {"role": "crew_owner", "rationale": "...", "title": "Crew Scheduling Lead",
+            "name": "...", "altitude": "...", "goal": "...", "ambition": "...",
+            "stake": "...", "lens": "..."}],
+ "not_seated": [{"stakeholder": "Legal", "reason": "...", "represented_by": "privacy"}]}
+```
+````
+
+`selection.parse` reads fences with voice's own reader and keeps the last `hermes-selection`
+block that parses to an object. It drops every unknown key, so a worker's `nominated_by`, `style`
+or `source` never survives, and it never raises. `selection.validate` applies the entry rules in
+order:
+- a role that fails `^[a-z][a-z0-9_]{1,23}$` is invalid ("bad slug");
+- a reserved role (`owner`, `manager`, `senior_director`, `junior_ic`, `chair`, `unattributed`) is
+  ignored, because a list that omits the fixed seats cannot unseat them;
+- a repeated role keeps its first entry;
+- a `LIBRARY` slug takes the library persona and ignores the worker's fields;
+- any other slug needs a `title` ("no title") and a name no cast or library persona has
+  ("name taken": names are compared casefolded with every character that is not a letter or a
+  digit dropped, so "Maya Okonkwo." and "maya-okonkwo" are taken and "Maya Okonkwo-Reyes" is not);
+- every seat needs a `rationale` ("no rationale").
+
+`resolve` records an invalid entry as considered with the reason `invalid: <why>`, such as
+`invalid: name taken`. A `not_seated` entry without both a stakeholder and a reason is dropped.
+Each stage gets a code from `selection.stage_code`: `no_answer` (the take was undelivered),
+`no_block`, `unparseable`, `too_few` (no valid seat), or null.
+
+**Resolution.** `selection.resolve` runs in the reduce of the chair's kept take.
+- The chair's list is authoritative. Stages 1-2 feed only who put a seat forward and who was
+  considered, and their failure never causes a fallback.
+- `reviewers` is `senior_director`, `manager`, then the chair's valid seats in her order. Past
+  twelve, the rest are considered with the reason "over the 12-seat bound". Each is represented by
+  the seat the chair's `not_seated` entry for that slug names when that seat is seated, else by
+  `senior_director`, so an overflow seat always has a representative.
+- `nominated_by` is computed master-side: the earliest selector whose valid list held the seat
+  (`owner`, `manager` or `senior_director`), `fixed` for the fixed four and `default` for a
+  fallback seat.
+- `considered` collects every stage's invalid entries and `not_seated` entries, the earlier seats
+  the final roster left out (the reason is the dropping stage's `not_seated` entry for that slug,
+  else "dropped by <Name>") and the overflow. It is keyed on a seat's slug or a stakeholder's
+  lowercased name, the latest stage winning, and a seated slug is never in it. Outside the
+  overflow, `represented_by` names a seated slug or is null. It keeps the first
+  `selection.CONSIDERED_MAX` (40) entries and each stage's first `selection.INVALID_MAX` (20)
+  invalid ones, and counts the rest as `considered_dropped` and `invalid_dropped`.
+- **Fallback.** When the chair's code is not null, the run seats the default committee:
+  `selection.fallback(code)`, the fixed four plus `tpm`, `pm`, `tl`, `staff_ic` and
+  `data_scientist`, with `cast.SENIORITY` as the reviewers. `fallback` is `chair_failed` (her
+  take was undelivered), `no_block`, `unparseable` or `too_few`. The five default seats say
+  "default committee (selection fell back: <code>)", the chair's list adds nothing to
+  `considered`, and an earlier seat no later usable list dropped is considered as "not in the
+  default committee (fallback: <code>)". A raise inside `resolve`, or a result that cannot be
+  installed, counts as `unparseable`, with its text on `error`. `reduce` never raises, and a
+  roster holding every reviewer is installed on every path, so a fallback run's phases after
+  `s3-senior_director` are a default committee's.
+- **Lost.** Selection lives in the master's memory, like the meeting. A process that picks the
+  run up at `open` without having opened it records a `lost` reduction ("the meeting cannot be
+  started here", `_LOST_OPEN`), and one that picks it up at a selection phase records the
+  meeting's own `lost`; either way the run ends failed and thread.md keeps what was written.
+- `_apply_selection(s, resolved)` installs the result, from one resolved dict, and is the only
+  code after `open` that sets `s["roster"]`, `s["reviewers"]` and the cap; it resets
+  `s["opening"]` to a copy of the reviewers.
+
+**The cap.** With `HERMES_COMMITTEE_MAX_TURNS` unset, the cap is 2 × reviewers + 16, fixed when the
+chair ratifies: 22 for three reviewers, 30 for the default seven (so a fallback keeps 30), 40 for
+twelve. Until then it is 30, provisionally. When every owner reply delegates, reviewer k opens at
+turn 3k-2, so every seated reviewer gets an opening turn. An explicit value is used as-is
+(`s["cap_explicit"]`), even one below 3 × reviewers - 2, which cuts the opening round short.
+
+**The thread.** The `open` header's `Committee:` block lists the fixed four in the legacy form
+(`- owner — Name, Title`), then `- Reviewer seats: chosen below`, then `Seat library:` with one
+`- slug: Title. Lens: <lens>` line per `LIBRARY` slug, then the ground rules. Each kept stage
+appends:
+
+```
+## selection N: Name, Title (role) proposes|amends|ratifies
+
+<the prose, its hermes-selection and hermes-turn fences stripped>
+
+Seats:
+- slug: Name, Title. Why: <rationale>.
+
+Not seated:
+- stakeholder: reason. Represented by <Name>.
+```
+
+`Not seated:` appears only when the list has entries, and "Represented by" only when the seat
+named is in that list or the fixed four. Each list shows its first `thread.LIST_MAX` (20) lines
+and then `- N more not listed.`. A delivered stage with no usable list gets one line in place of
+its lists: `_(no usable seat list: no_block)_`, `unparseable` or `no valid seats`. An undelivered
+stage is the `NO_TURN` stub alone. After the chair's kept take, and before `t01` is minted:
+
+```
+## committee seated
+
+- <slug>: Name, Title. Why: <rationale>. Put forward by <Name | fixed seat | default>.
+
+Considered, not seated:
+- stakeholder: reason. Represented by <Name>.
+
+Fallback: <code>
+```
+
+`Considered, not seated:` becomes `Everyone considered was seated.` when nobody was left out and
+nothing was cut (the cut ones are one `- N more not listed.` line), and the `Fallback:` line
+appears only on a fallback. Every line the master renders from worker text is dash-mapped onto
+one line, and the `- slug:` form keeps every one of them out of eval's header roster pattern
+(`^- (\w+) — (.+)$`). The view and eval take the committee from the final `selection`
+reduction, not from these lines.
+
+**The reductions.** Each kept stage is one `selection` reduction:
+`{stage, role, final, delivered, body, parsed, code, proposed, proposed_dropped, error, cap, take,
+takes, kept, voice, violations, flags}`. `proposed` is the stage's first 20 valid seats as
+`[{role, name, title, rationale}]`, `proposed_dropped` counts the rest, and `cap` is the master's
+cap at that moment, so the view never guesses it before `t01`. The chair's reduction
+(`final: true`) adds
+`{seated, reviewers, considered, considered_dropped, invalid_dropped, fallback}`, and its `cap`
+is the resolved one. `seated` holds the seat records in roster order, each `{role, name, title,
+altitude, goal, ambition, stake, lens, style, rationale, nominated_by, source}` with `source` one
+of `fixed`, `library` or `derived`. No selection reduction carries `artifact`, `revised` or
+`turn`. A discarded selector take is voice's `take` reduction with `stage` added and
+`turn: null`. Readers take the latest `selection` reduction with `final: true`. Selection
+reductions count under eval's `metrics.other_kinds`, never as turns. eval reads `metrics.seats`
+from the final one (a malformed one fails closed, so concern coverage caps), and
+`concern_coverage@2` counts a considered stakeholder with a representative as represented, not
+missing: see [committee-eval.md](committee-eval.md).
+
+**The view.** `view_data` resolves every name through the run's own seats (`view._seats`). Those
+are the final reduction's `seated`; the fixed four while selection runs or after it was lost; and
+`cast.CAST` for a run reduced before selection. A role it cannot resolve renders "unattributed".
+The view treats a run as selecting only when its phase is one of `view.SELECTION_PHASES` (the
+three stages and their `-take2`/`-take3`, compared, never parsed) or a `selection` reduction
+exists, so a run from before selection keeps today's nine seats and a null `selection` block
+before its first turn as after it. Roster rows add `rationale`, `nominated_by`,
+`nominated_by_name` (a selector's name, null for `fixed` and `default`) and `source`, all null on
+a legacy run. The top-level `selection` block is
+null or `{state, stages, fallback, considered, considered_dropped, invalid_dropped}`. `state` is
+`selecting`, `seated`, `fallback` or `lost`. Each stage carries its `code`, its `proposed` list
+(each item with `source`, `library` or `derived`), `proposed_dropped`, and voice's segments,
+badges, take, takes, violations and flags, as a timeline entry does, except that a stage never
+shows voice's soft-flag badges (`no_pointer`, `no_example`, `tells`): a selector is asked for no
+pointer or example. Each `considered` entry names its `represented_by_name`.
+
+On the committee tab, a run that is seating its committee never shows "Nothing said yet": the
+empty-state gate is `data.timeline.length === 0 && (data.selection == null || variant === 'metrics')`.
+Before `t01` the tab shows the progress bar (its cap read off the latest `selection` reduction
+once one exists), the roster with each seat's "why:" and "put forward by <Name>", "fixed seat" or
+"default seat", and the Selection card. The transcript, the verdict card and the Document card
+come with `t01`, even though `open` has already kept the original. The Selection card stays right
+under the roster after that. It shows each stage's words, badges and proposed seats; "kept take N
+of M; broke: …" when the take was retaken or kept breaking a rule; "no usable seat list: <why>"
+in the thread's words when the stage's code says its list could seat nobody; each count that was
+cut ("N more not listed.", "N more considered, not listed.", "N more invalid entries, not
+listed."); the considered list with who represents each stakeholder, or
+"Everyone considered was seated."; "Default committee: selection fell back (<code>)" on a
+fallback; and "Selection stopped: the meeting was lost." when the master lost the meeting
+mid-selection. No tab is added. The Metrics tab keeps its empty state until `t01`, and it counts
+a derived seat's turns like any other seat's.
+
+A derived seat's name and title are a selector's words, and the name check above compares only
+letters and digits, so a look-alike name (an added surname, a letter from another script) passes
+it. The defence is the slug: every surface that shows a derived seat's name marks it
+`<slug> · derived seat` (the roster, its transcript rows, a stage's proposed list, "Represented
+by", the Metrics turns-taken and floor-request rows, and the Document card's "raised by"), so a
+derived seat cannot pass for a cast or library persona.
+
+**The contract one-on-ones builds on.** A later loop must not rename these:
+- `s["roster"]`: slug to seat record, ordered owner, reviewers in opening order, junior_ic. It is
+  `{}` before `open`, the fixed four from `open`, and the ratified committee from the chair's
+  kept take. Pass `s["roster"] or None` to `cast.persona`, `cast.brief`, `cast.title`,
+  `cast.goal` and `thread.append_turn`; None means `cast.CAST`.
+- `s["reviewers"]`: the reviewer slugs in opening order, never popped. The default seven until
+  the chair's list is installed.
+- `s["cap_explicit"]`: whether `HERMES_COMMITTEE_MAX_TURNS` set the cap. When it did not, the cap
+  is 2 × reviewers + 16 and a later loop may add to it.
+- `s["current_kind"]`: default `None`; `None`, `"select"`, `"turn"` or `"decision"`, plus a later
+  loop's own kinds. Junior turns are `"turn"`. `seed` and `reduce` tell a selection stage from a
+  turn by it (the decision by `DECISION_PHASES` membership) and never parse the phase name.
+- `s["base"]`: the take-1 name, set by every minter through `_begin(s, base)`, `_select`
+  included. Reuse it rather than add a second phase key. `_retake` has no select branch.
+- `s["selection_next"]`: the next stage, 1-3, and 4 once selection is done. 4 is the default, so
+  a state that never saw `open` mints no s-phase, and `_lost` reads 4 at `open` as a process that
+  never opened the run. `next_phase` checks it after a pending retake and before delegation; a
+  later loop's up-front phases go once `selection_next > 3`, before the delegation rule.
+- The `## committee seated` line `- <slug>: Name, Title. Why: <rationale>. Put forward by <...>.`,
+  which a goal may point a worker at for the seated role keys.
+- `test_the_manager_is_the_owners_manager`: the manager's stake says she manages Maya, the
+  proposal owner.
+- The SPA empty-state gate `data.timeline.length === 0 && (data.selection == null || variant === 'metrics')`.
 
 ## Configuration
 
@@ -68,14 +302,16 @@ is *Decide whether to approve this proposal.*
 | Var | Default | Meaning |
 |---|---|---|
 | `HERMES_COMMITTEE_ARTIFACT` | — (**required**) | Absolute path to the file under review |
-| `HERMES_COMMITTEE_MAX_TURNS` | `30` | Hard time-box on turn phases |
+| `HERMES_COMMITTEE_MAX_TURNS` | 2 × reviewers + 16 (`30` for the default seven) | Hard time-box on turn phases; an explicit value is used as-is |
 | `HERMES_COMMITTEE_DRIVER` | unset | Optional methodology slash command |
 
 `ARTIFACT` and `MAX_TURNS` are read once, at `open` seed time, so a mid-run change cannot swap the
 cap or the artifact; an `ARTIFACT` that is unset or is not an existing readable file fails the run
 on the spot, naming the variable. A `MAX_TURNS` that does not parse — *and one below `1`, which
-would mint a committee that never speaks* — falls back to `30`. `DRIVER` is read on every
-`driver()` call, which may run in another process.
+would mint a committee that never speaks* — counts as unset. Unset, the cap is 30 until the chair
+ratifies, then 2 × reviewers + 16 (see "Selection"); an explicit value is used as-is, even one too
+small for the opening round. `DRIVER` is read on every `driver()` call, which may run in another
+process.
 
 The charge is clipped to 400 characters (`cast.CHARGE_MAX`) with an ellipsis rather than cut
 mid-word. A delegated `action` and a `stance` are cut to 200 (`turnblock.ACTION_MAX`,
@@ -111,7 +347,8 @@ it drops.
 `stance` is not a gate. It is free text, recorded on the turn's reduction and accumulated per
 role so the committee tab can show where each persona currently stands. Absent stays absent: a
 persona that states no stance is shown as having none, never as neutral. Only the owner and the
-seven reviewers are issued a block, so the junior IC and the chair state no stance. It is the one
+seated reviewers are issued a block (a selector is not), so the junior IC and the chair state no
+stance. It is the one
 key asked for in prose rather than shown in the worked example `turnblock.instruction` hands a
 speaker — a copied `stance: <20 words or fewer>` would mint that placeholder as what the persona
 said, and unlike a flag a stance is rendered back verbatim.
@@ -244,12 +481,13 @@ Take 3 is kept verbatim whatever it says, its prose never clipped (only an over-
 cut, and flagged `stance_clipped`), with the rules it broke. An undelivered or signals-only take
 is never sent back; its `voice` is null.
 
-- **Names and precedence (C8).** Take 1 is `t{NN}-{role}` or `decision`; take k is
-  `{base}-take{k}`, where `s["base"]` is the take-1 name. Every mint of a speaking phase, here and
-  in any later loop, calls `_begin(s, base)`. `_retake` reads only `base` and `take`, so the turn
-  counter, `current_turn`, `last_speaker` and HERMES_COMMITTEE_MAX_TURNS are untouched.
-  `next_phase` checks `_lost`, then a pending retake, then delegation, close, the cap and the rest,
-  so a retake runs before a pending delegation and before the cap. At a `DECISION_PHASES` phase a
+- **Names and precedence (C8).** Take 1 is `t{NN}-{role}`, `s{N}-{role}` or `decision`; take k
+  is `{base}-take{k}`, where `s["base"]` is the take-1 name. Every mint of a speaking phase, here
+  and in any later loop, calls `_begin(s, base)`. `_retake` reads only `base` and `take`, so the
+  turn counter, `current_turn`, `last_speaker` and HERMES_COMMITTEE_MAX_TURNS are untouched.
+  `next_phase` checks `_lost`, then a pending retake, then a pending selection stage, then
+  delegation, close, the cap and the rest, so a retake runs before a pending delegation and
+  before the cap. At a `DECISION_PHASES` phase a
   pending retake mints `decision-take{k}`, otherwise `ruling`.
 - **A retake that delivers nothing** (its worker failed, or it sent signals only) keeps the held
   take, graded again, with `retake_failed` added; that take is then written, gated, re-checked and
@@ -294,17 +532,20 @@ is never sent back; its `voice` is null.
   See [committee-eval.md](committee-eval.md).
 
 **Goal headroom** at the worst case (charge 5000, action 5000, image stem 48, retake note 5000,
-the last-take line with that 48-character stem, deep paths) against `cast.GOAL_MAX` 3600. A
-generated persona or a new goal shape must fit it; if one goes over, shorten `_GUARDRAIL_IMAGE`
-first. The owner's retake has 28 characters left at this worst case (a real stem such as
-`t12-data_scientist` is 30 shorter), which is why the goal names the takes file and the images
-folder relative to the thread rather than by absolute path.
+the last-take line with that 48-character stem, deep paths) against `cast.GOAL_MAX` 3600. Every
+goal shape must fit it. For the cast's own shapes, voice's rule stands: if one goes over, shorten
+`_GUARDRAIL_IMAGE` first (the owner's and every reviewer's goal carries it). For selection's
+shapes (the select goals, a library seat, a derived seat) spec D7 governs instead: if one goes
+over, lower `selection.FIELD_MAX`, never raise `GOAL_MAX`. The owner's retake has 28 characters
+left at this worst case (a real stem such as `t12-data_scientist` is 30 shorter), which is why the
+goal names the takes file and the images folder relative to the thread rather than by absolute
+path.
 
 | shape | take 1 | retake |
 |---|---|---|
 | owner | 3246 (354 left) | 3572 (28 left) |
 | senior_director | 2929 (671 left) | 3255 (345 left) |
-| manager | 2801 (799 left) | 3127 (473 left) |
+| manager | 2835 (765 left) | 3161 (439 left) |
 | tpm | 2794 (806 left) | 3120 (480 left) |
 | pm | 2811 (789 left) | 3137 (463 left) |
 | tl | 2819 (781 left) | 3145 (455 left) |
@@ -312,6 +553,19 @@ folder relative to the thread rather than by absolute path.
 | data_scientist | 2790 (810 left) | 3116 (484 left) |
 | junior_ic | 2868 (732 left) | 2893 (707 left) |
 | chair | 2553 (1047 left) | 2879 (721 left) |
+| s1-owner (select) | 2839 (761 left) | 3125 (475 left) |
+| s2-manager (select) | 2799 (801 left) | 3087 (513 left) |
+| s3-senior_director (select) | 2963 (637 left) | 3259 (341 left) |
+| derived reviewer (24-char slug, clip limits) | 3240 (360 left) | 3546 (54 left) |
+
+The select rows are `cast.select_goal` for each stage, each naming its own image (`s1-owner.svg`)
+and, on a retake, its own last take (`takes/s1-owner-take2.md`). The derived reviewer is the
+longest persona a selector can seat: a 24-character slug, every field at its clip limit
+(`selection.FIELD_MAX` = 120), image `t99-<slug>` and last take `takes/t99-<slug>-take2.md`. It
+fits only at that real stem: at the cast rows' 48-character stem it would be over. Every library
+seat at its real stem stays under 3100. `test_every_goal_stays_under_the_budget_at_maximum_size`
+holds every one of these under `GOAL_MAX`, and a later loop that adds a goal shape adds it there
+and here.
 
 ## Where things land
 
@@ -319,7 +573,9 @@ Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
 
 - `runs/<run_id>/thread.md` — the transcript, append-only: the `open` header (charge, artifact,
   roster, ground rules), one `## turn NN — <name>, <title> (<role>)` entry per settled turn (its
-  kept take only), then `## decision`. A turn whose worker failed still gets a stub —
+  kept take only), then `## decision`. Before the first turn come one `## selection N: ...` entry
+  per kept selection stage and `## committee seated` (see "Selection"). A turn whose worker failed
+  still gets a stub —
   `_(no turn delivered — the worker failed; see hermes show)_`.
 - `runs/<run_id>/revised/<basename>` — the revised copy, byte-copied from the original before the
   junior IC's first edit. After each junior-IC turn the master re-checks it — is it a regular file
@@ -446,7 +702,8 @@ was.", which stays true beside a note that the turn cap dropped a delegation.
 Before the first turn settles no reduction names the document, but `open` has already kept the
 original and the first worker can run for an hour. The view names the file from the thread
 header's artifact line meanwhile, and once `doc/00-original` is readable it shows the card, opened
-on Original, under "Nothing said yet".
+on Original, under "Nothing said yet". On a run that is seating its committee it waits for the
+first turn, as the transcript does (see "Selection").
 
 The view is the playbook's, not the control plane's. `playbooks/committee/view/dist/committee.umd.js`
 is built from `playbooks/committee/view/src/` with the toolchain in `web/` and committed, so
@@ -586,7 +843,7 @@ the master" also means "a playbook you trust with the operator's API token".
   there to read afterwards.
 - **A human rules at the end, never mid-run.** Nobody is asked anything while the committee talks.
   Once the verdict is written, the chair's ticket waits in `needs_human` with the run `running`:
-  accept ends the run `done`, reject ends it `failed`. One artifact per run, one cast.
+  accept ends the run `done`, reject ends it `failed`. One artifact per run, one committee.
 - **The meeting is not resumable; the ruling is.** The floor queue and the cast live in the
   master's memory, so a process lost mid-meeting cannot pick the meeting up again: a
   `hermes run resume <id> --wait` there records a `lost` reduction saying so and ends the run

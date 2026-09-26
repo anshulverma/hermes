@@ -122,3 +122,38 @@ def test_committee_spec_documents_voice_and_retakes():
         "<run>/decision-take{k}", "Goal headroom",
     ):
         assert needle in content, f"committee spec is missing {needle!r}"
+
+
+def test_committee_spec_documents_selection():
+    """docs/specs/committee-playbook.md states how a run seats its committee and the contract later loops use."""
+    from playbooks.committee import selection
+
+    spec_path = Path(__file__).parent.parent.parent / "docs" / "specs" / "committee-playbook.md"
+    content = spec_path.read_text()
+
+    for needle in (
+        "## Selection", "s1-owner", "s2-manager-take2", "s3-senior_director",
+        "cast.LIBRARY", "partner_owner", "cast.DERIVED_STYLE",
+        f"`selection.FIELD_MAX` = {selection.FIELD_MAX}",
+        "```hermes-selection", "chair_failed", "over the 12-seat bound", "invalid: name taken",
+        "_apply_selection(s, resolved)", "2 × reviewers + 16",
+        "- Reviewer seats: chosen below", "Seat library:",
+        "## selection N: Name, Title (role) proposes|amends|ratifies",
+        "_(no usable seat list:", "## committee seated",
+        "Put forward by <Name | fixed seat | default>.", "Everyone considered was seated.",
+        "{seated, reviewers, considered, considered_dropped, invalid_dropped, fallback}",
+        "concern_coverage@2", "SELECTION_PHASES", "<slug> · derived seat",
+        "lower `selection.FIELD_MAX`, never raise `GOAL_MAX`",
+        "data.timeline.length === 0 && (data.selection == null || variant === 'metrics')",
+        's["roster"]', 's["reviewers"]', 's["cap_explicit"]', 's["current_kind"]',
+        's["base"]', 's["selection_next"]',
+        '`None`, `"select"`, `"turn"` or `"decision"`', 'Junior turns are `"turn"`',
+        "test_the_manager_is_the_owners_manager",
+    ):
+        assert needle in content, f"committee spec does not document {needle!r}"
+    for stale in (
+        "is not configurable",
+        "| `HERMES_COMMITTEE_MAX_TURNS` | `30` |",
+        "the opening round in seniority order",
+    ):
+        assert stale not in content, f"committee spec still says {stale!r}"
