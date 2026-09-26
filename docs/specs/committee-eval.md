@@ -528,8 +528,10 @@ only.
     Eval lines carry all six dimensions, and anchor lines only the entered ones.
   - `read_ledger(path, limit)` returns the JSON-object lines in file order, splitting on `"\n"`
     only (a canonical line may hold a literal U+2028). It returns `[]` only when the file is
-    missing, and None (unknown) past `limit` bytes or for a symlink, a non-regular or an
-    unreadable file. It creates nothing. The view passes `LEDGER_MAX` (2 MB).
+    missing, and None (unknown) past `limit` bytes, for a symlink, a non-regular or an
+    unreadable file, and for a line nested past json's recursion limit (it may be an anchor no
+    one can read). Other lines that are not a JSON object are skipped. It creates nothing. The
+    view passes `LEDGER_MAX` (2 MB).
   - A resume that re-reduces judge can append a second line with the same `eval_run`. So
     `latest_evals` keeps the last line per `eval_run`, then the latest eval line per target key
     (home, run, created_at).
@@ -587,8 +589,9 @@ whatever state the run ends in. `playbooks/committee/__init__.py` does not impor
   - The label is `<run>` for the eval home, and `<parent>/<basename>:<run>` otherwise, for
     example `committee-spin/home:run-2`.
   - A cell scored under an older definition than the current `dimension_versions()` is starred,
-    with a footnote telling you to re-run the eval. So a concision bump stars only the concision
-    cells.
+    with the footnote
+    ``* older definition; re-run `.venv/bin/python -m playbooks.committee.eval_cli run <target>` ``.
+    So a concision bump stars only the concision cells.
   - A judge cell reads `4 (a:3)` when the user's anchor exists at the cell's version, and
     `4 (re-score needed)` when the anchors are only at other versions.
   - A `calibration` row closes the table. `--rubric` keeps only the evaluations whose rubric
@@ -605,32 +608,46 @@ whatever state the run ends in. `playbooks/committee/__init__.py` does not impor
 
 `view_data(run, reductions)["evaluation"]` comes from `_evaluation(run.id)` in
 `playbooks/committee/view.py`. The helper imports eval lazily (a module-scope import would be a
-cycle), never raises, and creates nothing. It reads `thread.run_file(run.id, "eval.json")`, after
-an `os.stat` size check, through `thread.read_regular`, and the ledger through
+cycle), never raises, and creates nothing. It reads `thread.run_file(run.id, "eval.json")`
+through `thread.read_regular`, after `lstat`ing `runs/<id>/` (a directory) and eval.json (a
+regular file) as `_size` does, and the ledger through
 `read_ledger(config.resolve_home()/"evals.jsonl", LEDGER_MAX)`. The value is one of:
-- `null` when there is no eval.json, which includes a run only ever scored from a foreign home.
-- `{"state": "error", "error": str}` when the file is over 256 KB, unreadable, not UTF-8 JSON,
-  not an object, has `schema != 1`, or holds junk inside that breaks the read.
+- `null` when `runs/<id>/` or its eval.json is missing, which includes a run only ever scored
+  from a foreign home.
+- `{"state": "error", "error": str}` when either is a symlink (dangling too) or not the right
+  kind of file, or the file is over 256 KB (checked again after the read), unreadable, not UTF-8
+  JSON (including nesting past json's recursion limit), not an object, has `schema != 1`, or
+  holds junk inside that breaks the read. No message names an absolute path: an OS error shows
+  its `strerror`.
 - Otherwise `{"state": "ok", rubric_version, evaluated_at, headline, judge_status, judge_error,
   dimensions: {<id>: {score, scorer, quote, calibration}}, flags: [<id>, …]}`, where:
-  - `quote` is the first verified quote, or null.
+  - each field reaches the UI as the type it renders, or null when the file holds anything
+    else: `score` an int (eval's `_score`), `evaluated_at` a number, the text fields a str, and
+    `flags` only the string ids.
+  - `scorer` comes from `JUDGE_DIMS`, never from the file.
+  - `quote` is the first quote whose `verified` is exactly `true`, or null.
   - `calibration` is the label for eval.json's own version of a judge dimension, or
     `uncalibrated` when it has none. It is `unknown` for every judge dimension when
     `read_ledger` returns None, and null for a deterministic dimension.
   - `judge_error` extends the planning spec's C7 payload. The UI shows the judge's error, and the
-    payload otherwise carried none.
+    payload otherwise carried none. It is shown as written: judge.reduce writes it in the master.
 
 `CommitteeView.tsx` renders `MeetingMetrics` and then `EvaluationBlock`, inside the committee
 view's existing `metrics` variant. So no tab appears or hides for any playbook, and the block never
 repeats the turns, delegations, re-checks or prose counts. It has four states:
-- not evaluated: "Not evaluated. Score it with `python -m playbooks.committee.eval_cli run <run>`."
-  That is shorthand: run it as `.venv/bin/python -m …` from the checkout, as at the top of this
-  spec.
-- ok: the headline, a table of dimension, score, scorer and evidence quote ("no verified quote"
-  when null), the flags (a repeated id shows `×n`), the rubric version, and a badge with the
-  calibration label on each judge dimension not labelled `calibrated`.
-- judge failed, partial or unparseable: the same, with `—` for each null score and a
-  "Judge <status>: <error>" line.
+- not evaluated, once the chair has delivered a verdict (`verdict.text` is non-empty): "Not
+  evaluated. Score it with `.venv/bin/python -m playbooks.committee.eval_cli run <run>` from the
+  hermes checkout, with HERMES_HOME set to this control plane's home." That runs as written, as
+  at the top of this spec.
+- not evaluated, before that (a meeting in progress, a chair that delivered nothing, which
+  `run` would refuse with exit 2): "Not evaluated: a run can be scored once the chair has
+  delivered its verdict." No command is offered.
+- ok: the headline, a table (`aria-label="Evaluation scores"`) of dimension, score, scorer and
+  evidence quote, wrapped in full ("no verified quote" when null), the flags (a repeated id shows
+  `×n`), the rubric version, and a badge with the calibration label on each judge dimension not
+  labelled `calibrated`. A null field shows as unknown ("Judge status unknown", "rubric unknown").
+- judge failed, partial or unparseable: the same, with `—` (read as "not scored") for each null
+  score and a "Judge <status>" line, with ": <error>" when there is one.
 - error: the message.
 
 A new eval shows on the page's next load, because nothing lands on the target to trigger a

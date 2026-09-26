@@ -1906,20 +1906,87 @@ describe('CommitteeView evaluation on the Metrics tab', () => {
       />,
     );
 
-  it('says a run nobody has scored is not evaluated, and how to score it', () => {
+  const COMMAND = '.venv/bin/python -m playbooks.committee.eval_cli run run-2';
+
+  it('says a run nobody has scored is not evaluated, and how to score it, runnable as written', () => {
     const { unmount } = metrics();
 
     const empty = screen.getByTestId('evaluation-empty');
     expect(empty.textContent).toBe(
-      'Not evaluated. Score it with python -m playbooks.committee.eval_cli run run-2.',
+      `Not evaluated. Score it with ${COMMAND} from the hermes checkout, ` +
+        "with HERMES_HOME set to this control plane's home.",
     );
-    expect(within(empty).getByText('python -m playbooks.committee.eval_cli run run-2').tagName).toBe('CODE');
+    expect(within(empty).getByText(COMMAND).tagName).toBe('CODE');
     expect(screen.queryByTestId('evaluation-headline')).toBeNull();
     unmount();
 
     metrics(null);
     expect(screen.getByTestId('evaluation-empty')).toBeInTheDocument();
     expect(screen.queryAllByTestId(/^eval-dim-/)).toHaveLength(0);
+  });
+
+  it('offers no command for a run that cannot be scored yet: mid-meeting, or a chair that delivered nothing', () => {
+    const NOT_YET = 'Not evaluated: a run can be scored once the chair has delivered its verdict.';
+    for (const data of [midRun, { ...run2, verdict: { ...run2.verdict!, text: '' } }]) {
+      const { unmount } = render(
+        <CommitteeView runId="run-2" data={{ ...data, evaluation: null }} refetch={noop} variant="metrics" />,
+      );
+      expect(screen.getByTestId('evaluation-empty').textContent).toBe(NOT_YET);
+      expect(screen.queryByText(/eval_cli/)).toBeNull();
+      unmount();
+    }
+  });
+
+  it("shows each dimension's scorer and verified quote in full, and says when none verified", () => {
+    metrics({
+      ...EVAL_OK,
+      dimensions: { ...EVAL_OK.dimensions, efficiency: dim(0, 'deterministic', null, null) },
+    });
+
+    const row = (id: string) => within(screen.getByTestId(`eval-dim-${id}`)).getAllByRole('cell');
+    const quote = EVAL_OK.dimensions.verdict_grounded.quote!;
+    expect(row('verdict_grounded').map((c) => c.textContent)).toEqual([
+      'verdict grounded',
+      '4uncalibrated',
+      'judge',
+      quote,
+    ]);
+    expect(row('concision')[2]).toHaveTextContent(/^deterministic$/);
+    // Read in full, wrapped: not cut to one line with the rest only in a tooltip.
+    const evidence = row('verdict_grounded')[3];
+    expect(evidence).not.toHaveAttribute('title');
+    expect(evidence).not.toHaveStyle({ whiteSpace: 'nowrap' });
+    expect(row('efficiency')[3]).toHaveTextContent(/^no verified quote$/);
+    // 0 is a score, not a missing one.
+    expect(screen.getByTestId('eval-score-efficiency')).toHaveTextContent(/^0$/);
+    expect(screen.queryAllByLabelText('not scored')).toHaveLength(0);
+  });
+
+  it('names the table and reads a missing score as not scored', () => {
+    const noJudge = dim(null, 'judge', null, 'uncalibrated');
+    metrics({
+      ...EVAL_OK,
+      judge_status: 'unparseable',
+      judge_error: null,
+      dimensions: { ...EVAL_OK.dimensions, verdict_grounded: noJudge, concern_coverage: noJudge },
+    });
+
+    const table = screen.getByRole('table', { name: 'Evaluation scores' });
+    const missing = within(table).getAllByLabelText('not scored');
+    expect(missing.map((m) => m.textContent)).toEqual(['—', '—']);
+    expect(within(screen.getByTestId('eval-score-verdict_grounded')).getByLabelText('not scored')).toBe(
+      missing[0],
+    );
+    // An unparseable answer has no error to append: the status alone.
+    expect(screen.getByTestId('evaluation-judge-status').textContent).toBe('Judge unparseable');
+  });
+
+  it('draws a payload whose fields the server could not type as unknown, not as a crash', () => {
+    metrics({ ...EVAL_OK, headline: null, rubric_version: null, evaluated_at: null, judge_status: null });
+
+    expect(screen.getByTestId('evaluation-judge-status').textContent).toBe('Judge status unknown');
+    expect(screen.getByTestId('evaluation-rubric')).toHaveTextContent(/^rubric unknown$/);
+    expect(screen.getAllByTestId(/^eval-dim-/)).toHaveLength(6);
   });
 
   it('shows the scores in rubric order under the meeting metrics, badging only uncalibrated judge scores', () => {
@@ -1934,7 +2001,7 @@ describe('CommitteeView evaluation on the Metrics tab', () => {
     expect(screen.getByTestId('eval-score-verdict_grounded')).toHaveTextContent(/^4$/);
     expect(screen.getByTestId('eval-score-efficiency')).toHaveTextContent(/^3$/);
     expect(screen.getByTestId('eval-score-concision')).toHaveTextContent(/^1$/);
-    expect(screen.getByTestId('evaluation-headline')).toHaveTextContent(EVAL_OK.headline);
+    expect(screen.getByTestId('evaluation-headline')).toHaveTextContent(EVAL_OK.headline!);
     expect(screen.getByTestId('evaluation-rubric')).toHaveTextContent('r1a2b3c4d');
 
     expect(screen.getByTestId('eval-uncalibrated-verdict_grounded')).toHaveTextContent('uncalibrated');

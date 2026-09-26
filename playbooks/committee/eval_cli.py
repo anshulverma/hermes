@@ -32,7 +32,7 @@ MODULES = "HERMES_PLAYBOOK_MODULES"
 PACKAGE = "playbooks.committee"
 NULL = "—"
 QUOTE_COLS = 80
-STALE_NOTE = "* older definition; re-run `eval run <target>`"
+STALE_NOTE = "* older definition; re-run `.venv/bin/python -m playbooks.committee.eval_cli run <target>`"
 
 
 def _fail(message: str) -> int:

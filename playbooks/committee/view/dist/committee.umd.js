@@ -1796,10 +1796,15 @@
 		textAlign: "left",
 		verticalAlign: "baseline"
 	};
-	function EvaluationBlock({ runId, evaluation }) {
+	function EvaluationBlock({ runId, evaluation, scorable }) {
 		const { Badge } = ds();
 		let body;
-		if (evaluation === null) body = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+		if (evaluation === null && !scorable) body = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "evaluation-empty",
+			style: quiet,
+			children: "Not evaluated: a run can be scored once the chair has delivered its verdict."
+		});
+		else if (evaluation === null) body = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "evaluation-empty",
 			style: quiet,
 			children: [
@@ -1807,9 +1812,9 @@
 				" ",
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
 					style: mono,
-					children: `python -m playbooks.committee.eval_cli run ${runId}`
+					children: `.venv/bin/python -m playbooks.committee.eval_cli run ${runId}`
 				}),
-				"."
+				" from the hermes checkout, with HERMES_HOME set to this control plane's home."
 			]
 		});
 		else if (evaluation.state === "error") body = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -1842,11 +1847,12 @@
 					},
 					children: [
 						"Judge ",
-						evaluation.judge_status,
+						evaluation.judge_status ?? "status unknown",
 						evaluation.judge_error ? `: ${evaluation.judge_error}` : ""
 					]
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("table", {
+					"aria-label": "Evaluation scores",
 					style: {
 						borderCollapse: "collapse",
 						width: "100%",
@@ -1887,7 +1893,10 @@
 									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										"data-testid": `eval-score-${id}`,
 										style: mono,
-										children: d.score ?? "—"
+										children: d.score === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+											"aria-label": "not scored",
+											children: "—"
+										}) : d.score
 									}), d.scorer === "judge" && d.calibration !== "calibrated" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										style: { marginLeft: 6 },
 										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Badge, {
@@ -1907,14 +1916,10 @@
 									children: d.scorer
 								}),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("td", {
-									title: d.quote ?? void 0,
 									style: {
 										...cell,
-										maxWidth: 0,
 										width: "100%",
-										overflow: "hidden",
-										textOverflow: "ellipsis",
-										whiteSpace: "nowrap",
+										overflowWrap: "anywhere",
 										color: d.quote ? "var(--text-secondary)" : "var(--text-muted)"
 									},
 									children: d.quote ?? "no verified quote"
@@ -1939,7 +1944,7 @@
 						fontSize: 11,
 						color: "var(--text-muted)"
 					},
-					children: ["rubric ", evaluation.rubric_version]
+					children: ["rubric ", evaluation.rubric_version ?? "unknown"]
 				})
 			] });
 		}
@@ -2002,7 +2007,8 @@
 			},
 			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, { data }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EvaluationBlock, {
 				runId,
-				evaluation: data.evaluation ?? null
+				evaluation: data.evaluation ?? null,
+				scorable: !!data.verdict?.text
 			})]
 		});
 		const edits = /* @__PURE__ */ new Map();

@@ -2872,7 +2872,8 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
     assert rows["run-9"] == ["2", "3", "3", "3", "1*", "1"]  # only concision is starred
     assert rows["run-5"] == ["—*", "—*", "—*", "—*", "2*", "—*"]
     assert rows["calibration"] == ["uncalibrated", "uncalibrated", "off (Δ2)", "", "", ""]
-    assert "* older definition; re-run `eval run <target>`" in out.splitlines()
+    assert ("* older definition; re-run "
+            "`.venv/bin/python -m playbooks.committee.eval_cli run <target>`") in out.splitlines()
     everything = rows
 
     # --rubric filters the evaluation rows only: anchors and the calibration row stay whole.

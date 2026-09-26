@@ -78,15 +78,19 @@ export type EvaluationDimension = {
   calibration: string | null;
 };
 
-/** `view_data()["evaluation"]` for a run that has an eval.json (C7). */
+/**
+ * `view_data()["evaluation"]` for a run that has an eval.json (C7). The server
+ * sends a field it could not type (a hand-edited file) as null, never as an
+ * object React cannot render.
+ */
 export type Evaluation =
   | { state: 'error'; error: string }
   | {
       state: 'ok';
-      rubric_version: string;
-      evaluated_at: number;
-      headline: string;
-      judge_status: 'ok' | 'partial' | 'unparseable' | 'failed';
+      rubric_version: string | null;
+      evaluated_at: number | null;
+      headline: string | null;
+      judge_status: 'ok' | 'partial' | 'unparseable' | 'failed' | null;
       judge_error: string | null;
       dimensions: Record<string, EvaluationDimension>;
       flags: string[];
@@ -757,15 +761,33 @@ const cell = {
   verticalAlign: 'baseline',
 } as const;
 
-function EvaluationBlock({ runId, evaluation }: { runId: string; evaluation: Evaluation | null }) {
+function EvaluationBlock({
+  runId,
+  evaluation,
+  scorable,
+}: {
+  runId: string;
+  evaluation: Evaluation | null;
+  /** The chair delivered a verdict: `eval_cli run` refuses (exit 2) anything else. */
+  scorable: boolean;
+}) {
   const { Badge } = ds();
   let body: React.ReactNode;
 
-  if (evaluation === null) {
+  if (evaluation === null && !scorable) {
+    body = (
+      <div data-testid="evaluation-empty" style={quiet}>
+        Not evaluated: a run can be scored once the chair has delivered its verdict.
+      </div>
+    );
+  } else if (evaluation === null) {
+    // Runnable as written: no bare `python` on the user's PATH, `playbooks` is
+    // importable only from the checkout, and run ids are per home.
     body = (
       <div data-testid="evaluation-empty" style={quiet}>
         Not evaluated. Score it with{' '}
-        <code style={mono}>{`python -m playbooks.committee.eval_cli run ${runId}`}</code>.
+        <code style={mono}>{`.venv/bin/python -m playbooks.committee.eval_cli run ${runId}`}</code> from the
+        hermes checkout, with HERMES_HOME set to this control plane's home.
       </div>
     );
   } else if (evaluation.state === 'error') {
@@ -795,11 +817,11 @@ function EvaluationBlock({ runId, evaluation }: { runId: string; evaluation: Eva
             data-testid="evaluation-judge-status"
             style={{ ...quiet, color: 'var(--status-attention, #e3b341)' }}
           >
-            Judge {evaluation.judge_status}
+            Judge {evaluation.judge_status ?? 'status unknown'}
             {evaluation.judge_error ? `: ${evaluation.judge_error}` : ''}
           </div>
         )}
-        <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
+        <table aria-label="Evaluation scores" style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
           <thead>
             <tr>
               {['dimension', 'score', 'scorer', 'evidence'].map((h) => (
@@ -822,7 +844,7 @@ function EvaluationBlock({ runId, evaluation }: { runId: string; evaluation: Eva
                   </td>
                   <td style={{ ...cell, whiteSpace: 'nowrap' }}>
                     <span data-testid={`eval-score-${id}`} style={mono}>
-                      {d.score ?? '—'}
+                      {d.score === null ? <span aria-label="not scored">—</span> : d.score}
                     </span>
                     {d.scorer === 'judge' && d.calibration !== 'calibrated' && (
                       <span style={{ marginLeft: 6 }}>
@@ -838,15 +860,13 @@ function EvaluationBlock({ runId, evaluation }: { runId: string; evaluation: Eva
                     )}
                   </td>
                   <td style={{ ...cell, color: 'var(--text-muted)' }}>{d.scorer}</td>
+                  {/* Wrapped, never cut to one line: a tooltip is out of reach
+                      of the keyboard and of touch. A quote is at most 300 chars. */}
                   <td
-                    title={d.quote ?? undefined}
                     style={{
                       ...cell,
-                      maxWidth: 0,
                       width: '100%',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
+                      overflowWrap: 'anywhere',
                       color: d.quote ? 'var(--text-secondary)' : 'var(--text-muted)',
                     }}
                   >
@@ -864,7 +884,7 @@ function EvaluationBlock({ runId, evaluation }: { runId: string; evaluation: Eva
             : [...flags].map(([id, n]) => (n > 1 ? `${id} ×${n}` : id)).join(' · ')}
         </div>
         <div data-testid="evaluation-rubric" style={{ ...mono, fontSize: 11, color: 'var(--text-muted)' }}>
-          rubric {evaluation.rubric_version}
+          rubric {evaluation.rubric_version ?? 'unknown'}
         </div>
       </>
     );
@@ -969,7 +989,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <MeetingMetrics data={data} />
-        <EvaluationBlock runId={runId} evaluation={data.evaluation ?? null} />
+        <EvaluationBlock runId={runId} evaluation={data.evaluation ?? null} scorable={!!data.verdict?.text} />
       </div>
     );
 
