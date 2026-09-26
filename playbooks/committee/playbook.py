@@ -834,21 +834,33 @@ class CommitteePlaybook:
 
         Voice grades the RAW answer, fences intact (its measure skips fenced
         blocks); fences are stripped only for the thread and the reduction
-        ``body``. No ``_apply_block``: a selector's request_floor, delegate and
-        close are ignored. Never raises: every parse and file touch is wrapped,
-        and exactly one ``selection`` reduction comes back (C5). It routes
+        ``body``. A take that breaks voice's hard rules is discarded and retaken
+        under the stage's base (s1-owner-take2); a retake that delivers nothing
+        keeps the held take, flagged retake_failed. Only the kept take is parsed.
+        No ``_apply_block``: a selector's request_floor, delegate and close are
+        ignored. Never raises: every parse and file touch is wrapped, and
+        exactly one ``selection`` reduction comes back per kept take (C5). It routes
         nothing (Q3), so it carries no ``needs_human_ticket_ids``, and no
         ``artifact``, ``revised`` or ``turn`` for the kind-agnostic readers.
         """
         errors: list[str] = []
         role, stage = s["current_role"], s["current_stage"]
         answer = _latest_answer(findings)
-        # Every take is kept for now; the discard verdict drives s-phase
-        # retakes from Task 8. `_keep` is still what falls back to a held take.
-        _, metrics, violations, flags = self._grade(run, s, role, answer)
+        discard, metrics, violations, flags = self._grade(run, s, role, answer)
+        if discard:
+            # Before any parse, thread write or `stages` append, so a discarded
+            # take's list is never the stage's. `_retake` re-mints the stage off
+            # `s["base"]` (`s2-manager-take2`); no meeting counter moves.
+            return self._discard(
+                run, s, role, answer, metrics, violations, flags, None,
+                extra={"stage": stage},
+            )
         answer, take, takes, metrics, violations, flags = self._keep(
             run, s, role, answer, metrics, violations, flags
         )
+        # Off the answer `_keep` returns: a retake that delivered nothing keeps
+        # the held take, which WAS delivered, so stage 3's code comes from its
+        # list, never "no_answer".
         delivered = bool(answer)
         try:
             doc, code = selection.parse(answer)

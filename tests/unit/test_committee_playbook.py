@@ -5625,6 +5625,176 @@ def test_the_committee_seated_entry_follows_the_ratification():
     assert "\n- 10 more not listed.\n" in entry  # both counts, summed
 
 
+# --- selection retakes (selection D1, D6) --------------------------------------
+
+# 167 words of otherwise plain prose: over every selector's 150-word cap
+# (voice.kind makes the senior director a reviewer here, not the chair), and
+# no other hard rule. The hermes-selection block after it is fenced, so voice's
+# measure never counts it.
+_SEAT_PROSE_LONG = "Seat the people who carry the risk. " + "word " * 160
+_SEAT_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>'
+_DEFAULT_SEATS = ["tpm", "pm", "tl", "staff_ic", "data_scientist"]  # DEFAULT_SELECTION's
+
+
+def _logged(log, kind):
+    """(phase, doc) for every `kind` reduction a `_drive(reductions=log)` run logged."""
+    return [(phase, red.json) for phase, red in log if red.kind == kind]
+
+
+def test_a_select_retake_keeps_its_stage():
+    """AC7: a retake is the same stage said again, under the stage's own name.
+
+    Nothing of the discarded take reaches thread.md or `stages`, and no meeting
+    counter moves: `selection_next`, `turn`, `current_turn` and `last_speaker`
+    stay where stage 1 left them. The retake ticket names its take, carries
+    voice's note and the last-take line, and offers the stage's own image name.
+    Only the kept take's list is the stage's: the discarded take seated
+    `security`, and nothing of that reaches the thread or the stage reduction.
+    """
+    from playbooks.committee import selection, thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run()
+    s = pb._state(run)
+    s.update(roster=selection.fixed_seats(), selection_next=1)  # what `open` leaves
+
+    def settle(answer):
+        run.phase = pb.next_phase(run)
+        found = [_finding(run, f"{run.id}/{run.phase}", answer)]
+        return run.phase, pb.reduce(run, run.phase, found, site)
+
+    assert settle(DEFAULT_SELECTION["owner"])[0] == "s1-owner"
+    wall = _selection_answer(["security"], prose=_SEAT_PROSE_LONG)
+    phase, red = settle(wall)
+
+    assert phase == "s2-manager" and [r.kind for r in red] == ["take"]
+    doc = red[0].json
+    assert (doc["phase"], doc["stage"], doc["turn"], doc["take"]) == ("s2-manager", 2, None, 1)
+    assert doc["kept"] is False and doc["violations"] == ["over_cap"]
+    assert "needs_human_ticket_ids" not in doc
+    assert s["held"] == {"answer": wall, "take": 1}
+    assert (s["selection_next"], s["turn"], s["current_turn"], s["last_speaker"]) == (
+        3, 1, 0, "owner")
+    assert [st["stage"] for st in s["stages"]] == [1]
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert "## selection 1:" in text and "## selection 2" not in text
+
+    run.phase = pb.next_phase(run)
+    assert run.phase == "s2-manager-take2"
+    ticket = pb.seed(run, site)[0]
+    assert ticket.id == f"{run.id}/s2-manager-take2"
+    assert (ticket.payload["kind"], ticket.payload["action"]) == ("select", None)
+    assert ticket.payload["title"] == (
+        f"selection 2 — {cast.CAST['manager']['name']} (manager) seats the committee (take 2)"
+    )
+    goal = ticket.payload["goal"]
+    assert "Retake 2 of 3." in goal
+    assert "\nYour last take is in takes/s2-manager-take1.md beside the thread" in goal
+    assert "one image, s2-manager.svg or s2-manager.png" in goal
+    assert len(goal) < cast.GOAL_MAX
+
+    kept = pb.reduce(run, run.phase, [_finding(run, ticket.id, DEFAULT_SELECTION["manager"])], site)
+
+    assert [r.kind for r in kept] == ["selection"]
+    assert (kept[0].json["stage"], kept[0].json["take"], kept[0].json["takes"]) == (2, 2, 2)
+    assert kept[0].json["violations"] == []
+    assert [p["role"] for p in kept[0].json["proposed"]] == _DEFAULT_SEATS
+    assert [st["stage"] for st in s["stages"]] == [1, 2]
+    assert [seat["role"] for seat in s["stages"][1]["doc"]["seats"]] == _DEFAULT_SEATS
+    assert (s["selection_next"], s["turn"], s["current_turn"], s["last_speaker"]) == (
+        3, 1, 0, "owner")
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert text.count("## selection 2:") == 1
+    assert "security" not in text.split("## selection 2:", 1)[1]
+    assert pb.next_phase(run) == "s3-senior_director"
+    assert (s["base"], s["take"], s["note"], s["held"]) == ("s3-senior_director", 1, None, None)
+
+
+def test_each_selection_stage_gets_its_own_two_retakes():
+    """AC7: `_select`'s `_begin` restarts every stage at take 1 with its own
+    MAX_TAKES, so no phase name repeats. A selector's `{base}` image stays hers
+    on every take of her stage, because a retake keeps `s["base"]`. The take
+    kept at the end of each stage is the only one whose list counts: the
+    discarded takes' `security` is in no stage record and in `considered`.
+    """
+    from playbooks.committee import thread
+
+    # The run id `_drive` uses is fixed, so the file can be in place before the
+    # drive. Only take 2 of stage 2 references it.
+    (thread.images_dir(_run().id) / "s2-manager.svg").write_bytes(_SEAT_SVG)
+    figure = "\n\n![seat map](images/s2-manager.svg)\nDescription: who holds each seat."
+    wall = _selection_answer(["security"], prose=_SEAT_PROSE_LONG)
+    wall_with_figure = _selection_answer(["security"], prose=_SEAT_PROSE_LONG + figure)
+    answers = {
+        "owner": [wall, DEFAULT_SELECTION["owner"]],
+        "manager": [wall, wall_with_figure, DEFAULT_SELECTION["manager"]],
+        "senior_director": DEFAULT_SELECTION["senior_director"],
+    }
+    log = []
+
+    _, _, s, seen, sp, ok = _drive({}, selection=answers, reductions=log)
+
+    assert [p for p in seen if p.startswith("s")] == [
+        "s1-owner", "s1-owner-take2",
+        "s2-manager", "s2-manager-take2", "s2-manager-take3",
+        "s3-senior_director",
+    ]
+    assert seen[seen.index("s3-senior_director") + 1] == "t01-senior_director"
+    takes = [doc for _, doc in _logged(log, "take")]
+    assert [(t["phase"], t["stage"], t["take"], t["turn"]) for t in takes] == [
+        ("s1-owner", 1, 1, None),
+        ("s2-manager", 2, 1, None),
+        ("s2-manager", 2, 2, None),
+    ]
+    image = takes[2]["voice"]["images"][0]
+    assert (image["name"], image["ok"]) == ("s2-manager.svg", True)
+    assert takes[2]["violations"] == ["over_cap"]  # no image_missing: the file is hers
+    kept = [doc for _, doc in _logged(log, "selection")]
+    assert [(k["stage"], k["take"], k["takes"]) for k in kept] == [
+        (1, 2, 2), (2, 3, 3), (3, 1, 1)]
+    assert all([p["role"] for p in k["proposed"]] == _DEFAULT_SEATS for k in kept)
+    assert all(
+        [seat["role"] for seat in st["doc"]["seats"]] == _DEFAULT_SEATS for st in s["stages"])
+    assert kept[2]["considered"] == [] and "security" not in s["roster"]
+    check_invariants(s, seen, sp, delivered=ok, reviewers=s["reviewers"])
+
+
+def test_a_failed_chair_retake_keeps_the_held_list():
+    """A chair who broke the cap and then delivered nothing keeps the list she
+    already gave, flagged `retake_failed`. Stage 3's code comes from the held
+    take, so nothing falls back and her three seats open the meeting.
+    """
+    from playbooks.committee import selection, thread
+
+    held = _selection_answer(["security", "sre", "privacy"], prose=_SEAT_PROSE_LONG)
+    log = []
+
+    _, run, s, seen, sp, ok = _drive(
+        {}, selection={**DEFAULT_SELECTION, "senior_director": [held, None]}, reductions=log)
+
+    takes = _logged(log, "take")
+    assert [(phase, t["phase"], t["stage"]) for phase, t in takes] == [
+        ("s3-senior_director", "s3-senior_director", 3)]
+    finals = [doc for _, doc in _logged(log, "selection") if doc["final"]]
+    assert len(finals) == 1
+    final = finals[0]
+    assert final["fallback"] is None and final["code"] is None
+    assert final["delivered"] is True and final["parsed"] is True
+    assert (final["take"], final["takes"]) == (1, 2)
+    assert final["violations"] == ["over_cap", "retake_failed"]
+    assert final["body"] == selection.strip(turnblock.strip(held)).strip()
+    assert [p["role"] for p in final["proposed"]] == ["security", "sre", "privacy"]
+    assert [seat["role"] for seat in final["seated"]] == [
+        "owner", "senior_director", "manager", "security", "sre", "privacy", "junior_ic"]
+    assert final["reviewers"] == s["reviewers"] == [
+        "senior_director", "manager", "security", "sre", "privacy"]
+    assert s["held"] is None and s["retake"] is None
+    assert seen[seen.index("s3-senior_director-take2") + 1] == "t01-senior_director"
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert text.count("## selection 3:") == 1 and "Fallback:" not in text
+    check_invariants(s, seen, sp, delivered=ok, reviewers=s["reviewers"])
+
 
 def test_registration_importing_the_package_registers_committee():
     """`import playbooks.committee` is the whole registration step.
