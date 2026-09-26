@@ -46,6 +46,14 @@ ENV_DRIVER = "HERMES_COMMITTEE_DRIVER"
 DEFAULT_MAX_TURNS = 30
 DEFAULT_CHARGE = "Decide whether to approve this proposal."
 
+# 1:1s (one-on-ones C1). The budget counts every 1:1 exchange ticket of a run,
+# separate from MAX_TURNS; retakes are not counted. 0 and 1 are off, because a
+# 1:1 needs two exchanges; junk and negative values fall back to the default.
+ENV_MAX_ONE_ON_ONE = "HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS"
+DEFAULT_MAX_ONE_ON_ONE = 16
+ONE_ON_ONE_MAX_EXCHANGES = 4  # member exchanges per 1:1; a closing exchange is extra
+UPFRONT_MAX = 3               # the plan's meet_1..meet_3
+
 # A turn that was delivered but carried only its hermes-turn block.
 _SIGNALS_ONLY = "_(the speaker sent signals only, no prose)_"
 # A selector's answer that was its hermes-selection block and nothing else (I2).
@@ -136,6 +144,87 @@ def _apply_selection(s: dict, resolved: dict) -> None:
     # `opening` a copy: the opening round is popped as it runs, `reviewers` never is
     s.update(roster=roster, reviewers=reviewers, opening=list(reviewers), max_turns=cap,
              considered=considered)
+
+
+def _need(pair: dict) -> int:
+    """Exchanges a scheduled pair may cost (D5): two, or three when its host
+    is not one of its two members and so closes it alone."""
+    return 2 if pair["host"] in pair["members"] else 3
+
+
+def _free(s: dict) -> int:
+    """1:1 budget neither spent nor promised (D5).
+
+    Every pending pair holds its ``_need``, and a 1:1 in progress whose host is
+    not a member holds one more until its closing exchange is minted. So a
+    scheduled pair can always start, and ``one_on_one_used`` never passes the
+    budget.
+    """
+    current = s["one_on_one"]
+    reserve = int(
+        bool(current) and current["host"] not in current["members"] and not current["closing"]
+    )
+    return (
+        s["one_on_one_budget"] - s["one_on_one_used"]
+        - sum(_need(pair) for pair in s["pending_one_on_ones"]) - reserve
+    )
+
+
+def _apply_plan(s: dict, block: dict, *, delivered: bool) -> dict:
+    """The owner's plan, validated line by line and scheduled (D4, D5).
+
+    ``meet_1``..``meet_3`` in key order (``meet_4`` and above never get here:
+    the parser drops unknown keys). A line is dropped with the first C4 plan
+    reason that applies, or scheduled as an up-front pair under the next
+    ``seq``. Pairs wait in ``pending_one_on_ones``, and every drop is also kept
+    in ``dropped_one_on_ones``. Pure over ``s``: reduce calls it, and ``_drive``
+    reaches it through the real reduce, so these gates exist once.
+    """
+    out: dict = {"scheduled": [], "dropped": [], "fallback": None}
+    if not delivered:
+        out["fallback"] = "no plan delivered"
+        return out
+    for n in range(1, UPFRONT_MAX + 1):
+        text = block.get(f"meet_{n}")
+        if text is None:
+            continue
+        parsed = turnblock.pair(text)
+        members = None
+        if isinstance(parsed, str):
+            reason = parsed  # "malformed" or "no topic"
+        else:
+            host, guest, topic = parsed
+            members = [host, guest]
+            if host not in s["roster"] or guest not in s["roster"]:
+                reason = "unknown role"  # the `chair` sentinel is not a seat
+            elif host not in (cast.OWNER, cast.MANAGER):
+                reason = "invalid host"
+            elif guest == cast.OWNER:
+                reason = "owner as guest"
+            elif guest == host:
+                reason = "same member"
+            elif guest == cast.JUNIOR:
+                reason = "junior_ic"
+            elif any({host, guest} == set(p["members"]) for p in s["pending_one_on_ones"]):
+                reason = "duplicate"
+            else:
+                pair = {
+                    "seq": s["one_on_one_seq"] + 1, "origin": "upfront",
+                    "called_by": cast.OWNER, "host": host, "members": [guest, host],
+                    "topic": cast.clip(topic, cast.TOPIC_MAX),
+                }
+                reason = "budget" if _free(s) < _need(pair) else None
+        if reason is None:
+            s["one_on_one_seq"] = pair["seq"]
+            s["pending_one_on_ones"].append(pair)
+            out["scheduled"].append(pair)
+        else:
+            drop = {"seq": None, "text": text, "members": members, "reason": reason}
+            s["dropped_one_on_ones"].append(drop)
+            out["dropped"].append(drop)
+    if not out["scheduled"]:
+        out["fallback"] = "no valid pairs"
+    return out
 
 
 def _latest_answer(findings: list[Finding] | None) -> str:
@@ -316,6 +405,19 @@ class CommitteePlaybook:
                 # the ratified committee's considered stakeholders; a seat's goal
                 # names the ones it represents (selection D1)
                 "considered": [],
+                # 1:1s (one-on-ones C3). The budget stays 0 until `open` reads
+                # HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS, so a state that never
+                # saw `open` has 1:1s off.
+                "one_on_one_budget": 0,
+                "one_on_one_used": 0,       # exchanges minted; NN of `oNN-<role>`
+                "one_on_one_seq": 0,        # the last seq given to a scheduled pair
+                "planned": False,           # `p01-owner` minted (set at mint, D2)
+                "pending_one_on_ones": [],  # scheduled pairs, FIFO
+                "one_on_one": None,         # the 1:1 in progress
+                "one_on_ones_done": [],     # seqs that finished
+                "dropped_one_on_ones": [],  # every drop of every reason, in order
+                "delegation_origin": None,  # the seq whose 1:1 set `delegation`
+                "origin_one_on_one": None,  # that seq, on the junior turn it mints
             }
             self._state_by_run[run.id] = s
         return s
@@ -354,6 +456,22 @@ class CommitteePlaybook:
         s["take"] += 1
         s["note"], s["retake"] = s["retake"], None
         return f"{s['base']}-take{s['take']}"
+
+    def _mint(self, s: dict, *, kind: str, role: str, name: str) -> str:
+        """Mint a plan or 1:1 phase: one speaker, one ticket, no meeting turn (D2).
+
+        Voice's ``_begin`` starts take 1 of ``name``, so retake names come off
+        it unchanged. It never touches ``turn``, ``current_turn``,
+        ``last_speaker``, ``opening``, ``queue`` or ``closed``: the meeting
+        picks up exactly where it stopped. ``planned`` is set here, at mint,
+        so a reduce that fails can never re-mint ``p01-owner``.
+        """
+        self._begin(s, name)
+        s["current_kind"] = kind
+        s["current_role"] = role
+        if kind == "plan":
+            s["planned"] = True
+        return name
 
     def _turn(
         self, s: dict, role: str, *, answers: int | None = None,
@@ -495,6 +613,14 @@ class CommitteePlaybook:
             if not cap_explicit:
                 max_turns = DEFAULT_MAX_TURNS
 
+            # The 1:1 budget, resolved once like the cap. 0 and 1 are kept and
+            # mean off (a 1:1 needs two exchanges); junk and negatives are 16.
+            try:
+                budget = int(os.environ.get(ENV_MAX_ONE_ON_ONE, DEFAULT_MAX_ONE_ON_ONE))
+            except (TypeError, ValueError):
+                budget = DEFAULT_MAX_ONE_ON_ONE
+            s["one_on_one_budget"] = budget if budget >= 0 else DEFAULT_MAX_ONE_ON_ONE
+
             # `clip` rather than a raw slice, so an over-long charge is cut at
             # a word with an ellipsis instead of mid-word. `cast.goal` clips it
             # again; the second clip is a no-op on an already-short line.
@@ -527,6 +653,32 @@ class CommitteePlaybook:
                 library=cast.LIBRARY.items(),
             )
             return []
+
+        if s["current_kind"] == "plan":
+            # The owner plans the up-front 1:1s: one ticket, no meeting turn.
+            return [Ticket(
+                id=f"{run.id}/{phase}",
+                run_id=run.id,
+                phase=phase,
+                state="queued",
+                resource_req="cpu",
+                priority=0.0,
+                attempts=0,
+                payload={
+                    "role": cast.OWNER,
+                    "title": cast.title(
+                        cast.OWNER, "plan", turn=s["current_turn"], roster=s["roster"] or None
+                    ),
+                    "goal": cast.plan_goal(
+                        charge=s["charge"],
+                        artifact=s["artifact"],
+                        thread=str(thread.path(run.id)),
+                        roster=s["roster"],
+                    ),
+                    "kind": "plan",
+                    "action": None,
+                },
+            )]
 
         if phase in DECISION_PHASES:
             role, kind, action = cast.CHAIR, "decision", None
@@ -672,7 +824,10 @@ class CommitteePlaybook:
                 "role": {"type": "string"},
                 "title": {"type": "string"},
                 "goal": {"type": "string"},
-                "kind": {"type": "string", "enum": ["turn", "edit", "decision", "select"]},
+                "kind": {"type": "string", "enum": [
+                    "turn", "edit", "decision", "select",
+                    "plan", "one_on_one", "one_on_one_close",
+                ]},
                 "action": {"type": ["string", "null"]},
             },
         }
@@ -769,6 +924,8 @@ class CommitteePlaybook:
             return self._reduce_decision(run, s, findings, phase)
         if s["current_kind"] == "select":
             return self._reduce_select(run, s, findings)
+        if s["current_kind"] == "plan":
+            return self._reduce_plan(run, s, findings)
         return self._reduce_turn(run, s, findings)
 
     # --- the voice gate (voice D3) --------------------------------------
@@ -1034,6 +1191,50 @@ class CommitteePlaybook:
             # the latest selection reduction with `final: true`; view_data runs
             # in the server process and learns the committee from here alone.
             **final,
+        })]
+
+    def _reduce_plan(
+        self, run: Run, s: dict, findings: list[Finding]
+    ) -> list[Reduction]:
+        """The owner's plan: schedule the up-front 1:1s and write the plan entry.
+
+        The plan is not speech in the room, so it is exempt from retakes (D8):
+        it is graded for the record with every file image refused, and the
+        discard verdict is ignored. Never raises: a thread failure lands in
+        ``error`` and the schedule stands.
+        """
+        errors: list[str] = []
+        answer = _latest_answer(findings)
+        _, metrics, violations, flags = self._grade(
+            run, s, cast.OWNER, answer, file_images=False
+        )
+        body = turnblock.strip(answer)
+        if answer and not body:
+            body = _SIGNALS_ONLY
+        plan = _apply_plan(s, turnblock.parse(answer), delivered=bool(answer))
+        try:
+            thread.append_plan(
+                run.id, pairs=plan["scheduled"], dropped=plan["dropped"],
+                fallback=plan["fallback"], roster=s["roster"],
+            )
+        except Exception as exc:  # never raise out of reduce
+            errors.append(f"thread: {exc}")
+        # No `cap`, `artifact`, `revised`, `role` or `turn` (C6): view._cap and
+        # eval's artifact path read those off a reduction of any kind.
+        return [Reduction(kind="one_on_one_plan", json={
+            "delivered": bool(answer),
+            "body": body,
+            "one_on_ones_scheduled": plan["scheduled"],
+            "one_on_ones_dropped": plan["dropped"],
+            "fallback": plan["fallback"],
+            "one_on_one_budget": s["one_on_one_budget"],
+            "error": "; ".join(errors) or None,
+            "take": 1,
+            "takes": 1,
+            "kept": True,
+            "voice": metrics,
+            "violations": violations,
+            "flags": flags,
         })]
 
     def _reduce_turn(
@@ -1331,6 +1532,11 @@ class CommitteePlaybook:
             # touches the turn counter, `last_speaker` or the cap, so the phase
             # after s3 is t01, numbered exactly as without selection.
             return self._select(s, s["selection_next"])
+        if not s["planned"] and s["one_on_one_budget"] >= 2:
+            # D3 item 4: the owner plans the up-front 1:1s once, after selection
+            # and before anyone else speaks. A 1:1 needs two exchanges, so a
+            # budget of 0 or 1 is off and changes no phase.
+            return self._mint(s, kind="plan", role=cast.OWNER, name="p01-owner")
         # a delegation outranks `close`: an edit the owner asked for still happens,
         # and costs one turn. The cap outranks BOTH, so this can never mint t31.
         if s["delegation"] and s["turn"] <= s["max_turns"]:

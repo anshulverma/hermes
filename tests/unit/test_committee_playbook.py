@@ -35,6 +35,9 @@ def clean_env(monkeypatch, tmp_path):
         "HERMES_COMMITTEE_DRIVER",
     ):
         monkeypatch.delenv(var, raising=False)
+    # 1:1s off unless a test turns them on: a test that seeds `open` for real
+    # keeps the base branch's phases (the budget tests override this).
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS", "0")
 
 
 def _fenced(body: str) -> str:
@@ -2636,7 +2639,13 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     run = _run()
     s = pb._state(run)
 
-    assert set(s) == {
+    one_on_one = {  # one-on-ones C3, with their defaults
+        "one_on_one_budget": 0, "one_on_one_used": 0, "one_on_one_seq": 0,
+        "planned": False, "pending_one_on_ones": [], "one_on_one": None,
+        "one_on_ones_done": [], "dropped_one_on_ones": [],
+        "delegation_origin": None, "origin_one_on_one": None,
+    }
+    assert set(s) == set(one_on_one) | {
         "turn", "opening", "queue", "delegation", "pending_action", "last_speaker",
         "closed", "current_role", "current_turn", "dropped_delegation",
         "rechecks", "pre_edit_digest", "artifact_digest", "charge", "artifact",
@@ -2673,6 +2682,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     assert s["cap_explicit"] is False
     assert s["reviewers"] == list(cast.SENIORITY) and s["reviewers"] is not s["opening"]
     assert s["considered"] == []  # nobody speaks for anyone before the chair ratifies
+    assert {key: s[key] for key in one_on_one} == one_on_one
     assert pb._state(run) is s  # same run, same dict
 
 
@@ -2759,7 +2769,25 @@ def _past_selection(run, s):
     run.phase, s["current_role"] = "s3-senior_director", "senior_director"
 
 
-def _drive(script, max_turns=30, selection=None, *, reductions=None):
+def _answer(block):
+    """The answer a worker sends for a scripted block, or None for no finding.
+
+    ``_ok: False`` is no finding. Otherwise ``_prose`` (a short default that
+    breaks none of voice's rules) and one hermes-turn block holding every key
+    not starting with ``_``: True is ``yes``, False is ``no``, a str verbatim.
+    ``_prose: ""`` with keys is a signals-only answer; no keys, no block.
+    """
+    if block.get("_ok") is False:
+        return None
+    prose = block.get("_prose", "Rollback first, then cost; I can defend that order.")
+    keys = {
+        key: "yes" if value is True else "no" if value is False else value
+        for key, value in block.items() if not key.startswith("_")
+    }
+    return _turn_answer(prose, **keys) if keys else prose
+
+
+def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, *, reductions=None):
     """Drive a whole run through the real next_phase.
 
     `script` maps a phase name to the block its speaker emits, or is a callable
@@ -2790,6 +2818,8 @@ def _drive(script, max_turns=30, selection=None, *, reductions=None):
         s["selection_next"] = 1
     else:
         _past_selection(run, s)
+    # `open` never runs here, so nothing else sets it: 0 (off) unless asked.
+    s["one_on_one_budget"] = one_on_one_budget
     seen = ["open"]
     speakers = []
     delivered = []
@@ -2812,6 +2842,27 @@ def _drive(script, max_turns=30, selection=None, *, reductions=None):
                     reductions.append((nxt, reduction))
             continue
         block = script(nxt, s) if callable(script) else dict(script.get(nxt, {}))
+        if s["current_kind"] == "plan":
+            # The owner's plan through the REAL seed and reduce: the plan
+            # ticket, `_grade`, `_apply_plan` and the plan entry run with
+            # nothing transcribed. Exempt from retakes, and not a meeting turn,
+            # so the owner stays out of `speakers` here.
+            from engine import contracts
+
+            assert nxt == "p01-owner", nxt
+            assert s["roster"], "pass selection= with a 1:1 budget: a pair needs seats"
+            ticket = pb.seed(run, _NamedSite("local"))[0]
+            contracts.validate(ticket.payload, pb.payload_schema(nxt))
+            assert (ticket.id, ticket.payload["kind"]) == (f"{run.id}/{nxt}", "plan")
+            answer = _answer(block)
+            for red in pb.reduce(
+                run, nxt,
+                [_finding(run, f"{run.id}/{nxt}", answer)] if answer is not None else [],
+                _NamedSite("local"),
+            ):
+                red.phase = nxt  # as the queue stores it, so a test can read it back
+                run.reductions.append(red)
+            continue
         if block.get("_retake"):
             # A take reduce discarded: its gates never run, and the same
             # speaker is asked again (`_discard` sets exactly this).
@@ -2858,6 +2909,10 @@ def check_invariants(s, seen, speakers, max_turns=30, delivered=None, reviewers=
     assert len(seen) == len(set(seen)), "duplicate phase name"
     reviewers = _REVIEWERS if reviewers is None else reviewers
     seen = [phase for phase in seen if not re.match(r"s[1-3]-", phase)]
+    # The plan is not a meeting turn (D2): minted at most once, then out of
+    # every NN, kept-take and reply check below.
+    assert seen.count("p01-owner") <= 1, "the plan was minted twice"
+    seen = [phase for phase in seen if phase != "p01-owner"]
     assert seen[-1] in DECISION_PHASES, f"did not end at a decision phase: {seen[-1]}"
     kept = _kept(seen[1:])  # seen[0] is `open`; speakers run parallel to seen[1:]
     assert sum(
@@ -3370,6 +3425,250 @@ def test_seeded_fuzz_over_random_blocks_and_random_caps(monkeypatch):
     assert json.dumps([cast.CAST, cast.LIBRARY], sort_keys=True) == pristine
 
 
+# --- one-on-ones: the budget and the owner's plan (one-on-ones C1, D2-D5) -----
+
+
+def _default_roster():
+    """The default room the way selection seats it: slug -> seat record, all nine."""
+    return {role: {**cast.CAST[role], "role": role} for role in cast.CAST}
+
+
+def _at_plan(budget=16):
+    """A run parked on `p01-owner`, minted by the real next_phase after selection."""
+    pb = _committee()
+    run = _run(phase="s3-senior_director")
+    s = pb._state(run)
+    # `selection_next` defaults to 4 (selection done), and the chair spoke last
+    s.update(current_role=cast.CHAIR_ROLE, one_on_one_budget=budget, roster=_default_roster())
+    run.phase = pb.next_phase(run)
+    assert (run.phase, s["current_kind"], s["current_role"]) == ("p01-owner", "plan", "owner")
+    return pb, run, s
+
+
+def _plan_block(*lines):
+    """The parsed block of a plan answer naming `lines` as meet_1, meet_2, ..."""
+    return turnblock.parse(_answer({f"meet_{n}": line for n, line in enumerate(lines, 1)}))
+
+
+def _plan(block, *, roster=None, budget=16):
+    """`_apply_plan` over a fresh post-selection state: (state, result)."""
+    from playbooks.committee.playbook import _apply_plan
+
+    s = _committee()._state(_run())
+    s.update(one_on_one_budget=budget, roster=roster or _default_roster())
+    return s, _apply_plan(s, block, delivered=True)
+
+
+def test_budget_env_parse(artifact, monkeypatch):
+    """C1: read once at `open`. Junk, negatives and unset mean 16; 0 and 1 are
+    kept as given and mean off, because a 1:1 needs two exchanges."""
+    from playbooks.committee.playbook import DEFAULT_MAX_ONE_ON_ONE, ENV_MAX_ONE_ON_ONE
+
+    assert ENV_MAX_ONE_ON_ONE == "HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS"
+    assert DEFAULT_MAX_ONE_ON_ONE == 16
+    for raw, stored in (("0", 0), ("1", 1), ("junk", 16), ("-3", 16), (None, 16)):
+        if raw is None:
+            monkeypatch.delenv(ENV_MAX_ONE_ON_ONE)
+        else:
+            monkeypatch.setenv(ENV_MAX_ONE_ON_ONE, raw)
+        pb = _committee()
+        run = _run(phase="open")
+        pb.seed(run, _NamedSite("local"))
+        s = pb._state(run)
+        assert s["one_on_one_budget"] == stored, raw
+        # selection done (at `open` itself, 4 means this process never opened
+        # the run: `_lost`): the plan comes next iff 1:1s are on
+        s["selection_next"] = 4
+        _past_selection(run, s)
+        assert (pb.next_phase(run) == "p01-owner") is (stored >= 2), raw
+
+
+def test_budget_zero_turns_one_on_ones_off():
+    """AC9 (off half): budgets 0 and 1 mint no plan and leave every phase the
+    base branch's. At 2 the plan is the only phase added."""
+    base = _drive({}, selection=DEFAULT_SELECTION)[3]
+    for budget in (0, 1):
+        _, _, s, seen, sp, ok = _drive({}, selection=DEFAULT_SELECTION, one_on_one_budget=budget)
+        check_invariants(s, seen, sp, delivered=ok)
+        assert seen == base, budget
+        assert s["planned"] is False and s["one_on_one_used"] == 0
+
+    seen = _drive({}, selection=DEFAULT_SELECTION, one_on_one_budget=2)[3]
+    assert "p01-owner" in seen
+    assert [phase for phase in seen if phase != "p01-owner"] == base
+
+
+def test_undelivered_plan_records_no_plan_delivered(monkeypatch):
+    """C6 and the plan edge case: a plan whose worker produced nothing schedules
+    nothing and the meeting goes straight on to the opening round. The plan is
+    one owner ticket of kind `plan`, and a thread failure never raises."""
+    from engine import contracts
+    from playbooks.committee import thread
+
+    pb, run, s = _at_plan()
+    ticket = pb.seed(run, _NamedSite("local"))[0]
+    assert ticket.id == f"{run.id}/p01-owner"
+    assert (ticket.payload["role"], ticket.payload["kind"], ticket.payload["action"]) == (
+        "owner", "plan", None)
+    assert ticket.payload["title"] == f"{cast.persona('owner')['name']} (owner) plans the 1:1s"
+    assert "meet_1" in ticket.payload["goal"] and len(ticket.payload["goal"]) < cast.GOAL_MAX
+    contracts.validate(ticket.payload, pb.payload_schema("p01-owner"))
+
+    red = pb.reduce(run, "p01-owner", [], _NamedSite("local"))
+    assert [r.kind for r in red] == ["one_on_one_plan"]
+    doc = red[0].json
+    assert (doc["delivered"], doc["body"], doc["fallback"]) == (False, "", "no plan delivered")
+    assert (doc["take"], doc["takes"], doc["kept"], doc["voice"]) == (1, 1, True, None)
+    assert (doc["violations"], doc["flags"]) == ([], [])
+    assert doc["one_on_ones_scheduled"] == [] and doc["one_on_ones_dropped"] == []
+    assert doc["one_on_one_budget"] == 16 and doc["error"] is None
+    assert not {"cap", "artifact", "revised", "role", "turn", "needs_human_ticket_ids"} & set(doc)
+    assert "_(no up-front 1:1s: no plan delivered)_" in thread.path(run.id).read_text(
+        encoding="utf-8")
+    # the plan moved no meeting state, and it is never minted again
+    assert (s["turn"], s["current_turn"], s["last_speaker"], s["queue"], s["closed"]) == (
+        1, 0, "owner", [], False)
+    assert s["opening"] == list(cast.SENIORITY) and s["planned"] is True
+    assert pb.next_phase(run) == "t01-senior_director"
+
+    # a thread that cannot be written is recorded, and the plan still stands
+    pb, run, s = _at_plan()
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(thread, "append_plan", boom)
+    answer = _answer({"meet_1": "owner tpm: cost"})
+    doc = pb.reduce(run, "p01-owner", [_finding(run, f"{run.id}/p01-owner", answer)],
+                    _NamedSite("local"))[0].json
+    assert doc["error"] == "thread: disk full"
+    assert [pair["members"] for pair in s["pending_one_on_ones"]] == [["tpm", "owner"]]
+
+
+def test_plan_with_no_valid_pairs_falls_back():
+    """AC1: a delivered plan naming no valid 1:1 records `no valid pairs`, and
+    `p01-owner` is followed by the first opening-round turn."""
+    from playbooks.committee import thread
+    from playbooks.committee.playbook import _SIGNALS_ONLY
+
+    base = _drive({}, selection=DEFAULT_SELECTION)[3]
+    _, run, s, seen, sp, ok = _drive({}, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    check_invariants(s, seen, sp, delivered=ok)
+    assert seen[seen.index("p01-owner") + 1] == "t01-senior_director"
+    assert [phase for phase in seen if phase != "p01-owner"] == base
+    plans = [r for r in run.reductions if r.kind == "one_on_one_plan"]
+    assert [r.phase for r in plans] == ["p01-owner"]
+    doc = plans[0].json
+    assert (doc["delivered"], doc["fallback"], doc["body"]) == (True, "no valid pairs", _answer({}))
+    assert doc["one_on_ones_scheduled"] == [] and doc["one_on_ones_dropped"] == []
+    assert (doc["take"], doc["takes"], doc["kept"], doc["violations"]) == (1, 1, True, [])
+    assert doc["one_on_one_budget"] == 16 and doc["error"] is None
+    assert not {"cap", "artifact", "revised", "role", "turn"} & set(doc)
+    assert "_(no up-front 1:1s: no valid pairs)_" in thread.path(run.id).read_text(
+        encoding="utf-8")
+    assert s["one_on_one_seq"] == 0 and s["one_on_one_used"] == 0
+
+    # a signals-only plan whose one line names nobody seated falls back the same way
+    pb, run, s = _at_plan()
+    answer = _answer({"_prose": "", "meet_1": "owner nobody: cost"})
+    doc = pb.reduce(run, "p01-owner", [_finding(run, f"{run.id}/p01-owner", answer)],
+                    _NamedSite("local"))[0].json
+    assert (doc["delivered"], doc["body"], doc["voice"]) == (True, _SIGNALS_ONLY, None)
+    assert doc["fallback"] == "no valid pairs"
+    assert [drop["reason"] for drop in doc["one_on_ones_dropped"]] == ["unknown role"]
+    assert pb.next_phase(run) == "t01-senior_director"
+
+
+def test_plan_lines_are_validated_with_reasons():
+    """C4: a plan line is dropped with the first reason that applies, in order,
+    or scheduled as an up-front pair hosted by the owner or the manager."""
+    def reasons(*lines, **kw):
+        return [drop["reason"] for drop in _plan(_plan_block(*lines), **kw)[1]["dropped"]]
+
+    assert reasons("manager tpm rollback", "manager tpm:", "manager: rollback") == [
+        "malformed", "no topic", "malformed"]
+    assert reasons("chair tpm: x", "owner chair: x", "owner nobody: x") == ["unknown role"] * 3
+    assert reasons("tpm pm: x", "manager owner: x", "owner owner: x") == [
+        "invalid host", "owner as guest", "owner as guest"]
+    assert reasons("manager manager: x", "owner junior_ic: x") == ["same member", "junior_ic"]
+    assert reasons("owner tpm: first", "Owner, TPM: again") == ["duplicate"]
+    assert reasons("owner tpm: a", "manager pm: b", "owner tl: c", budget=5) == ["budget"]
+
+    # a drop keeps its line as written, and its members once they parse
+    s, out = _plan(_plan_block("manager tpm rollback", "tpm pm: x"))
+    assert out["dropped"] == [
+        {"seq": None, "text": "manager tpm rollback", "members": None, "reason": "malformed"},
+        {"seq": None, "text": "tpm pm: x", "members": ["tpm", "pm"], "reason": "invalid host"},
+    ]
+    assert s["dropped_one_on_ones"] == out["dropped"] and s["pending_one_on_ones"] == []
+    assert out["scheduled"] == [] and out["fallback"] == "no valid pairs"
+
+    # the chair's seat and the manager may be guests; meet_4 never reaches the gate
+    block = _plan_block("manager tpm: rollback plan", "owner senior_director: scope",
+                        "owner manager: staffing", "owner pm: cut by the parser")
+    assert "meet_4" not in block
+    s, out = _plan(block)
+    assert out["scheduled"][0] == {
+        "seq": 1, "origin": "upfront", "called_by": "owner", "host": "manager",
+        "members": ["tpm", "manager"], "topic": "rollback plan"}
+    assert [pair["members"] for pair in out["scheduled"]] == [
+        ["tpm", "manager"], ["senior_director", "owner"], ["manager", "owner"]]
+    assert [pair["seq"] for pair in out["scheduled"]] == [1, 2, 3] and s["one_on_one_seq"] == 3
+    assert s["pending_one_on_ones"] == out["scheduled"]
+    assert out["dropped"] == [] and s["dropped_one_on_ones"] == [] and out["fallback"] is None
+
+    # a topic is clipped to TOPIC_MAX
+    topic = _plan(_plan_block("owner tpm: " + "x" * 300))[1]["scheduled"][0]["topic"]
+    assert len(topic) == cast.TOPIC_MAX and topic.endswith("…")
+
+    # roles are the run's seats, a library and a derived seat included, not cast.CAST
+    _, out = _plan(_plan_block("owner security: threat model", "manager crew_owner: rota",
+                               "owner pm: schedule"), roster=_one_on_one_roster())
+    assert [pair["members"] for pair in out["scheduled"]] == [
+        ["security", "owner"], ["crew_owner", "manager"]]
+    assert [drop["reason"] for drop in out["dropped"]] == ["unknown role"]
+
+    # gap 6: a verbatim copy of plan_instruction()'s worked example schedules nothing
+    _, out = _plan(turnblock.parse(turnblock.plan_instruction()))
+    assert out["scheduled"] == []
+    assert [drop["reason"] for drop in out["dropped"]] == ["unknown role"]
+
+    # ... and pairs are checked against a selection fallback roster the same way
+    _, _, s, seen, sp, ok = _drive(
+        {"p01-owner": {"meet_1": "owner security: threat model", "meet_2": "owner tpm: plan"}},
+        selection={**DEFAULT_SELECTION, "senior_director": None}, one_on_one_budget=16)
+    check_invariants(s, seen, sp, delivered=ok)
+    assert s["dropped_one_on_ones"][0] == {
+        "seq": None, "text": "owner security: threat model",
+        "members": ["owner", "security"], "reason": "unknown role"}
+    assert s["one_on_one_seq"] == 1
+
+
+def test_plan_is_exempt_from_retakes():
+    """D8 Plan: graded for the record with every file image refused, even its
+    own valid images/p01-owner.svg, and kept at take 1 whatever it broke."""
+    from playbooks.committee import thread
+
+    pb, run, s = _at_plan()
+    (thread.images_dir(run.id) / "p01-owner.svg").write_bytes(b"<svg></svg>")
+    prose = "word " * 200 + "\n![plan](images/p01-owner.svg)\nDescription: who meets whom."
+    answer = _answer({"_prose": prose, "meet_1": "manager tpm: rollback plan"})
+
+    red = pb.reduce(run, "p01-owner", [_finding(run, f"{run.id}/p01-owner", answer)],
+                    _NamedSite("local"))
+
+    assert [r.kind for r in red] == ["one_on_one_plan"]
+    doc = red[0].json
+    assert (doc["take"], doc["takes"], doc["kept"], doc["delivered"]) == (1, 1, True, True)
+    assert {"over_cap", "image_missing"} <= set(doc["violations"])
+    assert doc["voice"]["images"][0]["ok"] is False
+    assert [pair["members"] for pair in doc["one_on_ones_scheduled"]] == [["tpm", "manager"]]
+    assert s["retake"] is None and s["held"] is None
+    nxt = pb.next_phase(run)
+    assert "-take" not in nxt and nxt != "p01-owner"
+
+
 # --- the four transport-path methods (spec §5.6) ---------------------------
 
 
@@ -3421,6 +3720,9 @@ def test_every_ticket_kind_validates_against_the_one_payload_schema():
         ("t01-senior_director", _payload("turn", "senior_director")),
         ("t04-junior_ic", _payload("edit", "junior_ic", action="Add a rollback plan.")),
         ("decision", _payload("decision", "chair")),
+        ("p01-owner", _payload("plan", "owner")),
+        ("o01-tpm", _payload("one_on_one", "tpm")),
+        ("o05-manager", _payload("one_on_one_close", "manager")),
         ("s1-owner", _payload("select", "owner")),
     ]
     for phase, payload in cases:
@@ -3471,7 +3773,8 @@ def test_action_is_nullable_and_kind_is_a_closed_vocabulary():
 
     with pytest.raises(contracts.ContractError) as exc:
         contracts.validate(_payload("vote", "owner"), schema)
-    assert "Value 'vote' not in enum ['turn', 'edit', 'decision', 'select']" in str(exc.value)
+    assert ("Value 'vote' not in enum ['turn', 'edit', 'decision', 'select', "
+            "'plan', 'one_on_one', 'one_on_one_close']") in str(exc.value)
 
     with pytest.raises(contracts.ContractError) as exc:
         contracts.validate(_payload("turn", "owner", action=7), schema)

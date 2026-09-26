@@ -97,6 +97,9 @@ def artifact(tmp_path, monkeypatch):
     monkeypatch.setenv(committee.ENV_ARTIFACT, str(path))
     monkeypatch.delenv(committee.ENV_MAX_TURNS, raising=False)
     monkeypatch.delenv(committee.ENV_DRIVER, raising=False)
+    # 1:1s off: every scripted run keeps the base branch's phase list. The 1:1
+    # end-to-end test turns them on itself.
+    monkeypatch.setenv(committee.ENV_MAX_ONE_ON_ONE, "0")
     return path
 
 
