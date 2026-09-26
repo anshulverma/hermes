@@ -94,8 +94,9 @@ RUBRIC = "\n".join((
     "Concerns come from each member's own turns, never from persona config. The judge "
     "also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`. "
     "A stakeholder in seats.considered with a non-null represented_by counts as "
-    "represented, not missing; a stakeholder the thread names who is in neither "
-    "seats.roster nor seats.considered counts as missing.",
+    "represented, not missing; a stakeholder in seats.considered with no "
+    "represented_by, or one the thread names who is in neither seats.roster nor "
+    "seats.considered, counts as missing.",
     "",
     f"Evidence: {VERBATIM}.",
 ))
@@ -735,23 +736,29 @@ def _selected_seats(seats: dict, final: dict | None) -> dict:
     the roster and reviewers are the ratified ones in roster order, and the
     header has no say. spoken and unheard keep today's rule: today's ``spoken``
     already holds every reviewer role with a delivered turn, because the header
-    roster is unioned with every turn role. A final doc missing a key leaves
-    today's seats in place.
+    roster is unioned with every turn role. A malformed final doc fails closed:
+    the header's seats with ``unheard`` None, so ``concern_cap`` caps, because
+    a selection-era header seats only the fixed four and would read "all heard".
     """
     if final is None:
         return seats
     try:
         roster = [seat["role"] for seat in final["seated"]]
-        reviewers = list(final["reviewers"])
+        reviewers = final["reviewers"]
         considered = [{"stakeholder": c["stakeholder"], "represented_by": c["represented_by"]}
                       for c in final["considered"]]
+        # Only the shapes resolve writes: a str, a dict or "" iterates too.
+        if not (isinstance(final["seated"], list) and isinstance(final["considered"], list)
+                and isinstance(reviewers, list)
+                and all(isinstance(r, str) for r in roster + reviewers)):
+            raise TypeError("malformed final selection")
     except (KeyError, TypeError):
-        return seats
+        return {**seats, "unheard": None}
     heard = set(seats["spoken"])
     return {
         **seats,
         "roster": roster,
-        "reviewers": reviewers,
+        "reviewers": list(reviewers),
         "spoken": [r for r in reviewers if r in heard],
         "unheard": [r for r in reviewers if r not in heard],
         "considered": considered,

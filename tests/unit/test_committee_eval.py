@@ -148,7 +148,7 @@ def test_voice_measure_and_version():
     assert "3: some edits resolve their concern, others only partly." in E.RUBRIC
     assert "1: cosmetic or unrelated edits, or edits that leave the concern unresolved." in E.RUBRIC
     assert "partial." not in E.RUBRIC
-    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "7db8cd4c", (
+    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "36bad27d", (
         "RUBRIC text changed: bump the affected judge dimension's version in DIMENSIONS, "
         "re-pin this hash, and update the verbatim block and hash in docs/specs/committee-eval.md"
     )
@@ -3623,8 +3623,9 @@ SEL_RUN = "run-sel"
 # The sentence selection adds to RUBRIC's concern_coverage anchor (selection D8).
 REPRESENTED_RULE = (
     "A stakeholder in seats.considered with a non-null represented_by counts as "
-    "represented, not missing; a stakeholder the thread names who is in neither "
-    "seats.roster nor seats.considered counts as missing."
+    "represented, not missing; a stakeholder in seats.considered with no "
+    "represented_by, or one the thread names who is in neither seats.roster nor "
+    "seats.considered, counts as missing."
 )
 
 # The one line inside a turn entry that says it: the scanner's positive control.
@@ -3823,6 +3824,59 @@ def test_seats_come_from_the_final_selection_reduction(tmp_path, monkeypatch):
     # the concern_coverage inputs with no other change.
     inputs = chosen / "runs" / "committee-eval-chosen" / "inputs"
     assert "Partner crews" in (inputs / "metrics.json").read_text(encoding="utf-8")
+
+
+def test_a_malformed_final_selection_fails_closed_so_concern_coverage_caps():
+    """A hand-edited final selection doc is never read as "every reviewer was
+    heard": the header's seats come back with unheard null, and concern_cap caps."""
+    seated = _sel_seated()
+    good = _sel_stage(3, "senior_director", seated[3:5], seated=seated,
+                      reviewers=SEL_REVIEWERS, considered=SEL_CONSIDERED, fallback=None)
+    # A selection-era header seats only the fixed four; turn roles join them.
+    header = {"roster": ["owner", "senior_director", "manager", "junior_ic", "security"],
+              "reviewers": ["senior_director", "manager", "security"],
+              "spoken": ["senior_director", "manager", "security"], "unheard": []}
+
+    def cap(seats):
+        return E.concern_cap(5, {"seats": seats, "unanswered_reviewer_turns": []})
+
+    # The controls: the ratified committee has tpm unheard, and the header alone
+    # (what a malformed final used to fall back to) would clear the cap.
+    assert E._selected_seats(header, good)["unheard"] == ["tpm"]
+    assert cap(header) == 5
+    malformed = {
+        "considered missing": {k: v for k, v in good.items() if k != "considered"},
+        "considered null": {**good, "considered": None},
+        "considered not a list": {**good, "considered": {}},
+        "considered entry not a dict": {**good, "considered": ["Legal"]},
+        "seated a string": {**good, "seated": "owner"},
+        "seated not a list": {**good, "seated": ""},
+        "seated role not a string": {**good, "seated": [*seated, {"role": 7}]},
+        "reviewers nested": {**good, "reviewers": [["tpm"]]},
+        "reviewers a string": {**good, "reviewers": "tpm"},
+    }
+    for why, final in malformed.items():
+        seats = E._selected_seats(header, final)
+
+        assert seats == {**header, "unheard": None}, why
+        assert cap(seats) == 3, why
+
+
+def test_the_latest_row_marked_final_true_is_the_final_selection():
+    """Two final rows: the later wins. A `final` that is not exactly true (a
+    stage's false, a hand-edited "true") never counts."""
+    first = _sel_stage(3, "senior_director", [], reviewers=["senior_director", "manager", "tpm"])
+    later = _sel_stage(3, "senior_director", [], reviewers=["senior_director", "manager"])
+    rows = [("selection", "pending", _sel_stage(1, "owner", [])),
+            ("selection", "pending", first),
+            ("turn", "pending", {"role": "owner", "turn": 1}),
+            ("selection", "pending", later),
+            ("selection", "pending", {**later, "final": "true"}),
+            ("selection", "pending", _sel_stage(2, "manager", []))]
+
+    assert E._final_selection(rows) is later
+    assert E._final_selection(rows[:3]) is first
+    assert E._final_selection(rows[:1] + rows[4:]) is None
 
 
 def test_committee_seated_lines_never_count_as_outside_room(tmp_path, monkeypatch):
