@@ -292,9 +292,10 @@ def title(
 # The goal string is the only channel to a worker: the adapter renders
 # `goal_envelope.goal` into argv and the ticket payload never travels. So the
 # goal carries its material -- who you are, the charge, the two paths, whose
-# floor it is, the completion condition -- and the two runtime-variable strings
-# are the only ones bounded. Nothing clips the assembled string from the end,
-# which is what keeps the guardrail and the completion condition intact.
+# floor it is, the completion condition -- and the three runtime-variable
+# strings (the charge, a delegated action, a retake note) are the only ones
+# bounded. Nothing clips the assembled string from the end, which is what keeps
+# the guardrail and the completion condition intact.
 
 _GUARDRAIL = (
     "This review lands nothing, submits nothing and touches no repository. "
@@ -365,9 +366,12 @@ _DONE_EDIT = (
     "sentence of 40 words or fewer saying what you changed."
 )
 
+# Not spec C7's "saying what you changed": take 1 may have written nothing (a
+# report of why it could not edit, discarded for its length), and a retake told
+# it changed something would claim an edit that never happened.
 _DONE_EDIT_RETAKE = (
     "Done when: your answer is one sentence of 40 words or fewer saying what "
-    "you changed."
+    "your first take changed, or that it changed nothing."
 )
 
 _DONE_DECISION = (
@@ -394,7 +398,9 @@ _GUARDRAIL_IMAGE = (
     "nothing else."
 )
 
-_ALREADY_EDITED = "Your edit is already in the revised copy; do not edit it again."
+_ALREADY_EDITED = (
+    "Do not edit the revised copy again; whatever your first take changed stands."
+)
 
 
 def clip(text: str | None, limit: int) -> str:
@@ -484,8 +490,8 @@ def goal(
             f"{_UNCHANGED_ORIGINAL}\n\n"
         )
         if retake is not None:
-            # Report-only: take 1's edit is already in the copy and its
-            # re-check measures that edit, so this take writes nothing.
+            # Report-only: whatever take 1 wrote is already in the copy and
+            # its re-check measures that, so this take writes nothing.
             return (
                 f"{head}{_ALREADY_EDITED}\n\n{again}{pointer}\n\n"
                 f"{_GUARDRAIL}\n\n{_DONE_EDIT_RETAKE}"

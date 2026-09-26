@@ -105,7 +105,19 @@ def header_artifact(run_id: str) -> str:
 
 
 def images_dir(run_id: str) -> Path:
-    """``runs/<run_id>/images/``: the one folder an owner or reviewer may write an image into (0700)."""
+    """``runs/<run_id>/images/``: the one folder an owner or reviewer may write an image into (0700).
+
+    A worker could leave a symlink or a file there. ``state_dir`` would follow
+    the symlink (and chmod its target), and a file check through it could pass
+    an image the server, which follows none, then refuses. Raise instead.
+    """
+    folder = _config.state_dir("runs", run_id) / "images"
+    try:
+        mode = os.lstat(folder).st_mode
+    except FileNotFoundError:
+        mode = stat.S_IFDIR
+    if not stat.S_ISDIR(mode):
+        raise ValueError(f"{folder} is not a plain directory (a symlink or a file); refusing it")
     return _config.state_dir("runs", run_id, "images")
 
 

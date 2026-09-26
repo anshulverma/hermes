@@ -732,7 +732,7 @@ def test_every_goal_points_at_the_ground_rules_with_its_cap_and_carries_no_dash(
     )
     for g in (_goal(role), _goal(role, retake="Retake 2 of 3."), _goal(role, image="t02-x")):
         assert pointer in g, role
-        assert "—" not in g and " -- " not in g, role
+        assert "—" not in g and "–" not in g and " -- " not in g, role
     # built without `image`, no goal offers an image file
     assert "image, .svg" not in _goal(role)
 
@@ -757,13 +757,17 @@ def test_the_junior_retake_is_report_only():
         f"The revised copy you edit: {_REVISED}",
         "The owner delegated this to you: add a rollback section naming who pages",
     )
-    assert "Your edit is already in the revised copy; do not edit it again." in g
+    # Take 1 may have written nothing (a report of why it could not), so the
+    # retake is never told its edit landed, and may say it changed nothing.
+    assert "Do not edit the revised copy again; whatever your first take changed stands." in g
+    assert "already in the revised copy" not in g
     assert "Retake 2 of 3. Say it again within them." in g
     assert _GUARDRAIL in g and "the only file you may write" not in g.lower()
     assert g.endswith(
-        "Done when: your answer is one sentence of 40 words or fewer saying what you changed."
+        "Done when: your answer is one sentence of 40 words or fewer saying what your "
+        "first take changed, or that it changed nothing."
     )
-    assert "Your edit is already" not in _goal(cast.JUNIOR)  # take 1 edits
+    assert "Do not edit the revised copy again" not in _goal(cast.JUNIOR)  # take 1 edits
 
 
 def test_owner_and_reviewers_may_write_one_image_named_for_their_phase():
@@ -846,6 +850,26 @@ def test_images_dir_is_the_runs_private_images_folder(tmp_path):
 
     assert folder == tmp_path / "runs" / "committee-x" / "images"
     assert folder.is_dir() and (folder.stat().st_mode & 0o777) == 0o700
+
+
+@pytest.mark.parametrize("planted", ["symlink", "file"])
+def test_images_dir_refuses_a_planted_symlink_or_file(tmp_path, planted):
+    """A worker can plant images/ as a symlink: never follow it, never chmod its target."""
+    from playbooks.committee import thread
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o755)
+    elsewhere.chmod(0o755)
+    run_dir = tmp_path / "runs" / "committee-x"
+    run_dir.mkdir(parents=True)
+    if planted == "symlink":
+        (run_dir / "images").symlink_to(elsewhere, target_is_directory=True)
+    else:
+        (run_dir / "images").write_bytes(b"")
+
+    with pytest.raises(ValueError, match="images"):
+        thread.images_dir("committee-x")
+    assert (elsewhere.stat().st_mode & 0o777) == 0o755
 
 
 def test_thread_appends_turns_in_order_and_never_truncates(tmp_path):
@@ -1858,7 +1882,8 @@ def test_open_writes_the_ground_rules_and_makes_the_images_folder(artifact, tmp_
     pb.seed(run, _NamedSite("local"))
 
     assert "\n".join(voice.RULES) in thread.path(run.id).read_text(encoding="utf-8")
-    assert (tmp_path / "runs" / run.id / "images").is_dir()
+    images = tmp_path / "runs" / run.id / "images"
+    assert images.is_dir() and (images.stat().st_mode & 0o777) == 0o700
 
 
 def test_open_snapshots_the_bytes_it_hashed_before_the_header(artifact, tmp_path):
