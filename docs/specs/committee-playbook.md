@@ -81,7 +81,9 @@ The charge is clipped to 400 characters (`cast.CHARGE_MAX`) with an ellipsis rat
 mid-word. A delegated `action` and a `stance` are cut to 200 (`turnblock.ACTION_MAX`,
 `turnblock.STANCE_MAX`) by `turnblock._clip`: at the last space before the cap when that keeps at
 least half of it, else mid-word, then `…`. That is a backstop, since the goal asks for one sentence
-within the cap; the raw lengths go on the turn's `voice` as `action_chars` and `stance_chars`. The
+within the cap and an owner's action or an owner's or reviewer's stance over it sends the take back
+(`action_too_long`, `stance_too_long`), so only a kept take 3 is ever cut; the raw lengths go on the
+turn's `voice` as `action_chars` and `stance_chars`. The
 assembled goal is asserted under 3600 in every shape (see "Goal headroom").
 
 ## The turn block
@@ -127,7 +129,13 @@ Members talk like engineers in a meeting, not like memo writers. The rules live 
 from the operator's diff-authoring skill; nothing reads the skill at runtime. `open` writes them
 into the thread header after the roster, under `Ground rules for every speaker:`, and every goal
 carries one pointer line with the speaker's cap (`cast._RULES_POINTER`). The header labels are
-plain (`Charge:`, `Artifact:`, `Committee:`), with no bold.
+plain (`Charge:`, `Artifact:`, `Committee:`), with no bold. The thirteen numbered rules ask for a
+path:line and one example (rules 8 and 9 name the category, then one checkable instance), and one
+blank line ends the list, so Markdown never folds the unnumbered additions into rule 13. The
+additions name filler and hedging with examples (never 'Great question', 'Hope this helps', 'It's
+worth noting' or 'To be clear'; Bad: 'I think this might perhaps break.') and show one good turn
+whole: `Defer it: the retry loop at engine/dispatch.py:284 never backs off, so one dead host pages
+all night. For example, h3 failed 40 times in 10 min.`
 
 | seat (`voice.kind`) | cap | bullets | images |
 |---|---|---|---|
@@ -137,8 +145,11 @@ plain (`Charge:`, `Artifact:`, `Committee:`), with no bold.
 
 Nobody may use headers, bold, tables or nested bullets. An image is either a file the speaker
 writes as `runs/<run_id>/images/{base}.svg` or `.png` (`base` is its take-1 phase name, so
-`t02-owner.svg`) or a mermaid block, each with a caption and a `Description:` line of 40 words or
-fewer that later speakers read as text. Either of these is one image:
+`t02-owner.svg`) or a mermaid block, each with a caption of 15 words or fewer and a `Description:`
+line of 40 words or fewer that later speakers read as text. The goal names the folder as "the
+images folder beside the thread (not your working directory)": a worker's cwd is wherever it was
+launched, and a relative `images/` there would write into that checkout. Either of these is one
+image:
 
 ````
 ![Retry path before and after](images/t02-owner.svg)
@@ -155,28 +166,56 @@ Description: canary first, then one region, then everywhere.
 **Every take is measured.** `voice.measure(body, role)` runs on the speaker's own prose
 (`turnblock.strip(answer)`), never on thread.md. Fenced blocks, image references and the
 `Figure:`/`Description:` lines add no words and break no formatting rule, so a snippet holding
-`# x` or `**kw` is safe. A dash inside a quoted span, from `"` or `“` to the next matching close on
-that line, is not counted: `Ship “a — “b” c” now.` has none. `voice.check_images` is the only IO.
-A file image is ok only when it is referenced as exactly `images/<name>`, named for this speaker's
-`base`, and is a regular file (not a symlink) of at most 2 MB with PNG or SVG magic, in an images
-folder that exists and is not a symlink. Every take's metrics stay on its reduction under `voice`.
+`# x` or `**kw` is safe. A fence is what CommonMark renders as one: indented by up to three spaces
+(a tab or a no-break space makes it prose), and a backtick fence's info string holds no backtick;
+an unclosed fence is prose. A dash inside a quoted span, from `"` or `“` to the next matching close
+on that line, is not counted: `Ship “a — “b” c” now.` has none. Bold and sentence ends inside a
+double- or single-quoted span are the artifact's, not the speaker's, so neither counts there;
+bold on a `>` blockquote line does not count either, nor does a `**` with a digit on both sides
+(`2**10`). A sentence end skips `e.g.`, `i.e.`, `vs.`, `etc.`, `cf.`, `sec.`, `approx.`, `no.` and
+the month abbreviations (`Jan.` to `Dec.`, `Sept.`), so `Renamed the 'Why now?' heading.` is one
+sentence. A setext underline (a `===` or `---` line right under a prose line) counts as a header,
+because Markdown draws one. `first_line_words` is the first sentence of the first line.
+`voice.check_images` is the only IO. A file image is ok only when it is referenced as exactly
+`images/<name>`, named for this speaker's `base`, and is a regular file (not a symlink, not a FIFO)
+of at most 2 MB with PNG or SVG magic, in an images folder that exists and is not a symlink; a
+passing one also records `sha256`, of the bytes checked. `images` keeps the first 8 records and
+`images_count` counts them all, so one oversized answer stores 8, never thousands. Every take's
+metrics stay on its reduction under `voice`.
 
 **A take that breaks a hard rule is sent back.** The hard rules, in `voice.violations` order:
 `over_cap`; `multi_line` and `multi_sentence` (junior IC); `headers`; `bold`; `tables`; `nested`;
-`too_many_bullets`; `too_many_images`; `image_uncaptioned`; `image_missing` (a file image that is
-not ok, and every http, reference-style or shortcut `![label]` image); `action_too_long` (an owner
-action over 200 characters). `no_pointer`, `no_example`, `dashes`, `long_first_line` (over 25
-words) and `stance_clipped` are flags: shown, never sent back.
+`too_many_bullets`; `too_many_images` (on `images_count`); `image_uncaptioned` (a caption over 15
+words, a description over 40, or either missing); `image_missing` (a file image that is not ok,
+and every http, reference-style or shortcut `![label]` image); `action_too_long` (an owner action
+over 200 characters); `stance_too_long` (an owner's or a reviewer's stance over 200 characters);
+`filler` (2 or more `voice.FILLER` phrases, such as "great question" or "hope this helps"; one is
+only counted). `no_pointer`, `no_example`, `dashes`, `long_first_line` (a first sentence over 25
+words), `stance_clipped` (a kept take 3 whose stance was cut to 200) and `tells` are flags: shown,
+never sent back. `tells` is any process narration (`I checked`, `I've reviewed`, `Having read`,
+`Let me`, `I can confirm`), turn number (`turn 5`, `turns 3`, `t04`), unchanged-original narration
+(`the original is intact`, `nothing was modified`) or hedging (`I think`, `I believe`, `perhaps`,
+`might`, `could potentially`, `arguably`, `it seems`); the counts ride on `voice.tells`.
 
 `reduce` grades each take with `_grade` before any side effect. With violations and fewer than
 `voice.MAX_TAKES` (3) takes so far, `_discard` records it as `kind="take"` and holds it: nothing
-reaches thread.md, no gate is applied, no re-check or snapshot runs and no ticket is held.
-`next_phase` then mints the same speaker again, and the goal carries `voice.note`, image rules
-first, clipped to 200 characters:
+reaches thread.md, no gate is applied, no re-check or snapshot runs and no ticket is held. Its body
+(never its turn block) is written to `runs/<run_id>/takes/{base}-take{n}.md`, 0600 in a 0700
+folder, by the master only (`thread.write_take`: atomic, and `thread.takes_dir` refuses a folder
+that is a symlink or a file, which leaves the take's `error` as `takes: …` and names no file). The
+server never serves `takes/`. `next_phase` then mints the same speaker again, and the goal carries
+`voice.note`, image rules first, clipped to 200 characters, and one line naming that file:
 
 ```
 Retake 2 of 3. Rules broken: 205 words (cap 150); 3 bold. Say it again within them.
+Your last take is in takes/t02-owner-take1.md beside the thread; keep its substance.
 ```
+
+When the speaker was offered an image, `image_missing` names the one reference that passes (`an
+image not at images/t02-owner.svg or .png`); a speaker offered none (the chair, the junior IC, a
+refused folder) reads `an image missing or not your own file`. Both image rules, the word cap and
+one more count fit the clip whole; a longer list loses its last counts, which the speaker can
+reread for.
 
 | phase | what happens |
 |---|---|
@@ -184,8 +223,9 @@ Retake 2 of 3. Rules broken: 205 words (cap 150); 3 bold. Say it again within th
 | `t02-owner-take2` | 140 words: kept as turn 02 with `take: 2, takes: 2`, badged "retaken" |
 | `t03-manager` | the turn counter never moved: retakes cost no turns |
 
-Take 3 is kept verbatim whatever it says, never clipped, and flagged. An undelivered or
-signals-only take is never sent back; its `voice` is null.
+Take 3 is kept verbatim whatever it says, its prose never clipped (only an over-long stance is
+cut, and flagged `stance_clipped`), with the rules it broke. An undelivered or signals-only take
+is never sent back; its `voice` is null.
 
 - **Names and precedence (C8).** Take 1 is `t{NN}-{role}` or `decision`; take k is
   `{base}-take{k}`, where `s["base"]` is the take-1 name. Every mint of a speaking phase, here and
@@ -210,16 +250,21 @@ signals-only take is never sent back; its `voice` is null.
 - **The C4 contract**, for this loop and every later one. A discarded take is `kind="take"` with
   `{phase (the base), role, turn, take, kept: false, delivered: true, body, stance, action, voice,
   violations, flags, error}` plus the caller's `extra` keys, and never `artifact`, `revised` or
-  `cap` (the keys the kind-agnostic readers scan). A kept take goes under its own kind (`turn`,
-  `decision`, later `selection` or `one_on_one`) with `{take, takes, kept: true, voice, violations,
-  flags}`; `voice` is null on an undelivered take, and a decision adds `body`, the chair's prose
-  before the footer.
+  `cap` (the keys the kind-agnostic readers scan). Its `body` is the prose without the turn
+  block, and its `error` is `takes: …` when the take file could not be written, else null. A kept
+  take goes under its own kind (`turn`, `decision`, later `selection` or `one_on_one`) with
+  `{take, takes, kept: true, voice, violations, flags}`; `voice` is null on an undelivered take,
+  and a decision adds `body`, the chair's prose before the footer.
 - **Helpers later loops reuse**, none of which restates a rule: `_begin`;
   `_grade(run, s, role, answer, *, file_images=True)`, which never raises (pass
   `file_images=False` where an images/ name could collide, as one-on-ones' o-phases must: every
   file image is then refused); `_discard(run, s, role, answer, metrics, violations, flags, turn,
-  extra=None)`; `_keep(..., *, file_images=True)`, given the same `file_images` as `_grade`;
-  `view._segments(doc)` (never `voice.segments(body)`) and the view's `Segments`.
+  extra=None)`, which writes the take file and sets `s["last_take"]`; `_keep(..., *,
+  file_images=True)`, given the same `file_images` as `_grade`; `view._segments(doc)` (never
+  `voice.segments(body)`) and the view's `Segments`. `_begin` resets `last_take` and `image`; seed
+  sets `s["image"]` to the stem its goal offers ("" for none) and passes `last_take=s["last_take"]`
+  to `cast.goal`, so a later loop's seed that sets neither gets no file line and no named
+  reference.
 - **Model invariants (T11, `check_invariants` in tests/unit/test_committee_playbook.py).** Phase
   names are unique, the last phase is in `DECISION_PHASES`, exactly one decision is kept, NN is
   unique, ordered and within the cap among non-`-take` phases, and every delivered reviewer turn
@@ -231,21 +276,24 @@ signals-only take is never sent back; its `voice` is null.
   See [committee-eval.md](committee-eval.md).
 
 **Goal headroom** at the worst case (charge 5000, action 5000, image stem 48, retake note 5000,
-deep paths) against `cast.GOAL_MAX` 3600. A generated persona or a new goal shape must fit it; if
-one goes over, shorten `_GUARDRAIL_IMAGE` first.
+the last-take line with that 48-character stem, deep paths) against `cast.GOAL_MAX` 3600. A
+generated persona or a new goal shape must fit it; if one goes over, shorten `_GUARDRAIL_IMAGE`
+first. The owner's retake has 28 characters left at this worst case (a real stem such as
+`t12-data_scientist` is 30 shorter), which is why the goal names the takes file and the images
+folder relative to the thread rather than by absolute path.
 
 | shape | take 1 | retake |
 |---|---|---|
-| owner | 3251 (349 left) | 3453 (147 left) |
-| senior_director | 2934 (666 left) | 3136 (464 left) |
-| manager | 2806 (794 left) | 3008 (592 left) |
-| tpm | 2799 (801 left) | 3001 (599 left) |
-| pm | 2816 (784 left) | 3018 (582 left) |
-| tl | 2824 (776 left) | 3026 (574 left) |
-| staff_ic | 2849 (751 left) | 3051 (549 left) |
-| data_scientist | 2795 (805 left) | 2997 (603 left) |
-| junior_ic | 2868 (732 left) | 2769 (831 left) |
-| chair | 2553 (1047 left) | 2755 (845 left) |
+| owner | 3246 (354 left) | 3572 (28 left) |
+| senior_director | 2929 (671 left) | 3255 (345 left) |
+| manager | 2801 (799 left) | 3127 (473 left) |
+| tpm | 2794 (806 left) | 3120 (480 left) |
+| pm | 2811 (789 left) | 3137 (463 left) |
+| tl | 2819 (781 left) | 3145 (455 left) |
+| staff_ic | 2844 (756 left) | 3170 (430 left) |
+| data_scientist | 2790 (810 left) | 3116 (484 left) |
+| junior_ic | 2868 (732 left) | 2893 (707 left) |
+| chair | 2553 (1047 left) | 2879 (721 left) |
 
 ## Where things land
 
@@ -282,7 +330,12 @@ Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
   otherwise), reached by the same `O_NOFOLLOW` walk as `doc/`, 413 over 2 MB, 404 on a magic
   mismatch, under `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`,
   `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `Content-Disposition:
-  attachment`, so an SVG opened directly downloads instead of rendering.
+  attachment`, so an SVG opened directly downloads instead of rendering. With a `sha256` query
+  parameter (the view always sends the one the master recorded) it is a 404 unless the bytes read
+  hash to it, so an image a later worker overwrote is never served as the earlier speaker's.
+- `runs/<run_id>/takes/` — mode 0700: the body of each take the rules sent back, as
+  `{base}-take{n}.md` (0600), written by the master so the retake can reread it ("Voice and
+  retakes"). No route serves it.
 
 Every turn reduction also carries `answers_turn` (on an owner turn, the reviewer turn it answered)
 and `delegated_by_turn` (on a junior-IC turn, the owner turn whose delegation it applied), and the
@@ -402,9 +455,13 @@ Markdown blob: Markdown passes an image's `src` through raw, so `images/x.svg` w
 against the SPA's path and an http src would make the operator's browser fetch it. Image syntax
 is disarmed twice, by `view._segments` (every `![` in a text, caption or description gets a
 U+200B after its `!`) and again in `Segments`, so a reference the scan missed never loads.
-Captions and descriptions are plain text. A file image is drawn only when the master checked it
-(`ok`), as an `<img>` of `view/artifact?path=images/<name>` (with `&token=` on a remote bind); an
-unchecked one shows its caption, description and "image unavailable", and requests nothing. A
+Captions and descriptions are plain text. `view._segments` makes at most 8 image and mermaid
+segments (the rest of the body, from the line holding the ninth, is one text segment) and never
+splits a body over 64 KB (it is one text segment), so one oversized answer costs neither the
+request nor the browser. A file image is drawn only when the master checked it (`ok`), as an
+`<img>` of `view/artifact?path=images/<name>&sha256=<the recorded hash>` (with `&token=` on a
+remote bind); an unchecked one shows its caption, description and "image unavailable", and
+requests nothing. A
 mermaid block goes to the host's `HermesUI.renderMermaid` (`web/src/components/renderMermaid.ts`)
 and is shown only as an `<img>` of a `blob:` URL, never as inline markup. It says "rendering
 diagram…" while it draws, and shows its source as code when it fails (with `diagram failed to
@@ -420,15 +477,20 @@ script, a `javascript:` URL, an event attribute or `foreignObject`, or that is n
 `Content-Security-Policy: img-src 'self' blob: data:`, and a classDef's `fill:url(...)` fetches
 nothing.
 
-A kept take that broke a rule is badged "broke the ground rules", a retaken one "retaken", and one
-with no pointer or no example says so; the expanded row reads `kept take k of n` and what it broke.
-The Metrics section gains a Voice block listing every `voice.summary` figure, or "not measured for
-this run" for a run reduced before voice. The verdict card says how many takes the chair needed
-and what its kept ruling broke, and renders the ruling through `Segments` (a chair's file image is
-never drawn; its mermaid is). It finds its reduction among all of the run's reductions, not
-`?phase=decision`, so a verdict kept under `decision-take2` is stamped through its own id. A run
-that ended `chair retake failed` says so in attention tone. The document stepper does not use
-`Segments`: it stays image-free, as above.
+A kept take that broke a rule is badged "broke the ground rules", a retaken one "retaken", one
+with no pointer or no example says so, and one flagged `tells` is badged "AI tells", its tooltip
+listing each kind found with its count; the expanded row reads `kept take k of n` and what it
+broke. The Metrics section gains a Voice block listing every `voice.summary` figure, or "not
+measured for this run" for a run reduced before voice. The verdict card says how many takes the
+chair needed and what its kept ruling broke, and renders the ruling through `Segments` with
+nothing drawn: a chair's file image is refused, and its mermaid block is shown as its source,
+fenced, in a text segment, so a kept take 3 cannot draw a fake "accepted" tile above the real
+buttons. The card finds its reduction among all of the run's reductions, not `?phase=decision`,
+so a verdict kept under `decision-take2` is stamped through its own id. A run that ended `chair
+retake failed` says so in attention tone. The document stepper does not use `Segments`: it stays
+image-free, as above. A ticket's answer and a trace, which render a worker's raw text through the
+host Markdown, disarm `![` the same way, so neither loads an image a worker named, and a diagram
+that fails to draw leaves no element behind in the page.
 
 The server must have the playbook registered, so the control-plane process needs
 `HERMES_PLAYBOOK_MODULES=playbooks.committee` exactly as `hermes run` does. `make up` sets it (the
@@ -527,7 +589,8 @@ the master" also means "a playbook you trust with the operator's API token".
   blocks nothing but `done`. A chair turn that failed routes nothing, and neither does a chair
   retake that delivered nothing: there is nothing to rule on, and the run ends `failed`.
 - A discarded take never reaches thread.md: the room reads only kept takes, and every take's
-  metrics stay on its reduction.
+  metrics stay on its reduction. Its body is written only to `takes/`, for its own retake, and no
+  route serves that folder.
 - `reduce` never raises; file-IO failures ride on the reduction as `error`.
 - No phase name and no ticket id repeats, and the highest turn never exceeds the cap.
 - **The turn counter advances in `next_phase` and never in `reduce`.** Advanced in `reduce` it

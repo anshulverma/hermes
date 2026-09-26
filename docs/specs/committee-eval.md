@@ -260,7 +260,7 @@ target, the metrics, the flags and the deterministic scores. Pins are exact, wit
 | `unanswered_reviewer_turns` | as above | [] | [] |
 | `outside_room_mentions` | `[{line, quote}]` for lines in turn or decision entries matching `OUTSIDE_ROOM`, `(?i)\b(outside\|not in) this room\b`; without thread.md, bodies and chair prose with line null | lines 29, 37, 253, 309 | lines 43, 315 |
 | `words` | `{prose_total, median_reviewer_owner, chair_entry, chair_prose}`. prose_total = every delivered body plus the full decision entry. The median is a float over P, null when P is empty. | 15498 / 825.0 / 1862 / 1518 | 21728 / 1393.5 / 2202 / 1934 |
-| `voice` | `{n, pointer_share, walls_share, example_share, filler_per_turn}` over P (see voice.py) | 16 / 0.9375 / 0.625 / 0.875 / 0.0 | 14 / 0.9286 / 0.7143 / 1.0 / 0.0 |
+| `voice` | `{n, pointer_share, walls_share, example_share, filler_per_turn}` over P (see voice.py) | 16 / 0.9375 / 0.625 / 0.875 / 2.8125 | 14 / 0.9286 / 0.7143 / 1.0 / 7.7143 |
 | `bytes` | `{original, revised}` | 11397 / 14931 | 11397 / 19100 |
 | `edits` | `{per_edit, steps: [{turn, lines_added, lines_removed}], total}` | snapshot; t03 +7/−2, t06 +13/−6, t09 +27/−0, t12 +8/−2, t15 +18/−11, t18 +6/−5, t21 +4/−2, t24 +17/−13; total +87/−28 | unavailable; []; total +208/−88 |
 | `time` | every attempt on the run's tickets: `{summed_attempt_s, wall_clock_s, unmeasured}`, rounded to 0.1 s | 3284.0 / 3619.0 / 0 | 3279.4 / 3516.0 / 0 |
@@ -726,7 +726,9 @@ it.
   imports nothing else from voice.
 - **concision@2.** Voice changed concision's inputs: words skip fenced blocks and images, and
   `filler_hits` sums every tell. So concision is `concision@2`, on top of the `RULES` hash its
-  version already carries.
+  version already carries. A `RULES` edit moves only that hash: the FIX_G rules (filler and
+  hedging named, one good turn shown, rules 8 and 9 reworded, a blank line after rule 13) moved
+  `concision@2+d3793ae9` to `concision@2+ed91a866`, and the rubric version with it.
 
 `measure(body, role="reviewer")` is pure and never raises; a non-str counts as `""`. Of the keys it
 returns, eval reads five:
@@ -739,7 +741,10 @@ returns, eval reads five:
 - `examples`: the phrases in `_EXAMPLE_PHRASES` (case-insensitive), inline code spans, fenced
   blocks, and `_UNIT` matches such as `5 ms` or `40%`.
 - `filler_hits`: the sum of every tell in `tells`, which are the `FILLER` and `_PREEMPT` phrase
-  counts and the `_TELLS` pattern counts (`process`, `turn_refs`, `unchanged`).
+  counts and the `_TELLS` pattern counts (`process`, `turn_refs`, `unchanged`, `hedge`). Since
+  the tells learned hedging and more narration (`I've reviewed`, `Having read`, `Let me`, `t04`,
+  `the original is intact`), `filler_per_turn` reads 2.8125 on run-9 (was 2.75) and 7.7143 on
+  run-2 (was 6.1429); both still cross concision's `> 1` threshold, so the scores are unchanged.
 
 `metrics.voice_summary` is `eval.voice_summary(rows, entries)`: `voice.summary` over the target's
 kept rows, the last `turn` reduction per number plus the latest decision. That is the same fold the
@@ -748,6 +753,8 @@ committee view's top-level `voice` uses, so the Metrics tab and the eval never d
   chair's prose for the decision, on a copy: `action_clipped` reads `voice` off the shared docs.
 - A present `voice: null` (a signals-only or undelivered take) stays null and out.
 - It is null when no row was measured.
+- `pct_first_line_le_25` reads `first_line_words`, which is the first sentence of the first line:
+  run-9 reads 100.0 (18.8 by whole first line) and run-2 85.7 (was 50.0).
 
 `metrics.voice` is `voice_shares(rows)` over P, one measure dict per turn.
 - A reduction's `voice` dict is used verbatim, and every other turn in P is measured with
