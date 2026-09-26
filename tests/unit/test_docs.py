@@ -106,3 +106,19 @@ def test_committee_eval_spec_documents_the_cli_and_the_rubric():
         assert f"`{name}" in content, f"committee-eval spec does not name `{name}`"
     assert "](committee-eval.md)" in (specs / "committee-playbook.md").read_text(), \
         "committee-playbook.md does not link committee-eval.md"
+
+
+def test_committee_spec_documents_voice_and_retakes():
+    """docs/specs/committee-playbook.md states the rules, the retake contract and the headroom."""
+    spec_path = Path(__file__).parent.parent.parent / "docs" / "specs" / "committee-playbook.md"
+    content = spec_path.read_text()
+
+    for needle in (
+        "## Voice and retakes", "Ground rules for every speaker:", "playbooks/committee/voice.py",
+        "{base}-take{k}", "DECISION_PHASES", "_begin(s, base)", "file_images=False",
+        "_discard(", "kind=\"take\"", "retake_failed", "chair retake failed",
+        "runs/<run_id>/images/", "view/artifact?path=images/<name>",
+        "action: <one sentence, 200 characters or fewer>", "stance: <20 words or fewer>",
+        "<run>/decision-take{k}", "Goal headroom",
+    ):
+        assert needle in content, f"committee spec is missing {needle!r}"

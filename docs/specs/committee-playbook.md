@@ -14,25 +14,30 @@ How good a finished review was is scored by a second playbook, `committee-eval`;
 
 ## Phases
 
-`phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01.
+`phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01, and a retake of any speaking phase as `{base}-take{k}`.
 
 - **open** — zero tickets. `seed` resolves configuration, builds the cast, writes
-  `doc/00-original<ext>` and then the thread header (charge, artifact path, roster), and returns
-  `[]`. A failure to write either fails the run, so no header claims a meeting whose original was
-  not kept. No worker runs.
+  `doc/00-original<ext>`, makes `runs/<run_id>/images/`, then writes the thread header (charge,
+  artifact path, roster, ground rules), and returns `[]`. A failure to write any of them fails the
+  run, so no header claims a meeting whose original was not kept. No worker runs.
 - **t{NN}-{role}** — one ticket, one speaker: the opening round in seniority order, the owner's
   reply after every *delivered* reviewer turn, then whoever asked for the floor, FIFO. A turn whose
   worker produced nothing is answered by nobody — its thread entry is the `NO_TURN` stub, and
   sending the owner to reply to it yields a hallucinated answer or a burnt turn — so the next
   speaker after a failed turn is the next reviewer.
-- **decision** — one ticket for the chair. Its ticket is held `needs_human` until a human rules.
+- **`{base}-take{k}`** — a retake (k = 2, 3) of the speaking phase whose take-1 name is `base`:
+  same speaker, same turn number, no turn consumed (`t02-owner-take2`). `decision-take2` and
+  `decision-take3` are the chair's; `DECISION_PHASES` is `decision` plus those two, and everything
+  that meant "the decision phase" checks membership in it. See "Voice and retakes".
+- **decision** — one ticket for the chair, or `decision-take2`/`decision-take3` for its retakes.
+  The ticket of the phase whose verdict was kept is held `needs_human` until a human rules.
 - **ruling** — zero tickets, reached once the human has ruled. It exists so the engine hands
   `is_done` the decision's reduction (`run.reductions` carries only the prior phase): `done` iff
   the chair delivered a verdict and it was accepted.
 
-One speaker per phase is a rule, not a habit: two would race for the thread file, and a repeated
-phase name deadlocks the run silently. The review ends when the owner closes, the queue empties or
-the cap is hit.
+One speaker per phase is a rule, not a habit, and a retake is a new phase with the same speaker:
+two would race for the thread file, and a repeated phase name deadlocks the run silently. The
+review ends when the owner closes, the queue empties or the cap is hit.
 
 ## The cast
 
@@ -73,8 +78,11 @@ would mint a committee that never speaks* — falls back to `30`. `DRIVER` is re
 `driver()` call, which may run in another process.
 
 The charge is clipped to 400 characters (`cast.CHARGE_MAX`) with an ellipsis rather than cut
-mid-word, a delegated `action` to 200 (`turnblock.ACTION_MAX`) and a `stance` to 200
-(`turnblock.STANCE_MAX`); the assembled goal is asserted under 3600.
+mid-word. A delegated `action` and a `stance` are cut to 200 (`turnblock.ACTION_MAX`,
+`turnblock.STANCE_MAX`) by `turnblock._clip`: at the last space before the cap when that keeps at
+least half of it, else mid-word, then `…`. That is a backstop, since the goal asks for one sentence
+within the cap; the raw lengths go on the turn's `voice` as `action_chars` and `stance_chars`. The
+assembled goal is asserted under 3600 in every shape (see "Goal headroom").
 
 ## The turn block
 
@@ -83,10 +91,10 @@ Every speaker answers in prose and ends with one fenced block:
 ````
 ```hermes-turn
 request_floor: yes|no
-delegate: yes|no          # owner turns only; the target is always junior_ic
-action: <one line>        # required iff delegate is yes
-close: yes|no             # owner turns only
-stance: <one line>        # where you currently stand and why
+delegate: yes|no                                  # owner turns only; the target is always junior_ic
+action: <one sentence, 200 characters or fewer>   # required iff delegate is yes
+close: yes|no                                     # owner turns only
+stance: <20 words or fewer>                       # where you currently stand and why
 ```
 ````
 
@@ -102,8 +110,8 @@ role so the committee tab can show where each persona currently stands. Absent s
 persona that states no stance is shown as having none, never as neutral. Only the owner and the
 seven reviewers are issued a block, so the junior IC and the chair state no stance. It is the one
 key asked for in prose rather than shown in the worked example `turnblock.instruction` hands a
-speaker — a copied `stance: <one line>` would mint that placeholder as what the persona said, and
-unlike a flag a stance is rendered back verbatim.
+speaker — a copied `stance: <20 words or fewer>` would mint that placeholder as what the persona
+said, and unlike a flag a stance is rendered back verbatim.
 
 **The owner cannot close before the opening round drains.** A `close: yes` on a turn where any
 reviewer has still to take its opening turn is recorded on the reduction and then discarded: the
@@ -112,13 +120,141 @@ persona wants "a clear decision" and "concedes fast on small things" — can end
 committee at turn 02, producing a two-turn transcript that reaches `done` looking healthy. The
 owner may close again on any later turn.
 
+## Voice and retakes
+
+Members talk like engineers in a meeting, not like memo writers. The rules live in
+`playbooks/committee/voice.py` (`voice.RULES`, versioned by `voice.RULES_VERSION`), distilled once
+from the operator's diff-authoring skill; nothing reads the skill at runtime. `open` writes them
+into the thread header after the roster, under `Ground rules for every speaker:`, and every goal
+carries one pointer line with the speaker's cap (`cast._RULES_POINTER`). The header labels are
+plain (`Charge:`, `Artifact:`, `Committee:`), with no bold.
+
+| seat (`voice.kind`) | cap | bullets | images |
+|---|---|---|---|
+| owner, and every reviewer (any seat not below, a generated one too) | 150 words | 5 | 1 |
+| junior IC | one sentence of 40 words or fewer, on one line | one line | 0 |
+| chair | 300 words | 8: one list of conditions, each with an owner and a date | 0 |
+
+Nobody may use headers, bold, tables or nested bullets. An image is either a file the speaker
+writes as `runs/<run_id>/images/{base}.svg` or `.png` (`base` is its take-1 phase name, so
+`t02-owner.svg`) or a mermaid block, each with a caption and a `Description:` line of 40 words or
+fewer that later speakers read as text. Either of these is one image:
+
+````
+![Retry path before and after](images/t02-owner.svg)
+Description: the old path retries forever; the new one stops after 3 tries.
+
+Figure: Rollout order
+```mermaid
+flowchart LR
+  canary --> region --> global
+```
+Description: canary first, then one region, then everywhere.
+````
+
+**Every take is measured.** `voice.measure(body, role)` runs on the speaker's own prose
+(`turnblock.strip(answer)`), never on thread.md. Fenced blocks, image references and the
+`Figure:`/`Description:` lines add no words and break no formatting rule, so a snippet holding
+`# x` or `**kw` is safe. A dash inside a quoted span, from `"` or `“` to the next matching close on
+that line, is not counted: `Ship “a — “b” c” now.` has none. `voice.check_images` is the only IO.
+A file image is ok only when it is referenced as exactly `images/<name>`, named for this speaker's
+`base`, and is a regular file (not a symlink) of at most 2 MB with PNG or SVG magic, in an images
+folder that exists and is not a symlink. Every take's metrics stay on its reduction under `voice`.
+
+**A take that breaks a hard rule is sent back.** The hard rules, in `voice.violations` order:
+`over_cap`; `multi_line` and `multi_sentence` (junior IC); `headers`; `bold`; `tables`; `nested`;
+`too_many_bullets`; `too_many_images`; `image_uncaptioned`; `image_missing` (a file image that is
+not ok, and every http, reference-style or shortcut `![label]` image); `action_too_long` (an owner
+action over 200 characters). `no_pointer`, `no_example`, `dashes`, `long_first_line` (over 25
+words) and `stance_clipped` are flags: shown, never sent back.
+
+`reduce` grades each take with `_grade` before any side effect. With violations and fewer than
+`voice.MAX_TAKES` (3) takes so far, `_discard` records it as `kind="take"` and holds it: nothing
+reaches thread.md, no gate is applied, no re-check or snapshot runs and no ticket is held.
+`next_phase` then mints the same speaker again, and the goal carries `voice.note`, image rules
+first, clipped to 200 characters:
+
+```
+Retake 2 of 3. Rules broken: 205 words (cap 150); 3 bold. Say it again within them.
+```
+
+| phase | what happens |
+|---|---|
+| `t02-owner` | 205 words and 3 bold: a `take` reduction, nothing in thread.md |
+| `t02-owner-take2` | 140 words: kept as turn 02 with `take: 2, takes: 2`, badged "retaken" |
+| `t03-manager` | the turn counter never moved: retakes cost no turns |
+
+Take 3 is kept verbatim whatever it says, never clipped, and flagged. An undelivered or
+signals-only take is never sent back; its `voice` is null.
+
+- **Names and precedence (C8).** Take 1 is `t{NN}-{role}` or `decision`; take k is
+  `{base}-take{k}`, where `s["base"]` is the take-1 name. Every mint of a speaking phase, here and
+  in any later loop, calls `_begin(s, base)`. `_retake` reads only `base` and `take`, so the turn
+  counter, `current_turn`, `last_speaker` and HERMES_COMMITTEE_MAX_TURNS are untouched.
+  `next_phase` checks `_lost`, then a pending retake, then delegation, close, the cap and the rest,
+  so a retake runs before a pending delegation and before the cap. At a `DECISION_PHASES` phase a
+  pending retake mints `decision-take{k}`, otherwise `ruling`.
+- **A retake that delivers nothing** (its worker failed, or it sent signals only) keeps the held
+  take, graded again, with `retake_failed` added; that take is then written, gated, re-checked and
+  snapshotted once. For the chair the held verdict is written to thread.md but routes nothing
+  (`delivered: false`, `ended: "chair retake failed"`, `needs_human_ticket_ids: []`), and the run
+  ends failed.
+- **A fresh process mid-retake** has no meeting in memory, so the meeting is lost: thread.md ends
+  at the last kept turn, a chair retake goes on to `ruling` with no kept verdict, and the run ends
+  failed.
+- **The junior IC's retake only reports.** Only take 1 edits. A retake's `seed` makes no copy and
+  takes no pre-edit digest, and its goal says "Do not edit the revised copy again; whatever your
+  first take changed stands." The kept report's re-check still measures take 1's edit. If the copy
+  differs from what the discarded take 1 left, that turn's `error` says
+  `retake modified the revised copy`, whichever take is kept.
+- **The C4 contract**, for this loop and every later one. A discarded take is `kind="take"` with
+  `{phase (the base), role, turn, take, kept: false, delivered: true, body, stance, action, voice,
+  violations, flags, error}` plus the caller's `extra` keys, and never `artifact`, `revised` or
+  `cap` (the keys the kind-agnostic readers scan). A kept take goes under its own kind (`turn`,
+  `decision`, later `selection` or `one_on_one`) with `{take, takes, kept: true, voice, violations,
+  flags}`; `voice` is null on an undelivered take, and a decision adds `body`, the chair's prose
+  before the footer.
+- **Helpers later loops reuse**, none of which restates a rule: `_begin`;
+  `_grade(run, s, role, answer, *, file_images=True)`, which never raises (pass
+  `file_images=False` where an images/ name could collide, as one-on-ones' o-phases must: every
+  file image is then refused); `_discard(run, s, role, answer, metrics, violations, flags, turn,
+  extra=None)`; `_keep(..., *, file_images=True)`, given the same `file_images` as `_grade`;
+  `view._segments(doc)` (never `voice.segments(body)`) and the view's `Segments`.
+- **Model invariants (T11, `check_invariants` in tests/unit/test_committee_playbook.py).** Phase
+  names are unique, the last phase is in `DECISION_PHASES`, exactly one decision is kept, NN is
+  unique, ordered and within the cap among non-`-take` phases, and every delivered reviewer turn
+  that was kept is answered by a kept owner turn.
+- **The summary.** `voice.summary` over the kept rows (the last turn reduction per number, plus
+  the latest decision) is the view's top-level `voice` and eval's `metrics.voice_summary`; eval
+  measures a pre-voice run's bodies itself, on copies. Voice changed concision's inputs, so it is
+  `concision@2`, and eval's legacy `action_clipped` also counts an action ending `…` as clipped.
+  See [committee-eval.md](committee-eval.md).
+
+**Goal headroom** at the worst case (charge 5000, action 5000, image stem 48, retake note 5000,
+deep paths) against `cast.GOAL_MAX` 3600. A generated persona or a new goal shape must fit it; if
+one goes over, shorten `_GUARDRAIL_IMAGE` first.
+
+| shape | take 1 | retake |
+|---|---|---|
+| owner | 3251 (349 left) | 3453 (147 left) |
+| senior_director | 2934 (666 left) | 3136 (464 left) |
+| manager | 2806 (794 left) | 3008 (592 left) |
+| tpm | 2799 (801 left) | 3001 (599 left) |
+| pm | 2816 (784 left) | 3018 (582 left) |
+| tl | 2824 (776 left) | 3026 (574 left) |
+| staff_ic | 2849 (751 left) | 3051 (549 left) |
+| data_scientist | 2795 (805 left) | 2997 (603 left) |
+| junior_ic | 2868 (732 left) | 2769 (831 left) |
+| chair | 2553 (1047 left) | 2755 (845 left) |
+
 ## Where things land
 
 Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
 
-- `runs/<run_id>/thread.md` — the transcript, append-only: the `open` header, one
-  `## turn NN — <name>, <title> (<role>)` entry per settled turn, then `## decision`. A turn whose
-  worker failed still gets a stub — `_(no turn delivered — the worker failed; see hermes show)_`.
+- `runs/<run_id>/thread.md` — the transcript, append-only: the `open` header (charge, artifact,
+  roster, ground rules), one `## turn NN — <name>, <title> (<role>)` entry per settled turn (its
+  kept take only), then `## decision`. A turn whose worker failed still gets a stub —
+  `_(no turn delivered — the worker failed; see hermes show)_`.
 - `runs/<run_id>/revised/<basename>` — the revised copy, byte-copied from the original before the
   junior IC's first edit. After each junior-IC turn the master re-checks it — is it a regular file
   (a symlink or a FIFO is not), did its SHA-256 move — and records `verified: true|false` on that
@@ -135,6 +271,18 @@ Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
   delivered or not, and overwritten if that turn settles again. `<ext>` is the artifact's suffix
   when it is a dot and 1-16 letters or digits, and nothing otherwise. A revised copy that is
   missing, a symlink or a FIFO leaves no file and puts `snapshot: …` in that turn's `error`.
+- `runs/<run_id>/images/` — mode 0700, made at `open` and again before any owner or reviewer turn
+  if it is missing (a run opened before voice has none). It holds the one image each owner or
+  reviewer take may write, named `{base}.svg` or `{base}.png` for its take-1 phase and overwritten
+  by that phase's retakes. `thread.images_dir` refuses a folder that is a symlink or a file (that
+  turn is then offered no image), and grading calls it with `create=False`, so grading never makes
+  the folder. The master checks each referenced file ("Voice and retakes") and records only names,
+  never a host path. The control plane serves one at
+  `GET /api/runs/{id}/view/artifact?path=images/<name>` as raw bytes: only `.svg` or `.png` (400
+  otherwise), reached by the same `O_NOFOLLOW` walk as `doc/`, 413 over 2 MB, 404 on a magic
+  mismatch, under `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox`,
+  `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `Content-Disposition:
+  attachment`, so an SVG opened directly downloads instead of rendering.
 
 Every turn reduction also carries `answers_turn` (on an owner turn, the reviewer turn it answered)
 and `delegated_by_turn` (on a junior-IC turn, the owner turn whose delegation it applied), and the
@@ -249,6 +397,39 @@ turns per seat (undelivered ones called out), delegations out of delivered owner
 edits applied or not by the master's re-check, floor latency in turns (reductions carry no
 timestamps), and cumulative prose per turn, with signals-only and undelivered turns adding none.
 
+**A turn renders only through `Segments`** (`playbooks/committee/view/src/Voice.tsx`), never as one
+Markdown blob: Markdown passes an image's `src` through raw, so `images/x.svg` would resolve
+against the SPA's path and an http src would make the operator's browser fetch it. Image syntax
+is disarmed twice, by `view._segments` (every `![` in a text, caption or description gets a
+U+200B after its `!`) and again in `Segments`, so a reference the scan missed never loads.
+Captions and descriptions are plain text. A file image is drawn only when the master checked it
+(`ok`), as an `<img>` of `view/artifact?path=images/<name>` (with `&token=` on a remote bind); an
+unchecked one shows its caption, description and "image unavailable", and requests nothing. A
+mermaid block goes to the host's `HermesUI.renderMermaid` (`web/src/components/renderMermaid.ts`)
+and is shown only as an `<img>` of a `blob:` URL, never as inline markup. It says "rendering
+diagram…" while it draws, and shows its source as code when it fails (with `diagram failed to
+render: <message>`) or when the shelf has no renderer. mermaid lives on the host shelf and is never
+bundled into `committee.umd.js`.
+
+The renderer runs mermaid with `securityLevel: 'strict'`, `htmlLabels: false` and
+`suppressErrorRendering`, and its `secure` list stops a diagram's own directives from changing
+those or setting `themeCSS`, `fontFamily` or `altFontFamily`. It rejects output that still holds
+script, a `javascript:` URL, an event attribute or `foreignObject`, or that is not well-formed XML
+(a diagram with a link), so the view shows the source instead of a broken image. A diagram's
+`<style>` still applies to the page while it draws, so `web/index.html` sets
+`Content-Security-Policy: img-src 'self' blob: data:`, and a classDef's `fill:url(...)` fetches
+nothing.
+
+A kept take that broke a rule is badged "broke the ground rules", a retaken one "retaken", and one
+with no pointer or no example says so; the expanded row reads `kept take k of n` and what it broke.
+The Metrics section gains a Voice block listing every `voice.summary` figure, or "not measured for
+this run" for a run reduced before voice. The verdict card says how many takes the chair needed
+and what its kept ruling broke, and renders the ruling through `Segments` (a chair's file image is
+never drawn; its mermaid is). It finds its reduction among all of the run's reductions, not
+`?phase=decision`, so a verdict kept under `decision-take2` is stamped through its own id. A run
+that ended `chair retake failed` says so in attention tone. The document stepper does not use
+`Segments`: it stays image-free, as above.
+
 The server must have the playbook registered, so the control-plane process needs
 `HERMES_PLAYBOOK_MODULES=playbooks.committee` exactly as `hermes run` does. `make up` sets it (the
 `PLAYBOOK_MODULES` variable); a server started by hand does not, and an unregistered playbook is a
@@ -257,8 +438,9 @@ The server must have the playbook registered, so the control-plane process needs
 Registered or not, the **Run tab's phase rail** lists every phase that minted tickets, in the
 order it did — each turn included. A registered run at a declared phase also lists the declared
 phases after it, so at `decision` the rail shows `ruling` ahead; a turn phase is not declared, so
-mid-meeting nothing is listed ahead. The turn-by-turn reading lives on the Playbook tab, with names
-and prose attached.
+mid-meeting nothing is listed ahead. A retake is its own phase there (`t02-owner-take2`,
+`decision-take2`), undeclared like a turn. The turn-by-turn reading lives on the Playbook tab,
+with names and prose attached.
 
 **Runs created before the view renders as a legacy run, and says so.** `ended`, the artifact paths,
 the per-turn `stance` and the turn body are all carried on the reductions, and a run reduced by an
@@ -339,10 +521,13 @@ the master" also means "a playbook you trust with the operator's API token".
 - `verify()` returns `True` unconditionally, and no turn's reduction carries
   `needs_human_ticket_ids`: a `needs_human` ticket mid-conversation blocks advancement for good.
   The re-check lives in `reduce` instead.
-- **Only the decision reduction routes to review**, and only the chair's own ticket
-  (`<run>/decision`). The decision is terminal and the verdict is written before the hold, so
-  holding it blocks nothing but `done`. A chair turn that failed routes nothing: there is nothing to
-  rule on, and the run ends `failed`.
+- **Only the kept decision reduction routes to review**, and only the chair's own ticket for the
+  phase it was kept in (`<run>/decision` or `<run>/decision-take{k}`). A discarded take routes
+  nothing. The decision is terminal and the verdict is written before the hold, so holding it
+  blocks nothing but `done`. A chair turn that failed routes nothing, and neither does a chair
+  retake that delivered nothing: there is nothing to rule on, and the run ends `failed`.
+- A discarded take never reaches thread.md: the room reads only kept takes, and every take's
+  metrics stay on its reduction.
 - `reduce` never raises; file-IO failures ride on the reduction as `error`.
 - No phase name and no ticket id repeats, and the highest turn never exceeds the cap.
 - **The turn counter advances in `next_phase` and never in `reduce`.** Advanced in `reduce` it
