@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Annotated, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Query
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.gzip import GZipMiddleware
@@ -69,7 +69,22 @@ ARTIFACT_MAX_CHARS = 2 * 1024 * 1024
 # each file itself (its `view_data` emits every `path`); the server knows these
 # directory names and no file names. A second kind of per-run file is one more
 # entry here.
-RUN_FILE_DIRS = ("doc",)
+RUN_FILE_DIRS = ("doc", "images")
+
+# An image is served as raw bytes, whole or not at all: over this it is a 413,
+# never a truncated picture. Equal to the playbook side's own image cap.
+RUN_FILE_MAX_BYTES = 2 * 1024 * 1024
+
+# The two image types a view may show, by suffix. An SVG is worker-written
+# markup served from this origin, so it goes out under a CSP that sandboxes it
+# and allows no script, no fetch and no navigation, and as an attachment, so
+# opened directly it downloads instead of rendering. An <img> ignores both.
+_IMAGE_TYPES = {".png": "image/png", ".svg": "image/svg+xml"}
+_IMAGE_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "Cache-Control": "no-store",
+}
 
 # A file name inside one of those directories: no leading dot (so a temp file
 # being written is never served), no separator, no NUL, bounded.
@@ -79,6 +94,37 @@ _RUN_FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 # bucket widens instead, so a run row with a bad created_at (or ?bucket_s=1 on
 # a long run) cannot ask for millions of buckets.
 METRICS_MAX_BUCKETS = 1440
+
+
+def _image_magic_ok(data: bytes, suffix: str) -> bool:
+    """PNG's signature, or an SVG whose first non-blank bytes (after a BOM) open it."""
+    if suffix == ".png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    text = data[3:] if data.startswith(b"\xef\xbb\xbf") else data
+    return text.lstrip().startswith((b"<svg", b"<?xml"))
+
+
+def _image_response(fd: int, path: str) -> Response:
+    """The image ``fd`` holds, as raw bytes under the image headers. Closes ``fd``."""
+    name = path.split("/")[1]  # already held to _RUN_FILE_NAME: no quote, no separator
+    suffix = Path(name).suffix
+    too_big = HTTPException(status_code=413, detail=f"{path} is over {RUN_FILE_MAX_BYTES} bytes")
+    try:
+        with open(fd, "rb") as handle:
+            if os.fstat(handle.fileno()).st_size > RUN_FILE_MAX_BYTES:
+                raise too_big
+            data = handle.read(RUN_FILE_MAX_BYTES + 1)
+    except OSError:
+        raise HTTPException(status_code=404, detail=f"{path} is not readable")
+    if len(data) > RUN_FILE_MAX_BYTES:  # grew between the fstat and the read
+        raise too_big
+    if not _image_magic_ok(data, suffix):
+        raise HTTPException(status_code=404, detail=f"{path} is not a {suffix[1:]} image")
+    return Response(
+        content=data,
+        media_type=_IMAGE_TYPES[suffix],
+        headers={**_IMAGE_HEADERS, "Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 
 def _open_run_file(home: Path, run_id: str, path: str) -> int:
@@ -2158,10 +2204,10 @@ def create_app(bind: str | None = None) -> FastAPI:
         finally:
             conn.close()
 
-    @app.get("/api/runs/{run_id}/view/artifact")
+    @app.get("/api/runs/{run_id}/view/artifact", response_model=None)
     def get_run_view_artifact(
         run_id: str, path: str = "", _: None = Depends(require_auth_read)
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | Response:
         """One file from the run's own directory, as text, on demand.
 
         ``path`` is ``<dir>/<name>`` under ``runs/<run_id>/`` in THIS process's
@@ -2170,6 +2216,8 @@ def create_app(bind: str | None = None) -> FastAPI:
         master's host paths, and a server in a container that mounts only the
         home cannot open them. ``path`` defaults to "" so a missing one reaches
         the handler and gets its 400 after the gate, not FastAPI's 422 before.
+        ``images/<name>`` is served as raw bytes under a sandboxing CSP, an
+        ``<img>`` being its only reader.
         """
         home = config.resolve_home()
         conn = connect(str(home / "queue.db"))
@@ -2186,7 +2234,16 @@ def create_app(bind: str | None = None) -> FastAPI:
         # route is live on a server that has turned it off.
         if view_playbook(row[0]) is None:
             raise HTTPException(status_code=404, detail=f"Run {run_id!r} has no view")
+        # Below the run and view gates (their 404s outrank every 400), above
+        # the walk: an image path must name one of the two served types.
+        image = path.startswith("images/")
+        if image and Path(path).suffix not in _IMAGE_TYPES:
+            raise HTTPException(
+                status_code=400, detail=f"an image must be .svg or .png, not {path!r}"
+            )
         fd = _open_run_file(home, run_id, path)
+        if image:
+            return _image_response(fd, path)
         try:
             with open(fd, encoding="utf-8", errors="replace") as handle:
                 text = handle.read(ARTIFACT_MAX_CHARS + 1)

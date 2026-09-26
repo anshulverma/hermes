@@ -477,6 +477,138 @@ def test_non_loopback_gates_all_three_routes(temp_home, viewed):
     assert client.get(paths[1], headers=headers).status_code == 200
 
 
+# --- images (voice C9): raw bytes, sandboxed ---------------------------------
+
+SVG = b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>'
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+
+
+def _images(home: Path, run_id: str) -> Path:
+    images = home / "runs" / run_id / "images"
+    images.mkdir(parents=True, exist_ok=True)
+    return images
+
+
+@pytest.mark.parametrize("name, body, kind", [
+    ("t02-owner.svg", b"\xef\xbb\xbf \n" + SVG, "image/svg+xml"),
+    ("t04-tl.png", PNG, "image/png"),
+    ("a" * 124 + ".svg", SVG, "image/svg+xml"),  # a 128-character name
+])
+def test_image_route_serves_raw_bytes_under_a_sandboxing_csp(client, temp_home, viewed, name, body, kind):
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    (_images(temp_home, run_id) / name).write_bytes(body)
+
+    response = client.get(f"/api/runs/{run_id}/view/artifact", params={"path": f"images/{name}"})
+
+    assert response.status_code == 200
+    assert response.content == body
+    assert response.headers["content-type"] == kind
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-security-policy"] == (
+        "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+    assert response.headers["cache-control"] == "no-store"
+    # Opened directly, it downloads rather than renders; an <img> ignores this.
+    assert response.headers["content-disposition"] == f'attachment; filename="{name}"'
+
+
+@pytest.mark.parametrize("path", [
+    "images/../x.svg", "images/%2e%2e", "images/..", "/images/x.svg", "images/x.gif",
+    "images/x", "images/.t02-owner.svg",
+])
+def test_image_route_400s_a_bad_image_path(client, temp_home, viewed, path):
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    (_images(temp_home, run_id) / "x.svg").write_bytes(SVG)
+
+    assert client.get(f"/api/runs/{run_id}/view/artifact", params={"path": path}).status_code == 400
+
+
+def _image_symlinked_out(images: Path, outside: Path) -> None:
+    (outside / "x.svg").write_bytes(SVG)
+    (images / "x.svg").symlink_to(outside / "x.svg")
+
+
+def _images_dir_symlinked_out(images: Path, outside: Path) -> None:
+    """``images/`` itself a link out of the run: the walk refuses it, not just the leaf."""
+    (outside / "x.svg").write_bytes(SVG)
+    images.rmdir()
+    images.symlink_to(outside, target_is_directory=True)
+
+
+def _image_is_a_directory(images: Path, outside: Path) -> None:
+    (images / "x.svg").mkdir()
+
+
+def _image_is_a_fifo(images: Path, outside: Path) -> None:
+    os.mkfifo(images / "x.svg")
+
+
+def _image_has_the_wrong_magic(images: Path, outside: Path) -> None:
+    (images / "x.svg").write_bytes(b"GIF89a<svg>")
+
+
+@pytest.mark.parametrize("prepare", [
+    _missing, _image_symlinked_out, _images_dir_symlinked_out, _image_is_a_directory,
+    _image_is_a_fifo, _image_has_the_wrong_magic,
+])
+def test_image_route_404s_anything_but_this_runs_own_image(client, temp_home, viewed, tmp_path, prepare):
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    prepare(_images(temp_home, run_id), outside)
+
+    response = client.get(f"/api/runs/{run_id}/view/artifact?path=images/x.svg")
+
+    assert response.status_code == 404
+
+
+def test_image_route_404s_a_run_id_the_trace_rule_refuses(client, temp_home, viewed):
+    run_id = _run_row(temp_home, "-run-view", "stubview")  # a leading dash is refused
+    (_images(temp_home, run_id) / "x.svg").write_bytes(SVG)
+
+    assert client.get(f"/api/runs/{run_id}/view/artifact?path=images/x.svg").status_code == 404
+
+
+def test_image_route_413s_an_image_over_the_cap_and_never_truncates(client, temp_home, viewed):
+    from server.app import RUN_FILE_MAX_BYTES
+
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    (_images(temp_home, run_id) / "x.svg").write_bytes(SVG + b" " * RUN_FILE_MAX_BYTES)
+
+    assert client.get(f"/api/runs/{run_id}/view/artifact?path=images/x.svg").status_code == 413
+
+
+def test_the_server_image_cap_equals_the_playbooks():
+    from playbooks.committee import voice
+    from server.app import RUN_FILE_MAX_BYTES
+
+    assert RUN_FILE_MAX_BYTES == voice.IMAGE_MAX_BYTES
+
+
+def test_image_route_takes_the_token_on_the_query_on_a_remote_bind(temp_home, viewed):
+    from server.auth import read_token
+
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    (_images(temp_home, run_id) / "x.svg").write_bytes(SVG)
+    client = TestClient(create_app(bind="0.0.0.0"))
+    url = f"/api/runs/{run_id}/view/artifact?path=images/x.svg"
+    token = read_token(temp_home)
+
+    assert client.get(url).status_code == 401
+    assert client.get(url + "&token=wrong").status_code == 401
+    assert client.get(url + f"&token={token}").content == SVG
+    assert client.get(url, headers={"Authorization": f"Bearer {token}"}).content == SVG
+
+
+def test_doc_responses_are_unchanged_by_the_image_branch(client, temp_home, viewed):
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    (_doc(temp_home, run_id) / "t03.md").write_text("after turn 3\n", encoding="utf-8")
+
+    response = client.get(f"/api/runs/{run_id}/view/artifact?path=doc/t03.md")
+
+    assert response.json() == {"text": "after turn 3\n", "truncated": False}
+    assert "content-security-policy" not in response.headers
+
+
 # --- the committee's wiring ---------------------------------------------
 # The one playbook that ships a view. Importing it registers "committee"
 # process-globally, which is how every other module gets it too; do not pop it.
