@@ -58,6 +58,10 @@ describe('DS bundle load-order regression test', () => {
       typeof (window as any).HermesUI?.getToken,
       'HermesUI.getToken must be set by _globals -- a view bundle cannot import ../api/auth',
     ).toBe('function');
+    expect(
+      typeof (window as any).HermesUI?.renderMermaid,
+      'HermesUI.renderMermaid must be set by _globals -- a view bundle never bundles mermaid',
+    ).toBe('function');
 
     const ns = (window as any).MonoDarkDashDesignSystem_66fdfe || (window as any).DSNS;
     expect(ns, 'DS namespace must be populated by bundle').toBeTruthy();

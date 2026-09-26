@@ -10,4 +10,11 @@ import { getToken } from '../api/auth';
 globalThis.window.React = React;
 globalThis.window.ReactDOM = ReactDOM;
 globalThis.window.ReactJSXRuntime = ReactJSXRuntime;
-globalThis.window.HermesUI = { Markdown, getToken };
+// renderMermaid is a stand-in for tests that do not import '../ds' (a test that
+// does gets the real one from _globals); tests that draw a diagram replace it
+// on the shelf. ds-load.test.ts checks the real one.
+globalThis.window.HermesUI = {
+  Markdown,
+  getToken,
+  renderMermaid: async () => '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+};

@@ -11,6 +11,7 @@ declare global {
     HermesUI: {
       Markdown: typeof import('../components/Markdown').default;
       getToken: typeof import('../api/auth').getToken;
+      renderMermaid: typeof import('../components/renderMermaid').default;
     };
     MonoDarkDashDesignSystem_66fdfe: any;
     DSNS: any;

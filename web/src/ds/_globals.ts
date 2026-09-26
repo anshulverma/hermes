@@ -21,15 +21,19 @@
 // a bundle reading the raw global would send no Authorization header and 401 on
 // every fetch. getToken() answers correctly on both binds.
 //
+// renderMermaid is on the shelf so a view can draw a diagram without bundling
+// mermaid; it loads mermaid itself, on first use, as a separate chunk.
+//
 // Markdown must stay free of any '../ds' import: ds/index -> _globals -> Markdown
 // would become a cycle back through ds/index. ../api/auth imports nothing at all.
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 import * as ReactJSXRuntime from 'react/jsx-runtime';
 import Markdown from '../components/Markdown';
+import renderMermaid from '../components/renderMermaid';
 import { getToken } from '../api/auth';
 
 window.React = React;
 window.ReactDOM = ReactDOM;
 window.ReactJSXRuntime = ReactJSXRuntime;
-window.HermesUI = { Markdown, getToken };
+window.HermesUI = { Markdown, getToken, renderMermaid };
