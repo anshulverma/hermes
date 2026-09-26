@@ -311,7 +311,12 @@ def resolve(stages: list[dict], library: dict) -> dict:
     MAX_REVIEWERS here and the rest are considered.
     """
     chair = next((st for st in reversed(stages) if st.get("stage") == 3), None)
-    code = chair.get("code") if chair else "no_answer"
+    delivered = bool(chair and chair.get("delivered"))
+    stored = chair.get("code") if chair else None
+    # recomputed, never trusted (a stored None over a list with no valid seat
+    # would seat two reviewers); the list is read only when its size decides
+    seats = validate(chair.get("doc"), library)[0] if delivered and not stored else []
+    code = stage_code(delivered, stored, seats)
     if code is not None:
         out = fallback("chair_failed" if code == "no_answer" else code)
         try:

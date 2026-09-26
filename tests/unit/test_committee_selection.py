@@ -582,6 +582,13 @@ def test_resolve_falls_back_with_the_chairs_code():
     # no stage-3 entry at all is a chair who never answered
     assert S.resolve([], cast.LIBRARY) == S.fallback("chair_failed")
     assert S.resolve(_stages(owner), cast.LIBRARY) == S.fallback("chair_failed")
+    # the chair's code is recomputed from her entry, never trusted: a stored
+    # None over a list with no valid seat, or a bare entry, still falls back
+    earlier = _stages(owner, owner)
+    empty = {"stage": 3, "role": "senior_director", "delivered": True,
+             "doc": {"seats": []}, "code": None}
+    assert S.resolve([*earlier, empty], cast.LIBRARY) == S.fallback("too_few")
+    assert S.resolve([*earlier, {"stage": 3}], cast.LIBRARY) == S.fallback("chair_failed")
 
 
 def test_resolve_cuts_an_overflow_to_twelve_and_names_a_seated_representative():
@@ -625,6 +632,13 @@ def test_resolve_cuts_an_overflow_to_twelve_and_names_a_seated_representative():
     }
     seated = set(_roles(out["seated"]))
     assert all(c["represented_by"] in seated for c in out["considered"])
+    # only the chair's own note names an overflow seat's representative
+    # (rule 4): the owner's note on support, pointing at a seated tpm, does not
+    owner = {"seats": [_seat("tl")], "not_seated": [
+        {"stakeholder": "Support", "reason": "the owner's view", "represented_by": "tpm"},
+    ]}
+    again = S.resolve(_stages(owner, None, chair), cast.LIBRARY)
+    assert _by_stakeholder(again["considered"]) == _by_stakeholder(out["considered"])
 
     # 20 000 valid seats on every stage: twelve seated, the first 40 of the
     # rest considered and the others counted, and no pairwise work (a list
@@ -719,6 +733,27 @@ def test_resolve_collects_considered_from_every_source():
         "Legal": _considered("Legal", None, "no filing", "tpm"),
     }
 
+    # a fallback reads stages 1-2 only (D2), so the chair's invalid entry and
+    # note are not on the record; a seat the manager's usable list dropped
+    # keeps its dropper, and only an undropped one is "not in the default"
+    stages = _stages(
+        {"seats": [_seat("security"), _seat("tpm")]},
+        {"seats": [_seat("sre")]},
+        {"seats": [_seat("Legal")],
+         "not_seated": [{"stakeholder": "Finance", "reason": "no spend", "represented_by": "tpm"}]},
+    )
+
+    out = S.resolve(stages, cast.LIBRARY)
+
+    assert out["fallback"] == "too_few"
+    assert _by_stakeholder(out["considered"]) == {
+        "Security Engineer": _considered(
+            "Security Engineer", "security", f"dropped by {MANAGER}"),
+        "Site Reliability Engineer, on-call": _considered(
+            "Site Reliability Engineer, on-call", "sre",
+            "not in the default committee (fallback: too_few)"),
+    }
+
 
 def test_resolve_matches_considered_entries_on_their_keys():
     """Rule 6: one entry per key (a seat's slug, a note's stakeholder
@@ -736,15 +771,35 @@ def test_resolve_matches_considered_entries_on_their_keys():
         _considered("Privacy Engineer", "privacy", f"dropped by {MANAGER}"),
     ]
 
-    # the manager fails, so the chair's omission is the dropper; her note
-    # keyed "privacy team" is another stakeholder
+    # the manager fails, undelivered or delivered with no usable list, so the
+    # chair's omission is the dropper; her note keyed "privacy team" is another
+    # stakeholder
     notes = [{"stakeholder": "Privacy team", "reason": "no data moves", "represented_by": "sre"}]
-    out = S.resolve(_stages(owner, None, {**chair, "not_seated": notes}), cast.LIBRARY)
+    failed = [
+        (None, "no_answer"),
+        ("No list from me.", "no_block"),
+        (_answer("{broken"), "unparseable"),
+        ({"seats": [_seat("manager")]}, "too_few"),
+    ]
+    for manager, code in failed:
+        stages = _stages(owner, manager, {**chair, "not_seated": notes})
+        assert stages[1]["code"] == code
 
-    assert _by_stakeholder(out["considered"]) == {
-        "Privacy Engineer": _considered("Privacy Engineer", "privacy", f"dropped by {CHAIR}"),
-        "Privacy team": _considered("Privacy team", None, "no data moves", "sre"),
-    }
+        out = S.resolve(stages, cast.LIBRARY)
+
+        assert _by_stakeholder(out["considered"]) == {
+            "Privacy Engineer": _considered("Privacy Engineer", "privacy", f"dropped by {CHAIR}"),
+            "Privacy team": _considered("Privacy team", None, "no data moves", "sre"),
+        }, code
+
+    # a bad slug is keyed on its raw role lowercased: "Security" is the seated
+    # security, so it is not considered, and "Finance" is the chair's note
+    # keyed "finance", which replaces it
+    invalid = {"seats": [_seat("Security"), _seat("Finance")]}
+    noted = {**chair, "not_seated": [{"stakeholder": "finance", "reason": "no spend"}]}
+    out = S.resolve(_stages(invalid, None, noted), cast.LIBRARY)
+
+    assert out["considered"] == [_considered("finance", None, "no spend")]
 
     # a later note on the same key replaces an earlier one, and gives the
     # dropped seat its reason; a note keyed on a seated slug is dropped
