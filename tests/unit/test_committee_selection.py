@@ -313,12 +313,16 @@ def test_validate_rejects_a_derived_seat_named_like_a_cast_or_library_persona():
         _seat("sec_lead", name=f"  {security.upper()} ", title="Security lead"),
         _seat("ruth", title=cast.CAST["manager"]["name"].replace(" ", "\t")),  # name from title
         _seat("maya_two", name="Maya Okonkwo-Reyes", title="Crew lead"),
+        _seat("maya_dot", name=f"{owner}.", title="Staff Engineer & proposal owner"),
+        _seat("maya_dash", name=owner.lower().replace(" ", "-"), title="Owner"),
     ]}, cast.LIBRARY)
 
     assert [(i["role"], i["reason"]) for i in invalid] == [
         ("maya", "invalid: name taken"),
         ("sec_lead", "invalid: name taken"),
         ("ruth", "invalid: name taken"),
+        ("maya_dot", "invalid: name taken"),  # punctuation does not make a new person
+        ("maya_dash", "invalid: name taken"),
     ]
     assert [(s["role"], s["name"]) for s in seats] == [("maya_two", "Maya Okonkwo-Reyes")]
 

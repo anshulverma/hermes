@@ -94,10 +94,16 @@ _DASHES = str.maketrans({"\u2013": "-", "\u2014": "-"})
 # already unprintable.
 _INVISIBLE = frozenset("\u115f\u1160\u3164\uffa0\u2800\u034f")
 
-# Every cast and library persona's name, whitespace-collapsed and casefolded: a
-# derived seat by one of these would read in the thread and view as that person.
+def _name_key(name: str) -> str:
+    """A name reduced to its casefolded letters and digits: "Maya Okonkwo." and
+    "maya-okonkwo" are the same person to a reader, "Maya Okonkwo-Reyes" is not."""
+    return "".join(ch for ch in name.casefold() if ch.isalnum())
+
+
+# Every cast and library persona's name as a `_name_key`: a derived seat by one of
+# these would read in the thread and view as that person.
 _TAKEN = frozenset(
-    cast.clip(p["name"], NAME_MAX).casefold()
+    _name_key(cast.clip(p["name"], NAME_MAX))
     for p in (*cast.CAST.values(), *cast.LIBRARY.values())
 )
 
@@ -209,7 +215,7 @@ def validate(doc: dict | None, library: dict) -> tuple[list[dict], list[dict]]:
             persona, source = library[role], "library"
         elif title := _clip(entry.get("title"), TITLE_MAX):
             name = _clip(entry.get("name"), NAME_MAX) or _clip(entry["title"], NAME_MAX)
-            if name.casefold() in _TAKEN:
+            if _name_key(name) in _TAKEN:
                 invalid.append(_invalid(role, role, "name taken"))
                 continue
             persona = {
