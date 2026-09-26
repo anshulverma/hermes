@@ -21,6 +21,7 @@ import pytest
 
 from engine.models import Reduction, Run
 from playbooks.committee import cast, thread
+from playbooks.committee import eval as ev
 from playbooks.committee.view import view_data
 
 FIXTURE = Path(__file__).parent.parent / "data" / "committee-run-2-reductions.json"
@@ -108,8 +109,9 @@ def test_view_data_returns_every_block_the_contract_names(run2):
     data = view_data(_run("decision"), run2)
 
     assert set(data) == {
-        "kind", "roster", "progress", "timeline", "verdict", "document",
+        "kind", "roster", "progress", "timeline", "verdict", "document", "evaluation",
     }
+    assert data["evaluation"] is None  # never scored: no runs/<id>/eval.json
     assert data["kind"] == "committee"
     assert len(data["roster"]) == 9
     assert all(
@@ -721,3 +723,155 @@ def test_view_data_creates_nothing_under_the_home(run2, tmp_path):
     view_data(_run("open"), [])
 
     assert not (tmp_path / "runs").exists()
+
+
+# --- the evaluation (committee-eval D10, C7) ------------------------------------
+
+def _eval_body(home: str, run: str, created_at: float, versions: dict) -> dict:
+    """One eval.json body in committee-eval's C5 shape, schema 1.
+
+    Judge scores 2 / null / 3, deterministic 3 / 1 / 1. edits_address_concerns
+    is the judge dimension none of whose evidence verified, so it carries no
+    score and no quote: a partial judge.
+    """
+    def item(where, quote, verified, turn=None):
+        return {"turn": turn, "where": where, "line": None, "quote": quote,
+                "verified": verified}
+
+    def dim(scorer, score, evidence, error=None):
+        return {"scorer": scorer, "score": score, "rationale": "stated",
+                "evidence": evidence, "error": error}
+
+    return {
+        "schema": 1,
+        "rubric_version": ev.rubric_version(versions),
+        "rubric": dict(versions),
+        "target": {"home": home, "run": run, "created_at": created_at,
+                   "playbook": "committee", "state": "done",
+                   "review_state": "pending", "legacy": False},
+        "eval_run": f"committee-eval-{run}",
+        "evaluated_at": 1790000000.5,
+        "original_source": "snapshot",
+        "metrics": {},
+        "flags": [
+            {"id": "action_clipped", "turn": 3, "line": 812, "quote": "the last forty chars"},
+            {"id": "verdict_count_mismatch", "turn": None, "line": 820, "quote": "seven of",
+             "claimed": 7, "recorded": 8},
+        ],
+        "dimensions": {
+            "verdict_grounded": dim("judge", 2, [
+                item("turn", "a quote nobody wrote", False, 12),
+                item("decision", "Approve with changes.", True),
+            ]),
+            "edits_address_concerns": dim(
+                "judge", None, [item("turn", "invented", False, 6)], "no verifiable evidence"),
+            "concern_coverage": dim("judge", 3, [item("turn", "Fair point.", True, 2)]),
+            "efficiency": dim("deterministic", 3, [item("metric", "cost_usd=30.3875", True)]),
+            "concision": dim("deterministic", 1, [
+                item("metric", "words.median_reviewer_owner=825.0", True)]),
+            "verdict_consistency": dim("deterministic", 1, [
+                item("metric", "flags.verdict_count_mismatch=1", True)]),
+        },
+        "headline": "weakest: concision 1/5: words.median_reviewer_owner=825.0",
+        "judge": {"status": "partial", "evidence_rejected": 2, "cost_usd": 0.41,
+                  "tokens": None, "error": "edits_address_concerns: no verifiable evidence"},
+    }
+
+
+def test_evaluation_payload_states(tmp_path):
+    """T26 (committee-eval C7, D10). Null with no eval.json; the error state for
+    bad JSON, a non-object, ``schema != 1`` and a file over 256 KB; ok, with
+    calibration read off this home's evals.jsonl at request time: none, two
+    anchors within one, an unreadable ledger and a ledger over 2 MB. No call
+    creates anything."""
+    versions = ev.dimension_versions()
+    home = str(tmp_path.resolve())
+    run_dir = tmp_path / "runs" / RUN_ID
+
+    def evaluation():
+        before = sorted(tmp_path.rglob("*"))
+        out = view_data(_run("decision"), [])["evaluation"]
+        assert sorted(tmp_path.rglob("*")) == before  # no mkdir, no ledger file
+        return out
+
+    def labels():
+        return {dim: row["calibration"] for dim, row in evaluation()["dimensions"].items()}
+
+    # Never scored: null, not an empty table, and not even runs/ appears.
+    assert evaluation() is None
+
+    # The error state says why. The oversized file is a well-formed schema-1
+    # body, so only the size check can refuse it.
+    run_dir.mkdir(parents=True)
+    eval_json = run_dir / "eval.json"
+    for content, why in [
+        ("{not json", "not JSON"),
+        ("[1]", "not a JSON object"),
+        (json.dumps({"schema": 2}), "schema is 2"),
+        (json.dumps({"schema": 1, "pad": "x" * ev.EVAL_JSON_MAX}), "limit"),
+    ]:
+        eval_json.write_text(content, encoding="utf-8")
+        out = evaluation()
+        assert set(out) == {"state", "error"} and out["state"] == "error", content[:20]
+        assert why in out["error"]
+
+    # ok, before any ledger exists: every judge dimension uncalibrated, every
+    # deterministic one None (G6), rows in D5 order, the first VERIFIED quote.
+    body = _eval_body(home, RUN_ID, 1789000000.0, versions)
+    eval_json.write_text(json.dumps(body), encoding="utf-8")
+    ok = evaluation()
+    assert ok == {
+        "state": "ok",
+        "rubric_version": ev.rubric_version(versions),
+        "evaluated_at": 1790000000.5,
+        "headline": "weakest: concision 1/5: words.median_reviewer_owner=825.0",
+        "judge_status": "partial",
+        "judge_error": "edits_address_concerns: no verifiable evidence",
+        "dimensions": {
+            "verdict_grounded": {"score": 2, "scorer": "judge",
+                                 "quote": "Approve with changes.",
+                                 "calibration": "uncalibrated"},
+            "edits_address_concerns": {"score": None, "scorer": "judge",
+                                       "quote": None, "calibration": "uncalibrated"},
+            "concern_coverage": {"score": 3, "scorer": "judge",
+                                 "quote": "Fair point.", "calibration": "uncalibrated"},
+            "efficiency": {"score": 3, "scorer": "deterministic",
+                           "quote": "cost_usd=30.3875", "calibration": None},
+            "concision": {"score": 1, "scorer": "deterministic",
+                          "quote": "words.median_reviewer_owner=825.0", "calibration": None},
+            "verdict_consistency": {"score": 1, "scorer": "deterministic",
+                                    "quote": "flags.verdict_count_mismatch=1",
+                                    "calibration": None},
+        },
+        "flags": ["action_clipped", "verdict_count_mismatch"],
+    }
+    assert list(ok["dimensions"]) == list(ev.DIMENSIONS)
+
+    # Two anchored targets within one calibrate a judge dimension. Neither eval
+    # scored edits_address_concerns, so its anchors pair with nothing (G6).
+    other = _eval_body("/elsewhere/home", "run-2", 1788000000.0, versions)
+    for doc in (body, other):
+        ev.append_ledger(home, ev.eval_line(doc))
+        target = {key: doc["target"][key] for key in ("home", "run", "created_at")}
+        scores = {"verdict_grounded": 3, "edits_address_concerns": 4, "concern_coverage": 2}
+        ev.append_ledger(home, ev.anchor_line(target, scores, versions, "av", None))
+    deterministic = {"efficiency": None, "concision": None, "verdict_consistency": None}
+    assert labels() == {"verdict_grounded": "calibrated",
+                        "edits_address_concerns": "uncalibrated",
+                        "concern_coverage": "calibrated", **deterministic}
+
+    # A ledger that cannot be read (a symlink, which read_ledger refuses) is
+    # unknown, never "nothing anchored".
+    unknown = {"verdict_grounded": "unknown", "edits_address_concerns": "unknown",
+               "concern_coverage": "unknown", **deterministic}
+    ledger, real = tmp_path / "evals.jsonl", tmp_path / "ledger.real"
+    ledger.rename(real)
+    ledger.symlink_to(real)
+    assert labels() == unknown
+    ledger.unlink()
+    real.rename(ledger)
+
+    # Past 2 MB the ledger is not read, so no label can be claimed.
+    with open(ledger, "ab") as handle:
+        handle.write(b"\n" * ev.LEDGER_MAX)
+    assert labels() == unknown

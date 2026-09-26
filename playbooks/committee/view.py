@@ -7,22 +7,26 @@ playbook instance state. Every number on screen comes off the reductions
 ``reduce`` already wrote, in the order the queue returns them (``ORDER BY id``),
 which is the order they happened in.
 
-Two reads are not pure and are stated rather than hidden: the size of each
+Three reads are not pure and are stated rather than hidden: the size of each
 document snapshot under ``runs/<id>/doc/``, stat'd under THIS process's
 HERMES_HOME by the fixed layout ``thread.snapshot_key`` names -- never at a path
 a reduction recorded, which is the master's host path and means nothing inside
-a container -- and, before any turn has settled, the artifact line of the run's
-own ``thread.md`` header. The turn cap rides on the turn reductions; the environment is read
+a container -- before any turn has settled, the artifact line of the run's
+own ``thread.md`` header, and the run's ``eval.json`` with this home's
+``evals.jsonl`` (``_evaluation``), which committee-eval writes and nothing
+here does. The turn cap rides on the turn reductions; the environment is read
 only as a fallback for runs captured before that key existed.
 
 Stdlib-only.
 """
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
 
+from engine import config
 from engine.models import Reduction, Run
 from playbooks.committee import cast, thread
 
@@ -67,6 +71,8 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
         # and asserted on both sides of the seam, and read by nothing.
         "verdict": _verdict(decision),
         "document": _document(run, turns, decision_row, lost),
+        # committee-eval D10/C7: None until the run is scored from this home.
+        "evaluation": _evaluation(run.id),
     }
 
 
@@ -383,6 +389,90 @@ def _size(target: Path) -> int | None:
     if stat.S_ISDIR(run_dir.st_mode) and stat.S_ISDIR(doc.st_mode) and stat.S_ISREG(info.st_mode):
         return info.st_size
     return None
+
+
+# --- the evaluation (committee-eval D10, C7) -------------------------------
+
+def _evaluation(run_id: str) -> dict | None:
+    """The run's evaluation as the Metrics tab reads it, or None when there is none.
+
+    ``runs/<id>/eval.json`` exists only when committee-eval scored this run from
+    this same home (its D7). Anything else -- never scored, or scored from a
+    foreign home -- is None, never an empty score table. Calibration labels are
+    computed here from this home's ``evals.jsonl`` at request time and never
+    stored (D8): a ledger ``read_ledger`` cannot read -- past ``LEDGER_MAX``, a
+    symlink, unreadable -- makes every judge label "unknown".
+
+    Creates nothing -- no mkdir, no ledger file -- and never raises: this runs
+    inside a GET, so an oversized or hand-edited file is an error state on the
+    page, not a 500.
+    """
+    # Imported here rather than at module scope: eval imports playbook, which
+    # imports this module, so importing it at module scope would be a cycle.
+    from playbooks.committee import eval as ev
+
+    def error(message: str) -> dict:
+        return {"state": "error", "error": message}
+
+    path = thread.run_file(run_id, "eval.json")
+    try:
+        size = os.stat(path).st_size
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        return error(f"eval.json could not be read: {exc}")
+    if size > ev.EVAL_JSON_MAX:
+        return error(f"eval.json is {size} bytes, over the {ev.EVAL_JSON_MAX}-byte limit")
+    data = thread.read_regular(path)
+    if data is None:
+        return error("eval.json is not a readable regular file")
+    try:
+        body = json.loads(data.decode("utf-8"))
+    except ValueError as exc:  # a UnicodeDecodeError is a ValueError too
+        return error(f"eval.json is not JSON: {exc}")
+    if not isinstance(body, dict):
+        return error("eval.json is not a JSON object")
+    if body.get("schema") != 1:
+        return error(f"eval.json schema is {body.get('schema')!r}, not 1")
+
+    try:
+        # [] only when the ledger is missing (nothing anchored: "uncalibrated");
+        # None when it cannot be known, which no label may paper over.
+        lines = ev.read_ledger(ev.ledger_path(config.resolve_home()), ev.LEDGER_MAX)
+        labels = None if lines is None else ev.calibration(lines)
+        rubric = body.get("rubric") or {}
+        scored = body.get("dimensions") or {}
+        judge = body.get("judge") or {}
+        dimensions = {}
+        for dim in ev.DIMENSIONS:  # D5 order: the table's row order
+            doc = scored.get(dim) or {}
+            if dim not in ev.JUDGE_DIMS:
+                label = None  # deterministic dimensions are never calibrated (G6)
+            elif labels is None:
+                label = "unknown"
+            else:
+                label = labels.get(rubric.get(dim), "uncalibrated")
+            dimensions[dim] = {
+                "score": doc.get("score"),
+                "scorer": "judge" if dim in ev.JUDGE_DIMS else "deterministic",
+                "quote": next((item.get("quote") for item in doc.get("evidence") or []
+                               if item.get("verified") is True), None),
+                "calibration": label,
+            }
+        return {
+            "state": "ok",
+            "rubric_version": body.get("rubric_version"),
+            "evaluated_at": body.get("evaluated_at"),
+            "headline": body.get("headline"),
+            "judge_status": judge.get("status"),
+            # Not in C7's key list, but its UI table shows "the judge status and
+            # error", and nothing else in the payload carries the error.
+            "judge_error": judge.get("error"),
+            "dimensions": dimensions,
+            "flags": [flag.get("id") for flag in body.get("flags") or []],
+        }
+    except Exception as exc:  # schema 1 with junk inside, or a hand-edited ledger
+        return error(f"eval.json could not be read: {exc!r}")
 
 
 # --- odds and ends ---------------------------------------------------------
