@@ -184,6 +184,56 @@ function seed(): void {
   }
 }
 
+/** A second run whose owner turn carries one checked image. The reduction
+ *  records names only, never a host path: the server finds the file under its
+ *  own home (the container's /hermes-home) by the run's images/ layout. */
+const VOICE_RUN = 'committee-e2e-voice';
+const SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#6ea8fe"/></svg>';
+
+function seedVoice(): void {
+  // 0700 and 0600, as `thread.images_dir` and a worker's own write leave them.
+  rmSync(`${HOME}/runs/${VOICE_RUN}`, { recursive: true, force: true });
+  mkdirSync(`${HOME}/runs/${VOICE_RUN}/images`, { recursive: true, mode: 0o700 });
+  writeFileSync(`${HOME}/runs/${VOICE_RUN}/images/t02-owner.svg`, SVG, { mode: 0o600 });
+
+  // What `check_images` records for the owner's own file: `ok` true, so the
+  // view merges it onto the reference by position and renders an <img>.
+  const image = {
+    kind: 'image', name: 't02-owner.svg', ref: 'images/t02-owner.svg',
+    caption: 'staffing curve', description: 'engineers per week, flat after week 6', ok: true,
+  };
+  const turn = (n: number, role: string, body: string, images: unknown[]) => ({
+    turn: n, role, delivered: true, body, stance: null, request_floor: false, delegate: false,
+    close: false, action: null, verified: null, answers_turn: null, delegated_by_turn: null,
+    cap: CAP, error: null, artifact: ORIGINAL, revised: REVISED,
+    take: 1, takes: 1, kept: true, voice: { words: 6, images }, violations: [], flags: [],
+  });
+
+  const db = new DatabaseSync(`${HOME}/queue.db`);
+  try {
+    const now = Date.now() / 1000;
+    db.prepare('DELETE FROM reductions WHERE run_id = ?').run(VOICE_RUN);
+    db.prepare('DELETE FROM runs WHERE id = ?').run(VOICE_RUN);
+    db.prepare(
+      `INSERT INTO runs (id, playbook, site, base_ref, config_json, state, phase,
+                         created_at, updated_at)
+       VALUES (?, 'committee', 'local', 'main', '{}', 'running', 't03-tpm', ?, ?)`,
+    ).run(VOICE_RUN, now, now);
+    const insert = db.prepare(
+      `INSERT INTO reductions (run_id, phase, kind, json, review_state, created_at, updated_at)
+       VALUES (?, ?, 'turn', ?, 'pending', ?, ?)`,
+    );
+    insert.run(VOICE_RUN, 't01-senior_director', JSON.stringify(
+      turn(1, 'senior_director', 'Defer it: the staffing line is fiction.', [])), now, now);
+    insert.run(VOICE_RUN, 't02-owner', JSON.stringify(turn(2, 'owner',
+      'Conceded: staffing is the risk.\n![staffing curve](images/t02-owner.svg)\n'
+      + 'Description: engineers per week, flat after week 6', [image])), now + 1, now + 1);
+  } finally {
+    db.close();
+  }
+}
+
 /** Open the committee tab for the seeded run and wait for real content. */
 async function openCommittee(page: Page): Promise<void> {
   await page.goto(`/#playbook?run=${RUN}`);
@@ -196,6 +246,7 @@ test.skip(HOME === '', 'set HERMES_E2E_HOME -- use `make ui-test-committee`');
 test.beforeAll(() => {
   if (!HOME) return;
   seed();
+  seedVoice();
 });
 
 test('the seeded run is served with a view', async ({ request }) => {
@@ -331,6 +382,42 @@ test('the document stepper walks every version, served inside the container', as
   await expect(page.locator('[data-testid="original-label"]'))
     .toHaveText('Original — as the committee was handed it');
   await expect(whole).toContainText('Staffing: six engineers for two quarters.');
+});
+
+test('a turn image loads through the run images route, served inside the container', async ({ page, request }) => {
+  const direct = await request.get(`/api/runs/${VOICE_RUN}/view/artifact?path=images/t02-owner.svg`);
+  expect(direct.status()).toBe(200);
+  expect(direct.headers()['content-type']).toBe('image/svg+xml');
+  expect(direct.headers()['content-security-policy']).toContain('sandbox');
+  // Opened directly it downloads; an <img> ignores the header, as below proves.
+  expect(direct.headers()['content-disposition']).toContain('attachment');
+  expect(await direct.text()).toBe(SVG);
+
+  // Image requests only: the design system's Inter @font-face is an outside
+  // fetch of its own, unrelated to what a worker's turn can make the browser load.
+  const images: string[] = [];
+  page.on('request', (r) => { if (r.resourceType() === 'image') images.push(r.url()); });
+
+  await page.goto(`/#playbook?run=${VOICE_RUN}`);
+  await expect(page.getByText('Maya Okonkwo').first()).toBeVisible({ timeout: 15000 });
+  const entry = page.locator('[data-testid="entry-2"]');
+  await entry.locator('button').first().click();
+
+  const img = entry.locator('img[alt="staffing curve"]');
+  await expect(img).toHaveAttribute(
+    'src', new RegExp(`/api/runs/${VOICE_RUN}/view/artifact\\?path=images%2Ft02-owner\\.svg`));
+  // Decoded, not merely requested: a 400, a 404 or a CSP block leaves naturalWidth 0.
+  await expect
+    .poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0))
+    .toBe(true);
+  await expect(entry.getByText('engineers per week, flat after week 6')).toBeVisible();
+
+  // The listener saw the image load (so an empty list below is not vacuous),
+  // and nothing on the page fetched an image from another origin.
+  const origin = new URL(page.url()).origin;
+  expect(images.some((u) => u.includes(`/api/runs/${VOICE_RUN}/view/artifact?path=images%2Ft02-owner.svg`))).toBe(true);
+  const outside = images.filter((u) => /^https?:/.test(u) && new URL(u).origin !== origin);
+  expect(outside, outside.join('\n')).toEqual([]);
 });
 
 test('one injected script tag, and the host React is the only React', async ({ page }) => {
