@@ -3201,6 +3201,17 @@ def test_every_turn_reduction_carries_both_links_null_when_not_applicable():
     assert reviewer.json["answers_turn"] is None
     assert reviewer.json["delegated_by_turn"] is None
 
+    # No revised copy here, so the re-check records an error rather than raising.
+    s.update(current_role="junior_ic", current_turn=3, answers_turn=None,
+             delegated_by_turn=2, pending_action="tighten")
+    junior = pb.reduce(
+        run, "t03-junior_ic",
+        [_finding(run, f"{run.id}/t03-junior_ic", _turn_answer("Done.", close="no"))],
+        _NamedSite("local"),
+    )[0]
+    assert junior.json["delegated_by_turn"] == 2
+    assert junior.json["answers_turn"] is None
+
 
 def test_a_cap_dropped_delegation_names_the_owner_turn_that_asked_for_it():
     _, _, capped, _, _, _ = _drive(
