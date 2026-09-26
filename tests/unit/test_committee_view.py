@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from engine.models import Reduction, Run
-from playbooks.committee import cast, thread
+from playbooks.committee import cast, thread, voice
 from playbooks.committee import eval as ev
 from playbooks.committee.view import view_data
 
@@ -110,6 +110,7 @@ def test_view_data_returns_every_block_the_contract_names(run2):
 
     assert set(data) == {
         "kind", "roster", "progress", "timeline", "verdict", "document", "evaluation",
+        "voice",
     }
     assert data["evaluation"] is None  # never scored: no runs/<id>/eval.json
     assert data["kind"] == "committee"
@@ -123,6 +124,7 @@ def test_view_data_returns_every_block_the_contract_names(run2):
     assert all(
         set(entry) == {
             "n", "role", "name", "title", "body", "action", "badges", "verified", "stance",
+            "take", "takes", "violations", "flags", "voice", "segments",
         }
         for entry in data["timeline"]
     )
@@ -729,6 +731,120 @@ def test_view_data_creates_nothing_under_the_home(run2, tmp_path):
     view_data(_run("open"), [])
 
     assert not (tmp_path / "runs").exists()
+
+
+# --- voice (C10) ---------------------------------------------------------------
+
+def _voiced(n, role, body, **over):
+    """A turn reduction as voice's `_reduce_turn` writes it."""
+    metrics = voice.measure(body, role)
+    doc = {
+        "role": role, "turn": n, "delivered": True, "body": body, "stance": None,
+        "artifact": "/x/proposal.md", "revised": "/x/revised/proposal.md", "cap": 30,
+        "request_floor": False, "delegate": False, "close": False, "action": None,
+        "verified": None, "answers_turn": None, "delegated_by_turn": None, "error": None,
+        "take": 1, "takes": 1, "kept": True, "voice": metrics,
+        "violations": voice.violations(metrics, role), "flags": voice.flags(metrics, role),
+    }
+    doc.update(over)
+    return Reduction(kind="turn", json=doc, phase=f"t{n:02d}-{role}")
+
+
+_FIGURES = (
+    "Staffing is the risk.\n"
+    "![staffing curve](images/t02-owner.svg)\n"
+    "Description: engineers per week, flat after week 6.\n"
+    "Figure: the pipeline\n"
+    "```mermaid\ngraph TD; A-->B\n```\n"
+    "Description: two stages."
+)
+
+
+def test_a_voiced_entry_carries_its_take_its_rules_and_its_badges():
+    kept = _voiced(2, "owner", "Word " * 160, takes=3, take=3,
+                   violations=["over_cap"], flags=["no_pointer", "no_example"])
+    entry = view_data(_run("t03-tpm"), [kept])["timeline"][0]
+
+    assert (entry["take"], entry["takes"]) == (3, 3)
+    assert entry["violations"] == ["over_cap"]
+    assert entry["flags"] == ["no_pointer", "no_example"]
+    assert entry["voice"]["words"] == 160
+    assert entry["badges"] == ["voice_flag", "retaken", "no_pointer", "no_example"]
+
+
+def test_segments_merge_the_masters_image_check_by_position():
+    doc = _voiced(2, "owner", _FIGURES)
+    doc.json["voice"]["images"][0]["ok"] = True
+    entry = view_data(_run("t03-tpm"), [doc])["timeline"][0]
+
+    assert [s["kind"] for s in entry["segments"]] == ["text", "image", "mermaid"]
+    assert entry["segments"][1] == {
+        "kind": "image", "name": "t02-owner.svg", "ref": "images/t02-owner.svg",
+        "caption": "staffing curve", "description": "engineers per week, flat after week 6.",
+        "ok": True,
+    }
+    assert entry["segments"][2]["source"] == "graph TD; A-->B"
+
+    unchecked = _voiced(2, "owner", _FIGURES)
+    unchecked.json.pop("voice")
+    image = view_data(_run("t03-tpm"), [unchecked])["timeline"][0]["segments"][1]
+    assert image["ok"] is False  # absent means refused, never assumed
+
+    # A recorded image the master never passed stays refused: measure leaves
+    # ok None, and check_images writes False for a foreign or missing file.
+    for ok in (None, False):
+        refused = _voiced(2, "owner", _FIGURES)
+        refused.json["voice"]["images"][0]["ok"] = ok
+        image = view_data(_run("t03-tpm"), [refused])["timeline"][0]["segments"][1]
+        assert image["ok"] is False, ok
+
+    # A pass rides only onto the reference it was recorded for, never onto
+    # whatever sits at its position when the body is split again.
+    drifted = _voiced(2, "owner", _FIGURES)
+    drifted.json["voice"]["images"][0].update(
+        ok=True, name="t09-tl.svg", ref="images/t09-tl.svg")
+    image = view_data(_run("t03-tpm"), [drifted])["timeline"][0]["segments"][1]
+    assert image["ok"] is False
+
+
+def test_a_legacy_entry_has_no_voice_and_no_badge(run2):
+    raw = json.loads(FIXTURE.read_text(encoding="utf-8"))[0]  # run-2 as written: no body
+    entry = view_data(_run("decision"), [Reduction(kind="turn", json=raw["json"])])["timeline"][0]
+
+    assert (entry["take"], entry["takes"], entry["voice"]) == (None, None, None)
+    assert entry["violations"] == [] and entry["flags"] == [] and entry["segments"] == []
+    assert not {"voice_flag", "retaken", "no_pointer", "no_example"} & set(entry["badges"])
+    assert view_data(_run("decision"), run2)["voice"] is None
+
+
+def test_take_reductions_stay_out_of_the_timeline_and_the_floor():
+    first = _voiced(1, "tl", "Defer it: `a.py:1` for example.")
+    take = Reduction(kind="take", json={"phase": "t02-owner", "role": "owner", "turn": 2,
+                                        "take": 1, "kept": False, "delivered": True,
+                                        "body": "x", "request_floor": True},
+                     phase="t02-owner")
+    data = view_data(_run("t02-owner-take2"), [first, take])
+
+    assert [e["n"] for e in data["timeline"]] == [1]
+    assert data["progress"]["holder"] == "tl" and data["progress"]["queue"] == []
+
+
+def test_the_top_level_voice_summarises_kept_rows_and_the_verdict_says_how_it_was_kept():
+    turn = _voiced(1, "tl", "Defer it: `a.py:1` for example.")
+    decision = Reduction(kind="decision", json={
+        "verdict": "Approve.\n\n![x](http://evil.example/a.png)", "delivered": True,
+        "rechecks": [], "takes": 2, "violations": ["too_many_images"],
+        "voice": {"words": 1, "cap": 300}, "ended": "queue empty",
+    }, phase="decision-take2", review_state="pending")
+    data = view_data(_run("decision-take2"), [turn, decision])
+
+    assert data["voice"]["owner_reviewer_median_words"] == 5.0
+    assert data["voice"]["chair_words"] == 1
+    verdict = data["verdict"]
+    assert verdict["takes"] == 2 and verdict["violations"] == ["too_many_images"]
+    assert verdict["voice"] == {"words": 1, "cap": 300}
+    assert [s["kind"] for s in verdict["segments"]] == ["text", "image"]
+    assert verdict["segments"][1]["ok"] is False
 
 
 # --- the evaluation (committee-eval D10, C7) ------------------------------------

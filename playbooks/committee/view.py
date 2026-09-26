@@ -29,7 +29,7 @@ from pathlib import Path
 
 from engine import config
 from engine.models import Reduction, Run
-from playbooks.committee import cast, thread
+from playbooks.committee import cast, thread, voice
 
 
 def view_data(run: Run, reductions: list[Reduction]) -> dict:
@@ -74,6 +74,11 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
         "document": _document(run, turns, decision_row, lost),
         # committee-eval D10/C7: None until the run is scored from this home.
         "evaluation": _evaluation(run.id),
+        # voice C11 over the kept turn and decision rows; null for a run
+        # reduced before voice existed, which the view says in words.
+        "voice": voice.summary(
+            [(r.kind, r.json) for r in reductions if isinstance(r.json, dict)]
+        ),
     }
 
 
@@ -189,7 +194,43 @@ def _entry(doc: dict) -> dict:
         "verified": doc.get("verified") if isinstance(doc.get("verified"), bool) else None,
         # The document stepper reads a reviewer's stance off the entry, by turn.
         "stance": stance.strip() if isinstance(stance, str) and stance.strip() else None,
+        # voice C10. A turn reduced before voice has none of these keys and
+        # reads as null / empty: no badge, no metric, never a made-up 0.
+        "take": _int(doc.get("take")),
+        "takes": _int(doc.get("takes")),
+        "violations": _strings(doc.get("violations")),
+        "flags": _strings(doc.get("flags")),
+        "voice": doc.get("voice") if isinstance(doc.get("voice"), dict) else None,
+        "segments": _segments(doc),
     }
+
+
+def _segments(doc: dict) -> list[dict]:
+    """The body as voice.segments splits it, each image's ``ok`` merged in.
+
+    ``ok`` comes from the master's check recorded on the reduction, matched by
+    position over the same ordered list of images (mermaid included) that
+    ``measure`` recorded, and only onto the reference it was recorded for. It
+    is False whenever it is absent: this process never stats a worker's file
+    on the master's behalf. Later loops build segments with this, never with
+    voice.segments(body) directly.
+    """
+    body = doc.get("body")
+    recorded = doc.get("voice") if isinstance(doc.get("voice"), dict) else {}
+    checked = recorded.get("images") if isinstance(recorded.get("images"), list) else []
+    out, index = [], 0
+    for seg in voice.segments(body if isinstance(body, str) else ""):
+        if seg["kind"] in ("image", "mermaid"):
+            if seg["kind"] == "image":
+                got = checked[index] if index < len(checked) else None
+                ok = isinstance(got, dict) and got.get("ok") is True and (
+                    (got.get("kind"), got.get("name"), got.get("ref"))
+                    == ("image", seg["name"], seg["ref"])
+                )
+                seg = {**seg, "ok": ok}
+            index += 1
+        out.append(seg)
+    return out
 
 
 def _badges(doc: dict, *, attributed: bool) -> list[str]:
@@ -226,6 +267,15 @@ def _badges(doc: dict, *, attributed: bool) -> list[str]:
         badges.append("close")
     if doc.get("error"):
         badges.append("error")
+    # voice C10: the rules a kept take broke, whether it was retaken, and the
+    # two soft flags a reader scans for.
+    if _strings(doc.get("violations")):
+        badges.append("voice_flag")
+    if (_int(doc.get("takes")) or 1) > 1:
+        badges.append("retaken")
+    for flag in ("no_pointer", "no_example"):
+        if flag in _strings(doc.get("flags")):
+            badges.append(flag)
     return badges
 
 
@@ -255,6 +305,16 @@ def _verdict(decision: dict | None) -> dict | None:
         "artifact_intact": decision.get("artifact_intact"),
         "dropped_delegation": decision.get("dropped_delegation"),
         "dropped_floor_requests": _as_list(decision.get("dropped_floor_requests")),
+        "takes": _int(decision.get("takes")),
+        "violations": _strings(decision.get("violations")),
+        "voice": decision.get("voice") if isinstance(decision.get("voice"), dict) else None,
+        # The verdict text split like a turn body, every file image refused:
+        # the chair may add none, so none is ever drawn, and Markdown never
+        # receives an image reference to fetch.
+        "segments": [
+            {**seg, "ok": False} if seg["kind"] == "image" else seg
+            for seg in voice.segments(decision.get("verdict") or "")
+        ],
         # No `simulation` key. It was a constant `True` -- criterion 8 wants the
         # disclaimer to be independent of whether the chair wrote it, and the
         # view satisfies that by rendering the notice UNCONDITIONALLY, which is
@@ -520,6 +580,11 @@ def _as_list(value: object) -> list:
     of a route.
     """
     return list(value) if isinstance(value, list) else []
+
+
+def _strings(value: object) -> list[str]:
+    """The strings in ``value`` when it is a list, otherwise an empty list."""
+    return [v for v in _as_list(value) if isinstance(v, str)]
 
 
 def _role(doc: dict) -> str:
