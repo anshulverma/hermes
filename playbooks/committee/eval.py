@@ -10,8 +10,8 @@ ruling.
 
 Every dimension carries a version, so a score is only ever compared with scores
 taken under the same definition. The voice rules and the one word counter live
-in playbooks/committee/voice.py; this module imports only ``RULES`` and
-``measure`` from it, so there is never a second definition to drift.
+in playbooks/committee/voice.py; this module imports only ``RULES``, ``measure``
+and ``summary`` from it, so there is never a second definition to drift.
 
 Stdlib-only.
 """
@@ -114,29 +114,33 @@ def voice_summary(rows: list[tuple[str, dict]], entries: dict) -> dict | None:
     D3, and only the latest decision is read. A pre-voice row has no ``voice``
     key and is measured here on a COPY: the shared docs are never touched,
     because action_clipped reads ``voice`` off them and a filled-in dict without
-    ``action_chars`` would silence its legacy fallback. A present null (an
-    undelivered voice-era take) stays null and so stays out.
+    ``action_chars`` would silence its legacy fallback. A present null (a
+    signals-only or undelivered voice-era take) stays null and so stays out.
     """
+    def obj(value: object) -> dict:
+        return value if isinstance(value, dict) else {}
+
     turns: dict[int, dict] = {}
     decision = None
     for kind, doc in rows:
-        if kind == "turn" and isinstance(doc, dict) and isinstance(doc.get("turn"), int):
+        if (kind == "turn" and isinstance(doc, dict) and isinstance(doc.get("turn"), int)
+                and not isinstance(doc["turn"], bool)):
             turns[doc["turn"]] = doc
         elif kind == "decision" and isinstance(doc, dict):
             decision = doc
-    bodies = entries.get("turns") or {}
+    entries = obj(entries)
+    bodies = obj(entries.get("turns"))
     out = []
     for n, doc in turns.items():
         row = dict(doc)
         if "voice" not in row and row.get("delivered"):
-            # str keys on disk (json.dump), int keys if measure built it in memory
-            body = (bodies.get(str(n)) or bodies.get(n) or {}).get("body") or ""
+            body = obj(bodies.get(str(n))).get("body") or ""
             row["voice"] = measure(body, str(row.get("role") or ""))
         out.append(("turn", row))
     if decision is not None:
         row = dict(decision)
         if "voice" not in row and row.get("delivered"):
-            prose = (entries.get("decision") or {}).get("chair_prose") or ""
+            prose = obj(entries.get("decision")).get("chair_prose") or ""
             row["voice"] = measure(prose, "chair")
         out.append(("decision", row))
     return summary(out)
@@ -996,7 +1000,7 @@ def compute_flags(target: Target, metrics: dict) -> list[dict]:
             clipped = (isinstance(chars, (int, float)) and not isinstance(chars, bool)
                        and chars > turnblock.ACTION_MAX)
         else:
-            clipped = len(action) >= turnblock.ACTION_MAX
+            clipped = len(action) >= turnblock.ACTION_MAX or action.endswith("…")
         if clipped:
             prefix = f"- re-check of turn {n:02d} "
             flags.append({

@@ -31,7 +31,7 @@ import pytest
 
 from engine.db.migrate import apply_migrations
 from playbooks.committee import eval as E
-from playbooks.committee import voice
+from playbooks.committee import turnblock, voice
 
 MEASURE_KEYS = {"words", "pointers", "examples", "longest_paragraph_words", "filler_hits"}
 
@@ -1674,7 +1674,8 @@ def test_verdict_count_words_and_every_match(tmp_path):
 
 
 def test_flag_rules(tmp_path):
-    """D4 rules no baseline pins: the truncation phrase and verified, action_chars at 200, delegated_by_turn, claim lines."""
+    """D4 rules no baseline pins: the truncation phrase and verified, action_chars at 200,
+    a word-cut action under a null voice, delegated_by_turn, claim lines."""
     home, run_id = build_home(tmp_path, "run-9")
     base = E.load_target(str(home), run_id)
 
@@ -1711,6 +1712,14 @@ def test_flag_rules(tmp_path):
              12: {**owner(12, 50), "delegate": False}, 13: junior(13, "Done.")}
     assert flags(turns, {"rechecks": [{"turn": 13, "action": "c" * 10}]}) == [
         ("action_clipped", 13, None, None)]
+    # A signals-only owner take keeps voice null, so the legacy fallback decides, and
+    # turnblock's word cut leaves a 231-character action under 200, ending "…".
+    raw = ("alpha " * 40)[:231]
+    cut = turnblock.parse(f"```{turnblock.FENCE_TAG}\naction: {raw}\n```")["action"]
+    assert len(cut) < turnblock.ACTION_MAX and cut.endswith("…")
+    turns = {20: {**owner(20, 0), "voice": None}, 21: junior(21, "Done.")}
+    assert flags(turns, {"rechecks": [{"turn": 21, "action": cut}]}) == [
+        ("action_clipped", 21, None, None)]
 
     # Two identical wrong sentences get their own lines; one thread.md lacks sorts last.
     text = "\n".join(("# Committee — run-x", "", "## decision — Dana Whitfield", "",
@@ -3548,12 +3557,16 @@ def test_concision_is_bumped_because_voice_changed_its_inputs():
 def test_voice_summary_measures_pre_voice_rows_on_copies_and_keeps_null_out():
     stale = {"role": "tl", "turn": 1, "delivered": True, "voice": {"words": 99, "cap": 150}}
     legacy = {"role": "tl", "turn": 1, "delivered": True}  # the later t01 wins (eval D3)
-    silent = {"role": "pm", "turn": 2, "delivered": False, "voice": None}
+    # a voice-era signals-only take: delivered, voice null
+    silent = {"role": "pm", "turn": 2, "delivered": True, "voice": None}
+    unsent = {"role": "pm", "turn": 3, "delivered": False}  # pre-voice and never delivered
     decision = {"delivered": True, "verdict": "Approve with changes."}
-    entries = {"turns": {"1": {"role": "tl", "body": "Defer it."}, "2": {"role": "pm", "body": ""}},
+    entries = {"turns": {"1": {"role": "tl", "body": "Defer it."},
+                         "2": {"role": "pm", "body": "_(the speaker sent signals only, no prose)_"},
+                         "3": {"role": "pm", "body": ""}},
                "decision": {"chair_prose": "Approve with changes."}}
     rows = [("turn", stale), ("turn", legacy), ("take", {"role": "pm", "voice": {"words": 900}}),
-            ("turn", silent), ("decision", decision)]
+            ("turn", silent), ("turn", unsent), ("decision", decision)]
 
     summary = E.voice_summary(rows, entries)
 
@@ -3561,10 +3574,21 @@ def test_voice_summary_measures_pre_voice_rows_on_copies_and_keeps_null_out():
     # legacy fallback still applies to them
     assert "voice" not in legacy and "voice" not in decision
     assert summary["median_words_by_role"] == {"tl": 2.0, "chair": 3.0}
+    assert summary["total_takes"] == 2
     assert summary["owner_reviewer_median_words"] == 2.0
     assert summary["chair_words"] == 3
     assert summary["reviewer_pct_with_pointer"] == 0.0
     assert E.voice_summary([("turn", silent)], entries) is None  # a present null stays out
+
+
+def test_voice_summary_never_raises_on_hand_built_entries():
+    legacy = {"role": "tl", "turn": 1, "delivered": True}
+    decision = {"delivered": True}
+    for entries in (None, [], "x", {"turns": ["x"], "decision": "x"}, {"turns": {"1": "x"}}):
+        assert E.voice_summary([("turn", legacy), ("decision", decision)], entries)[
+            "median_words_by_role"] == {"tl": 0.0, "chair": 0.0}
+    # a bool is not a turn number
+    assert E.voice_summary([("turn", {**legacy, "turn": True})], {}) is None
 
 
 def test_a_voice_era_header_seats_the_same_roster_under_eval_d3(tmp_path, monkeypatch):

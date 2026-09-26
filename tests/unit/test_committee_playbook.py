@@ -186,6 +186,9 @@ def test_a_long_action_is_cut_at_a_word_near_the_cap():
     assert action.endswith("…")
     assert action[:-1].split()[-1] == "wording"  # no half word before the ellipsis
     assert len(action) > T.ACTION_MAX // 2
+    # a space at index 200 is past the cap, and exactly 200 characters is not cut
+    assert len(T.parse(_fenced("action: " + "a" * 150 + " " + "b" * 49 + " tail"))["action"]) <= T.ACTION_MAX
+    assert T.parse(_fenced("action: " + "a" * 200))["action"] == "a" * 200
 
 
 def test_lengths_reports_the_raw_unclipped_action_and_stance():
@@ -205,7 +208,7 @@ def test_the_instructions_ask_for_a_sentence_action_and_a_short_stance():
     assert "`action: <one sentence, 200 characters or fewer>`" in owner
     for text in (owner, T.instruction()):
         assert "`stance: <20 words or fewer>`" in text
-        assert " -- " not in text and "—" not in text
+        assert " -- " not in text and "—" not in text and "–" not in text
 
 
 # --- turnblock: stripping ------------------------------------------------

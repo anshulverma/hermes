@@ -718,8 +718,8 @@ refetch. The eval playbook itself has no view, so its runs get the generic tabs.
   own words: lead with the point; bullets of about 1.5 lines or less; no walls of text; no
   defending decisions; concrete examples and pointers. No element contains `**`, an en dash or
   an em dash, and the skill is never read at runtime.
-- eval.py imports only `RULES` and `measure`, and `words(text)` is `measure(text)["words"]`.
-  eval.py has no other word counter.
+- eval.py imports only `RULES`, `measure` and `summary`, and `words(text)` is
+  `measure(text)["words"]`. eval.py has no other word counter.
 - The wall threshold, 120 words, is `_WALL_WORDS` in eval.py, not a voice.py name, because eval
   imports nothing else from voice.
 
@@ -801,7 +801,7 @@ the previous one. Each behaviour loop scores its live run with the two commands 
 spec, and compares it against run-9 and run-2.
 
 - **Names.**
-  - eval.py's only voice import is `from playbooks.committee.voice import RULES, measure`.
+  - eval.py's only voice import is `from playbooks.committee.voice import RULES, measure, summary`.
   - Build on `words`, `DIMENSIONS`, `JUDGE_DIMS`, `DETERMINISTIC_DIMS`, `dimension_versions(rules)`,
     `rubric_version(versions)`, `compute_metrics(target)` and `calibration(ledger_lines)`.
   - Quote verification is two calls, never one that reads the disk itself:
