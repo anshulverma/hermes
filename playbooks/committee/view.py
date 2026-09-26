@@ -36,9 +36,10 @@ from playbooks.committee import cast, selection, thread, voice
 def view_data(run: Run, reductions: list[Reduction]) -> dict:
     """The whole view payload for one committee run.
 
-    ``run`` is read for exactly one thing -- whether the chair has the floor --
-    and its phase name is checked against the static ``DECISION_PHASES``, never
-    parsed for a speaker (the runtime phase name is display-only, §5.6).
+    ``run``'s phase is read for two things -- whether the chair has the floor
+    and whether selection ran -- and only checked against the static
+    ``DECISION_PHASES`` and ``SELECTION_PHASES``, never parsed for a speaker
+    (the runtime phase name is display-only, §5.6).
     """
     # Nothing `reduce` writes reaches the out-of-contract shapes guarded below
     # and in `_role`/`_as_list` -- they need a hand-edited database. But this
@@ -76,7 +77,7 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
         "verdict": _verdict(decision),
         "document": _document(run, turns, decision_row, lost),
         # selection C6: the stages, who was considered and any fallback. None
-        # for a legacy run, a run lost mid-meeting, or one not yet past open.
+        # for a legacy run (lost or not), or one not yet past open.
         "selection": _selection(run, reductions, seats),
         # committee-eval D10/C7: None until the run is scored from this home.
         "evaluation": _evaluation(run.id),
@@ -394,8 +395,15 @@ def _verdict(decision: dict | None) -> dict | None:
 
 # --- selection (selection C6) ----------------------------------------------
 
-# The three selectors, whose nominations the roster names by person.
+# The three selectors, whose nominations the roster names by person, in stage order.
 _SELECTORS = (cast.OWNER, "manager", cast.CHAIR_ROLE)
+# The selection phases, beside playbook's DECISION_PHASES: stage k is
+# `s{k}-{selector}` (playbook `_select`) and take k of it `{base}-take{k}`.
+SELECTION_PHASES: tuple[str, ...] = tuple(
+    f"s{stage}-{role}{take}"
+    for stage, role in enumerate(_SELECTORS, 1)
+    for take in ("", *(f"-take{k}" for k in range(2, voice.MAX_TAKES + 1)))
+)
 # voice's soft flags. A selector is asked for no pointer or example, so on a
 # stage they ride on `flags` and are never badged (orchestrator decision 11).
 _SOFT_BADGES = ("no_pointer", "no_example", "tells")
@@ -414,24 +422,20 @@ def _final(reductions: list[Reduction]) -> dict | None:
 def _selection_state(run: Run, reductions: list[Reduction]) -> str | None:
     """seated | fallback | lost | selecting, or None (selection C6).
 
-    The phase is compared, never parsed: while no turn exists, anything that is
-    not a static or decision phase is an s-phase or one of its retakes.
+    Selection ran only if the run is at an s-phase or wrote a ``selection``
+    reduction. The phase is compared against ``SELECTION_PHASES``, never
+    parsed, so a legacy run at t01 before its first turn settles (a retake of
+    it, or lost there) keeps today's nine.
     """
-    # Imported here rather than at module scope, as in `_floor`: playbook.py
-    # imports this module.
-    from playbooks.committee.playbook import DECISION_PHASES
-
     final = _final(reductions)
     if final is not None:
         return "fallback" if _str(final.get("fallback")) else "seated"
     kinds = {r.kind for r in reductions}
     if "turn" in kinds:
         return None  # a legacy run, lost mid-meeting or not
-    if "lost" in kinds:
-        return "lost"
-    if run.phase in (None, "open", "ruling") or run.phase in DECISION_PHASES:
-        return None
-    return "selecting"
+    if run.phase not in SELECTION_PHASES and "selection" not in kinds:
+        return None  # not yet past open, or a legacy run before its first turn
+    return "lost" if "lost" in kinds else "selecting"
 
 
 def _seats(run: Run, reductions: list[Reduction]) -> dict[str, dict]:

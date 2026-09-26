@@ -304,6 +304,25 @@ def test_validate_requires_a_title_for_a_derived_seat_and_a_rationale_for_every_
     assert all(i["stakeholder"] == i["role"] and i["represented_by"] is None for i in invalid)
 
 
+def test_validate_rejects_a_derived_seat_named_like_a_cast_or_library_persona():
+    """A derived seat cannot speak as someone already in the cast or the library:
+    "Maya Okonkwo" under slug "maya" would read in the timeline as the owner."""
+    owner, security = cast.CAST["owner"]["name"], cast.LIBRARY["security"]["name"]
+    seats, invalid = S.validate({"seats": [
+        _seat("maya", name=owner, title="Staff Engineer & proposal owner"),
+        _seat("sec_lead", name=f"  {security.upper()} ", title="Security lead"),
+        _seat("ruth", title=cast.CAST["manager"]["name"].replace(" ", "\t")),  # name from title
+        _seat("maya_two", name="Maya Okonkwo-Reyes", title="Crew lead"),
+    ]}, cast.LIBRARY)
+
+    assert [(i["role"], i["reason"]) for i in invalid] == [
+        ("maya", "invalid: name taken"),
+        ("sec_lead", "invalid: name taken"),
+        ("ruth", "invalid: name taken"),
+    ]
+    assert [(s["role"], s["name"]) for s in seats] == [("maya_two", "Maya Okonkwo-Reyes")]
+
+
 def test_validate_clips_every_field_and_maps_long_dashes_to_hyphens():
     """Voice's rule 5 holds for derived text too: no en or em dash survives."""
     long = "x" * 500

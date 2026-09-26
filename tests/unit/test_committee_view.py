@@ -23,7 +23,7 @@ import pytest
 from engine.models import Reduction, Run
 from playbooks.committee import cast, selection, thread, voice
 from playbooks.committee import eval as ev
-from playbooks.committee.view import view_data
+from playbooks.committee.view import SELECTION_PHASES, view_data
 
 FIXTURE = Path(__file__).parent.parent / "data" / "committee-run-2-reductions.json"
 
@@ -1593,6 +1593,33 @@ def test_a_legacy_run_lost_mid_meeting_has_no_selection(run2):
     assert all(row[key] is None for row in data["roster"] for key in _ROW_KEYS)
 
 
+def test_a_legacy_run_before_its_first_turn_keeps_the_nine():
+    """Only an s-phase or a selection reduction says selection ran. A run from
+    before selection, at t01 with no turn settled, keeps today's nine and no
+    Selection card: never "selecting" or "lost" with the fixed four."""
+    take = Reduction(kind="take", json={
+        "phase": "t01-senior_director", "role": "senior_director", "turn": 1, "take": 1,
+        "kept": False, "delivered": True, "body": "x"}, phase="t01-senior_director")
+    lost = Reduction(kind="lost", json={"error": "the meeting was lost"})
+    for phase, reductions in (
+        ("t01-senior_director", []),            # minted, nothing settled yet
+        ("t01-senior_director-take2", [take]),  # a voice retake of the first turn
+        ("t01-senior_director", [lost]),        # lost at t01
+    ):
+        data = view_data(_run(phase), reductions)
+
+        assert data["selection"] is None, phase
+        assert [row["role"] for row in data["roster"]] == list(cast.CAST), phase
+        assert all(row[key] is None for row in data["roster"] for key in _ROW_KEYS), phase
+
+    # The playbook's three stage names (`_select`) and voice's retakes of each.
+    assert SELECTION_PHASES == (
+        "s1-owner", "s1-owner-take2", "s1-owner-take3",
+        "s2-manager", "s2-manager-take2", "s2-manager-take3",
+        "s3-senior_director", "s3-senior_director-take2", "s3-senior_director-take3",
+    )
+
+
 def test_a_derived_seat_is_named_in_floor_stances_and_entries():
     crew = _seat("crew_owner", "manager", **_CREW_OWNER)
     reductions = [
@@ -1612,6 +1639,11 @@ def test_a_derived_seat_is_named_in_floor_stances_and_entries():
     assert data["progress"]["holder"] == "owner"
     assert rows["crew_owner"]["state"] == "queued"
     assert rows["crew_owner"]["stance"] == "defer until crews can opt out"  # _stances
+
+    # A derived seat holding the floor lights its own row (_roster), never a 500.
+    data = view_data(_run("t02-owner"), reductions[:4])
+    assert data["progress"]["holder"] == "crew_owner"
+    assert {row["role"]: row["state"] for row in data["roster"]}["crew_owner"] == "holds_floor"
 
 
 def test_an_unknown_role_is_unattributed_and_never_raises():

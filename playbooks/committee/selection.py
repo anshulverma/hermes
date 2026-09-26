@@ -94,6 +94,13 @@ _DASHES = str.maketrans({"\u2013": "-", "\u2014": "-"})
 # already unprintable.
 _INVISIBLE = frozenset("\u115f\u1160\u3164\uffa0\u2800\u034f")
 
+# Every cast and library persona's name, whitespace-collapsed and casefolded: a
+# derived seat by one of these would read in the thread and view as that person.
+_TAKEN = frozenset(
+    cast.clip(p["name"], NAME_MAX).casefold()
+    for p in (*cast.CAST.values(), *cast.LIBRARY.values())
+)
+
 
 def _blocks(lines: list[str]) -> list[tuple[int, int]]:
     """(opener, closer) line indexes of every closed hermes-selection fence.
@@ -181,7 +188,8 @@ def validate(doc: dict | None, library: dict) -> tuple[list[dict], list[dict]]:
     are always seated. A repeated slug is ignored: the first entry carrying it
     decides it, even an invalid one. A library slug takes ``{**library[slug]}``
     and the worker's fields are ignored. Any other slug is derived and needs a
-    title, and every seat needs a rationale. Each seat is a new dict;
+    title and a name no cast or library persona has (any case), and every seat
+    needs a rationale. Each seat is a new dict;
     ``nominated_by`` is added later by ``resolve``. Never raises.
     """
     seats: list[dict] = []
@@ -200,9 +208,12 @@ def validate(doc: dict | None, library: dict) -> tuple[list[dict], list[dict]]:
         if role in library:
             persona, source = library[role], "library"
         elif title := _clip(entry.get("title"), TITLE_MAX):
+            name = _clip(entry.get("name"), NAME_MAX) or _clip(entry["title"], NAME_MAX)
+            if name.casefold() in _TAKEN:
+                invalid.append(_invalid(role, role, "name taken"))
+                continue
             persona = {
-                "name": _clip(entry.get("name"), NAME_MAX)
-                or _clip(entry["title"], NAME_MAX),
+                "name": name,
                 "title": title,
                 **{k: _clip(entry.get(k), FIELD_MAX) for k in _FIELDS},
                 "style": cast.DERIVED_STYLE,
