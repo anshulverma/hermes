@@ -1,0 +1,11 @@
+{
+  "id": "run-9",
+  "playbook": "committee",
+  "site": "local",
+  "base_ref": "main",
+  "config_json": "{\"goals\": [\"Decide whether Hermes should fund the federation layer now, defer it again, or drop it.\"]}",
+  "state": "done",
+  "phase": "ruling",
+  "created_at": 1790284938.0342479,
+  "updated_at": 1790319192.7655504
+}
