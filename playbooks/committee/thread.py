@@ -7,6 +7,12 @@ from one process, one settled turn at a time. A turn that produced no finding
 still gets an entry (``NO_TURN``), so the transcript stays contiguous and the
 loss is visible rather than silently missing.
 
+Beside it, ``one-on-ones/``: one private file per 1:1, ``NN-<m0>-<m1>.md``
+(0600, in a 0700 folder; a planted symlink is refused, as for ``images/``),
+append-only and holding kept exchanges only. thread.md gets just the owner's
+plan and each 1:1's outcome, because that is all the room reads. Only
+``reduce`` writes either; the view and the server never read the private file.
+
 Then ``revised/``: a byte copy of the document as ``open`` read it, made once,
 that the junior IC edits when the owner delegates. The original is never
 touched, and ``digest`` is what lets ``reduce`` tell whether the edit actually
@@ -36,7 +42,7 @@ from pathlib import Path
 
 from engine import config as _config
 
-from playbooks.committee import cast, selection, voice
+from playbooks.committee import cast, selection, turnblock, voice
 
 # The body written for a turn whose worker produced no finding.
 NO_TURN = "_(no turn delivered — the worker failed; see hermes show)_"
@@ -47,11 +53,28 @@ def path(run_id: str) -> Path:
     return _config.state_dir("runs", run_id) / "thread.md"
 
 
-def _append(run_id: str, text: str) -> None:
-    """Append ``text`` to the transcript and flush it."""
-    with open(path(run_id), "a", encoding="utf-8") as handle:
-        handle.write(text)
-        handle.flush()
+def _append(run_id: str, text: str, *, target: Path | None = None) -> None:
+    """Append ``text`` to the transcript and flush it.
+
+    With ``target`` (a 1:1's private file) it goes there instead, kept 0600;
+    a symlink or anything but a regular file planted at that name raises
+    (``OSError``/``ValueError``) and is never written through.
+    """
+    if target is None:
+        with open(path(run_id), "a", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+        return
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+    fd = os.open(target, flags, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"{target} is not a regular file; refusing it")
+        os.fchmod(fd, 0o600)
+        with open(fd, "a", encoding="utf-8", closefd=False) as handle:
+            handle.write(text)
+    finally:
+        os.close(fd)
 
 
 # A heading in a body (0-3 spaces, then "#") is escaped, so it reads as text and
@@ -77,10 +100,10 @@ def _escape(body: str) -> str:
     )
 
 
-def _entry(run_id: str, heading: str, body: str) -> None:
+def _entry(run_id: str, heading: str, body: str, *, target: Path | None = None) -> None:
     """Append one ``## ...`` entry, its body's headings escaped, NO_TURN for an empty body."""
     text = _escape(body.strip()) if isinstance(body, str) else ""
-    _append(run_id, f"\n{heading}\n\n{text or NO_TURN}\n")
+    _append(run_id, f"\n{heading}\n\n{text or NO_TURN}\n", target=target)
 
 
 # Voice's rule 5: no en or em dash in a line the master renders from worker text.
@@ -340,6 +363,110 @@ def append_seated(
     if fallback:
         lines += ["", f"Fallback: the default committee ({selection.fallback_words(fallback)})."]
     _entry(run_id, "## committee seated", "\n".join(lines))
+
+
+# --- the 1:1s: the private file, the plan entry, the outcome entry (one-on-ones C7) ---
+
+
+def _line(text, limit: int) -> str:
+    """Worker text (a topic, an outcome, a dropped plan line) as one dash-free line,
+    clipped to ``limit`` after the dashes are mapped. Exchange bodies go through
+    ``_entry`` instead."""
+    return cast.clip(_one(text), limit)
+
+
+def _name(role: str, roster: dict | None) -> str:
+    """A seat's name through the run's roster (None reads cast.CAST; unknown raises KeyError)."""
+    return _one(cast.persona(role, roster)["name"])
+
+
+def _who(role: str, roster: dict | None) -> str:
+    """``Name, Title (role)`` (the title alone for a seat named from it), as ``_seat`` names one."""
+    seat = cast.persona(role, roster)
+    return f"{cast.label({'name': _one(seat['name']), 'title': _bare(seat['title'])})} ({role})"
+
+
+def _pair(host: str, members: list[str], roster: dict | None) -> str:
+    """``Host ↔ Guest`` when the host is a member, else ``A ↔ B, hosted by Host``."""
+    a, b = members
+    if host in members:
+        return f"{_name(host, roster)} ↔ {_name(b if a == host else a, roster)}"
+    return f"{_name(a, roster)} ↔ {_name(b, roster)}, hosted by {_name(host, roster)}"
+
+
+def one_on_one_path(run_id: str, *, seq: int, members: list[str]) -> Path:
+    """``runs/<id>/one-on-ones/<seq:02d>-<m0>-<m1>.md``. Makes the 0700 folder, never the file.
+
+    A folder planted there as a symlink or a file is refused (``_plain_dir``),
+    and so is a member that is not a seat slug, so the name never leaves it.
+
+    Raises:
+        ValueError: the folder is refused, or ``members`` is not two seat slugs.
+    """
+    if len(members) != 2 or not all(
+            isinstance(m, str) and selection.SLUG_RE.fullmatch(m) for m in members):
+        raise ValueError(f"not a pair of seat slugs: {members!r}")
+    return _plain_dir(run_id, "one-on-ones") / f"{seq:02d}-{members[0]}-{members[1]}.md"
+
+
+def append_one_on_one(
+    run_id: str, *, seq: int, host: str, members: list[str], topic: str, speaker: str,
+    exchange: int | None, body: str, closing: bool, roster: dict | None,
+) -> None:
+    """Append one kept exchange to the 1:1's private file.
+
+    The members' exchange 1 first writes the header, the topic and voice's
+    rules: keyed on the exchange number, never on whether the file exists. The
+    host's closing exchange is headed ``## outcome:``. May raise; reduce
+    records the error.
+    """
+    target = one_on_one_path(run_id, seq=seq, members=members)
+    heading = f"## {'outcome' if closing else f'exchange {exchange}'}: {_who(speaker, roster)}"
+    if exchange == 1 and not closing:
+        a, b = members
+        _append(run_id, (
+            f"# 1:1 {seq}: {_name(a, roster)} ↔ {_name(b, roster)}, "
+            f"hosted by {_name(host, roster)}\n\n"
+            f"Topic: {_line(topic, cast.TOPIC_MAX)}\n\n"
+            "Ground rules for every speaker:\n" + "\n".join(voice.RULES) + "\n"
+        ), target=target)
+    _entry(run_id, heading, body, target=target)
+
+
+def append_one_on_one_outcome(
+    run_id: str, *, seq: int, host: str, members: list[str], aligned: bool,
+    agreed: str | None, still_open: str | None, ended: str | None,
+    closing_delivered: bool = True, roster: dict | None,
+) -> None:
+    """Append a finished 1:1's outcome to thread.md, the only part of it the room reads.
+
+    A null (or blank) ``agreed``/``still_open`` line is omitted. With neither,
+    the entry says why no outcome was recorded. May raise; reduce records the
+    error.
+    """
+    said = (("Agreed", _line(agreed, turnblock.OUTCOME_MAX)),
+            ("Still open", _line(still_open, turnblock.OUTCOME_MAX)))
+    lines = [f"{label}: {text}" for label, text in said if text]
+    if not lines:
+        why = ended if closing_delivered else "the host's closing exchange was not delivered"
+        lines = [f"_(no outcome recorded: {why})_"]
+    state = "aligned" if aligned else "not aligned"
+    _entry(run_id, f"## 1:1 {seq}: {_pair(host, members, roster)} ({state})", "\n".join(lines))
+
+
+def append_plan(
+    run_id: str, *, pairs: list[dict], dropped: list[dict], fallback: str | None,
+    roster: dict | None,
+) -> None:
+    """Append the owner's plan: each scheduled pair, or why there is none, then each drop.
+
+    May raise; reduce records the error.
+    """
+    lines = [f"- {_pair(p['host'], p['members'], roster)}: {_line(p['topic'], cast.TOPIC_MAX)}"
+             for p in pairs] or [f"_(no up-front 1:1s: {fallback})_"]
+    lines += [f"- dropped: {_line(d['text'], turnblock.PAIR_MAX)} ({d['reason']})"
+              for d in dropped]
+    _entry(run_id, f"## 1:1 plan: {_who(cast.OWNER, roster)}", "\n".join(lines))
 
 
 def revised_path(run_id: str, artifact: str) -> Path:
