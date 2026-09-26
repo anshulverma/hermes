@@ -1,5 +1,6 @@
 """FastAPI control plane server with bearer-token auth, WebSocket live events, and SPA serving with token injection on loopback."""
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -104,8 +105,13 @@ def _image_magic_ok(data: bytes, suffix: str) -> bool:
     return text.lstrip().startswith((b"<svg", b"<?xml"))
 
 
-def _image_response(fd: int, path: str) -> Response:
-    """The image ``fd`` holds, as raw bytes under the image headers. Closes ``fd``."""
+def _image_response(fd: int, path: str, sha256: str = "") -> Response:
+    """The image ``fd`` holds, as raw bytes under the image headers. Closes ``fd``.
+
+    A non-empty ``sha256`` names the exact bytes the caller wants (the ones its
+    playbook checked): anything else in the file now is a 404, so a later
+    writer cannot swap the picture under an earlier reference.
+    """
     name = path.split("/")[1]  # already held to _RUN_FILE_NAME: no quote, no separator
     suffix = Path(name).suffix
     too_big = HTTPException(status_code=413, detail=f"{path} is over {RUN_FILE_MAX_BYTES} bytes")
@@ -120,6 +126,8 @@ def _image_response(fd: int, path: str) -> Response:
         raise too_big
     if not _image_magic_ok(data, suffix):
         raise HTTPException(status_code=404, detail=f"{path} is not a {suffix[1:]} image")
+    if sha256 and hashlib.sha256(data).hexdigest() != sha256:
+        raise HTTPException(status_code=404, detail=f"{path} is not the image that was checked")
     return Response(
         content=data,
         media_type=_IMAGE_TYPES[suffix],
@@ -2206,7 +2214,7 @@ def create_app(bind: str | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/view/artifact", response_model=None)
     def get_run_view_artifact(
-        run_id: str, path: str = "", _: None = Depends(require_auth_read)
+        run_id: str, path: str = "", sha256: str = "", _: None = Depends(require_auth_read)
     ) -> dict[str, Any] | Response:
         """One file from the run's own directory, as text, on demand.
 
@@ -2217,7 +2225,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         home cannot open them. ``path`` defaults to "" so a missing one reaches
         the handler and gets its 400 after the gate, not FastAPI's 422 before.
         ``images/<name>`` is served as raw bytes under a sandboxing CSP, an
-        ``<img>`` being its only reader.
+        ``<img>`` being its only reader; an optional ``sha256`` pins its bytes.
         """
         home = config.resolve_home()
         conn = connect(str(home / "queue.db"))
@@ -2243,7 +2251,7 @@ def create_app(bind: str | None = None) -> FastAPI:
             )
         fd = _open_run_file(home, run_id, path)
         if image:
-            return _image_response(fd, path)
+            return _image_response(fd, path, sha256)
         try:
             with open(fd, encoding="utf-8", errors="replace") as handle:
                 text = handle.read(ARTIFACT_MAX_CHARS + 1)

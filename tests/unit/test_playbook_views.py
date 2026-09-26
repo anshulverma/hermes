@@ -4,6 +4,7 @@ tests.unit.test_playbook_views — the playbook view seam, playbook-agnostic.
 A stub playbook stands in for the committee: the seam is two duck-typed methods
 and the server must not care which playbook supplies them.
 """
+import hashlib
 import os
 import threading
 from pathlib import Path
@@ -575,6 +576,38 @@ def test_image_route_413s_an_image_over_the_cap_and_never_truncates(client, temp
     (_images(temp_home, run_id) / "x.svg").write_bytes(SVG + b" " * RUN_FILE_MAX_BYTES)
 
     assert client.get(f"/api/runs/{run_id}/view/artifact?path=images/x.svg").status_code == 413
+
+
+def test_image_route_serves_an_image_of_exactly_the_cap(client, temp_home, viewed):
+    from server.app import RUN_FILE_MAX_BYTES
+
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    body = SVG + b" " * (RUN_FILE_MAX_BYTES - len(SVG))
+    (_images(temp_home, run_id) / "x.svg").write_bytes(body)
+
+    response = client.get(f"/api/runs/{run_id}/view/artifact?path=images/x.svg")
+
+    assert response.status_code == 200
+    assert response.content == body
+
+
+def test_image_route_404s_a_png_whose_bytes_are_not_a_png(client, temp_home, viewed):
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    (_images(temp_home, run_id) / "y.png").write_bytes(SVG)
+
+    assert client.get(f"/api/runs/{run_id}/view/artifact?path=images/y.png").status_code == 404
+
+
+def test_image_route_serves_only_the_bytes_the_given_sha256_names(client, temp_home, viewed):
+    """A later worker may overwrite an earlier speaker's checked image; the view
+    asks for the bytes the master checked, and anything else is a 404."""
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    (_images(temp_home, run_id) / "x.svg").write_bytes(SVG)
+    url = f"/api/runs/{run_id}/view/artifact?path=images/x.svg"
+
+    assert client.get(url + f"&sha256={hashlib.sha256(SVG).hexdigest()}").content == SVG
+    assert client.get(url + f"&sha256={hashlib.sha256(b'other').hexdigest()}").status_code == 404
+    assert client.get(url).content == SVG  # absent: unchanged
 
 
 def test_the_server_image_cap_equals_the_playbooks():
