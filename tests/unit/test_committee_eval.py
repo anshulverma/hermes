@@ -251,10 +251,13 @@ def test_fixture_homes_build(tmp_path):
         traces = run_dir / "traces"
         assert sorted(int(p.stem) for p in traces.iterdir()) == attempt_ids
         for trace in traces.iterdir():  # trimmed: only what the eval reads (G4)
-            for line in trace.read_bytes().splitlines():
-                obj = json.loads(line)
+            lines = [json.loads(line) for line in trace.read_bytes().splitlines()]
+            costs = [obj for obj in lines if obj["type"] == "cost-state"]
+            # run-9's traces are their cost-state lines alone; run-2's have none, only usage
+            assert len(costs) == (1 if name == "run-9" else 0) and len(lines) > 0
+            for obj in lines:
                 if obj["type"] == "cost-state":
-                    assert set(obj) <= {"type", "totalCostUSD"}
+                    assert set(obj) == {"type", "totalCostUSD", "modelUsage", "hasUnknownModelCost"}
                 else:
                     assert obj["type"] == "assistant" and set(obj) == {"type", "message"}
                     assert set(obj["message"]) <= {"id", "usage"}
@@ -619,11 +622,14 @@ def test_answered_reviewer_turns_both_rules(tmp_path):
     assert E.unanswered_reviewer_turns(target("t06")) == [1, 4, 7, 8, 10, 13, 17]
 
 
-RUN9_TOKENS = {"input": 402, "output": 278815, "cache_creation": 2304109, "cache_read": 13727431}
+# Claude Code's modelUsage totals on each trace's last cost-state, summed (G4). The
+# transcript's per-message usage undercounts what it bills: 402/278815/2304109/13727431.
+RUN9_TOKENS = {"input": 502, "output": 287400, "cache_creation": 4378394, "cache_read": 13727431}
+RUN2_TOKENS = {"input": 214, "output": 183920, "cache_creation": 1768249, "cache_read": 6785620}
 
 
 def test_tokens_dedupe_and_cost_rules(tmp_path):
-    """T6: usage once per message.id per trace, the last cost-state per trace, null cost on a gap (G4)."""
+    """T6: modelUsage per trace, else usage once per message.id; the last cost-state per trace; null cost on a gap (G4)."""
     import json
 
     from playbooks.committee.eval import trace_totals, compute_metrics, load_target
@@ -652,27 +658,71 @@ def test_tokens_dedupe_and_cost_rules(tmp_path):
     b = jl(asst("m1", output_tokens=100), {"type": "cost-state", "totalCostUSD": 2})
     a_tokens = {"input": 2, "output": 23, "cache_creation": 5, "cache_read": 7}
 
+    # no cost-state carries modelUsage: both traces fall back to the transcript
     assert trace_totals([a, b]) == {
         "cost_usd": 3.2345,
         "tokens": {"input": 2, "output": 123, "cache_creation": 5, "cache_read": 7},
-        "found": 2, "with_cost": 2,
+        "tokens_source": "transcript", "found": 2, "with_cost": 2,
     }
     # a missing trace: cost is null, tokens are summed over what was found
     assert trace_totals([a, None]) == {
-        "cost_usd": None, "tokens": a_tokens, "found": 1, "with_cost": 1}
+        "cost_usd": None, "tokens": a_tokens, "tokens_source": "transcript",
+        "found": 1, "with_cost": 1}
     # a trace with no cost-state line nulls the cost too
     assert trace_totals([a, jl(asst("x", output_tokens=1))])["cost_usd"] is None
     # nothing found: tokens are null as well
-    nothing = {"cost_usd": None, "tokens": None, "found": 0, "with_cost": 0}
+    nothing = {"cost_usd": None, "tokens": None, "tokens_source": None, "found": 0, "with_cost": 0}
     assert trace_totals([None, None]) == nothing
     assert trace_totals([]) == nothing
 
-    # run-9's pins (C5): 25 attempts, 25 traces, each with a cost-state line
+    def state(cost, **models):
+        return {"type": "cost-state", "totalCostUSD": cost, "modelUsage": models}
+
+    # modelUsage on the LAST cost-state is the trace's tokens, summed over models; the
+    # transcript and an earlier cost-state's modelUsage count nothing then
+    billed = jl(
+        asst("m1", input_tokens=1, output_tokens=1),
+        state(0.5, opus={"inputTokens": 1000}),
+        state(2.5, opus={"inputTokens": 3, "outputTokens": 40, "cacheCreationInputTokens": 500,
+                         "cacheReadInputTokens": 6000, "thinkingTokens": 9, "costUSD": 2.0},
+              haiku={"inputTokens": 7, "outputTokens": 1, "cacheReadInputTokens": "9"},
+              junk="not a dict"),
+        asst("m2", output_tokens=1),
+    )
+    billed_tokens = {"input": 10, "output": 41, "cache_creation": 500, "cache_read": 6000}
+    assert trace_totals([billed]) == {
+        "cost_usd": 2.5, "tokens": billed_tokens, "tokens_source": "modelUsage",
+        "found": 1, "with_cost": 1}
+    # the source is per trace: one of each is mixed, and each trace counts its own way
+    mixed = trace_totals([billed, a])
+    assert (mixed["tokens_source"], mixed["tokens"]) == (
+        "mixed", {k: billed_tokens[k] + a_tokens[k] for k in a_tokens})
+    # hasUnknownModelCost: that trace has no cost, so the run's cost is null (tokens still count)
+    unknown = jl({**state(1.0, opus={"outputTokens": 5}), "hasUnknownModelCost": True})
+    got = trace_totals([billed, unknown])
+    assert (got["cost_usd"], got["with_cost"], got["tokens"]["output"]) == (None, 1, 46)
+    # the last cost-state decides: a later known total supersedes an earlier unknown one
+    assert trace_totals([jl({**state(1.0), "hasUnknownModelCost": True},
+                            {**state(1.5), "hasUnknownModelCost": False})])["cost_usd"] == 1.5
+    # a genuine $0 trace costs 0.0, never null
+    free = trace_totals([jl(state(0))])
+    assert (free["cost_usd"], free["with_cost"]) == (0.0, 1) and type(free["cost_usd"]) is float
+    assert free["tokens"] == dict.fromkeys(a_tokens, 0) and free["tokens_source"] == "modelUsage"
+    # a str trace (engine.trace.read returns str) reads as its utf-8 bytes, where only
+    # \n and \r end a line: a U+2028 inside a JSON string never splits one
+    line = json.dumps({**state(1.25, opus={"outputTokens": 2}), "note": "a\u2028b"},
+                      ensure_ascii=False)
+    assert trace_totals([line + "\n"]) == trace_totals([(line + "\n").encode()]) == {
+        "cost_usd": 1.25, "tokens": {**dict.fromkeys(a_tokens, 0), "output": 2},
+        "tokens_source": "modelUsage", "found": 1, "with_cost": 1}
+    assert trace_totals([a.decode("utf-8", "replace")]) == trace_totals([a])
+
+    # run-9's pins (C5): 25 attempts, 25 traces, each with a cost-state line and modelUsage
     home, run_id = build_home(tmp_path, "run-9")
     m = compute_metrics(load_target(str(home), run_id))
     assert m["time"] == {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0}
     assert m["cost_usd"] == 30.3875
-    assert m["tokens"] == RUN9_TOKENS
+    assert (m["tokens"], m["tokens_source"]) == (RUN9_TOKENS, "modelUsage")
     assert m["traces"] == {"expected": 25, "found": 25, "with_cost": 25}
 
     # one trace gone: cost null, found < expected, tokens are what the other 24 hold
@@ -686,14 +736,13 @@ def test_tokens_dedupe_and_cost_rules(tmp_path):
     # time comes from the attempts rows, never from the traces
     assert m["time"] == {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0}
 
-    # run-2 (legacy): its traces carry usage but no cost-state line (C5, spec A4)
+    # run-2 (legacy): its traces carry usage but no cost-state line, so no modelUsage (C5, spec A4)
     (tmp_path / "two").mkdir()
     home2, run2 = build_home(tmp_path / "two", "run-2")
     m = compute_metrics(load_target(str(home2), run2))
     assert m["time"] == {"summed_attempt_s": 3279.4, "wall_clock_s": 3516.0}
     assert m["cost_usd"] is None
-    assert m["tokens"] == {
-        "input": 214, "output": 183920, "cache_creation": 1768249, "cache_read": 6785620}
+    assert (m["tokens"], m["tokens_source"]) == (RUN2_TOKENS, "transcript")
     assert m["traces"] == {"expected": 21, "found": 21, "with_cost": 0}
 
 
@@ -843,8 +892,8 @@ def test_run9_metrics_pinned(tmp_path):
         "edits": {"per_edit": "snapshot", "steps": RUN9_STEPS, "total": RUN9_TOTAL},
         "time": {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0},
         "cost_usd": 30.3875,
-        "tokens": {"input": 402, "output": 278815, "cache_creation": 2304109,
-                   "cache_read": 13727431},
+        "tokens": RUN9_TOKENS,
+        "tokens_source": "modelUsage",
         "traces": {"expected": 25, "found": 25, "with_cost": 25},
         "other_kinds": {},
         "extra_takes": 0,
@@ -884,8 +933,8 @@ def test_run2_legacy_metrics_pinned(tmp_path):
                   "total": {"lines_added": 208, "lines_removed": 88}},
         "time": {"summed_attempt_s": 3279.4, "wall_clock_s": 3516.0},
         "cost_usd": None,
-        "tokens": {"input": 214, "output": 183920, "cache_creation": 1768249,
-                   "cache_read": 6785620},
+        "tokens": RUN2_TOKENS,
+        "tokens_source": "transcript",
         "traces": {"expected": 21, "found": 21, "with_cost": 0},
         "other_kinds": {},
         "extra_takes": 0,

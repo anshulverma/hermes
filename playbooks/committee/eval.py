@@ -490,12 +490,12 @@ def unanswered_reviewer_turns(target: Target) -> list[int]:
 
 OUTSIDE_ROOM = re.compile(r"(?i)\b(outside|not in) this room\b")
 
-# eval's token key <- the trace's message.usage key (G4)
+# eval's token key <- (the cost-state's modelUsage key, the transcript's message.usage key) (G4)
 TOKEN_KEYS = {
-    "input": "input_tokens",
-    "output": "output_tokens",
-    "cache_creation": "cache_creation_input_tokens",
-    "cache_read": "cache_read_input_tokens",
+    "input": ("inputTokens", "input_tokens"),
+    "output": ("outputTokens", "output_tokens"),
+    "cache_creation": ("cacheCreationInputTokens", "cache_creation_input_tokens"),
+    "cache_read": ("cacheReadInputTokens", "cache_read_input_tokens"),
 }
 
 
@@ -504,26 +504,33 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def trace_totals(traces: list[bytes | None]) -> dict:
-    """Cost and tokens over trace files' bytes, one entry per expected trace (G4).
+def trace_totals(traces: list[bytes | str | None]) -> dict:
+    """Cost and tokens over trace files' contents, one entry per expected trace (G4).
 
-    Per trace, the LAST cost-state line with a numeric ``totalCostUSD`` is that
-    trace's cost. Each ``message.id``'s usage counts once, from its last line,
-    because one message's usage repeats across several assistant lines. ``None``
-    is a trace that does not exist. ``cost_usd`` is null unless there is at
-    least one trace and every one has a cost; ``tokens`` is null when no trace
-    was found. Non-JSON lines, non-object lines and assistant lines without a
-    string id or a usage object are skipped. Never raises. judge.reduce reuses
-    this for the judge's own trace (Task 9).
+    Per trace, the LAST cost-state line decides its cost: its numeric
+    ``totalCostUSD``, or none when it says ``hasUnknownModelCost``. Tokens are
+    that trace's last cost-state ``modelUsage``, summed over models: Claude
+    Code's own totals, which match what it bills. A trace without modelUsage
+    (legacy) falls back to its transcript, each ``message.id``'s usage once from
+    its last line, which misses part of the bill. ``tokens_source`` says which:
+    "modelUsage", "transcript", "mixed", or null when no trace was found.
+    ``None`` is a trace that does not exist; a str (``engine.trace.read``) is
+    read as its utf-8 bytes, so only ``\\n``/``\\r`` end a line. ``cost_usd`` is
+    null unless there is at least one trace and every one has a cost; ``tokens``
+    is null when no trace was found. Malformed lines are skipped. Never raises.
+    judge.reduce reuses this for the judge's own trace (Task 9).
     """
     tokens = dict.fromkeys(TOKEN_KEYS, 0)
     cost = 0.0
     found = with_cost = 0
+    sources = set()
     for data in traces:
+        if isinstance(data, str):
+            data = data.encode("utf-8", "replace")
         if not isinstance(data, bytes):
             continue
         found += 1
-        last_cost = None
+        last_cost = model_usage = None
         usage: dict[str, dict] = {}
         for raw in data.splitlines():
             try:
@@ -532,8 +539,13 @@ def trace_totals(traces: list[bytes | None]) -> dict:
                 continue
             if not isinstance(line, dict):
                 continue
-            if line.get("type") == "cost-state" and _is_number(line.get("totalCostUSD")):
-                last_cost = line["totalCostUSD"]
+            if line.get("type") == "cost-state":
+                if line.get("hasUnknownModelCost") is True:
+                    last_cost = None
+                elif _is_number(line.get("totalCostUSD")):
+                    last_cost = line["totalCostUSD"]
+                if isinstance(line.get("modelUsage"), dict):
+                    model_usage = line["modelUsage"]
             elif line.get("type") == "assistant":
                 msg = line.get("message")
                 if (isinstance(msg, dict) and isinstance(msg.get("id"), str)
@@ -542,13 +554,19 @@ def trace_totals(traces: list[bytes | None]) -> dict:
         if last_cost is not None:
             with_cost += 1
             cost += last_cost
-        for counts in usage.values():
-            for key, source in TOKEN_KEYS.items():
-                value = counts.get(source)
+        source, pick, rows = (("modelUsage", 0, model_usage.values()) if model_usage is not None
+                              else ("transcript", 1, usage.values()))
+        sources.add(source)
+        for counts in rows:
+            if not isinstance(counts, dict):
+                continue
+            for key, names in TOKEN_KEYS.items():
+                value = counts.get(names[pick])
                 tokens[key] += value if _is_number(value) else 0
     return {
         "cost_usd": round(cost, 4) if traces and with_cost == len(traces) else None,
         "tokens": tokens if found else None,
+        "tokens_source": sources.pop() if len(sources) == 1 else ("mixed" if sources else None),
         "found": found,
         "with_cost": with_cost,
     }
@@ -646,6 +664,7 @@ def compute_metrics(target: Target) -> dict:
         "time": _time(target.attempts),
         "cost_usd": totals["cost_usd"],
         "tokens": totals["tokens"],
+        "tokens_source": totals["tokens_source"],
         "traces": {"expected": len(target.attempts), "found": totals["found"],
                    "with_cost": totals["with_cost"]},
         "other_kinds": dict(target.other_kinds),
