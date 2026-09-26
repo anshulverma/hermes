@@ -134,7 +134,7 @@ def test_voice_measure_and_version():
         "edits_address_concerns": "edits_address_concerns@2",
         "concern_coverage": "concern_coverage@1",
         "efficiency": "efficiency@1",
-        "concision": "concision@1",
+        "concision": "concision@2",
         "verdict_consistency": "verdict_consistency@2",
     }
     assert (E.MIN_ANCHORS, E.QUOTE_MAX, E.EVIDENCE_MAX, E.FENCE_TAG) == (2, 300, 5, "hermes-eval")
@@ -153,8 +153,8 @@ def test_voice_measure_and_version():
     # A rules swap moves concision's version and the rubric version, and nothing else.
     now = E.dimension_versions()
     digest = hashlib.sha256("\n".join(voice.RULES).encode()).hexdigest()[:8]
-    assert now == {**E.DIMENSIONS, "concision": "concision@1+" + digest}
-    assert E.DIMENSIONS["concision"] == "concision@1"
+    assert now == {**E.DIMENSIONS, "concision": "concision@2+" + digest}
+    assert E.DIMENSIONS["concision"] == "concision@2"
     swapped = E.dimension_versions(voice.RULES + ("Say it in one line.",))
     assert swapped["concision"] != now["concision"]
     assert {k: v for k, v in swapped.items() if k != "concision"} == {
@@ -1089,11 +1089,13 @@ RUN9_STEPS = [
                     (15, 18, 11), (18, 6, 5), (21, 4, 2), (24, 17, 13))
 ]
 RUN9_TOTAL = {"lines_added": 87, "lines_removed": 28}
-# Golden (C5): what C8 gives on the fixtures, pinned in this first green commit.
+# Golden (C5): what C8 gives on the fixtures. filler_per_turn moved off 0.0 when
+# committee-voice made filler_hits sum every tell (process, turn refs, unchanged,
+# preempt, filler), not the filler phrases alone.
 RUN9_VOICE = {"n": 16, "pointer_share": 0.9375, "walls_share": 0.625,
-              "example_share": 0.875, "filler_per_turn": 0.0}
+              "example_share": 0.875, "filler_per_turn": 2.75}
 RUN2_VOICE = {"n": 14, "pointer_share": 0.9286, "walls_share": 0.7143,
-              "example_share": 1.0, "filler_per_turn": 0.0}
+              "example_share": 1.0, "filler_per_turn": 6.1429}
 
 
 def _mentions(home: Path, run_id: str, *numbers: int) -> list[dict]:
@@ -1336,10 +1338,11 @@ def test_deterministic_scores_pinned(tmp_path):
     assert [e["quote"] for e in nine["efficiency"]["evidence"]] == [
         "cost_usd=30.3875", "time.summed_attempt_s=3284.0", "turns=24", "cap=30",
         "dropped.delegation=null", "dropped.floor_requests=[]"]
-    # Only walls_share crosses its threshold on either baseline (Task 5's golden shares).
+    # walls_share and filler_per_turn cross their thresholds on both baselines (the golden shares).
     assert nine["concision"]["rationale"] == (
         "start 1 (median_reviewer_owner 825.0 > 800); "
-        f"walls_share {RUN9_VOICE['walls_share']} > 0.25: -1; floor 1")
+        f"walls_share {RUN9_VOICE['walls_share']} > 0.25: -1; "
+        f"filler_per_turn {RUN9_VOICE['filler_per_turn']} > 1: -1; floor 1")
     assert nine["concision"]["evidence"][0]["quote"] == "words.median_reviewer_owner=825.0"
     # Only the chair's own claim counts (verdict_consistency@2): run-9's four cut-off
     # delegations are the re-check footer's claim, reported by their flag, never scored here.
@@ -1353,7 +1356,8 @@ def test_deterministic_scores_pinned(tmp_path):
     assert two["efficiency"]["evidence"][0]["quote"] == "cost_usd=null"
     assert two["concision"]["rationale"] == (
         "start 1 (median_reviewer_owner 1393.5 > 800); "
-        f"walls_share {RUN2_VOICE['walls_share']} > 0.25: -1; floor 1")
+        f"walls_share {RUN2_VOICE['walls_share']} > 0.25: -1; "
+        f"filler_per_turn {RUN2_VOICE['filler_per_turn']} > 1: -1; floor 1")
     assert two["verdict_consistency"]["rationale"] == "start 5"
     assert [e["quote"] for e in two["verdict_consistency"]["evidence"]] == ["rechecks_verified=6"]
 
@@ -3448,3 +3452,54 @@ def test_show_cli(tmp_path, monkeypatch, capsys):
     lines = out.splitlines()
     assert f"headline: {clean}" in lines and "flags: x [2Ky" in lines
     assert f"judge: partial ({clean})" in lines
+
+
+# --- committee-voice: eval counts words through voice (voice D8, T19) ---------
+
+def test_eval_words_are_voice_words():
+    text = ("Defer it.\n\n```python\nx = 1\n```\n"
+            "![curve](images/t02-owner.svg)\nDescription: engineers per week.")
+
+    assert E.words(text) == voice.measure(text)["words"] == 2
+
+
+def _fixture_turns(run):
+    """(role, body) for every turn entry of a fixture thread.md, split at eval D3's boundaries."""
+    root = Path(__file__).parent.parent / "data" / "committee-eval" / run
+    path = next(root.rglob("thread.md"))
+    turns, role, lines = [], None, []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^## turn (\d{2,}) — (.+) \((\w+)\)$", line)
+        if m or re.match(r"^## decision — .+$", line):
+            if role is not None:
+                turns.append((role, "\n".join(lines).strip()))
+            role, lines = (m.group(3) if m else None), []
+        elif role is not None:
+            lines.append(line)
+    if role is not None:
+        turns.append((role, "\n".join(lines).strip()))
+    return turns
+
+
+@pytest.mark.parametrize("run, median", [("run-9", 825.0), ("run-2", 1393.5)])
+def test_every_fixture_turn_counts_words_through_voice(tmp_path, run, median):
+    """voice.measure over each turn entry reproduces eval's own pinned
+    words.median_reviewer_owner (C5; T1/T2 pin eval's metric to the same value):
+    delivered turns, role not junior_ic. Measured during planning on the live
+    run-9 and committee-spin run-2 threads: 825.0 and 1393.5, no undelivered stub."""
+    from playbooks.committee import thread
+
+    turns = _fixture_turns(run)
+
+    assert len(turns) == {"run-9": 24, "run-2": 20}[run]
+    counted = [voice.measure(body, role)["words"] for role, body in turns
+               if role != "junior_ic" and body != thread.NO_TURN]
+    assert statistics.median(counted) == median
+    home, run_id = build_home(tmp_path, run)
+    metrics = E.compute_metrics(E.load_target(str(home), run_id))
+    assert metrics["words"]["median_reviewer_owner"] == statistics.median(counted)
+
+
+def test_concision_is_bumped_because_voice_changed_its_inputs():
+    assert "concision@2" in repr(E.DIMENSIONS)
+    assert "concision@1" not in repr(E.DIMENSIONS)

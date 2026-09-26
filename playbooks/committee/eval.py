@@ -50,7 +50,7 @@ DIMENSIONS: dict[str, str] = {
     "edits_address_concerns": "edits_address_concerns@2",  # @2: anchors 3 and 1 no longer overlap
     "concern_coverage": "concern_coverage@1",
     "efficiency": "efficiency@1",
-    "concision": "concision@1",
+    "concision": "concision@2",  # @2: voice words skip fences and image lines; filler_hits sums every tell
     "verdict_consistency": "verdict_consistency@2",  # @2: only the chair's own claims count
 }
 JUDGE_DIMS = ("verdict_grounded", "edits_address_concerns", "concern_coverage")
@@ -101,7 +101,7 @@ _WALL_WORDS = 120  # C8: a wall is a paragraph over 120 words; the one threshold
 
 
 def words(text: str) -> int:
-    """The one word count, voice's, so eval never grows a second counter."""
+    """Words in ``text`` as voice counts them: fenced blocks and image lines add none."""
     return measure(text)["words"]
 
 
