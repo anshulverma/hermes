@@ -115,6 +115,8 @@ OPENING_ROUND = [
     for phase in (f"t{2 * index + 1:02d}-{role}", f"t{2 * index + 2:02d}-{cast.OWNER}")
 ]
 LAST_OPENING_OWNER_TURN = OPENING_ROUND[-1]  # "t14-owner"
+# Every run opens with three selection tickets before t01 (selection D1).
+SELECTION_PHASES = ["s1-owner", "s2-manager", "s3-senior_director"]
 
 
 def _mk_run(conn, run_id):
@@ -260,6 +262,27 @@ def _wrap(prose: str, block: str) -> str:
     return f"{prose}\n\n{FENCE}{turnblock.FENCE_TAG}\n{block}\n{FENCE}\n"
 
 
+# What every selector answers by default: today's five library reviewers in
+# SENIORITY order, so a selection run's meeting is today's meeting.
+DEFAULT_SEATS = ["tpm", "pm", "tl", "staff_ic", "data_scientist"]
+
+
+def _selection(prose: str, seats: list) -> str:
+    """Prose plus one hermes-selection fence (C4). A str seat is a library slug."""
+    doc = {
+        "seats": [
+            {"role": seat, "rationale": f"{seat} owns part of this plan"}
+            if isinstance(seat, str) else seat
+            for seat in seats
+        ],
+        "not_seated": [],
+    }
+    return f"{prose}\n\n{FENCE}hermes-selection\n{json.dumps(doc)}\n{FENCE}\n"
+
+
+SELECTION_ANSWER = _selection("These five seats cover every team this plan touches.", DEFAULT_SEATS)
+
+
 class ScriptedCommitteeAgent:
     """An agent double that actually talks, and actually edits on an edit turn.
 
@@ -274,6 +297,10 @@ class ScriptedCommitteeAgent:
         ``reduce`` hashes that file off disk, not the result payload. An action
         starting with ``"no-op:"`` is honoured literally: the file is left
         alone, so the re-check fails.
+      - ``kind == "select"``   -> ``selection_blocks[role]`` (default
+        ``SELECTION_ANSWER``). ``fail_select`` names the selectors whose
+        ticket fails; ``fail_roles`` never applies to a select ticket, because
+        senior_director is both a meeting seat and the ratifying selector.
       - ``role == owner``      -> ``owner_block``, fixed at construction.
       - anything else          -> a reviewer turn.
 
@@ -309,11 +336,19 @@ class ScriptedCommitteeAgent:
         fail_roles=(),
         floor_phases=(),
         violate_phases=(),
+        selection_blocks=None,
+        fail_select=(),
     ):
         self.owner_block = owner_block
         self.owner_phases = None if owner_phases is None else frozenset(owner_phases)
         self.fail_roles = frozenset(fail_roles)
         self.floor_phases = frozenset(floor_phases)
+        # keyed on role for payload kind "select"; a role left out answers
+        # SELECTION_ANSWER
+        self.selection_blocks = {
+            role: SELECTION_ANSWER for role in (cast.OWNER, "manager", cast.CHAIR_ROLE)
+        } | dict(selection_blocks or {})
+        self.fail_select = frozenset(fail_select)
         self.violate_phases = frozenset(violate_phases)
 
     # --- Agent protocol ---------------------------------------------------
@@ -352,7 +387,8 @@ class ScriptedCommitteeAgent:
             )
 
         role = payload.get("role", "")
-        if role in self.fail_roles:
+        failing = self.fail_select if payload.get("kind") == "select" else self.fail_roles
+        if role in failing:
             return Result(
                 outcome="driver_failed",
                 termination_reason="driver_error",
@@ -388,6 +424,8 @@ class ScriptedCommitteeAgent:
             if kind in ("decision", "edit"):
                 return VIOLATION
             return _wrap(VIOLATION, OWNER_QUIET if role == cast.OWNER else QUIET_REVIEWER)
+        if kind == "select":
+            return self.selection_blocks[role]
         if kind == "decision":
             # No disclaimer: that sentence is the PRODUCT's to append. See the
             # class docstring.
@@ -443,6 +481,7 @@ def test_full_conversation_runs_unattended_and_holds_the_verdict_for_a_human(
 
     # criteria 4 + 5: the exact turn order, one dispatch per phase, no repeats.
     expected_phases = [
+        *SELECTION_PHASES,
         "t01-senior_director", "t02-owner", "t03-manager", "t04-owner",
         "t05-tpm", "t06-owner", "t07-pm", "t08-owner", "t09-tl", "t10-owner",
         "t11-staff_ic", "t12-owner", "t13-data_scientist", "t14-owner",
@@ -451,7 +490,7 @@ def test_full_conversation_runs_unattended_and_holds_the_verdict_for_a_human(
     phases = _dispatched_phases(conn, run_id)
     assert phases == expected_phases
     assert len(set(phases)) == len(phases)
-    assert max(int(p[1:3]) for p in phases if p != "decision") <= 30
+    assert max(int(p[1:3]) for p in phases if p.startswith("t")) <= 30
     assert phases[-1] == "decision"
 
     ticket_ids = [
@@ -463,7 +502,7 @@ def test_full_conversation_runs_unattended_and_holds_the_verdict_for_a_human(
 
     # criterion 3: one thread entry per turn, in order, each a named persona,
     # with the owner's reply following every reviewer turn.
-    roles = [p.split("-", 1)[1] for p in expected_phases if p != "decision"]
+    roles = [p.split("-", 1)[1] for p in expected_phases if p.startswith("t")]
     assert [h for h, _ in _turns(run_id)] == [
         _heading(i + 1, role) for i, role in enumerate(roles)
     ]
@@ -490,7 +529,9 @@ def test_full_conversation_runs_unattended_and_holds_the_verdict_for_a_human(
 
     # criterion 8: nothing waited on a human mid-run; only the verdict does.
     reductions = _reductions(conn, run_id)
-    assert [kind for _, kind, _ in reductions] == ["turn"] * 16 + ["decision"]
+    assert [kind for _, kind, _ in reductions] == ["selection"] * 3 + ["turn"] * 16 + ["decision"]
+    assert [[p["role"] for p in doc["proposed"]] for _, kind, doc in reductions
+            if kind == "selection"] == [DEFAULT_SEATS] * 3
     assert all("needs_human_ticket_ids" not in doc for _, _, doc in reductions[:-1])
     assert reductions[-1][2]["needs_human_ticket_ids"] == [f"{run_id}/decision"]
     assert conn.execute(
@@ -533,8 +574,11 @@ def test_failed_turn_still_gets_a_stub_and_the_run_advances(
     assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
 
     assert _dispatched_phases(conn, run_id) == [
-        "t01-senior_director", "t02-manager", "t03-owner", "t04-tpm", "decision",
+        *SELECTION_PHASES, "t01-senior_director", "t02-manager", "t03-owner", "t04-tpm",
+        "decision",
     ]
+    # fail_roles={"senior_director"} fails the meeting seat, never the ratifier
+    assert _reduction_for(conn, run_id, "s3-senior_director")["delivered"] is True
     assert conn.execute(
         "SELECT state FROM tickets WHERE id=?", (f"{run_id}/t01-senior_director",)
     ).fetchone()[0] == "failed"
@@ -572,8 +616,9 @@ def test_turn_cap_ends_the_conversation_at_the_cap(
     assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
 
     phases = _dispatched_phases(conn, run_id)
-    assert phases == ["t01-senior_director", "t02-owner", "t03-manager", "decision"]
-    assert max(int(p[1:3]) for p in phases if p != "decision") == 3
+    assert phases == [*SELECTION_PHASES, "t01-senior_director", "t02-owner", "t03-manager",
+                      "decision"]
+    assert max(int(p[1:3]) for p in phases if p.startswith("t")) == 3
     assert phases[-1] == "decision"
     # Cut off on a reviewer turn: no owner reply follows it.
     assert [h for h, _ in _turns(run_id)][-1] == _heading(3, "manager")
@@ -649,7 +694,7 @@ def test_delegated_edit_writes_only_the_revised_copy(
     assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
 
     assert _dispatched_phases(conn, run_id) == [
-        *OPENING_ROUND, "t15-junior_ic", "decision",
+        *SELECTION_PHASES, *OPENING_ROUND, "t15-junior_ic", "decision",
     ]
 
     revised = thread.revised_path(run_id, str(artifact))
@@ -778,7 +823,7 @@ def test_failed_recheck_is_named_in_the_decision(
     ).fetchone() == ("failed", "rejected")
 
     assert _dispatched_phases(conn, run_id) == [
-        *OPENING_ROUND, "t15-junior_ic", "decision",
+        *SELECTION_PHASES, *OPENING_ROUND, "t15-junior_ic", "decision",
     ]
 
     revised = thread.revised_path(run_id, str(artifact))
@@ -825,7 +870,7 @@ def test_the_cap_drops_a_delegation_and_the_decision_says_so(
 
     # No junior-IC turn: the cap fell before one could be minted.
     assert _dispatched_phases(conn, run_id) == [
-        "t01-senior_director", "t02-owner", "decision",
+        *SELECTION_PHASES, "t01-senior_director", "t02-owner", "decision",
     ]
     assert not thread.revised_path(run_id, str(artifact)).exists()
     assert thread.digest(artifact) == original
@@ -863,7 +908,7 @@ def test_failed_chair_turn_fails_the_run(
     host = _start(conn, run_id, pb, local_site, agent)
     assert _drive(conn, run_id, pb, local_site, agent, host) == "failed"
 
-    assert _dispatched_phases(conn, run_id) == ["t01-senior_director", "decision"]
+    assert _dispatched_phases(conn, run_id) == [*SELECTION_PHASES, "t01-senior_director", "decision"]
     assert conn.execute(
         "SELECT state FROM tickets WHERE id=?", (f"{run_id}/decision",)
     ).fetchone()[0] == "failed"
@@ -892,9 +937,9 @@ def test_a_violating_turn_is_retaken_and_only_the_kept_take_reaches_the_thread(
     assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
 
     phases = _dispatched_phases(conn, run_id)
-    assert phases[:4] == ["t01-senior_director", "t02-owner", "t02-owner-take2", "t02-owner-take3"]
+    assert phases[3:7] == ["t01-senior_director", "t02-owner", "t02-owner-take2", "t02-owner-take3"]
     # retakes cost no turns: the non-take phases are the quiet run's, exactly
-    assert [p for p in phases if "-take" not in p] == OPENING_ROUND + ["decision"]
+    assert [p for p in phases if "-take" not in p] == SELECTION_PHASES + OPENING_ROUND + ["decision"]
     takes = [(phase, doc) for phase, kind, doc in _reductions(conn, run_id) if kind == "take"]
     assert [phase for phase, _ in takes] == ["t02-owner", "t02-owner-take2"]
     assert [doc["take"] for _, doc in takes] == [1, 2]
@@ -928,7 +973,7 @@ def test_a_junior_retake_reports_without_editing_again(
 
     _drive(conn, run_id, pb, local_site, agent, host)
 
-    assert _dispatched_phases(conn, run_id)[2:4] == ["t03-junior_ic", "t03-junior_ic-take2"]
+    assert _dispatched_phases(conn, run_id)[5:7] == ["t03-junior_ic", "t03-junior_ic-take2"]
     kept = _reduction_for(conn, run_id, "t03-junior_ic-take2")
     assert kept["verified"] is True and kept["error"] is None
     revised = thread.revised_path(run_id, str(artifact)).read_text()
@@ -998,9 +1043,14 @@ def test_eval_scores_scripted_run(eval_home, source_repo, artifact, local_site, 
     assert dims["verdict_grounded"]["score"] == JUDGE_SCORES["verdict_grounded"]
     assert dims["edits_address_concerns"]["score"] == JUDGE_SCORES["edits_address_concerns"]
     # G7: concern_coverage is the judge's 5, capped by this run's own record.
-    # The cap of 4 left t04 (manager) unanswered, and five reviewers never spoke.
+    # The cap of 4 left t04 (manager) unanswered. The header now names only the
+    # fixed four and eval still reads its seats there, so the two fixed
+    # reviewers are its whole roster and both spoke; the five library seats
+    # come back as unheard once eval reads the final selection reduction (D8).
     metrics = body["metrics"]
-    assert metrics["seats"]["unheard"] == ["tpm", "pm", "tl", "staff_ic", "data_scientist"]
+    assert metrics["seats"]["reviewers"] == ["senior_director", "manager"]
+    assert metrics["seats"]["unheard"] == []
+    assert metrics["other_kinds"] == {"selection": 3}
     assert metrics["unanswered_reviewer_turns"] == [4]
     assert dims["concern_coverage"]["score"] == committee_eval.concern_cap(
         JUDGE_SCORES["concern_coverage"], metrics
@@ -1297,6 +1347,7 @@ def _committee_target(conn, site, run_id, monkeypatch, *, rule=True):
     host = _start(conn, run_id, pb, site, agent)
     assert _drive(conn, run_id, pb, site, agent, host) == "running"
     assert _dispatched_phases(conn, run_id) == [
+        *SELECTION_PHASES,
         "t01-senior_director", "t02-owner", "t03-junior_ic", "t04-manager", "decision",
     ]
     if rule:

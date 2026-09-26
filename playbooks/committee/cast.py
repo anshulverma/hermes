@@ -716,9 +716,11 @@ def select_goal(
     seat rule, the block, the rules pointer and the image guardrail, the retake
     note (with the last-take line, as in ``goal``), the Done line. ``image`` is
     the stage's take-1 phase name (``s1-owner``), the stem of the one image it
-    may write. No ``roster``: the three selectors are fixed seats in ``CAST``.
-    An unknown stage raises ``KeyError``, like an unknown title kind.
+    may write; empty (seed found the images folder refused) means no file at
+    all, as in ``goal``. No ``roster``: the three selectors are fixed seats in
+    ``CAST``. An unknown stage raises ``KeyError``, like an unknown title kind.
     """
+    guardrail = _GUARDRAIL_IMAGE.format(image=image) if image else _GUARDRAIL
     return (
         f"{brief(role)}\n\n"
         f"{_SELECT_FRAMING}\n\n"
@@ -729,7 +731,7 @@ def select_goal(
         f"{_SEAT_RULE}\n\n"
         f"{_SELECT_BLOCK}\n\n"
         f"{_RULES_POINTER.format(cap=_voice.cap_text(role))}\n\n"
-        f"{_GUARDRAIL_IMAGE.format(image=image)}\n\n"
+        f"{guardrail}\n\n"
         f"{_again(retake, last_take)}"
         f"{_DONE_SELECT}"
     )

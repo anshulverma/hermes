@@ -3,7 +3,9 @@
 Nine personas read one file and argue about it in one thread. The engine sees three
 static phases (``open``, ``decision``, ``ruling``); every turn between the first two
 is a phase minted at runtime as ``t{NN:02d}-{role}`` — one ticket, one speaker,
-strictly serial. ``ruling`` is the human's: it seeds nothing, and a run reaches it
+strictly serial. Before ``t01`` three selection phases (``s1-owner``,
+``s2-manager``, ``s3-senior_director``) seat the committee, outside the turn
+count. ``ruling`` is the human's: it seeds nothing, and a run reaches it
 once the chair's verdict has been accepted or rejected.
 
 This module is the state machine. ``next_phase`` decides who speaks next and
@@ -32,7 +34,7 @@ from typing import TYPE_CHECKING
 
 from engine import playbook as _playbook
 from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
-from playbooks.committee import cast, thread, turnblock, view, voice
+from playbooks.committee import cast, selection, thread, turnblock, view, voice
 
 if TYPE_CHECKING:  # avoid import cycle
     from engine.site import Site
@@ -247,6 +249,22 @@ class CommitteePlaybook:
                 # the revised copy's `_copy_digest` after a discarded junior
                 # take 1, so a report-only retake that edits again is caught.
                 "edit_digest": "",
+                # Selection (selection D1, C3). `current_kind` is what seed and
+                # reduce dispatch on, state-held: None until the first mint,
+                # then "select", "turn" (junior turns too) or "decision".
+                "current_kind": None,
+                # the stage in progress (1-3), and the next one to mint. 4 means
+                # selection is done: `open` sets 1, so a state that never saw
+                # `open` mints no s-phase.
+                "current_stage": None,
+                "selection_next": 4,
+                # one {stage, role, delivered, doc, code} per kept stage take
+                "stages": [],
+                # HERMES_COMMITTEE_MAX_TURNS was set explicitly (D5)
+                "cap_explicit": False,
+                # the run's reviewers in opening order: the default seven until
+                # the chair's list is installed
+                "reviewers": list(cast.SENIORITY),
             }
             self._state_by_run[run.id] = s
         return s
@@ -255,9 +273,9 @@ class CommitteePlaybook:
         """This process never held the meeting (a ``resume --wait`` after Ctrl-C).
 
         Past ``open``, a process that held it always has a speaker on record:
-        ``_turn`` and ``_decision`` set one before the phase is dispatched. Without
-        one the floor queue and the cast are gone, and ``next_phase`` would
-        re-mint ``t01`` over a ticket that exists.
+        ``_select``, ``_turn`` and ``_decision`` set one before the phase is
+        dispatched. Without one the floor queue and the cast are gone, and
+        ``next_phase`` would re-mint ``t01`` over a ticket that exists.
         """
         return run.phase not in (None, "open") and s["current_role"] is None
 
@@ -297,6 +315,7 @@ class CommitteePlaybook:
         s["current_turn"] = s["turn"]
         s["turn"] += 1
         s["current_role"] = role
+        s["current_kind"] = "turn"  # every role, the junior IC included
         # the junior IC speaks FOR the owner, so it does not trigger an owner reply
         s["last_speaker"] = cast.OWNER if role in (cast.OWNER, cast.JUNIOR) else role
         self._begin(s, name)
@@ -311,6 +330,7 @@ class CommitteePlaybook:
         a silently wrong reason.
         """
         s["current_role"] = cast.CHAIR  # `decision` never passes through _turn
+        s["current_kind"] = "decision"
         s["ended"] = ended
         self._begin(s, "decision")
         if s["delegation"]:
@@ -321,12 +341,31 @@ class CommitteePlaybook:
             s["delegation"] = None
         return "decision"
 
+    def _select(self, s: dict, stage: int) -> str:
+        """Mint selection stage ``stage`` (1-3): its selector seats the committee.
+
+        Outside the meeting: it never touches ``turn``, ``current_turn``,
+        ``last_speaker``, ``max_turns``, ``opening`` or ``queue``, so the owner
+        still "spoke last" when s3 settles and the next phase is ``t01``,
+        numbered exactly as without selection. ``_begin`` makes the stage name
+        the base, so a retake is ``s{N}-{role}-take{k}`` and the selector's one
+        image is ``s{N}-{role}.svg|png``.
+        """
+        role = ("owner", "manager", "senior_director")[stage - 1]
+        name = f"s{stage}-{role}"
+        self._begin(s, name)
+        s["current_role"] = role
+        s["current_kind"] = "select"
+        s["current_stage"] = stage
+        s["selection_next"] = stage + 1
+        return name
+
     # --- seeding --------------------------------------------------------
 
     def seed(self, run: Run, site: "Site") -> list[Ticket]:
         """Seed the current phase.
 
-        Three shapes, dispatched on the phase the engine set. The phase name is
+        Four shapes, dispatched on the phase the engine set. The phase name is
         display-only and is never parsed for data (§5.6):
 
         * ``open`` is a zero-ticket bootstrap. It checks the site, resolves the
@@ -336,6 +375,8 @@ class CommitteePlaybook:
           every reviewer is told to read for itself.
         * ``decision``, or a retake of it (``DECISION_PHASES``), is one ticket
           for the chair.
+        * a selection stage (``current_kind`` "select") is one ticket for its
+          selector, with the stage's own title and goal.
         * anything else is one ticket for ``s["current_role"]``, the speaker
           ``_turn`` recorded when it minted this phase. A junior-IC turn
           byte-copies the artifact into the revised directory first, so the
@@ -405,10 +446,10 @@ class CommitteePlaybook:
             s["artifact_digest"] = hashlib.sha256(data).hexdigest()
             s["revised"] = str(thread.revised_path(run.id, artifact))
             s["max_turns"] = max_turns
-            s["roster"] = {
-                role: f"{cast.persona(role)['name']}, {cast.persona(role)['title']}"
-                for role in cast.CAST
-            }
+            # The fixed four (Q5), as seat records; the chair's ratified list
+            # replaces this at the final resolve. Selection runs first.
+            s["roster"] = selection.fixed_seats()
+            s["selection_next"] = 1
 
             # Written last, snapshot then header: an OSError from either fails
             # the command exactly the way the two ValueErrors above do, and a
@@ -419,13 +460,19 @@ class CommitteePlaybook:
                 run.id,
                 charge=s["charge"],
                 artifact=s["artifact"],
-                roster=[f"{role} — {who}" for role, who in s["roster"].items()],
+                # the legacy `- role — Name, Title` lines eval's parser reads
+                roster=[f"{r} — {p['name']}, {p['title']}" for r, p in s["roster"].items()],
                 rules=voice.RULES,
+                library=cast.LIBRARY.items(),
             )
             return []
 
         if phase in DECISION_PHASES:
             role, kind, action = cast.CHAIR, "decision", None
+        elif s["current_kind"] == "select":
+            # A selector seats the committee (selection D1): no action and no
+            # revised copy. The stage is state-held; the phase name is never parsed.
+            role, kind, action = s["current_role"], "select", None
         else:
             role = s["current_role"]
             kind, action = "turn", None
@@ -465,18 +512,47 @@ class CommitteePlaybook:
                 # comparison that can still fail.
                 s["pre_edit_digest"] = thread.digest(revised)
 
-        # The owner's and a reviewer's one image, named for the phase. Made
-        # here, 0700, not by the worker (0755): a run opened before `open`
-        # made the folder has none. A folder that is refused (a planted
+        # The owner's, a reviewer's and a selector's one image, named for the
+        # phase. Made here, 0700, not by the worker (0755): a run opened before
+        # `open` made the folder has none. A folder that is refused (a planted
         # symlink or file) offers no image rather than failing the run.
         image = ""
-        if kind == "turn" and s["base"]:
+        if kind in ("turn", "select") and s["base"]:
             try:
                 thread.images_dir(run.id)
                 image = s["base"]
             except (OSError, ValueError):
                 pass
         s["image"] = image  # what a retake note names as the one passing reference
+
+        if kind == "select":
+            # The selector's own title and goal (selection D7).
+            title = cast.title(role, "select", turn=s["current_stage"], take=s["take"])
+            goal = cast.select_goal(
+                role,
+                stage=s["current_stage"],
+                charge=s["charge"],
+                artifact=s["artifact"],
+                thread=str(thread.path(run.id)),
+                image=image,
+                retake=s["note"],
+                last_take=s["last_take"],
+            )
+        else:
+            title = cast.title(
+                role, kind, turn=s["current_turn"], action=action, take=s["take"]
+            )
+            goal = cast.goal(
+                role,
+                charge=s["charge"],
+                artifact=s["artifact"],
+                thread=str(thread.path(run.id)),
+                revised=s["revised"],
+                action=action,
+                image=image,
+                retake=s["note"],
+                last_take=s["last_take"],
+            )
 
         return [Ticket(
             id=f"{run.id}/{phase}",
@@ -488,20 +564,8 @@ class CommitteePlaybook:
             attempts=0,
             payload={
                 "role": role,
-                "title": cast.title(
-                    role, kind, turn=s["current_turn"], action=action, take=s["take"]
-                ),
-                "goal": cast.goal(
-                    role,
-                    charge=s["charge"],
-                    artifact=s["artifact"],
-                    thread=str(thread.path(run.id)),
-                    revised=s["revised"],
-                    action=action,
-                    image=image,
-                    retake=s["note"],
-                    last_take=s["last_take"],
-                ),
+                "title": title,
+                "goal": goal,
                 "kind": kind,
                 "action": action,
             },
@@ -539,7 +603,7 @@ class CommitteePlaybook:
                 "role": {"type": "string"},
                 "title": {"type": "string"},
                 "goal": {"type": "string"},
-                "kind": {"type": "string", "enum": ["turn", "edit", "decision"]},
+                "kind": {"type": "string", "enum": ["turn", "edit", "decision", "select"]},
                 "action": {"type": ["string", "null"]},
             },
         }
@@ -631,6 +695,8 @@ class CommitteePlaybook:
             return [Reduction(kind="lost", json={"error": _LOST})]
         if phase in DECISION_PHASES:
             return self._reduce_decision(run, s, findings, phase)
+        if s["current_kind"] == "select":
+            return self._reduce_select(run, s, findings)
         return self._reduce_turn(run, s, findings)
 
     # --- the voice gate (voice D3) --------------------------------------
@@ -733,6 +799,79 @@ class CommitteePlaybook:
             violations = [*violations, "retake_failed"]
         s["held"] = s["retake"] = None
         return answer, take, takes, metrics, violations, flags
+
+    def _reduce_select(
+        self, run: Run, s: dict, findings: list[Finding]
+    ) -> list[Reduction]:
+        """One selector's stage: the list in the thread and on a selection reduction.
+
+        Voice grades the RAW answer, fences intact (its measure skips fenced
+        blocks); fences are stripped only for the thread and the reduction
+        ``body``. No ``_apply_block``: a selector's request_floor, delegate and
+        close are ignored. Never raises: every parse and file touch is wrapped,
+        and exactly one ``selection`` reduction comes back (C5). It routes
+        nothing (Q3), so it carries no ``needs_human_ticket_ids``, and no
+        ``artifact``, ``revised`` or ``turn`` for the kind-agnostic readers.
+        """
+        errors: list[str] = []
+        role, stage = s["current_role"], s["current_stage"]
+        answer = _latest_answer(findings)
+        # Every take is kept for now; the discard verdict drives s-phase
+        # retakes from Task 8. `_keep` is still what falls back to a held take.
+        _, metrics, violations, flags = self._grade(run, s, role, answer)
+        answer, take, takes, metrics, violations, flags = self._keep(
+            run, s, role, answer, metrics, violations, flags
+        )
+        delivered = bool(answer)
+        try:
+            doc, code = selection.parse(answer)
+            seats, _invalid = selection.validate(doc, cast.LIBRARY)
+            not_seated = selection.not_seated(doc)
+            code = selection.stage_code(delivered, code, seats)
+        except Exception as exc:  # never raise out of reduce (gap 3)
+            doc, code, seats, not_seated = None, "unparseable", [], []
+            errors.append(f"selection: {exc}")
+        body = selection.strip(turnblock.strip(answer)).strip()
+        if delivered and not body:
+            body = _SIGNALS_ONLY  # a block with no prose is delivered (gap 4)
+        # The whole lists: the entry shows the first thread.LIST_MAX of each
+        # and counts the rest. An empty body writes the NO_TURN stub.
+        try:
+            thread.append_selection(
+                run.id, stage=stage, role=role, body=body, seats=seats,
+                not_seated=not_seated, code=code, roster=s["roster"] or None,
+            )
+        except Exception as exc:  # never raise out of reduce
+            errors.append(f"thread: {exc}")
+        s["stages"].append(
+            {"stage": stage, "role": role, "delivered": delivered, "doc": doc, "code": code}
+        )
+        return [Reduction(kind="selection", json={
+            "stage": stage,
+            "role": role,
+            "final": stage == 3,
+            "delivered": delivered,
+            "body": body,
+            "parsed": doc is not None,
+            "code": code,
+            # The same first entries the thread shows, and how many more there
+            # were: a 200 KB block must not become a 200 KB reduction.
+            "proposed": [
+                {key: seat[key] for key in ("role", "name", "title", "rationale")}
+                for seat in seats[:thread.LIST_MAX]
+            ],
+            "proposed_dropped": max(0, len(seats) - thread.LIST_MAX),
+            "error": "; ".join(errors) or None,
+            # the master's cap, so the view never guesses it before t01 (D5)
+            "cap": s["max_turns"],
+            # voice C4, as on a turn
+            "take": take,
+            "takes": takes,
+            "kept": True,
+            "voice": metrics,
+            "violations": violations,
+            "flags": flags,
+        })]
 
     def _reduce_turn(
         self, run: Run, s: dict, findings: list[Finding]
@@ -1022,6 +1161,11 @@ class CommitteePlaybook:
             # Above delegation, close and the cap: a retake is the same turn
             # said again, and whatever it delegates follows it.
             return self._retake(s)
+        if s["selection_next"] <= 3:
+            # Selection runs before the meeting and outside it: `_select` never
+            # touches the turn counter, `last_speaker` or the cap, so the phase
+            # after s3 is t01, numbered exactly as without selection.
+            return self._select(s, s["selection_next"])
         # a delegation outranks `close`: an edit the owner asked for still happens,
         # and costs one turn. The cap outranks BOTH, so this can never mint t31.
         if s["delegation"] and s["turn"] <= s["max_turns"]:

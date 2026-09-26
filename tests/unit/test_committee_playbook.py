@@ -13,6 +13,7 @@ parseable, or absent -- and absent stays absent, never inferred into a False.
 from __future__ import annotations
 
 import itertools
+import json
 import random
 import re
 
@@ -1875,6 +1876,8 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
         "delegation_turn", "dropped_delegation_turn", "answers_turn", "delegated_by_turn",
         "snapshot_note",
         "base", "take", "retake", "note", "held", "edit_digest", "last_take", "image",
+        "current_kind", "current_stage", "selection_next", "stages", "cap_explicit",
+        "reviewers",
     }
     assert (s["base"], s["take"], s["retake"], s["note"], s["held"], s["edit_digest"]) == (
         "", 1, None, None, None, "")
@@ -1895,6 +1898,12 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
     assert s["charge"] == "" and s["artifact"] == "" and s["revised"] == ""
     # nothing has ended yet
     assert s["ended"] is None
+    # selection (C3): nothing minted yet, and 4 means "selection done", so a
+    # state that never saw `open` mints no s-phase
+    assert s["current_kind"] is None and s["current_stage"] is None
+    assert s["selection_next"] == 4 and s["stages"] == []
+    assert s["cap_explicit"] is False
+    assert s["reviewers"] == list(cast.SENIORITY) and s["reviewers"] is not s["opening"]
     assert pb._state(run) is s  # same run, same dict
 
 
@@ -1933,20 +1942,74 @@ def test_state_is_never_evicted_from_under_a_live_run():
 _REVIEWERS = list(cast.SENIORITY)
 
 
-def _drive(script, max_turns=30):
+def _selection_answer(
+    seats, *, prose="These seats cover every team this proposal touches.", not_seated=()
+):
+    """Prose plus one hermes-selection block, the way a selector answers (C4).
+
+    A str seat is a library slug with a stock rationale; a dict is sent as is.
+    """
+    doc = {
+        "seats": [
+            {"role": seat, "rationale": f"{seat} has a stake in this proposal"}
+            if isinstance(seat, str) else seat
+            for seat in seats
+        ],
+        "not_seated": list(not_seated),
+    }
+    return f"{prose}\n\n```hermes-selection\n{json.dumps(doc)}\n```\n"
+
+
+# All three selectors seat today's five library reviewers in SENIORITY order,
+# so a selection run's meeting is the default run's meeting.
+DEFAULT_SELECTION = {
+    role: _selection_answer(["tpm", "pm", "tl", "staff_ic", "data_scientist"])
+    for role in ("owner", "manager", "senior_director")
+}
+
+
+def _selection_take(selection, role, take):
+    """The answer ``role`` gives on take ``take`` (gap 1).
+
+    A str is every take's answer, None is undelivered, and a list is per take:
+    take k is item k-1, and a take past the list's end is undelivered. A role
+    missing from the dict is undelivered.
+    """
+    value = selection.get(role)
+    if isinstance(value, list):
+        return value[take - 1] if take <= len(value) else None
+    return value
+
+
+def _drive(script, max_turns=30, selection=None, *, reductions=None):
     """Drive a whole run through the real next_phase.
 
     `script` maps a phase name to the block its speaker emits, or is a callable
     (phase, state) -> block. A `_ok: False` key models a turn whose worker
-    produced no finding. Returns (pb, run, state, phases_seen, speakers,
-    delivered) -- `speakers` is who next_phase MINTED and `delivered` is whether
-    that worker produced anything, parallel lists: which turns were answered
-    depends on both.
+    produced no finding, and `_retake: True` a take reduce discarded. Returns
+    (pb, run, state, phases_seen, speakers, delivered) -- `speakers` is who
+    next_phase MINTED and `delivered` is whether that worker produced anything,
+    parallel lists: which turns were answered depends on both.
+
+    `max_turns` is an explicit HERMES_COMMITTEE_MAX_TURNS; None means unset
+    (DEFAULT_MAX_TURNS, `cap_explicit` False). `selection` maps a stage role to
+    its answer (see `_selection_take`). With it the run opens with s1-s3, each
+    settled through the real `pb.reduce`, so grade, parse and validate run with
+    nothing transcribed; selectors never enter `speakers` or `delivered`.
+    Without it `selection_next` stays 4 and no s-phase is minted.
+    `reductions`, when a list, collects (phase, reduction) for every s-phase.
     """
+    from playbooks.committee import selection as sel  # selection
+    from playbooks.committee.playbook import DEFAULT_MAX_TURNS
+
     pb = _committee()
     run = _run()
     s = pb._state(run)
-    s["max_turns"] = max_turns
+    s["max_turns"] = DEFAULT_MAX_TURNS if max_turns is None else max_turns  # selection
+    s["cap_explicit"] = max_turns is not None  # selection
+    if selection is not None:  # selection
+        s["roster"] = sel.fixed_seats()
+        s["selection_next"] = 1
     seen = ["open"]
     speakers = []
     delivered = []
@@ -1958,6 +2021,16 @@ def _drive(script, max_turns=30):
         assert len(seen) < 400, f"NON-TERMINATION: {seen[:40]}..."
         seen.append(nxt)
         run.phase = nxt
+        if s["current_kind"] == "select":  # selection
+            # A selector is not a meeting speaker. The real reduce settles the
+            # stage: grade, discard or keep, parse, validate, the thread entry.
+            assert nxt in (s["base"], f"{s['base']}-take{s['take']}"), (nxt, s["base"])
+            answer = _selection_take(selection, s["current_role"], s["take"])
+            found = [] if answer is None else [_finding(run, f"{run.id}/{nxt}", answer)]
+            for reduction in pb.reduce(run, nxt, found, _NamedSite("local")):
+                if reductions is not None:
+                    reductions.append((nxt, reduction))
+            continue
         block = script(nxt, s) if callable(script) else dict(script.get(nxt, {}))
         if block.get("_retake"):
             # A take reduce discarded: its gates never run, and the same
@@ -1993,9 +2066,18 @@ def _kept(phases):
     return out
 
 
-def check_invariants(s, seen, speakers, max_turns=30, delivered=None):
-    """Every property the model asserted on every run it drove."""
+def check_invariants(s, seen, speakers, max_turns=30, delivered=None, reviewers=None):
+    """Every property the model asserted on every run it drove.
+
+    `reviewers` is the run's own reviewer list (pass `s["reviewers"]` on a
+    selection run); None is the default seven. The selection phases are not
+    meeting turns: they have no speaker and no NN, so every check after the
+    duplicate check runs without them, which keeps `_kept(seen[1:])` parallel
+    to `speakers`.
+    """
     assert len(seen) == len(set(seen)), "duplicate phase name"
+    reviewers = _REVIEWERS if reviewers is None else reviewers
+    seen = [phase for phase in seen if not re.match(r"s[1-3]-", phase)]
     assert seen[-1] in DECISION_PHASES, f"did not end at a decision phase: {seen[-1]}"
     kept = _kept(seen[1:])  # seen[0] is `open`; speakers run parallel to seen[1:]
     assert sum(
@@ -2018,7 +2100,7 @@ def check_invariants(s, seen, speakers, max_turns=30, delivered=None):
     for i, who in enumerate(body):
         if i + 1 >= len(body):
             break  # a trailing reviewer is the documented cap cut-off
-        if who in _REVIEWERS and said[i]:
+        if who in reviewers and said[i]:
             # every reviewer turn that delivered is answered by the owner
             assert body[i + 1] == "owner", f"reviewer {who} at {i} unanswered by {body[i+1]}"
         if not said[i]:
@@ -2339,7 +2421,7 @@ def _result_doc(payload: dict, outcome: str = "ok") -> dict:
 
 
 def test_every_ticket_kind_validates_against_the_one_payload_schema():
-    """One schema, every phase: turn, edit and decision all pass it."""
+    """One schema, every phase: turn, edit, decision and select all pass it."""
     from engine import contracts
     from playbooks.committee.playbook import CommitteePlaybook
 
@@ -2348,6 +2430,7 @@ def test_every_ticket_kind_validates_against_the_one_payload_schema():
         ("t01-senior_director", _payload("turn", "senior_director")),
         ("t04-junior_ic", _payload("edit", "junior_ic", action="Add a rollback plan.")),
         ("decision", _payload("decision", "chair")),
+        ("s1-owner", _payload("select", "owner")),
     ]
     for phase, payload in cases:
         contracts.validate(payload, pb.payload_schema(phase))
@@ -2381,7 +2464,7 @@ def test_payload_schema_requires_role_title_goal_and_kind():
 
 
 def test_action_is_nullable_and_kind_is_a_closed_vocabulary():
-    """action is None on every turn but the junior IC's; kind is an enum of three."""
+    """action is None on every turn but the junior IC's; kind is an enum of four."""
     from engine import contracts
     from playbooks.committee.playbook import CommitteePlaybook
 
@@ -2389,6 +2472,7 @@ def test_action_is_nullable_and_kind_is_a_closed_vocabulary():
 
     contracts.validate(_payload("turn", "owner", action=None), schema)
     contracts.validate(_payload("edit", "junior_ic", action="Name the risk owner."), schema)
+    contracts.validate(_payload("select", "manager", action=None), schema)
 
     absent = _payload("turn", "owner")
     del absent["action"]
@@ -2396,7 +2480,7 @@ def test_action_is_nullable_and_kind_is_a_closed_vocabulary():
 
     with pytest.raises(contracts.ContractError) as exc:
         contracts.validate(_payload("vote", "owner"), schema)
-    assert "Value 'vote' not in enum ['turn', 'edit', 'decision']" in str(exc.value)
+    assert "Value 'vote' not in enum ['turn', 'edit', 'decision', 'select']" in str(exc.value)
 
     with pytest.raises(contracts.ContractError) as exc:
         contracts.validate(_payload("turn", "owner", action=7), schema)
@@ -2564,9 +2648,14 @@ def test_seed_open_is_a_zero_ticket_bootstrap(artifact):
     header = thread.path(run.id).read_text(encoding="utf-8")
     assert "Decide whether to fund the migration." in header
     assert str(artifact) in header
-    for role in cast.CAST:
-        assert role in header
-        assert cast.persona(role)["name"] in header
+    # the fixed four in the legacy form eval's parser reads, then the library
+    for role in ("owner", "senior_director", "manager", "junior_ic"):
+        who = cast.CAST[role]
+        assert f"\n- {role} — {who['name']}, {who['title']}\n" in header
+    assert "\n- Reviewer seats: chosen below\n" in header
+    for slug, persona in cast.LIBRARY.items():
+        assert f"\n- {slug}: {persona['title']}. Lens: " in header
+    assert cast.CAST["tpm"]["name"] not in header  # a reviewer is seated later, or not
 
     s = pb._state(run)
     assert s["charge"] == "Decide whether to fund the migration."
@@ -2574,6 +2663,11 @@ def test_seed_open_is_a_zero_ticket_bootstrap(artifact):
     assert s["artifact_digest"] == thread.digest(artifact)
     assert s["revised"] == str(thread.revised_path(run.id, str(artifact)))
     assert s["max_turns"] == 30
+    from playbooks.committee import selection
+
+    assert s["roster"] == selection.fixed_seats()
+    assert list(s["roster"]) == ["owner", "senior_director", "manager", "junior_ic"]
+    assert s["selection_next"] == 1
 
 
 def test_open_writes_the_ground_rules_and_makes_the_images_folder(artifact, tmp_path):
@@ -2743,7 +2837,12 @@ def test_charge_defaults_when_no_goals_and_is_clipped(artifact):
 
 
 def test_turn_ticket_carries_exactly_the_frozen_payload_keys(artifact):
-    """A turn phase seeds one ticket for s["current_role"], id f"{run.id}/{phase}"."""
+    """After `open` the owner's select ticket, then turn 1's once s1-s3 settle.
+
+    Both carry exactly the frozen payload keys, id f"{run.id}/{phase}", and
+    validate against the one payload schema. A select retake keeps the stage's
+    goal, its image stem and names its last take.
+    """
     from engine import contracts
     from playbooks.committee import cast, thread
 
@@ -2752,19 +2851,44 @@ def test_turn_ticket_carries_exactly_the_frozen_payload_keys(artifact):
     run = _run(phase="open")
     pb.seed(run, site)
 
-    phase = pb.next_phase(_run(phase="open"))
-    assert phase == "t01-senior_director"
+    run.phase = pb.next_phase(run)
+    assert run.phase == "s1-owner"
+    [t] = pb.seed(run, site)
+    assert (t.id, t.run_id, t.phase) == (f"{run.id}/s1-owner", run.id, "s1-owner")
+    assert (t.state, t.resource_req, t.priority, t.attempts) == ("queued", "cpu", 0.0, 0)
+    assert set(t.payload) == {"role", "title", "goal", "kind", "action"}
+    assert (t.payload["role"], t.payload["kind"], t.payload["action"]) == ("owner", "select", None)
+    assert t.payload["title"] == "selection 1 — Maya Okonkwo (owner) seats the committee"
+    assert str(artifact) in t.payload["goal"]
+    assert str(thread.path(run.id)) in t.payload["goal"]
+    assert "hermes-selection" in t.payload["goal"]
+    assert "s1-owner.svg" in t.payload["goal"]  # the stage's own image base
+    assert len(t.payload["goal"]) < cast.GOAL_MAX
+    contracts.validate(t.payload, pb.payload_schema(run.phase))
 
-    tickets = pb.seed(_run(phase=phase), site)
-    assert len(tickets) == 1
-    t = tickets[0]
-    assert t.id == f"{run.id}/{phase}"
-    assert t.run_id == run.id
-    assert t.phase == phase
-    assert t.state == "queued"
-    assert t.resource_req == "cpu"
-    assert t.priority == 0.0
-    assert t.attempts == 0
+    # A retake of the stage (Task 8 sets these from `_discard`): the same
+    # select goal, with the note and the line naming the take it replaces.
+    s = pb._state(run)
+    s.update(retake="Retake 2 of 3. Rules broken: 1 bold.", last_take="takes/s1-owner-take1.md")
+    run.phase = pb.next_phase(run)
+    assert run.phase == "s1-owner-take2"
+    [t] = pb.seed(run, site)
+    assert t.payload["title"] == "selection 1 — Maya Okonkwo (owner) seats the committee (take 2)"
+    assert "Retake 2 of 3. Rules broken: 1 bold.\nYour last take is in " \
+        "takes/s1-owner-take1.md beside the thread" in t.payload["goal"]
+    assert "one image, s1-owner.svg or s1-owner.png" in t.payload["goal"]
+    assert "hermes-selection" in t.payload["goal"] and t.payload["kind"] == "select"
+    contracts.validate(t.payload, pb.payload_schema(run.phase))
+
+    for want in ("s2-manager", "s3-senior_director", "t01-senior_director"):
+        role = pb._state(run)["current_role"]
+        answer = DEFAULT_SELECTION[role]
+        pb.reduce(run, run.phase, [_finding(run, f"{run.id}/{run.phase}", answer)], site)
+        run.phase = pb.next_phase(run)
+        assert run.phase == want
+
+    [t] = pb.seed(run, site)
+    assert t.id == f"{run.id}/t01-senior_director"
     assert set(t.payload) == {"role", "title", "goal", "kind", "action"}
     assert t.payload["role"] == "senior_director"
     assert t.payload["title"] == "turn 1 — Dana Whitfield (senior_director) takes the floor"
@@ -2773,7 +2897,7 @@ def test_turn_ticket_carries_exactly_the_frozen_payload_keys(artifact):
     assert str(artifact) in t.payload["goal"]
     assert str(thread.path(run.id)) in t.payload["goal"]
     assert len(t.payload["goal"]) <= cast.GOAL_MAX
-    contracts.validate(t.payload, pb.payload_schema(phase))
+    contracts.validate(t.payload, pb.payload_schema(run.phase))
 
 
 def test_junior_seed_byte_copies_the_original_and_leaves_it_untouched(artifact):
@@ -4674,6 +4798,18 @@ def test_a_turn_seed_makes_the_images_folder_and_offers_no_image_through_a_refus
 
     assert "one image" not in refused and "write no file at all" in refused
 
+    # a selector's seed runs the same guard (selection D6)
+    choosing = _run(phase="s2-manager")
+    choosing.id = "committee-planted-select"
+    pb._select(pb._state(choosing), 2)
+    (tmp_path / "runs" / choosing.id).mkdir(parents=True)
+    (tmp_path / "runs" / choosing.id / "images").symlink_to(elsewhere, target_is_directory=True)
+
+    select = pb.seed(choosing, site)[0].payload
+
+    assert select["kind"] == "select" and "hermes-selection" in select["goal"]
+    assert "one image" not in select["goal"] and "write no file at all" in select["goal"]
+
 
 def test_a_retake_ticket_names_its_take_and_carries_the_note():
     pb = _committee()
@@ -4695,20 +4831,24 @@ def _meet(pb, run, answers, *, until):
     """The real loop, not the model: next_phase, seed, reduce, from `open` on.
 
     ``answers`` maps a phase to its worker's answer; every other phase answers
-    a short compliant turn. Stops once ``until(phase)`` holds for a phase it
+    a short compliant turn, or, on the three selection stages `open` arms,
+    ``DEFAULT_SELECTION``. Stops once ``until(phase)`` holds for a phase it
     just seeded, and returns every ticket seeded, by phase.
     """
     site = _NamedSite("local")
     pb.seed(run, site)
+    s = pb._state(run)
     seeded = {}
     while True:
         run.phase = pb.next_phase(run)
         seeded[run.phase] = ticket = pb.seed(run, site)[0]
         if until(run.phase):
             return seeded
-        answer = answers.get(run.phase, _turn_answer(
-            "Defer it: `engine/dispatch.py:284` drops the lease, e.g. at 3 s.", stance="defer"))
-        pb.reduce(run, run.phase, [_finding(run, ticket.id, answer)], site)
+        default = (DEFAULT_SELECTION[s["current_role"]] if s["current_kind"] == "select"
+                   else _turn_answer("Defer it: `engine/dispatch.py:284` drops the lease, "
+                                     "e.g. at 3 s.", stance="defer"))
+        pb.reduce(run, run.phase, [_finding(run, ticket.id, answers.get(run.phase, default))],
+                  site)
 
 
 @pytest.mark.parametrize("cap, after", [(2, "decision"), (30, "t03-")])
@@ -4721,7 +4861,10 @@ def test_the_speaker_after_a_kept_retake_gets_no_retake_note(artifact, monkeypat
 
     seeded = _meet(pb, run, {"t02-owner": _WALL}, until=lambda phase: phase.startswith(after))
 
-    assert list(seeded)[1:3] == ["t02-owner", "t02-owner-take2"]
+    # s1-s3, then t01; t02's retake follows its first take
+    assert list(seeded)[:4] == ["s1-owner", "s2-manager", "s3-senior_director",
+                                "t01-senior_director"]
+    assert list(seeded)[4:6] == ["t02-owner", "t02-owner-take2"]
     assert "Retake 2 of 3" in seeded["t02-owner-take2"].payload["goal"]
     ticket = seeded[run.phase]
     assert "Retake" not in ticket.payload["goal"] and "(take" not in ticket.payload["title"]
@@ -5058,6 +5201,198 @@ def test_a_later_junior_turn_starts_clean_after_an_earlier_retake(tmp_path):
 
     assert kept.json["error"] is None and kept.json["verified"] is True
     assert kept.json["take"] == 1
+
+
+# --- selection: the three s-phases before t01 (selection D1) ----------------
+
+def test_selection_phases_precede_the_opening_round(artifact):
+    """open -> s1-owner -> s2-manager -> s3-senior_director -> t01 (AC7, gap 6).
+
+    Selection moves no meeting counter: turn, current_turn, last_speaker,
+    opening and queue are where `open` left them, so t01 is numbered as today.
+    """
+    from playbooks.committee import selection
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="open")
+    s = pb._state(run)
+    assert s["current_kind"] is None and s["selection_next"] == 4
+    pb.seed(run, site)
+    assert s["selection_next"] == 1 and s["roster"] == selection.fixed_seats()
+
+    stages = ("s1-owner", "s2-manager", "s3-senior_director")
+    for stage, want in enumerate(stages, start=1):
+        run.phase = pb.next_phase(run)
+        assert run.phase == want
+        assert (s["current_kind"], s["current_stage"], s["selection_next"]) == (
+            "select", stage, stage + 1)
+        assert (s["base"], s["take"]) == (want, 1)
+        assert (s["turn"], s["current_turn"], s["last_speaker"]) == (1, 0, "owner")
+        assert s["opening"] == list(cast.SENIORITY) and s["queue"] == []
+        answer = DEFAULT_SELECTION[s["current_role"]]
+        pb.reduce(run, want, [_finding(run, f"{run.id}/{want}", answer)], site)
+
+    run.phase = pb.next_phase(run)
+    assert run.phase == "t01-senior_director"
+    assert (s["current_kind"], s["current_turn"], s["turn"]) == ("turn", 1, 2)
+
+    kinds = {}
+
+    def script(phase, st):
+        kinds[phase] = st["current_kind"]
+        if phase == "t02-owner":
+            return {"delegate": True, "action": "tighten the risk section"}
+        return {}
+
+    _, _, d, seen, sp, ok = _drive(script, selection=DEFAULT_SELECTION)
+
+    check_invariants(d, seen, sp, delivered=ok)
+    assert seen[:5] == ["open", *stages, "t01-senior_director"]
+    assert seen[5:7] == ["t02-owner", "t03-junior_ic"]
+    # a junior turn is "turn" too; the last mint was the decision
+    assert kinds["t01-senior_director"] == kinds["t03-junior_ic"] == "turn"
+    assert d["current_kind"] == "decision"
+    assert len(sp) == len(seen) - 4  # open and the three selectors are no speakers
+
+
+def test_each_stage_records_its_list_in_the_thread_and_on_a_selection_reduction():
+    """One `selection` reduction per stage with C5's per-stage keys, and D3's entry."""
+    from playbooks.committee import selection, thread
+
+    crew_owner = {"role": "crew_owner", "name": "Jordan Pike",
+                  "title": "Crew Owner, ingest team",
+                  "rationale": "runs the crews this plan moves"}
+    legal = {"stakeholder": "Legal", "reason": "no contract changes",
+             "represented_by": "senior_director"}
+    answers = {
+        "owner": _selection_answer(["security", "tpm"]),
+        "manager": _selection_answer(["security", "tpm", "sre"], not_seated=[legal]),
+        "senior_director": _selection_answer([crew_owner, "security"]),
+    }
+    reds = []
+
+    _, run, s, seen, sp, _ = _drive({}, selection=answers, reductions=reds)
+
+    assert seen[1:5] == ["s1-owner", "s2-manager", "s3-senior_director", "t01-senior_director"]
+    assert sp[0] == "senior_director" and len(sp) == len(seen) - 4
+    assert [(phase, r.kind) for phase, r in reds] == [
+        ("s1-owner", "selection"), ("s2-manager", "selection"),
+        ("s3-senior_director", "selection"),
+    ]
+    docs = [r.json for _, r in reds]
+    keys = {"stage", "role", "final", "delivered", "body", "parsed", "code", "proposed",
+            "proposed_dropped", "error", "cap", "take", "takes", "kept", "voice",
+            "violations", "flags"}
+    assert set(docs[0]) == set(docs[1]) == keys
+    assert keys <= set(docs[2])  # the final one grows the resolved keys (Task 7)
+    assert [(d["stage"], d["role"], d["final"]) for d in docs] == [
+        (1, "owner", False), (2, "manager", False), (3, "senior_director", True)]
+    for d in docs:
+        assert (d["delivered"], d["parsed"], d["code"], d["error"]) == (True, True, None, None)
+        assert (d["take"], d["takes"], d["kept"], d["cap"]) == (1, 1, True, 30)
+        assert d["body"] == "These seats cover every team this proposal touches."
+        assert d["voice"] is not None and d["violations"] == [] and d["proposed_dropped"] == 0
+        assert not {"artifact", "revised", "turn", "needs_human_ticket_ids"} & set(d)
+    sec = cast.LIBRARY["security"]
+    assert docs[0]["proposed"] == [
+        {"role": "security", "name": sec["name"], "title": "Security Engineer",
+         "rationale": "security has a stake in this proposal"},
+        {"role": "tpm", "name": cast.CAST["tpm"]["name"], "title": cast.CAST["tpm"]["title"],
+         "rationale": "tpm has a stake in this proposal"},
+    ]
+    assert [p["role"] for p in docs[1]["proposed"]] == ["security", "tpm", "sre"]
+    assert docs[2]["proposed"][0] == {k: crew_owner[k] for k in ("role", "name", "title", "rationale")}
+    assert [(st["stage"], st["role"], st["delivered"], st["code"]) for st in s["stages"]] == [
+        (1, "owner", True, None), (2, "manager", True, None), (3, "senior_director", True, None)]
+    assert s["stages"][1]["doc"]["not_seated"][0]["stakeholder"] == "Legal"
+
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    who = {r: cast.CAST[r] for r in ("owner", "manager", "senior_director")}
+    assert [line for line in text.splitlines() if line.startswith("## selection")] == [
+        f"## selection 1: {who['owner']['name']}, {who['owner']['title']} (owner) proposes",
+        f"## selection 2: {who['manager']['name']}, {who['manager']['title']} (manager) amends",
+        f"## selection 3: {who['senior_director']['name']}, "
+        f"{who['senior_director']['title']} (senior_director) ratifies",
+    ]
+    assert text.count("\nSeats:\n") == 3
+    assert f"- security: {sec['name']}, Security Engineer. Why: security has a stake in this proposal." in text
+    assert f"- Legal: no contract changes. Represented by {who['senior_director']['name']}." in text
+    assert "- crew_owner: Jordan Pike, Crew Owner, ingest team. Why: runs the crews this plan moves." in text
+    assert "hermes-selection" not in text
+
+    # A list past thread.LIST_MAX (decisions 5 and 8): the thread gets the whole
+    # list and shows its first 20, the reduction keeps the same 20 and counts the rest.
+    pb = _committee()
+    many = _run()
+    many.id = "committee-many-seats"
+    pb._state(many).update(roster=selection.fixed_seats(), selection_next=1)
+    many.phase = pb.next_phase(many)
+    seats = [{"role": f"seat_{i:02d}", "title": f"Seat {i}", "rationale": "named in the plan"}
+             for i in range(thread.LIST_MAX + 5)]
+    [red] = pb.reduce(many, many.phase, [_finding(
+        many, f"{many.id}/{many.phase}", _selection_answer(seats))], _NamedSite("local"))
+    assert [p["role"] for p in red.json["proposed"]] == [f"seat_{i:02d}" for i in range(20)]
+    assert red.json["proposed_dropped"] == 5 and red.json["code"] is None
+    long = thread.path(many.id).read_text(encoding="utf-8")
+    assert "- seat_19: Seat 19, Seat 19." in long and "seat_20" not in long
+    assert "\n- 5 more not listed.\n" in long
+
+
+def test_a_proseless_selection_answer_is_signals_only_in_the_thread():
+    """A block with no prose is a delivered take (gap 4); only no answer is NO_TURN."""
+    from playbooks.committee import thread
+    from playbooks.committee.playbook import _SIGNALS_ONLY
+
+    reds = []
+    answers = {**DEFAULT_SELECTION, "owner": _selection_answer(["tpm"], prose=""),
+               "manager": None}
+
+    _, run, s, _, _, _ = _drive({}, selection=answers, reductions=reds)
+
+    first, second = reds[0][1].json, reds[1][1].json
+    assert (first["delivered"], first["body"], first["parsed"], first["code"]) == (
+        True, _SIGNALS_ONLY, True, None)
+    assert [p["role"] for p in first["proposed"]] == ["tpm"]
+    assert (second["delivered"], second["body"], second["parsed"], second["code"]) == (
+        False, "", False, "no_answer")
+    assert second["voice"] is None and second["proposed"] == []
+    assert [st["code"] for st in s["stages"]] == [None, "no_answer", None]
+    entries = thread.path(run.id).read_text(encoding="utf-8").split("\n## ")
+    one = next(e for e in entries if e.startswith("selection 1:"))
+    two = next(e for e in entries if e.startswith("selection 2:"))
+    assert _SIGNALS_ONLY in one and "\nSeats:\n" in one and thread.NO_TURN not in one
+    assert thread.NO_TURN in two and "Seats:" not in two and "no usable seat list" not in two
+
+
+def test_a_selectors_turn_block_is_stripped_and_ignored():
+    """No `_apply_block` on a select phase: delegate, close and request_floor do nothing."""
+    from playbooks.committee import selection, thread
+
+    pb = _committee()
+    run = _run()
+    s = pb._state(run)
+    # `opening` empty so a close WOULD be honoured if the gates ran
+    s.update(roster=selection.fixed_seats(), selection_next=1, opening=[])
+    run.phase = pb.next_phase(run)
+    assert run.phase == "s1-owner"
+    signals = _turn_answer("I seat security; the list is below.", request_floor="yes",
+                           delegate="yes", action="Cut the staffing ask.", close="yes")
+    answer = _selection_answer(["security"], prose=signals.strip())
+
+    [red] = pb.reduce(run, "s1-owner", [_finding(run, f"{run.id}/s1-owner", answer)],
+                      _NamedSite("local"))
+
+    assert red.kind == "selection"
+    assert red.json["body"] == "I seat security; the list is below."
+    assert red.json["code"] is None and [p["role"] for p in red.json["proposed"]] == ["security"]
+    assert s["delegation"] is None and s["pending_action"] is None
+    assert s["closed"] is False and s["queue"] == []
+    assert s["last_speaker"] == "owner" and s["turn"] == 1
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert "hermes-turn" not in text and "hermes-selection" not in text
+    assert "delegate: yes" not in text and "Cut the staffing ask." not in text
+    assert pb.next_phase(run) == "s2-manager"
 
 
 # --- registration and wiring ---------------------------------------------
