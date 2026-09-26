@@ -198,21 +198,23 @@ def _drive(conn, run_id, pb, site, agent, host, rounds=40):
     return _run_state(conn, run_id)
 
 
-def _rule(conn, run_id, pb, site, agent, host, *, accept):
+def _rule(conn, run_id, pb, site, agent, host, *, accept, phase="decision"):
     """A human rules on the held verdict, then the loop drives on.
 
     What the Review tab (or `hermes reduction accept|reject`) does while
     `hermes run --wait` keeps the loop alive. The held ticket must be the chair's
     and linked to the decision reduction: a wrong id in `needs_human_ticket_ids`
     routes nothing, silently, and the run would have ended `done` unreviewed.
+    ``phase`` is the chair phase whose take was kept (``decision-take2`` after
+    a retake): the kept verdict holds its own ticket.
     """
     assert _run_state(conn, run_id) == "running"
     state, reduction_id = conn.execute(
-        "SELECT state, reduction_id FROM tickets WHERE id=?", (f"{run_id}/decision",)
+        "SELECT state, reduction_id FROM tickets WHERE id=?", (f"{run_id}/{phase}",)
     ).fetchone()
     assert state == "needs_human"
     assert reduction_id == conn.execute(
-        "SELECT id FROM reductions WHERE run_id=? AND phase='decision'", (run_id,)
+        "SELECT id FROM reductions WHERE run_id=? AND phase=?", (run_id, phase)
     ).fetchone()[0]
     (queue.accept_reduction if accept else queue.reject_reduction)(conn, reduction_id)
     return _drive(conn, run_id, pb, site, agent, host)
@@ -248,6 +250,11 @@ OWNER_DELEGATES_NOOP = (
 )
 
 
+# 350 words with a bold span: over every cap (the chair's 300 included), and bold.
+# What `violate_phases` returns.
+VIOLATION = "**This** " + "word " * 349
+
+
 def _wrap(prose: str, block: str) -> str:
     """Prose plus one hermes-turn fence -- what a real speaker returns (spec 5.4)."""
     return f"{prose}\n\n{FENCE}{turnblock.FENCE_TAG}\n{block}\n{FENCE}\n"
@@ -278,6 +285,10 @@ class ScriptedCommitteeAgent:
     lookups -- no counter, no mutation. ``owner_phases=None`` means every owner
     turn, which is what the quiet default wants.
 
+    ``violate_phases``: those phases answer ``VIOLATION``, so the master
+    discards the take and mints a retake; the double never edits on a
+    ``-take`` phase, because a retake is report-only.
+
     The chair's prose deliberately does NOT contain the simulation disclaimer.
     A real chair is asked for one by its completion condition, but a double that
     says it lets the tests pass on the double's own words: the disclaimer the
@@ -297,18 +308,23 @@ class ScriptedCommitteeAgent:
         owner_phases=None,
         fail_roles=(),
         floor_phases=(),
+        violate_phases=(),
     ):
         self.owner_block = owner_block
         self.owner_phases = None if owner_phases is None else frozenset(owner_phases)
         self.fail_roles = frozenset(fail_roles)
         self.floor_phases = frozenset(floor_phases)
+        self.violate_phases = frozenset(violate_phases)
 
     # --- Agent protocol ---------------------------------------------------
 
     def build_invocation(self, envelope: dict, driver) -> list[str]:
         payload = envelope.get("payload") or {}
         action = payload.get("action") or ""
-        if payload.get("kind") != "edit" or action.startswith("no-op:"):
+        # A retake phase is report-only: its goal forbids every write, and a
+        # double that edited again would fake a "retake modified" error.
+        retake = "-take" in str(envelope.get("phase") or "")
+        if payload.get("kind") != "edit" or action.startswith("no-op:") or retake:
             return ["true"]
         target = str(
             thread.revised_path(envelope["run_id"], os.environ[committee.ENV_ARTIFACT])
@@ -368,6 +384,10 @@ class ScriptedCommitteeAgent:
         payload = envelope.get("payload") or {}
         role = payload.get("role", "")
         kind = payload.get("kind", "")
+        if envelope.get("phase") in self.violate_phases:
+            if kind in ("decision", "edit"):
+                return VIOLATION
+            return _wrap(VIOLATION, OWNER_QUIET if role == cast.OWNER else QUIET_REVIEWER)
         if kind == "decision":
             # No disclaimer: that sentence is the PRODUCT's to append. See the
             # class docstring.
@@ -850,6 +870,65 @@ def test_failed_chair_turn_fails_the_run(
     # The transcript still stands: turn 01 was delivered.
     assert [h for h, _ in _turns(run_id)] == [_heading(1, "senior_director")]
     assert _turns(run_id)[0][1] != thread.NO_TURN
+
+
+# --- retakes (voice T12) -------------------------------------------------------
+
+def test_a_violating_turn_is_retaken_and_only_the_kept_take_reaches_the_thread(
+    home, source_repo, artifact, conn, local_site
+):
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(violate_phases={"t02-owner", "t02-owner-take2"})
+    run_id = "committee-retake"
+    host = _start(conn, run_id, pb, local_site, agent)
+
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+
+    phases = _dispatched_phases(conn, run_id)
+    assert phases[:4] == ["t01-senior_director", "t02-owner", "t02-owner-take2", "t02-owner-take3"]
+    # retakes cost no turns: the non-take phases are the quiet run's, exactly
+    assert [p for p in phases if "-take" not in p] == OPENING_ROUND + ["decision"]
+    takes = [(phase, doc) for phase, kind, doc in _reductions(conn, run_id) if kind == "take"]
+    assert [phase for phase, _ in takes] == ["t02-owner", "t02-owner-take2"]
+    assert [doc["take"] for _, doc in takes] == [1, 2]
+    kept = _reduction_for(conn, run_id, "t02-owner-take3")
+    assert (kept["take"], kept["takes"], kept["violations"]) == (3, 3, [])
+    assert [b for h, b in _turns(run_id) if h == _heading(2, cast.OWNER)] == [kept["body"]]
+
+
+def test_a_junior_retake_reports_without_editing_again(
+    home, source_repo, artifact, conn, local_site
+):
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(
+        owner_block=OWNER_DELEGATES, owner_phases={"t02-owner"},
+        violate_phases={"t03-junior_ic"},
+    )
+    run_id = "committee-junior-retake"
+    host = _start(conn, run_id, pb, local_site, agent)
+
+    _drive(conn, run_id, pb, local_site, agent, host)
+
+    assert _dispatched_phases(conn, run_id)[2:4] == ["t03-junior_ic", "t03-junior_ic-take2"]
+    kept = _reduction_for(conn, run_id, "t03-junior_ic-take2")
+    assert kept["verified"] is True and kept["error"] is None
+    revised = thread.revised_path(run_id, str(artifact)).read_text()
+    assert revised.count(f"<!-- committee edit: {EDIT_ACTION} -->") == 1
+
+
+def test_a_retaken_verdict_is_held_under_its_own_phase_and_an_accept_ends_it_done(
+    home, source_repo, artifact, conn, local_site
+):
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(violate_phases={"decision"})
+    run_id = "committee-chair-retake"
+    host = _start(conn, run_id, pb, local_site, agent)
+
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+    assert _dispatched_phases(conn, run_id)[-2:] == ["decision", "decision-take2"]
+    assert _rule(conn, run_id, pb, local_site, agent, host,
+                 accept=True, phase="decision-take2") == "done"
+    assert len([h for h, _ in _entries(run_id) if h.startswith("## decision")]) == 1
 
 
 # --- committee-eval: the scripted judge and T22-T25 -------------------------
