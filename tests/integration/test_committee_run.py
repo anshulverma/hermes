@@ -891,6 +891,10 @@ def test_a_violating_turn_is_retaken_and_only_the_kept_take_reaches_the_thread(
     takes = [(phase, doc) for phase, kind, doc in _reductions(conn, run_id) if kind == "take"]
     assert [phase for phase, _ in takes] == ["t02-owner", "t02-owner-take2"]
     assert [doc["take"] for _, doc in takes] == [1, 2]
+    (payload,) = conn.execute(
+        "SELECT payload_json FROM tickets WHERE id=?", (f"{run_id}/t02-owner-take2",)
+    ).fetchone()
+    assert "Retake 2 of 3" in json.loads(payload)["goal"]
     kept = _reduction_for(conn, run_id, "t02-owner-take3")
     assert (kept["take"], kept["takes"], kept["violations"]) == (3, 3, [])
     assert [b for h, b in _turns(run_id) if h == _heading(2, cast.OWNER)] == [kept["body"]]

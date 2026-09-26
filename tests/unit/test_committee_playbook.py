@@ -852,8 +852,9 @@ def test_images_dir_is_the_runs_private_images_folder(tmp_path):
     assert folder.is_dir() and (folder.stat().st_mode & 0o777) == 0o700
 
 
+@pytest.mark.parametrize("create", [True, False])
 @pytest.mark.parametrize("planted", ["symlink", "file"])
-def test_images_dir_refuses_a_planted_symlink_or_file(tmp_path, planted):
+def test_images_dir_refuses_a_planted_symlink_or_file(tmp_path, planted, create):
     """A worker can plant images/ as a symlink: never follow it, never chmod its target."""
     from playbooks.committee import thread
 
@@ -868,8 +869,23 @@ def test_images_dir_refuses_a_planted_symlink_or_file(tmp_path, planted):
         (run_dir / "images").write_bytes(b"")
 
     with pytest.raises(ValueError, match="images"):
-        thread.images_dir("committee-x")
+        thread.images_dir("committee-x", create=create)
     assert (elsewhere.stat().st_mode & 0o777) == 0o755
+
+
+def test_images_dir_without_create_only_looks(tmp_path):
+    """create=False makes and chmods nothing: an absent folder raises, a plain one comes back as is."""
+    from playbooks.committee import thread
+
+    with pytest.raises(FileNotFoundError):
+        thread.images_dir("committee-x", create=False)
+    assert not (tmp_path / "runs").exists()
+
+    folder = tmp_path / "runs" / "committee-x" / "images"
+    folder.mkdir(parents=True)
+    folder.chmod(0o755)
+    assert thread.images_dir("committee-x", create=False) == folder
+    assert (folder.stat().st_mode & 0o777) == 0o755
 
 
 def test_thread_appends_turns_in_order_and_never_truncates(tmp_path):
@@ -3768,6 +3784,37 @@ def test_grade_without_file_images_never_accepts_a_file():
     assert metrics["images"][0]["ok"] is False
 
 
+def test_keep_regrades_a_held_take_with_the_callers_file_images():
+    """A phase that grades with file_images=False keeps image_missing on the held take."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="o01-owner-take2")
+    s = _speaking(pb, run, "owner", 0, base="o01-owner")
+    (thread.images_dir(run.id) / "o01-owner.svg").write_bytes(b"<svg></svg>")
+    held = "Staffing is flat.\n![curve](images/o01-owner.svg)\nDescription: engineers per week."
+    s.update(take=2, held={"answer": held, "take": 1})
+
+    _, take, takes, metrics, violations, _ = pb._keep(
+        run, s, "owner", "", None, [], [], file_images=False)
+
+    assert (take, takes, violations) == (1, 2, ["image_missing", "retake_failed"])
+    assert metrics["images"][0]["ok"] is False
+
+
+def test_grading_a_file_image_never_makes_the_images_folder(tmp_path):
+    """reduce only looks: an absent images folder is an image not ok, and stays absent."""
+    pb = _committee()
+    run = _run(phase="t02-owner")
+    s = _speaking(pb, run, "owner", 2)
+    answer = "Staffing is flat.\n![curve](images/t02-owner.svg)\nDescription: engineers per week."
+
+    discard, metrics, violations, _ = pb._grade(run, s, "owner", answer)
+
+    assert (discard, violations, metrics["images"][0]["ok"]) == (True, ["image_missing"], False)
+    assert not (tmp_path / "runs" / run.id).exists()
+
+
 def test_a_refused_images_folder_is_an_image_not_ok_and_never_raises(tmp_path):
     """A worker that plants images/ as a symlink gets no image through it, and
     reduce still returns: take 1 is sent back, take 3 is kept and flagged."""
@@ -3837,6 +3884,44 @@ def test_a_retake_ticket_names_its_take_and_carries_the_note():
     assert "Retake 2 of 3. Your last take broke the ground rules: 1 bold." in ticket.payload["goal"]
     assert "one image, t02-owner.svg or t02-owner.png" in ticket.payload["goal"]
     assert set(ticket.payload) == {"role", "title", "goal", "kind", "action"}
+
+
+def _meet(pb, run, answers, *, until):
+    """The real loop, not the model: next_phase, seed, reduce, from `open` on.
+
+    ``answers`` maps a phase to its worker's answer; every other phase answers
+    a short compliant turn. Stops once ``until(phase)`` holds for a phase it
+    just seeded, and returns every ticket seeded, by phase.
+    """
+    site = _NamedSite("local")
+    pb.seed(run, site)
+    seeded = {}
+    while True:
+        run.phase = pb.next_phase(run)
+        seeded[run.phase] = ticket = pb.seed(run, site)[0]
+        if until(run.phase):
+            return seeded
+        answer = answers.get(run.phase, _turn_answer(
+            "Defer it: `engine/dispatch.py:284` drops the lease, e.g. at 3 s.", stance="defer"))
+        pb.reduce(run, run.phase, [_finding(run, ticket.id, answer)], site)
+
+
+@pytest.mark.parametrize("cap, after", [(2, "decision"), (30, "t03-")])
+def test_the_speaker_after_a_kept_retake_gets_no_retake_note(artifact, monkeypatch, cap, after):
+    """The cap routes the chair in after t02's retake (cap 2), or the next turn
+    is minted (cap 30): either starts at take 1, with nothing of t02's note."""
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", str(cap))
+    pb = _committee()
+    run = _run()
+
+    seeded = _meet(pb, run, {"t02-owner": _WALL}, until=lambda phase: phase.startswith(after))
+
+    assert list(seeded)[1:3] == ["t02-owner", "t02-owner-take2"]
+    assert "Retake 2 of 3" in seeded["t02-owner-take2"].payload["goal"]
+    ticket = seeded[run.phase]
+    assert "Retake" not in ticket.payload["goal"] and "(take" not in ticket.payload["title"]
+    s = pb._state(run)
+    assert (s["base"], s["take"]) == (run.phase, 1)
 
 
 def test_a_fresh_process_after_a_discarded_take_leaves_the_thread_at_the_last_kept_turn():
@@ -4022,6 +4107,20 @@ def test_a_fresh_process_after_a_discarded_chair_take_goes_to_ruling_and_fails()
     assert fresh.is_done(_run(phase="ruling", reductions=[take])) is False
 
 
+def test_a_verdict_is_graded_against_the_chairs_own_cap():
+    """200 words: over a reviewer's 150, within the chair's 300, so take 1 is kept."""
+    pb = _committee()
+    run = _run(phase="decision")
+    _chairing(pb, run)
+    verdict = "Approve with changes. " + "word " * 197
+
+    doc = pb.reduce(run, "decision", [_finding(run, f"{run.id}/decision", verdict)],
+                    _NamedSite("local"))[0]
+
+    assert doc.kind == "decision" and doc.json["voice"]["words"] == 200
+    assert doc.json["violations"] == []
+
+
 def _junior_take_one_discarded(pb, run, tmp_path):
     """A junior take 1 that edited the copy and then broke the one-sentence rule."""
     from playbooks.committee import thread
@@ -4096,6 +4195,42 @@ def test_a_junior_retake_that_writes_a_copy_take_one_removed_records_the_error(t
         run, f"{run.id}/{run.phase}", "My first take changed nothing.")], site)[0]
 
     assert kept.json["error"] == "retake modified the revised copy"
+
+
+def test_a_junior_take_two_that_edits_and_is_sent_back_is_still_caught_at_take_three(tmp_path):
+    """The copy's digest is take 1's: a discarded take 2 that edited does not move it."""
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t05-junior_ic")
+    copy, _ = _junior_take_one_discarded(pb, run, tmp_path)
+    run.phase = pb.next_phase(run)
+    copy.write_text(copy.read_text() + "and a second edit\n")
+    sent_back = pb.reduce(run, run.phase, [_finding(
+        run, f"{run.id}/{run.phase}", "I added it. Then I added more.")], site)[0]
+    assert sent_back.kind == "take"
+    run.phase = pb.next_phase(run)
+    assert run.phase == "t05-junior_ic-take3"
+
+    kept = pb.reduce(run, run.phase, [_finding(
+        run, f"{run.id}/{run.phase}", "I added the rollback paragraph.")], site)[0]
+
+    assert kept.json["take"] == 3
+    assert kept.json["error"] == "retake modified the revised copy"
+
+
+def test_a_junior_retake_that_edits_then_delivers_nothing_keeps_take_one_and_the_error(tmp_path):
+    """Dispatched takes count, not the kept one: take 1 is kept, take 2's edit is named."""
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    copy, _ = _junior_take_one_discarded(pb, run, tmp_path)
+    run.phase = pb.next_phase(run)
+    copy.write_text(copy.read_text() + "and another edit\n")
+
+    kept = pb.reduce(run, run.phase, [], _NamedSite("local"))[0].json
+
+    assert (kept["take"], kept["takes"]) == (1, 2)
+    assert kept["violations"] == ["multi_sentence", "retake_failed"]
+    assert kept["error"] == "retake modified the revised copy"
 
 
 def test_a_later_junior_turn_starts_clean_after_an_earlier_retake(tmp_path):

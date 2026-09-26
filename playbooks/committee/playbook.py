@@ -637,8 +637,9 @@ class CommitteePlaybook:
         for an undelivered or signals-only take, which is never discarded.
         ``file_images=False`` refuses every file image (a phase whose images/
         name could collide), so a file reference there forces a retake. So
-        does an images folder ``thread.images_dir`` refuses (a planted symlink
-        or file): nothing reached through it is the speaker's own file.
+        does an images folder that is absent or that ``thread.images_dir``
+        refuses (a planted symlink or file): nothing reached through it is the
+        speaker's own file. Grading only looks; it never makes the folder.
         """
         try:
             body = turnblock.strip(answer)
@@ -650,7 +651,7 @@ class CommitteePlaybook:
             folder = None
             if file_images and any(image["kind"] == "image" for image in images):
                 try:
-                    folder = thread.images_dir(run.id)
+                    folder = thread.images_dir(run.id, create=False)
                 except (OSError, ValueError):
                     folder = None
             metrics["images"] = (
@@ -698,17 +699,20 @@ class CommitteePlaybook:
 
     def _keep(
         self, run: Run, s: dict, role: str, answer: str, metrics: dict | None,
-        violations: list[str], flags: list[str],
+        violations: list[str], flags: list[str], *, file_images: bool = True,
     ) -> tuple[str, int, int, dict | None, list[str], list[str]]:
         """(answer, take, takes, metrics, violations, flags) of the take to keep.
 
         This take, unless it delivered nothing and an earlier take is held: then
-        the held take is kept, graded again, with ``retake_failed`` added.
+        the held take is kept, graded again (with the caller's ``file_images``),
+        with ``retake_failed`` added.
         """
         takes = take = s["take"]
         if metrics is None and s["held"]:
             answer, take = s["held"]["answer"], s["held"]["take"]
-            _, metrics, violations, flags = self._grade(run, s, role, answer)
+            _, metrics, violations, flags = self._grade(
+                run, s, role, answer, file_images=file_images
+            )
             violations = [*violations, "retake_failed"]
         s["held"] = s["retake"] = None
         return answer, take, takes, metrics, violations, flags
@@ -880,8 +884,8 @@ class CommitteePlaybook:
         discard, metrics, violations, flags = self._grade(run, s, cast.CHAIR, answer)
         if discard:
             return self._discard(run, s, cast.CHAIR, answer, metrics, violations, flags, None)
-        # A retake that delivered nothing falls back to the held take: its prose
-        # is recorded, but its ticket has already failed and cannot be routed.
+        # A retake that delivered nothing, whether it failed or sent signals
+        # only, falls back to the held take: its prose is recorded, unruled.
         retake_failed = metrics is None and bool(s["held"])
         answer, take, takes, metrics, violations, flags = self._keep(
             run, s, cast.CHAIR, answer, metrics, violations, flags
@@ -973,9 +977,9 @@ class CommitteePlaybook:
             "error": "; ".join(errors) or None,
         }
         if retake_failed:
-            # The held verdict is on the record, unruled: the chair's ticket for
-            # this phase failed, so there is nothing `record_reduction` can
-            # route, and the run ends failed like any undelivered decision.
+            # The held verdict is on the record, unruled: this phase's retake
+            # delivered nothing, whether it failed or sent signals only, so no
+            # ticket is held, and the run ends failed like any undelivered decision.
             doc.update(
                 needs_human_ticket_ids=[], verdict=text, delivered=False,
                 ended="chair retake failed",

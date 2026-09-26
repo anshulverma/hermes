@@ -104,21 +104,26 @@ def header_artifact(run_id: str) -> str:
     return ""
 
 
-def images_dir(run_id: str) -> Path:
+def images_dir(run_id: str, *, create: bool = True) -> Path:
     """``runs/<run_id>/images/``: the one folder an owner or reviewer may write an image into (0700).
 
     A worker could leave a symlink or a file there. ``state_dir`` would follow
     the symlink (and chmod its target), and a file check through it could pass
     an image the server, which follows none, then refuses. Raise instead.
+
+    ``create=False`` only looks (reduce grading a take): it makes and chmods
+    nothing, and raises ``FileNotFoundError`` when the folder is absent.
     """
-    folder = _config.state_dir("runs", run_id) / "images"
+    folder = _config.resolve_home() / "runs" / run_id / "images"
     try:
         mode = os.lstat(folder).st_mode
     except FileNotFoundError:
+        if not create:
+            raise
         mode = stat.S_IFDIR
     if not stat.S_ISDIR(mode):
         raise ValueError(f"{folder} is not a plain directory (a symlink or a file); refusing it")
-    return _config.state_dir("runs", run_id, "images")
+    return _config.state_dir("runs", run_id, "images") if create else folder
 
 
 def append_turn(run_id: str, *, turn: int, role: str, body: str) -> None:
