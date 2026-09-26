@@ -15,7 +15,6 @@ capture and says so.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -105,12 +104,11 @@ def _run(phase: str) -> Run:
 
 # --- the shape --------------------------------------------------------------
 
-def test_view_data_returns_every_block_the_contract_names(run2, artifacts):
-    original, _ = artifacts
+def test_view_data_returns_every_block_the_contract_names(run2):
     data = view_data(_run("decision"), run2)
 
     assert set(data) == {
-        "kind", "roster", "progress", "timeline", "verdict", "artifacts",
+        "kind", "roster", "progress", "timeline", "verdict", "document",
     }
     assert data["kind"] == "committee"
     assert len(data["roster"]) == 9
@@ -121,12 +119,13 @@ def test_view_data_returns_every_block_the_contract_names(run2, artifacts):
     assert set(data["progress"]) == {"turn", "cap", "holder", "queue", "ended"}
     assert len(data["timeline"]) == 20
     assert all(
-        set(entry) == {"n", "role", "name", "title", "body", "action", "badges", "verified"}
+        set(entry) == {
+            "n", "role", "name", "title", "body", "action", "badges", "verified", "stance",
+        }
         for entry in data["timeline"]
     )
-    assert data["artifacts"] == {
-        "original": {"name": original.name, "bytes": 11397},
-        "revised": {"name": "federation-future.md", "bytes": 19100},
+    assert set(data["document"]) == {
+        "name", "captured", "original", "steps", "final", "dropped_delegation",
     }
 
 
@@ -401,7 +400,10 @@ def test_a_run_with_no_reductions_renders_an_empty_meeting():
 
     assert data["timeline"] == []
     assert data["verdict"] is None
-    assert data["artifacts"] == {"original": None, "revised": None}
+    assert data["document"] == {
+        "name": None, "captured": False, "original": None, "steps": [],
+        "final": None, "dropped_delegation": None,
+    }
     # 30 is DEFAULT_MAX_TURNS, pinned literally: it is what a reader compares
     # the turn count against.
     assert data["progress"] == {
@@ -459,50 +461,150 @@ def test_view_data_does_not_raise_on_a_reduction_no_reduce_would_write(run2):
     assert data["verdict"]["dropped_floor_requests"] == []
 
 
-def _gone(revised: Path) -> None:
-    revised.unlink()
+# --- the document's versions (doc-diff C3) --------------------------------------
+
+RUN_ID = "committee-20260919-000000"  # what `_run` builds
 
 
-def _a_directory(revised: Path) -> None:
-    revised.unlink()
-    revised.mkdir()
+def _steps(reductions):
+    """{turn: (owner_turn, reviewer_turn, provenance)} off the document block."""
+    return {
+        step["turn"]: (step["owner_turn"], step["reviewer_turn"], step["provenance"])
+        for step in view_data(_run("decision"), reductions)["document"]["steps"]
+    }
 
 
-def _empty(revised: Path) -> None:
-    revised.write_bytes(b"")
+def test_the_document_sizes_every_version_under_this_process_home(run2, tmp_path):
+    """Never at a path a reduction recorded: those are the master's host paths."""
+    from playbooks.committee import thread
+
+    thread.write_snapshot(RUN_ID, "doc/00-original.md", b"o" * 11397)
+    for turn in (3, 6, 9, 12):
+        thread.write_snapshot(RUN_ID, f"doc/t{turn:02d}.md", b"e" * (11397 + turn))
+    doc = tmp_path / "runs" / RUN_ID / "doc"
+    (doc / "t15.md").symlink_to(doc / "t12.md")  # the route refuses it; so does the size
+    # t18 was never written: "could not read", never "no edit was made".
+
+    document = view_data(_run("decision"), run2)["document"]
+
+    assert document["name"] == "federation-future.md"
+    assert document["captured"] is True
+    assert document["original"] == {"path": "doc/00-original.md", "bytes": 11397}
+    assert [step["turn"] for step in document["steps"]] == [3, 6, 9, 12, 15, 18]
+    assert document["steps"][0] == {
+        "turn": 3, "path": "doc/t03.md", "bytes": 11400, "delivered": True,
+        "verified": True, "owner_turn": 2, "reviewer_turn": 1, "provenance": "inferred",
+    }
+    assert document["steps"][4]["bytes"] is None   # the symlink
+    assert document["steps"][5]["bytes"] is None   # never written
+    assert document["final"] == {
+        "path": "doc/t18.md", "turn": 18, "bytes": None, "ruling": "awaiting_ruling",
+    }
+    assert document["dropped_delegation"] is None
 
 
-def _unreachable(revised: Path) -> None:
-    revised.unlink()
-    revised.parent.chmod(0o000)
+def test_steps_ascend_by_turn_and_a_turn_settled_twice_keeps_its_last_reduction(run2):
+    retake = Reduction(kind="turn", json=dict(run2[2].json, verified=False))  # t03 again
+    shuffled = list(reversed(run2[:-1])) + [retake, run2[-1]]
+
+    steps = view_data(_run("decision"), shuffled)["document"]["steps"]
+
+    assert [step["turn"] for step in steps] == [3, 6, 9, 12, 15, 18]
+    assert steps[0]["verified"] is False
 
 
-@pytest.mark.parametrize("prepare, expected", [
-    # `seed` records the revised path on EVERY run, delegation or not, so the
-    # path proves nothing about whether a copy was ever made.
-    (_gone, None),
-    # Without `_size`'s `is_file()` this renders {"bytes": 4096} -- a directory
-    # reported as a revised copy 4 KB long.
-    (_a_directory, None),
-    # The whole reason `_size` answers -1 rather than 0: a zero-byte revised
-    # copy is a real state and must not read as "no copy was ever made".
-    (_empty, {"name": "federation-future.md", "bytes": 0}),
-    # And the one path that reaches `_size`'s `except OSError`: `is_file()`
-    # raises PermissionError rather than answering False. Answering 0 there
-    # would render a revised copy that cannot even be looked at.
-    (_unreachable, None),
-])
-def test_the_revised_copy_is_none_unless_a_readable_file_is_really_there(
-    run2, artifacts, prepare, expected
-):
-    original, revised = artifacts
-    if prepare is _unreachable and os.geteuid() == 0:
-        pytest.skip("root traverses a 0o000 directory, so is_file() never raises")
-    prepare(revised)
-    try:
-        artifacts_block = view_data(_run("decision"), run2)["artifacts"]
-    finally:
-        revised.parent.chmod(0o755)
+def test_final_is_the_last_step_that_applied_or_else_the_original(run2):
+    run2[17].json["verified"] = False  # t18 did not apply
+    final = view_data(_run("decision"), run2)["document"]["final"]
+    assert (final["path"], final["turn"]) == ("doc/t15.md", 15)
 
-    assert artifacts_block["original"] == {"name": original.name, "bytes": 11397}
-    assert artifacts_block["revised"] == expected
+    for reduction in run2:
+        if reduction.json.get("role") == "junior_ic":
+            reduction.json["verified"] = False
+    final = view_data(_run("decision"), run2)["document"]["final"]
+    assert (final["path"], final["turn"]) == ("doc/00-original.md", None)
+
+    no_edits = [r for r in run2 if r.json.get("role") != "junior_ic"]
+    document = view_data(_run("decision"), no_edits)["document"]
+    assert document["steps"] == []
+    assert document["final"] is None
+
+
+def test_a_dropped_delegation_is_a_note_naming_its_owner_turn_never_a_step(run2):
+    run2[-1].json.update(dropped_delegation="Fold §9 into §8", dropped_delegation_turn=20)
+    document = view_data(_run("decision"), run2)["document"]
+    assert document["dropped_delegation"] == {"owner_turn": 20, "action": "Fold §9 into §8"}
+    assert [step["turn"] for step in document["steps"]] == [3, 6, 9, 12, 15, 18]
+
+    del run2[-1].json["dropped_delegation_turn"]  # a decision from before the key
+    assert view_data(_run("decision"), run2)["document"]["dropped_delegation"] == {
+        "owner_turn": None, "action": "Fold §9 into §8",
+    }
+
+
+def test_every_timeline_entry_carries_its_stance(run2):
+    run2[5].json["stance"] = "   "  # t06: blank is no stance
+    timeline = view_data(_run("decision"), run2)["timeline"]
+
+    assert timeline[1]["stance"] == _STANCES[2]
+    assert timeline[3]["stance"] == _STANCES[4]
+    assert timeline[0]["stance"] is None  # no key at all
+    assert timeline[5]["stance"] is None
+
+
+def test_reductions_without_the_keys_are_placed_by_turn_order(run2):
+    """Run-2 and run-9 predate `delegated_by_turn`: reviewer N-2, owner N-1."""
+    assert _steps(run2) == {
+        3: (2, 1, "inferred"), 6: (5, 4, "inferred"), 9: (8, 7, "inferred"),
+        12: (11, 10, "inferred"), 15: (14, 13, "inferred"), 18: (17, 16, "inferred"),
+    }
+
+
+def test_a_broken_turn_order_is_unknown_rather_than_guessed(run2):
+    run2[1].json["delegate"] = False           # t02 delegated nothing
+    run2[3].json["delivered"] = False          # t04's reviewer never spoke
+    run2[8].json["delegated_by_turn"] = None   # t09: recorded as not applicable
+
+    steps = _steps(run2)
+
+    assert steps[3] == (None, None, "unknown")
+    assert steps[6] == (5, None, "inferred")
+    assert steps[9] == (None, None, "unknown")
+
+
+def test_a_recorded_link_wins_over_turn_order(run2):
+    run2[5].json["delegated_by_turn"] = 2  # t06 applied t02's delegation
+    run2[1].json["answers_turn"] = 1
+    run2[8].json["delegated_by_turn"] = 8  # t08 carries no answers_turn key
+
+    steps = _steps(run2)
+
+    assert steps[6] == (2, 1, "recorded")
+    assert steps[9] == (8, None, "recorded")
+
+
+def _stamped(reductions, state):
+    return reductions[:-1] + [
+        Reduction(kind="decision", json=reductions[-1].json, review_state=state)
+    ]
+
+
+@pytest.mark.parametrize("change, ruling", [
+    (lambda rs: rs[:-1], "in_session"),
+    (lambda rs: rs, "awaiting_ruling"),
+    (lambda rs: _stamped(rs, "accepted"), "accepted"),
+    (lambda rs: _stamped(rs, "rejected"), "rejected"),
+    (lambda rs: _stamped(rs, "superseded"), "no_ruling"),
+    (lambda rs: rs + [Reduction(kind="lost", json={"error": "gone"})], "no_ruling"),
+    (lambda rs: rs[:-1] + [
+        Reduction(kind="decision", json=dict(rs[-1].json, delivered=False))], "no_ruling"),
+], ids=["in_session", "awaiting", "accepted", "rejected", "superseded", "lost", "chair_failed"])
+def test_final_is_labelled_by_how_the_ruling_stands(run2, change, ruling):
+    assert view_data(_run("decision"), change(run2))["document"]["final"]["ruling"] == ruling
+
+
+def test_view_data_creates_nothing_under_the_home(run2, tmp_path):
+    view_data(_run("decision"), run2)
+    view_data(_run("open"), [])
+
+    assert not (tmp_path / "runs").exists()

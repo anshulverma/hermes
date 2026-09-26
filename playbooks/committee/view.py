@@ -7,8 +7,11 @@ playbook instance state. Every number on screen comes off the reductions
 ``reduce`` already wrote, in the order the queue returns them (``ORDER BY id``),
 which is the order they happened in.
 
-One read is not pure and is stated rather than hidden: the size of the two
-artifacts. The turn cap rides on the turn reductions; the environment is read
+One read is not pure and is stated rather than hidden: the size of each
+document snapshot under ``runs/<id>/doc/``, stat'd under THIS process's
+HERMES_HOME by the fixed layout ``thread.snapshot_key`` names -- never at a path
+a reduction recorded, which is the master's host path and means nothing inside
+a container. The turn cap rides on the turn reductions; the environment is read
 only as a fallback for runs captured before that key existed.
 
 Stdlib-only.
@@ -16,10 +19,11 @@ Stdlib-only.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 from engine.models import Reduction, Run
-from playbooks.committee import cast
+from playbooks.committee import cast, thread
 
 
 def view_data(run: Run, reductions: list[Reduction]) -> dict:
@@ -35,11 +39,14 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
     # a view that says less than it hoped to.
     reductions = reductions or []
     turns = [r for r in reductions if r.kind == "turn" and isinstance(r.json, dict)]
-    decision = next(
-        (r.json for r in reversed(reductions)
+    # The row, not only its json: the ruling is the row's `review_state`.
+    decision_row = next(
+        (r for r in reversed(reductions)
          if r.kind == "decision" and isinstance(r.json, dict)),
         None,
     )
+    decision = decision_row.json if decision_row is not None else None
+    lost = any(r.kind == "lost" for r in reductions)
     holder, queue, spoken = _floor(run, turns, decision)
     stances = _stances(turns)
 
@@ -58,7 +65,7 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
         # only surface that renders a stance. The payload key was typed, fixtured
         # and asserted on both sides of the seam, and read by nothing.
         "verdict": _verdict(decision),
-        "artifacts": _artifacts(reductions),
+        "document": _document(run, turns, decision_row, lost),
     }
 
 
@@ -153,6 +160,8 @@ def _entry(doc: dict) -> dict:
     role = _role(doc)
     who = cast.persona(role) if role in cast.CAST else None
     action = doc.get("action")
+    # The same guard `_stances` uses: absent, blank or junk is None, never "".
+    stance = doc.get("stance")
     return {
         "n": _turn_no(doc),
         "role": role,
@@ -166,6 +175,8 @@ def _entry(doc: dict) -> dict:
         "action": action if isinstance(action, str) and action else None,
         "badges": _badges(doc, attributed=who is not None),
         "verified": doc.get("verified") if isinstance(doc.get("verified"), bool) else None,
+        # The document stepper reads a reviewer's stance off the entry, by turn.
+        "stance": stance.strip() if isinstance(stance, str) and stance.strip() else None,
     }
 
 
@@ -240,59 +251,126 @@ def _verdict(decision: dict | None) -> dict | None:
     }
 
 
-# --- the two files ---------------------------------------------------------
+# --- the document's versions ----------------------------------------------
 
-def _artifacts(reductions: list[Reduction]) -> dict:
-    """The original and the revised copy, named and sized.
+# Reviewer seats: everyone in the cast who is neither the owner nor the junior IC.
+_REVIEWERS = frozenset(cast.CAST) - {cast.OWNER, cast.JUNIOR}
 
-    Both paths ride on the reductions. Nothing here calls
-    ``thread.revised_path``, which would create the run's directory as a side
-    effect of a GET.
+
+def _document(
+    run: Run, turns: list[Reduction], decision: Reduction | None, lost: bool
+) -> dict:
+    """The original, one step per junior-IC turn, and the final version.
+
+    Every ``path`` is run-relative, named by ``thread.snapshot_key``, and sized
+    here under this process's own home -- so the server can serve each one
+    from ``runs/<id>/`` without reading a reduction. Steps carry turn numbers,
+    never names: the view takes names, stances and prose from ``timeline``.
     """
-    latest = {"artifact": "", "revised": ""}
-    for reduction in reductions:
-        doc = reduction.json if isinstance(reduction.json, dict) else {}
-        for key in latest:
-            value = doc.get(key)
-            if isinstance(value, str) and value:
-                latest[key] = value
-
-    original = Path(latest["artifact"]) if latest["artifact"] else None
-    revised = Path(latest["revised"]) if latest["revised"] else None
-    revised_bytes = _size(revised)
-    return {
-        # DELIBERATELY not symmetric with `revised` below. `original` is null
-        # only when no reduction named a path at all; a path that names nothing
-        # readable renders 0 bytes rather than null, because spec §6 types this
-        # non-nullable and the diff panel has a file name to show either way.
-        # The asymmetry is real: "0 bytes" is a claim and absence is not, so an
-        # original that has vanished reads as an empty file. `revised` cannot
-        # afford that -- a zero-byte revised copy is a state the run can reach.
-        "original": (
-            {"name": original.name, "bytes": max(_size(original), 0)}
-            if original is not None else None
-        ),
-        # None until the junior IC's copy exists: `seed` records this path on
-        # every run, delegation or not, so only the file proves anything.
-        "revised": (
-            {"name": revised.name, "bytes": revised_bytes}
-            if revised is not None and revised_bytes >= 0 else None
-        ),
+    artifact = ""
+    for doc in [r.json for r in turns] + ([decision.json] if decision else []):
+        value = doc.get("artifact")
+        if isinstance(value, str) and value:
+            artifact = value
+    name = Path(artifact).name or None
+    block = {
+        "name": name, "captured": False, "original": None, "steps": [], "final": None,
+        "dropped_delegation": _dropped(decision),
     }
+    if name is None:
+        return block
+
+    key = thread.snapshot_key(artifact, None)
+    original = {"path": key, "bytes": _size(thread.run_file(run.id, key))}
+    by_turn = {_turn_no(r.json): r.json for r in turns}  # the last reduction per turn wins
+    steps = []
+    for n in sorted(t for t, doc in by_turn.items() if t > 0 and _role(doc) == cast.JUNIOR):
+        doc = by_turn[n]
+        key = thread.snapshot_key(artifact, n)
+        owner_turn, reviewer_turn, provenance = _provenance(n, doc, by_turn)
+        steps.append({
+            "turn": n,
+            "path": key,
+            "bytes": _size(thread.run_file(run.id, key)),
+            "delivered": bool(doc.get("delivered")),
+            "verified": doc.get("verified") if isinstance(doc.get("verified"), bool) else None,
+            "owner_turn": owner_turn,
+            "reviewer_turn": reviewer_turn,
+            "provenance": provenance,
+        })
+
+    final = None
+    if steps:
+        # The last edit that applied, else the original. Always a doc/ file,
+        # never revised/: the stepper serves every version the same way.
+        applied = [step for step in steps if step["verified"] is True]
+        last = applied[-1] if applied else {**original, "turn": None}
+        final = {
+            "path": last["path"], "turn": last["turn"], "bytes": last["bytes"],
+            "ruling": _ruling(decision, lost),
+        }
+    block.update(captured=original["bytes"] is not None, original=original,
+                 steps=steps, final=final)
+    return block
 
 
-def _size(target: Path | None) -> int:
-    """The file's size, or -1 when there is no file there.
+def _provenance(n: int, doc: dict, by_turn: dict[int, dict]) -> tuple:
+    """(owner_turn, reviewer_turn, provenance) for junior-IC turn ``n``.
 
-    ``-1`` rather than ``0``: a zero-byte revised copy is a real state and must
-    not read as "no copy was ever made".
+    The recorded link wins whenever the reduction carries the key. Only a
+    reduction from before the key existed -- ABSENT, not null -- falls back to
+    turn order, which holds for the ``next_phase`` that wrote it: a delegation
+    is consumed by the very next mint, and an owner turn is minted only right
+    after a delivered reviewer turn.
     """
-    if target is None:
-        return -1
+    if "delegated_by_turn" in doc:
+        owner = _int(doc.get("delegated_by_turn"))
+        if owner is None:
+            return None, None, "unknown"
+        return owner, _int((by_turn.get(owner) or {}).get("answers_turn")), "recorded"
+    owner = by_turn.get(n - 1) or {}
+    if _role(owner) != cast.OWNER or owner.get("delegate") is not True:
+        return None, None, "unknown"
+    reviewer = by_turn.get(n - 2) or {}
+    heard = _role(reviewer) in _REVIEWERS and bool(reviewer.get("delivered"))
+    return n - 1, (n - 2 if heard else None), "inferred"
+
+
+def _ruling(decision: Reduction | None, lost: bool) -> str:
+    """How the meeting's verdict stands, which is what Final is labelled by."""
+    if lost:
+        return "no_ruling"
+    if decision is None:
+        return "in_session"
+    if not decision.json.get("delivered"):
+        return "no_ruling"
+    if decision.review_state == "pending":
+        return "awaiting_ruling"
+    if decision.review_state in ("accepted", "rejected"):
+        return decision.review_state
+    return "no_ruling"  # superseded
+
+
+def _dropped(decision: Reduction | None) -> dict | None:
+    """The delegation the turn cap cut off, as a note -- never a step."""
+    doc = decision.json if decision is not None else {}
+    action = doc.get("dropped_delegation")
+    if not (isinstance(action, str) and action):
+        return None
+    return {"owner_turn": _int(doc.get("dropped_delegation_turn")), "action": action}
+
+
+def _size(target: Path) -> int | None:
+    """The size of the regular file at ``target``, or None for anything else.
+
+    ``lstat``: the route refuses a symlink, so a size here for one would
+    promise a read that then fails. None, not 0 -- a zero-byte version is real.
+    """
     try:
-        return target.stat().st_size if target.is_file() else -1
+        info = os.lstat(target)
     except OSError:
-        return -1
+        return None
+    return info.st_size if stat.S_ISREG(info.st_mode) else None
 
 
 # --- odds and ends ---------------------------------------------------------
@@ -320,8 +398,12 @@ def _role(doc: dict) -> str:
 
 def _turn_no(doc: dict) -> int:
     """The turn number a reduction carries, or 0 if it carries junk."""
-    value = doc.get("turn")
-    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    return _int(doc.get("turn")) or 0
+
+
+def _int(value: object) -> int | None:
+    """``value`` when it is an int and not a bool, otherwise None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 def _cap(reductions: list[Reduction]) -> int:
