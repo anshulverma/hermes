@@ -368,7 +368,9 @@ class CommitteePlaybook:
                 try:
                     revised = thread.ensure_revised(run.id, s["artifact"])
                 except OSError:
-                    # The original AND its doc/00-original snapshot have both gone since `open`.
+                    # No copy could be made: the original AND its doc/00-original
+                    # snapshot have both gone since `open`, or the write into
+                    # revised/ failed.
                     # seed() is called unguarded inside the master loop
                     # (engine/dispatch.py:287), so letting this out would
                     # abandon the run `running`, with no terminal state and no
@@ -379,7 +381,8 @@ class CommitteePlaybook:
                 # Snapshot the copy as it stands BEFORE this worker touches it, so
                 # reduce's re-check (spec 7) measures THIS edit rather than the
                 # accumulated difference from the original. On the first delegation
-                # the copy is a byte-copy of the original, so this is exactly the
+                # the copy is a byte copy of the original as `open` read it
+                # (doc/00-original), so this is exactly the
                 # comparison spec 7 describes; on the second and later ones it is
                 # the only comparison that can still fail.
                 s["pre_edit_digest"] = thread.digest(revised)
@@ -572,8 +575,8 @@ class CommitteePlaybook:
         # --- the independent re-check (spec 7), master-side ---------------
         # The no-trust invariant wants an independent check of an `ok` claim. It
         # cannot live in `verify` (see `reduce`'s docstring), so it rides on the
-        # reduction instead: does the revised copy exist, and did its sha256
-        # move during THIS turn?
+        # reduction instead: is the revised copy a regular file, and did its
+        # sha256 move during THIS turn?
         #
         # RULE: compare against the digest `seed` snapshotted just before the
         # worker ran, never against the original. `ensure_revised` copies once
@@ -595,8 +598,9 @@ class CommitteePlaybook:
                 before = s["pre_edit_digest"]
                 # An empty `before` is not a digest -- `digest` of a zero-byte
                 # file is e3b0c442..., never "" -- it means the snapshot itself
-                # failed (`seed`'s OSError path: the original and doc/00-original
-                # both vanished before any copy was made). Without the clause, a
+                # failed (`seed`'s OSError path: no copy was made, because the
+                # original and doc/00-original were both gone or the write
+                # failed). Without the clause, a
                 # worker that INVENTED the revised file from nothing hashes to
                 # something != "" and is reported verified, inverting the one
                 # no-trust check (spec 7).

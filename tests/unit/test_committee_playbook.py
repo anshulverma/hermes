@@ -876,6 +876,7 @@ def test_run_file_and_snapshot_key_create_nothing(tmp_path):
 def test_read_regular_reads_a_regular_file_and_nothing_else(tmp_path):
     """A symlink, a FIFO, a directory or nothing at all reads as None, at once."""
     import os
+    import threading
 
     from playbooks.committee import thread
 
@@ -885,16 +886,27 @@ def test_read_regular_reads_a_regular_file_and_nothing_else(tmp_path):
     link.symlink_to(real)
     fifo = tmp_path / "pipe.md"
     os.mkfifo(fifo)
+    # Every fd read_regular opens, on every path, is closed again: it runs in
+    # the long-lived master process.
+    open_fds = len(os.listdir("/proc/self/fd"))
 
     assert thread.read_regular(real) == b"bytes\n"
     assert thread.read_regular(str(real)) == b"bytes\n"
     assert thread.read_regular(link) is None       # O_NOFOLLOW
-    assert thread.read_regular(fifo) is None       # and it returned: O_NONBLOCK
-    open_fds = len(os.listdir("/proc/self/fd"))
+    # In a thread, so a blocking open fails this test instead of hanging the suite.
+    fifo_read = []
+    reader = threading.Thread(
+        target=lambda: fifo_read.append(thread.read_regular(fifo)), daemon=True
+    )
+    reader.start()
+    reader.join(timeout=5)
+    assert not reader.is_alive(), "opening a FIFO blocked: O_NONBLOCK is gone"
+    assert fifo_read == [None]
     assert thread.read_regular(tmp_path) is None   # a directory
-    assert len(os.listdir("/proc/self/fd")) == open_fds  # and its fd was closed
     assert thread.read_regular(tmp_path / "missing.md") is None
     assert thread.read_regular(None) is None       # reduce must never raise
+    assert thread.read_regular("a\0b") is None     # an embedded NUL is a ValueError
+    assert len(os.listdir("/proc/self/fd")) == open_fds
 
 
 def test_write_snapshot_is_private_and_the_last_write_wins(tmp_path):
@@ -919,15 +931,38 @@ def test_a_failed_snapshot_write_leaves_no_file_and_no_temp(tmp_path, monkeypatc
     temps = []
 
     def boom(src, dst):
-        temps.append(os.path.basename(src))
+        temps.append(src)
         raise OSError("disk full")
 
     monkeypatch.setattr(os, "replace", boom)
     with pytest.raises(OSError, match="disk full"):
         thread.write_snapshot("run-1", "doc/t03.md", b"x")
 
-    assert temps and temps[0].startswith(".t03.md.")
-    assert list((tmp_path / "runs" / "run-1" / "doc").iterdir()) == []
+    doc = tmp_path / "runs" / "run-1" / "doc"
+    assert temps and os.path.basename(temps[0]).startswith(".t03.md.")
+    # In the target's own directory: a temp anywhere else can sit on another
+    # filesystem, where os.replace fails with EXDEV.
+    assert os.path.dirname(temps[0]) == str(doc)
+    assert list(doc.iterdir()) == []
+
+
+@pytest.mark.parametrize("key", [
+    "../escaped.md", "doc/../escaped.md", "{tmp}/escaped.md", "escaped.md",
+    "doc/sub/t03.md", "doc/..", "doc", "",
+])
+def test_write_snapshot_refuses_a_key_outside_doc(tmp_path, key):
+    """Only ``doc/<name>`` is a snapshot; any other key escapes or misfiles it.
+
+    The absolute case points inside tmp_path: ``state_dir`` chmods what it is
+    handed to 0700, so a regression must never be handed a real directory.
+    """
+    from playbooks.committee import thread
+
+    with pytest.raises(ValueError, match="not a doc/ snapshot"):
+        thread.write_snapshot("run-1", key.format(tmp=tmp_path), b"x")
+
+    assert not (tmp_path / "runs").exists()  # refused before anything was created
+    assert not (tmp_path / "escaped.md").exists()
 
 
 # --- part 1: the class skeleton and its per-run state -----------------------
@@ -1962,16 +1997,29 @@ def test_edit_one_starts_from_the_open_time_bytes_even_if_the_original_moved(art
 
 
 def test_ensure_revised_prefers_the_open_snapshot_and_falls_back_to_the_artifact(tmp_path):
-    """A run from before snapshots existed has no doc/00-original mid-flight."""
+    """doc/00-original when it is a regular file; the live artifact otherwise.
+
+    Every worker runs bypassPermissions, so one can delete doc/00-original or
+    swap it for a symlink. A symlink is refused, not followed: it is not the
+    snapshot `open` wrote.
+    """
     from playbooks.committee import thread
 
     artifact = tmp_path / "proposal.md"
     artifact.write_bytes(b"live\n")
+    key = thread.snapshot_key(str(artifact), None)
 
-    assert thread.ensure_revised("run-legacy", str(artifact)).read_bytes() == b"live\n"
+    assert thread.ensure_revised("run-deleted", str(artifact)).read_bytes() == b"live\n"
 
-    thread.write_snapshot("run-new", thread.snapshot_key(str(artifact), None), b"handed\n")
+    thread.write_snapshot("run-new", key, b"handed\n")
     assert thread.ensure_revised("run-new", str(artifact)).read_bytes() == b"handed\n"
+
+    decoy = tmp_path / "decoy.md"
+    decoy.write_bytes(b"planted\n")
+    link = thread.run_file("run-linked", key)
+    link.parent.mkdir(parents=True)
+    link.symlink_to(decoy)
+    assert thread.ensure_revised("run-linked", str(artifact)).read_bytes() == b"live\n"
 
 
 def test_decision_ticket_is_built_for_the_chair(artifact):
@@ -2579,9 +2627,9 @@ def test_reduce_records_a_missing_revised_file_as_unverified(tmp_path):
     """No revised copy at all is the loudest failure of the re-check.
 
     `pre_edit_digest` is a REAL digest here, so the `before and ...` clause does
-    not short-circuit and `revised.is_file()` is what has to catch this. Without
-    it, `digest` of an absent file is "", which `!= before`, and the master would
-    report `verified: True` for a file that does not exist.
+    not short-circuit and `data is not None` -- `read_regular` found no regular
+    file -- is what has to catch this. Without it, hashing None raises inside
+    the re-check, and an absent file -- an answer -- is recorded as a crash.
     """
     from playbooks.committee import thread
 
@@ -2618,8 +2666,9 @@ def test_reduce_records_a_missing_revised_file_as_unverified(tmp_path):
 def test_reduce_treats_a_missing_pre_edit_snapshot_as_a_failed_recheck(tmp_path):
     """An empty `pre_edit_digest` is a FAILED snapshot, and can only be a failure.
 
-    `seed` leaves it empty in exactly one case: the original vanished before any
-    copy could be made, so nothing was hashed. If the worker then CREATES the
+    `seed` leaves it empty in exactly one case: no copy could be made -- the
+    original and doc/00-original both vanished, or the write into revised/
+    failed -- so nothing was hashed. If the worker then CREATES the
     revised file out of nothing, its digest is not "" -- and comparing the two
     reports the fabrication as a verified edit, which inverts the one
     master-side no-trust check there is. "" is unreachable on the healthy path:
@@ -2637,7 +2686,7 @@ def test_reduce_treats_a_missing_pre_edit_snapshot_as_a_failed_recheck(tmp_path)
         current_role="junior_ic",
         current_turn=5,
         opening=[],
-        artifact=str(tmp_path / "proposal.md"),  # gone before seed could copy it
+        artifact=str(tmp_path / "proposal.md"),  # gone, like doc/00-original
         revised=str(revised),
         pending_action="add a rollback paragraph",
         pre_edit_digest="",  # what seed's OSError path leaves behind

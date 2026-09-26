@@ -7,10 +7,15 @@ from one process, one settled turn at a time. A turn that produced no finding
 still gets an entry (``NO_TURN``), so the transcript stays contiguous and the
 loss is visible rather than silently missing.
 
-The other half of the run directory is ``revised/``: a byte copy of the
-artifact, made once, that the junior IC edits when the owner delegates. The
-original is never touched, and ``digest`` is what lets ``reduce`` tell whether
-the edit actually landed.
+Then ``revised/``: a byte copy of the document as ``open`` read it, made once,
+that the junior IC edits when the owner delegates. The original is never
+touched, and ``digest`` is what lets ``reduce`` tell whether the edit actually
+landed.
+
+And ``doc/``: every version of the document, for the view's stepper --
+``doc/00-original<ext>`` (the bytes ``open`` hashed) and ``doc/tNN<ext>`` (the
+revised copy as junior-IC turn NN left it), written atomically and 0600 by
+``write_snapshot`` and read back by ``read_regular``, which follows no symlink.
 
 Stdlib-only.
 """
@@ -108,17 +113,24 @@ def revised_path(run_id: str, artifact: str) -> Path:
 
 
 def ensure_revised(run_id: str, artifact: str) -> Path:
-    """Byte-copy the artifact into ``revised/`` if it is not already there.
+    """Create the editable copy in ``revised/`` if it is not already there.
 
-    Called by ``seed`` of a junior-IC turn, so the worker only ever edits a
-    file that already exists and the re-check has something to hash. Existing
-    means the edit already happened: never overwrite it.
+    Its bytes are doc/00-original's -- what ``open`` read and hashed -- or,
+    when that snapshot is gone, the live artifact's. Called by ``seed`` of a
+    junior-IC turn, so the worker only ever edits a file that already exists
+    and the re-check has something to hash. Existing means the edit already
+    happened: never overwrite it.
+
+    Raises:
+        OSError: no copy could be made -- doc/00-original and the artifact are
+            both unreadable, or writing into ``revised/`` failed.
     """
     destination = revised_path(run_id, artifact)
     if not destination.exists():
         # The open-time snapshot, so Edit 1's baseline is exactly what the
-        # committee was handed even if the original moved since. A run from
-        # before snapshots existed has none and copies the live file, as before.
+        # committee was handed even if the original moved since. Only when a
+        # worker (every one runs bypassPermissions) deleted doc/00-original or
+        # swapped it for something else does this copy the live file instead.
         # `read_regular`, not `is_file()`: a symlink there is refused, not
         # followed, like everywhere else doc/ is read.
         handed = read_regular(run_file(run_id, snapshot_key(artifact, None)))
@@ -210,9 +222,15 @@ def write_snapshot(run_id: str, key: str, data: bytes) -> None:
     temp name is dot-prefixed, which the server's name pattern never matches, so
     a crashed write can never be served as a snapshot. It overwrites on purpose:
     a turn settled again keeps its last settle.
+
+    Raises:
+        ValueError: ``key`` is not ``doc/<name>`` -- an absolute or ``..`` key
+            would write outside the run's doc/ directory.
     """
     target = Path(key)
-    directory = _config.state_dir("runs", run_id, *target.parent.parts)
+    if target.parent != Path("doc") or target.name in ("", ".", ".."):
+        raise ValueError(f"not a doc/ snapshot key: {key!r}")
+    directory = _config.state_dir("runs", run_id, "doc")
     fd, temp = tempfile.mkstemp(dir=directory, prefix=f".{target.name}.")
     try:
         with open(fd, "wb") as handle:
