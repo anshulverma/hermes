@@ -615,3 +615,171 @@ def test_answered_reviewer_turns_both_rules(tmp_path):
     assert E.unanswered_reviewer_turns(target("all")) == [4, 8, 10, 17]
     # One explicit null is enough to mean recorded, and it answers nobody.
     assert E.unanswered_reviewer_turns(target("t06")) == [1, 4, 7, 8, 10, 13, 17]
+
+
+RUN9_TOKENS = {"input": 402, "output": 278815, "cache_creation": 2304109, "cache_read": 13727431}
+
+
+def test_tokens_dedupe_and_cost_rules(tmp_path):
+    """T6: usage once per message.id per trace, the last cost-state per trace, null cost on a gap (G4)."""
+    import json
+
+    from playbooks.committee.eval import trace_totals, compute_metrics, load_target
+
+    def jl(*objs):
+        return b"".join(json.dumps(o).encode() + b"\n" for o in objs)
+
+    def asst(mid, **usage):
+        return {"type": "assistant", "message": {"id": mid, "usage": usage}}
+
+    a = jl(
+        asst("m1", input_tokens=1, output_tokens=10),
+        # the same message.id again: its last line wins, the first counts nothing
+        asst("m1", input_tokens=2, output_tokens=20,
+             cache_creation_input_tokens=5, cache_read_input_tokens=7),
+        {"type": "cost-state", "totalCostUSD": 1.0},
+        asst("m2", output_tokens=3),  # missing keys count 0
+        {"type": "cost-state", "totalCostUSD": 1.2345},  # the last NUMERIC one wins
+        {"type": "cost-state", "totalCostUSD": "9.0"},  # a string is not a cost
+        {"type": "cost-state", "totalCostUSD": True},  # nor is a bool
+        [1, 2],
+        {"type": "assistant", "message": "not a dict"},
+        {"type": "assistant", "message": {"usage": {"output_tokens": 1000}}},  # no id: skipped
+    ) + b"not json\n\xff\n"
+    # m1 again in ANOTHER trace: dedupe is per trace, so it counts again
+    b = jl(asst("m1", output_tokens=100), {"type": "cost-state", "totalCostUSD": 2})
+    a_tokens = {"input": 2, "output": 23, "cache_creation": 5, "cache_read": 7}
+
+    assert trace_totals([a, b]) == {
+        "cost_usd": 3.2345,
+        "tokens": {"input": 2, "output": 123, "cache_creation": 5, "cache_read": 7},
+        "found": 2, "with_cost": 2,
+    }
+    # a missing trace: cost is null, tokens are summed over what was found
+    assert trace_totals([a, None]) == {
+        "cost_usd": None, "tokens": a_tokens, "found": 1, "with_cost": 1}
+    # a trace with no cost-state line nulls the cost too
+    assert trace_totals([a, jl(asst("x", output_tokens=1))])["cost_usd"] is None
+    # nothing found: tokens are null as well
+    nothing = {"cost_usd": None, "tokens": None, "found": 0, "with_cost": 0}
+    assert trace_totals([None, None]) == nothing
+    assert trace_totals([]) == nothing
+
+    # run-9's pins (C5): 25 attempts, 25 traces, each with a cost-state line
+    home, run_id = build_home(tmp_path, "run-9")
+    m = compute_metrics(load_target(str(home), run_id))
+    assert m["time"] == {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0}
+    assert m["cost_usd"] == 30.3875
+    assert m["tokens"] == RUN9_TOKENS
+    assert m["traces"] == {"expected": 25, "found": 25, "with_cost": 25}
+
+    # one trace gone: cost null, found < expected, tokens are what the other 24 hold
+    gone = sorted((home / "runs" / run_id / "traces").glob("*.jsonl"))[0]
+    lost = trace_totals([gone.read_bytes()])["tokens"]
+    gone.unlink()
+    m = compute_metrics(load_target(str(home), run_id))
+    assert m["cost_usd"] is None
+    assert m["traces"] == {"expected": 25, "found": 24, "with_cost": 24}
+    assert m["tokens"] == {k: RUN9_TOKENS[k] - lost[k] for k in RUN9_TOKENS}
+    # time comes from the attempts rows, never from the traces
+    assert m["time"] == {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0}
+
+    # run-2 (legacy): its traces carry usage but no cost-state line (C5, spec A4)
+    (tmp_path / "two").mkdir()
+    home2, run2 = build_home(tmp_path / "two", "run-2")
+    m = compute_metrics(load_target(str(home2), run2))
+    assert m["time"] == {"summed_attempt_s": 3279.4, "wall_clock_s": 3516.0}
+    assert m["cost_usd"] is None
+    assert m["tokens"] == {
+        "input": 214, "output": 183920, "cache_creation": 1768249, "cache_read": 6785620}
+    assert m["traces"] == {"expected": 21, "found": 21, "with_cost": 0}
+
+
+def test_unknown_kinds_retakes_new_seats(tmp_path):
+    """T15: later loops' kinds, discarded takes, a duplicate turn and a seat the cast never had."""
+    import json
+    import sqlite3
+    import time
+
+    from playbooks.committee import cast
+    from playbooks.committee.eval import compute_metrics, load_target
+
+    home, run_id = build_home(tmp_path, "run-9")
+    before = compute_metrics(load_target(str(home), run_id))
+    assert before["turns"] == 24
+    assert before["turns_by_role"] == {
+        "owner": 8, "junior_ic": 8, "senior_director": 2, "manager": 1, "tpm": 1,
+        "pm": 1, "tl": 1, "staff_ic": 1, "data_scientist": 1,
+    }
+    assert (before["undelivered_turns"], before["owner_turns_delivered"],
+            before["delegations"]) == (0, 8, 8)
+    assert (before["rechecks"], before["rechecks_verified"], before["errors"]) == (8, 8, 0)
+    assert before["floor_requests"] == [{"turn": 1, "role": "senior_director"}]
+    assert (before["ended"], before["cap"], before["artifact_intact"]) == ("queue empty", 30, True)
+    assert before["dropped"] == {"delegation": None, "floor_requests": []}
+    reviewers = ["senior_director", "manager", "tpm", "pm", "tl", "staff_ic", "data_scientist"]
+    assert before["seats"] == {"roster": ["owner", *reviewers, "junior_ic"],
+                               "reviewers": reviewers, "spoken": reviewers, "unheard": []}
+    assert before["unanswered_reviewer_turns"] == []
+    assert [x["line"] for x in before["outside_room_mentions"]] == [29, 37, 253, 309]
+    assert before["outside_room_mentions"][0]["quote"].startswith(
+        "- **Auth needs a yes from outside this room.**")
+    assert (before["other_kinds"], before["extra_takes"]) == ({}, 0)
+
+    assert "security" not in cast.CAST
+    now = time.time()
+    db = sqlite3.connect(home / "queue.db")
+    t03 = next(doc for (doc,) in db.execute(
+        "SELECT json FROM reductions WHERE run_id=? AND kind='turn' ORDER BY id", (run_id,))
+        if json.loads(doc)["turn"] == 3)
+    security = {"role": "security", "turn": 25, "delivered": True,
+                "body": "Nobody from security has signed off on cross-node auth.",
+                "stance": None, "cap": 30, "request_floor": False, "delegate": False,
+                "close": False, "action": None, "verified": None, "error": None}
+    rows = [
+        ("take", "t02-owner", json.dumps({"turn": 2, "role": "owner", "body": "a discarded take"})),
+        ("take", "t04-owner", json.dumps({"turn": 4, "role": "owner", "body": "another one"})),
+        ("turn", "t03-junior_ic", t03),  # a second t03: the later wins, the earlier is extra
+        ("selection", "selection", json.dumps({"roster": ["owner", "security", "junior_ic"]})),
+        ("one_on_one_plan", "one_on_one_plan", json.dumps({"pairs": [["owner", "security"]]})),
+        ("one_on_one", "one_on_one-security", json.dumps({"member": "security", "body": "1:1"})),
+        ("turn", "t25-security", json.dumps(security)),
+    ]
+    db.executemany(
+        "INSERT INTO reductions (run_id, kind, json, review_state, created_at, updated_at, phase)"
+        " VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+        [(run_id, kind, doc, now, now, phase) for kind, phase, doc in rows])
+    (start,) = db.execute(
+        "SELECT MIN(a.started_at) FROM attempts a JOIN tickets t ON a.ticket_id=t.id"
+        " WHERE t.run_id=?", (run_id,)).fetchone()
+    for phase in ("selection", "one_on_one_plan", "one_on_one-security"):
+        db.execute(
+            "INSERT INTO tickets (id, run_id, phase, state, created_at, updated_at)"
+            " VALUES (?, ?, ?, 'done', ?, ?)", (f"{run_id}/{phase}", run_id, phase, now, now))
+        # 10 s each, inside the run's span, and no trace file
+        db.execute(
+            "INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at, outcome)"
+            " VALUES (?, ?, 'localhost', 1, ?, ?, 'ok')",
+            (f"{run_id}/{phase}", phase, start + 100.0, start + 110.0))
+    db.commit()
+    db.close()
+
+    m = compute_metrics(load_target(str(home), run_id))  # never raises
+    assert m["extra_takes"] == 3  # two takes plus the losing t03
+    assert m["other_kinds"] == {"selection": 1, "one_on_one_plan": 1, "one_on_one": 1}
+    assert m["turns"] == 25
+    assert m["turns_by_role"] == {**before["turns_by_role"], "security": 1}
+    assert m["seats"] == {
+        "roster": ["owner", *reviewers, "junior_ic", "security"],
+        "reviewers": [*reviewers, "security"],
+        "spoken": [*reviewers, "security"], "unheard": [],
+    }
+    assert m["unanswered_reviewer_turns"] == [25]  # nobody answered the new seat
+    # one attempt per new phase counts in time and in the expected traces
+    assert m["time"] == {"summed_attempt_s": 3314.0, "wall_clock_s": 3619.0}
+    assert m["traces"] == {"expected": 28, "found": 25, "with_cost": 25}
+    assert m["cost_usd"] is None  # three attempts have no trace
+    assert m["tokens"] == RUN9_TOKENS
+    for key in ("owner_turns_delivered", "delegations", "rechecks", "rechecks_verified",
+                "floor_requests", "ended", "cap", "outside_room_mentions"):
+        assert m[key] == before[key], key

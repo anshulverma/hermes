@@ -482,3 +482,170 @@ def unanswered_reviewer_turns(target: Target) -> list[int]:
         if not ok:
             out.append(n)
     return out
+
+
+# --- the record: what happened and what it cost (C5 record half, G4) ----------
+
+OUTSIDE_ROOM = re.compile(r"(?i)\b(outside|not in) this room\b")
+
+# eval's token key <- the trace's message.usage key (G4)
+TOKEN_KEYS = {
+    "input": "input_tokens",
+    "output": "output_tokens",
+    "cache_creation": "cache_creation_input_tokens",
+    "cache_read": "cache_read_input_tokens",
+}
+
+
+def _is_number(value: object) -> bool:
+    """An int or a float, never a bool (JSON ``true`` is not a cost)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def trace_totals(traces: list[bytes | None]) -> dict:
+    """Cost and tokens over trace files' bytes, one entry per expected trace (G4).
+
+    Per trace, the LAST cost-state line with a numeric ``totalCostUSD`` is that
+    trace's cost. Each ``message.id``'s usage counts once, from its last line,
+    because one message's usage repeats across several assistant lines. ``None``
+    is a trace that does not exist. ``cost_usd`` is null unless there is at
+    least one trace and every one has a cost; ``tokens`` is null when no trace
+    was found. Non-JSON lines, non-object lines and assistant lines without a
+    string id or a usage object are skipped. Never raises. judge.reduce reuses
+    this for the judge's own trace (Task 9).
+    """
+    tokens = dict.fromkeys(TOKEN_KEYS, 0)
+    cost = 0.0
+    found = with_cost = 0
+    for data in traces:
+        if not isinstance(data, bytes):
+            continue
+        found += 1
+        last_cost = None
+        usage: dict[str, dict] = {}
+        for raw in data.splitlines():
+            try:
+                line = json.loads(raw)
+            except (ValueError, RecursionError):
+                continue
+            if not isinstance(line, dict):
+                continue
+            if line.get("type") == "cost-state" and _is_number(line.get("totalCostUSD")):
+                last_cost = line["totalCostUSD"]
+            elif line.get("type") == "assistant":
+                msg = line.get("message")
+                if (isinstance(msg, dict) and isinstance(msg.get("id"), str)
+                        and isinstance(msg.get("usage"), dict)):
+                    usage[msg["id"]] = msg["usage"]
+        if last_cost is not None:
+            with_cost += 1
+            cost += last_cost
+        for counts in usage.values():
+            for key, source in TOKEN_KEYS.items():
+                value = counts.get(source)
+                tokens[key] += value if _is_number(value) else 0
+    return {
+        "cost_usd": round(cost, 4) if traces and with_cost == len(traces) else None,
+        "tokens": tokens if found else None,
+        "found": found,
+        "with_cost": with_cost,
+    }
+
+
+def _time(attempts: list[dict]) -> dict:
+    """Summed and wall-clock seconds over every attempt with both timestamps, to 0.1 s."""
+    spans = [(a["started_at"], a["ended_at"]) for a in attempts
+             if _is_number(a.get("started_at")) and _is_number(a.get("ended_at"))]
+    if not spans:
+        return {"summed_attempt_s": 0.0, "wall_clock_s": 0.0}
+    return {
+        "summed_attempt_s": round(sum(end - start for start, end in spans), 1),
+        "wall_clock_s": round(max(e for _, e in spans) - min(s for s, _ in spans), 1),
+    }
+
+
+def _ended(target: Target) -> str:
+    """D3: the decision's ``ended``, else whether the last delivered owner turn closed."""
+    if target.decision.get("ended"):
+        return str(target.decision["ended"])
+    owners = [t for t in target.turns.values()
+              if t.get("role") == cast.OWNER and t.get("delivered")]
+    return "owner closed" if owners and owners[-1].get("close") else "unknown"
+
+
+def _outside_room_mentions(target: Target) -> list[dict]:
+    """Lines inside turn and decision entries that name someone outside the room.
+
+    Lines before t01 (the header, selection, 1:1 plans) belong to no entry (D3).
+    With no thread.md, the turn bodies and the chair prose are scanned instead,
+    with ``line`` null. ``quote`` is the stripped line clipped to QUOTE_MAX.
+    """
+    if target.thread is None or target.thread_text is None:
+        texts = [body(target, n) for n in target.turns] + [chair_prose(target.decision)]
+        return [{"line": None, "quote": ln.strip()[:QUOTE_MAX]}
+                for text in texts for ln in text.splitlines() if OUTSIDE_ROOM.search(ln)]
+    lines = target.thread_text.splitlines()
+    entries = list(target.thread["turns"].values())
+    if target.thread.get("decision"):
+        entries.append(target.thread["decision"])
+    hits = sorted({
+        i for e in entries
+        for i in range(e["line_start"], min(e["line_end"], len(lines)) + 1)
+        if OUTSIDE_ROOM.search(lines[i - 1])
+    })
+    return [{"line": i, "quote": lines[i - 1].strip()[:QUOTE_MAX]} for i in hits]
+
+
+def compute_metrics(target: Target) -> dict:
+    """C5's metrics from the loaded target: what the record says happened.
+
+    Turns are the winning reduction per number (Task 3). Time, cost, tokens and
+    traces cover every attempt on the run's tickets in ascending attempt id, so
+    selection, 1:1 and retake work is in the bill. Task 5 adds the prose and
+    document keys.
+    """
+    turns, decision = target.turns, target.decision
+    delivered = [t for t in turns.values() if t.get("delivered")]
+    owner = [t for t in delivered if t.get("role") == cast.OWNER]
+    by_role: dict[str, int] = {}
+    for t in turns.values():
+        role = str(t.get("role"))
+        by_role[role] = by_role.get(role, 0) + 1
+    raw_rechecks = decision.get("rechecks")
+    rechecks = ([c for c in raw_rechecks if isinstance(c, dict)]
+                if isinstance(raw_rechecks, list) else [])
+    dropped_floor = decision.get("dropped_floor_requests")
+    seated, revs = roster(target), reviewers(target)
+    spoken = [r for r in revs if any(t.get("role") == r for t in delivered)]
+    caps = [t["cap"] for t in turns.values() if t.get("cap") is not None]
+    totals = trace_totals([target.traces.get(a["id"]) for a in target.attempts])
+    return {
+        "turns": len(turns),
+        "turns_by_role": by_role,
+        "undelivered_turns": len(turns) - len(delivered),
+        "owner_turns_delivered": len(owner),
+        "delegations": sum(1 for t in owner if t.get("delegate") and t.get("action")),
+        "rechecks": len(rechecks),
+        "rechecks_verified": sum(1 for c in rechecks if c.get("verified") is True),
+        "floor_requests": [{"turn": n, "role": t.get("role")}
+                           for n, t in turns.items() if t.get("request_floor")],
+        "errors": sum(1 for t in [*turns.values(), decision] if t.get("error") is not None),
+        "ended": _ended(target),
+        "cap": caps[-1] if caps else None,
+        "artifact_intact": decision.get("artifact_intact"),
+        "dropped": {
+            "delegation": decision.get("dropped_delegation"),
+            "floor_requests": list(dropped_floor) if isinstance(dropped_floor, list) else [],
+        },
+        "seats": {"roster": seated, "reviewers": revs, "spoken": spoken,
+                  "unheard": [r for r in revs if r not in spoken]},
+        "unanswered_reviewer_turns": unanswered_reviewer_turns(target),
+        "outside_room_mentions": _outside_room_mentions(target),
+        "time": _time(target.attempts),
+        "cost_usd": totals["cost_usd"],
+        "tokens": totals["tokens"],
+        "traces": {"expected": len(target.attempts), "found": totals["found"],
+                   "with_cost": totals["with_cost"]},
+        "other_kinds": dict(target.other_kinds),
+        "extra_takes": target.takes + target.duplicate_turns,
+    }
