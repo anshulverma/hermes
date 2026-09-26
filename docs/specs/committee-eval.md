@@ -294,6 +294,9 @@ then by turn, then by line (nulls last), and every `line` is null when thread.md
   so it catches a cut-off message, never a domain phrase such as "cut off from the root".
   - `line` is the first thread.md line inside that turn's entry that matches.
   - `quote` is that stripped line, clipped to 300.
+  - It is report-only, never scored. The claim that the edit applied is the re-check footer's,
+    never the chair's (chair prose strips the footer), so verdict_consistency does not count it.
+    The judge reads it in `metrics.json` for edits_address_concerns.
   - run-9 has it at t06, t09, t15 and t18, on lines 130, 244, 424 and 519.
 - `action_clipped`: a decision re-check whose delegating owner turn has
   `voice.action_chars > turnblock.ACTION_MAX` (200). When that owner turn has no `voice` dict, the
@@ -330,12 +333,13 @@ only.
 | `concern_coverage` | judge, capped | The judge's score, capped at 3 by `concern_cap` unless `seats.unheard` and `unanswered_reviewer_turns` are both empty lists. Missing or malformed metrics cap too, because unknown is never "all heard". |
 | `efficiency` | deterministic | Start at 5 and subtract 1 for each of: `cost_usd` unknown or `> 20`; `summed_attempt_s` unknown or `> 3000`; `turns >= cap` (meeting turns only, skipped when cap is null); any dropped delegation or floor request. Floor 1. An unknown cost or time fails its check, so a run that hides its bill never scores better. |
 | `concision` | deterministic | Band on `words.median_reviewer_owner`: ≤150→5, ≤300→4, ≤500→3, ≤800→2, else 1. Then subtract 1 for each of: `walls_share > 0.25`; `pointer_share < 0.5`; `example_share < 0.5`; `filler_per_turn > 1`. A null share never subtracts. Floor 1. A null median (P is empty) makes the score null with the error `no measured reviewer/owner prose`. |
-| `verdict_consistency` | deterministic | 5 − 2 × `verdict_count_mismatch` flags − min(2, `delegation_truncated_but_applied` flags). Floor 1. |
+| `verdict_consistency` | deterministic | 5 − 2 × `verdict_count_mismatch` flags. Floor 1. Only the chair's own claims count; `delegation_truncated_but_applied` is report-only. |
 
 - `JUDGE_DIMS` and `DETERMINISTIC_DIMS` split the six ids in this order.
 - The baselines (`test_deterministic_scores_pinned`): efficiency, concision and
-  verdict_consistency are 3, 1 and 1 for run-9, and 3, 1 and 5 for run-2. run-2's efficiency loses
-  a point for its unknown cost (it has no cost-state line).
+  verdict_consistency are 3, 1 and 3 for run-9, and 3, 1 and 5 for run-2. run-2's efficiency loses
+  a point for its unknown cost (it has no cost-state line). run-9's verdict_consistency loses two
+  points for "Seven edits landed" against eight verified re-checks.
 - **Judge anchors.** The `RUBRIC` constant holds them, and `rubric.md` gets it verbatim:
 
   ```text
@@ -346,8 +350,8 @@ only.
 
   edits_address_concerns
   5: each edit does what its delegation asked and resolves the concern behind it.
-  3: partial.
-  1: cosmetic, partial or unrelated edits.
+  3: some edits resolve their concern, others only partly.
+  1: cosmetic or unrelated edits, or edits that leave the concern unresolved.
   Read the per-edit snapshots under inputs/doc/ when present; cite the delegating owner turn, the junior_ic report, or the edited text itself (`where:"original"|"revised"`, C3).
 
   concern_coverage
@@ -359,8 +363,8 @@ only.
   ```
 
   - The text is pinned: `test_voice_measure_and_version` asserts the first 8 hex of its sha256
-    (`4cf6cb0f`). An edit fails that test until the affected judge dimension's `@n` is bumped and
-    the hash re-pinned.
+    (`96377104`). An edit fails that test until the affected judge dimension's `@n` is bumped and
+    the hash re-pinned. The same change updates the block above and this hash.
   - The planning spec's closing sentence ("The run-9 baseline for absent stakeholders includes at
     least Security and on-call/SRE.") is left out of `RUBRIC` on purpose (G13): it is an
     acceptance note about one run, and giving it to the judge would bias concern_coverage on every
@@ -372,16 +376,20 @@ only.
     for example `"words.median_reviewer_owner=825.0"`. efficiency reads `cost_usd`,
     `time.summed_attempt_s`, `turns`, `cap`, `dropped.delegation` and `dropped.floor_requests`;
     concision reads `words.median_reviewer_owner` and the four `voice` shares.
-  - verdict_consistency carries its counted flags, the `verdict_count_mismatch` ones first
-    (`where: "decision"`) and then the truncations (`where: "turn"`), each with its turn, line and
-    quote. So the headline, `show` and the view quote the chair's contradicting sentence. Only
-    when no flag counts is its evidence the single metric item `rechecks_verified=<n>`.
+  - verdict_consistency carries its `verdict_count_mismatch` flags (`where: "decision"`), each
+    with its turn, line and quote. So `show` and the view's verdict_consistency row quote the
+    chair's contradicting sentence; the headline does too when verdict_consistency is the unique
+    weakest dimension (ties go to table order, where it is last). Only when no flag counts is its
+    evidence the single metric item `rechecks_verified=<n>`.
   - `rationale` is `"; ".join` of the steps applied, for example
     `"start 5; cost_usd 30.3875 > 20: -1; summed_attempt_s 3284.0 > 3000: -1"` (an unknown input
     reads `cost_usd unknown: -1`, and a drop reads `dropped delegation: -1`). concision starts
     `"start 1 (median_reviewer_owner 825.0 > 800)"`. It ends `"; floor 1"` when the floor bit.
 - **Versions.**
-  - `DIMENSIONS` maps each id to an explicit `"<id>@<n>"`, all `@1` at first.
+  - `DIMENSIONS` maps each id to an explicit `"<id>@<n>"`. Today `edits_address_concerns@2` and
+    `verdict_consistency@2`, the rest `@1`. edits_address_concerns@2 rewrote anchors 3 and 1,
+    which both said "partial" at @1. verdict_consistency@2 counts only the chair's claims; @1
+    also took up to 2 points for `delegation_truncated_but_applied` flags (run-9 scored 1).
   - `dimension_versions(rules=RULES)` returns `DIMENSIONS` with concision suffixed
     `"+" + sha256("\n".join(rules).encode()).hexdigest()[:8]`. So a rules swap can never silently
     compare.
@@ -440,7 +448,8 @@ only.
     only ```` ```hermes-eval ```` and closes on a line holding only ```` ``` ````, so a
     ```` ``` ```` inside a JSON string can never close it early and hand the win to a block
     echoed from the transcript.
-  - Each judge dimension is `{score, rationale, evidence: [{turn, where, quote}]}`.
+  - Each judge dimension is `{score, rationale, evidence: [{turn, where, quote}]}`, with at most
+    5 evidence items, each quote at most 300 characters and the rationale at most 4000.
     concern_coverage may add `concerns` and `absent_stakeholders`, which go under its `detail`.
   - `where` is one of turn, decision, header, original or revised. Unknown keys are ignored.
   - `parse_answer` takes the last fence whose body parses as a JSON object, so a restated answer
@@ -474,7 +483,8 @@ only.
        isinstance(v, bool) and 1 <= v <= 5`; 4.0, "4" and true are not scores) AND at least one of
        its quotes verified. Otherwise it is null with `score is not an integer 1-5` (checked
        first) or `no verifiable evidence`.
-     - A rationale is clipped to 1000 chars.
+     - A rationale is clipped to 4000 chars (`RATIONALE_MAX`), ending `…` when cut. The output
+       contract tells the judge that limit.
      - concern_coverage gets `concern_cap`, and a capped score records `detail.capped_from`. Its
        `detail` is `{concerns: [{member, concern, raised_turn, answered_turn}],
        absent_stakeholders: [{who, turn, quote, line, verified}]}`: object items only, at most 20
@@ -773,7 +783,10 @@ spec, and compares it against run-9 and run-2.
   tolerance absorbs a moved pin. concision's version also carries a hash of `RULES`, so a rules
   swap bumps it without anyone remembering to. A `RUBRIC` edit fails
   `test_voice_measure_and_version` until the affected judge dimension's `@n` is bumped and the
-  hash re-pinned. `compare` stars the stale cells.
+  hash re-pinned. That test spells each dimension's version as a literal
+  (`"verdict_consistency@2"`), so grep for the old one to find it. The same change updates the
+  verbatim `RUBRIC` block and its hash in this doc, and the current versions listed under
+  Versions. `compare` stars the stale cells.
 - **committee-voice** rewrites voice.py in place.
   - It keeps `RULES`, `measure` and a superset of `measure`'s keys.
   - It keeps `_PATH_LINE`'s lookbehind form, `(?<![\w./-])[\w./-]+\.\w+:\d+(-\d+)?`; the plain

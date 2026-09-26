@@ -44,11 +44,11 @@ from playbooks.committee.voice import RULES, measure
 # D5 order. A loop that changes a dimension's definition, bands or inputs bumps its n.
 DIMENSIONS: dict[str, str] = {
     "verdict_grounded": "verdict_grounded@1",
-    "edits_address_concerns": "edits_address_concerns@1",
+    "edits_address_concerns": "edits_address_concerns@2",  # @2: anchors 3 and 1 no longer overlap
     "concern_coverage": "concern_coverage@1",
     "efficiency": "efficiency@1",
     "concision": "concision@1",
-    "verdict_consistency": "verdict_consistency@1",
+    "verdict_consistency": "verdict_consistency@2",  # @2: only the chair's own claims count
 }
 JUDGE_DIMS = ("verdict_grounded", "edits_address_concerns", "concern_coverage")
 DETERMINISTIC_DIMS = ("efficiency", "concision", "verdict_consistency")
@@ -59,7 +59,7 @@ QUOTE_MAX = 300  # a judge quote is clipped to this many characters before it is
 QUOTE_MIN_WORDS, QUOTE_MIN_CHARS = 3, 12
 EVIDENCE_MAX = 5  # evidence items kept per judge dimension; extras are dropped (C3)
 DETAIL_MAX = 20  # concerns and absent_stakeholders kept each in concern_coverage.detail (C3)
-RATIONALE_MAX = 1000  # a judge rationale is clipped to this many characters (C3)
+RATIONALE_MAX = 4000  # a judge rationale is clipped to this many characters, "…" included (C3)
 FENCE_TAG = "hermes-eval"
 
 VERBATIM = (
@@ -79,8 +79,8 @@ RUBRIC = "\n".join((
     "",
     "edits_address_concerns",
     "5: each edit does what its delegation asked and resolves the concern behind it.",
-    "3: partial.",
-    "1: cosmetic, partial or unrelated edits.",
+    "3: some edits resolve their concern, others only partly.",
+    "1: cosmetic or unrelated edits, or edits that leave the concern unresolved.",
     "Read the per-edit snapshots under inputs/doc/ when present; cite the delegating "
     'owner turn, the junior_ic report, or the edited text itself (`where:"original"|"revised"`, C3).',
     "",
@@ -100,6 +100,11 @@ _WALL_WORDS = 120  # C8: a wall is a paragraph over 120 words; the one threshold
 def words(text: str) -> int:
     """The one word count, voice's, so eval never grows a second counter."""
     return measure(text)["words"]
+
+
+def clip(text: str, limit: int) -> str:
+    """``text`` cut to ``limit`` characters, ending "…" when anything was cut."""
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def _num(row: object, key: str) -> int | float:
@@ -976,7 +981,6 @@ _CONCISION_KEYS = (
     "words.median_reviewer_owner", "voice.walls_share", "voice.pointer_share",
     "voice.example_share", "voice.filler_per_turn",
 )
-_COUNTED = ("delegation_truncated_but_applied", "verdict_count_mismatch")
 
 
 def _metric(metrics: dict, dotted: str):
@@ -1039,18 +1043,14 @@ def score_deterministic(metrics: dict, flags: list[dict]) -> dict[str, dict]:
             (filler is not None and filler > 1, f"filler_per_turn {filler} > 1: -1"),
         ], _metric_evidence(metrics, _CONCISION_KEYS))
 
-    # The chair's contradicting sentences lead, so headline, show and the view quote one.
-    counted = sorted((f for f in flags if isinstance(f, dict) and f.get("id") in _COUNTED),
-                     key=lambda f: f["id"] != "verdict_count_mismatch")
-    mismatch = sum(f["id"] == "verdict_count_mismatch" for f in counted)
-    truncated = len(counted) - mismatch
+    # Only the chair's own claims count (@2). A cut-off delegation is the re-check
+    # footer's claim, reported by its flag and judged under edits_address_concerns.
+    counted = [f for f in flags if isinstance(f, dict) and f.get("id") == "verdict_count_mismatch"]
     consistency = _scored(5, "start 5", [
-        (2 * mismatch, f"verdict_count_mismatch x{mismatch}: -{2 * mismatch}"),
-        (min(2, truncated), f"delegation_truncated_but_applied x{truncated}: -{min(2, truncated)}"),
+        (2 * len(counted), f"verdict_count_mismatch x{len(counted)}: -{2 * len(counted)}"),
     ], [
         {"turn": f.get("turn"), "line": f.get("line"), "quote": f.get("quote", ""),
-         "where": "decision" if f["id"] == "verdict_count_mismatch" else "turn",
-         "verified": True}
+         "where": "decision", "verified": True}
         for f in counted
     ] or _metric_evidence(metrics, ("rechecks_verified",)))
     return {"efficiency": efficiency, "concision": concision, "verdict_consistency": consistency}
@@ -1200,8 +1200,9 @@ _GOAL_CONTRACT = (
     '{"score": <an integer 1-5>, "rationale": "<why>", "evidence": [{"turn": <the turn '
     'number, or null>, "where": "turn" | "decision" | "header" | "original" | "revised", '
     '"quote": "<verbatim>"}]}, '
-    f"with at most {EVIDENCE_MAX} evidence items per dimension and each quote at most "
-    f"{QUOTE_MAX} characters. concern_coverage may also carry "
+    f"with at most {EVIDENCE_MAX} evidence items per dimension, each quote at most "
+    f"{QUOTE_MAX} characters and each rationale at most {RATIONALE_MAX} characters. "
+    "concern_coverage may also carry "
     '"concerns": [{"member": "<seat>", "concern": "<what>", "raised_turn": <n>, '
     '"answered_turn": <n or null>}] and "absent_stakeholders": [{"who": "<function>", '
     '"turn": <n>, "quote": "<verbatim>"}].'
@@ -1432,7 +1433,7 @@ def score_judge(parsed: dict | None, inputs: dict, digests: dict,
     most EVIDENCE_MAX items are read per dimension (extras are dropped, not
     counted); a malformed item is dropped and counted, an unverified one kept
     with ``verified: false`` and counted. A rationale is clipped to
-    RATIONALE_MAX. concern_coverage is capped by ``concern_cap`` and carries
+    RATIONALE_MAX, ending "…" when cut. concern_coverage is capped by ``concern_cap`` and carries
     ``_detail``. Never raises.
     """
     snap = read_snapshot(inputs, digests)
@@ -1447,7 +1448,7 @@ def score_judge(parsed: dict | None, inputs: dict, digests: dict,
             out["error"] = "missing from the answer"
         else:
             if isinstance(given.get("rationale"), str):
-                out["rationale"] = given["rationale"][:RATIONALE_MAX]
+                out["rationale"] = clip(given["rationale"], RATIONALE_MAX)
             items = given.get("evidence")
             for item in (items if isinstance(items, list) else [])[:EVIDENCE_MAX]:
                 checked = verify_evidence(item, snap)

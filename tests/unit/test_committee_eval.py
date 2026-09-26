@@ -42,13 +42,17 @@ def _w(k: int) -> str:
 
 def test_voice_measure_and_version():
     """T17: voice.measure and the C8 shares on fixed inputs; a rules change moves concision's version, and only it."""
-    # Every key, all ints; empty and non-str input count as "" and never raise.
+    # Every key eval reads, all ints (voice may return a superset, D11); empty and non-str
+    # input count as "" and never raise.
+    def keys(m):
+        return {k: m[k] for k in MEASURE_KEYS}
+
     empty = dict.fromkeys(MEASURE_KEYS, 0)
-    assert voice.measure("") == empty
+    assert keys(voice.measure("")) == empty
     for junk in (None, 42, b"a b", ["a b"]):
-        assert voice.measure(junk) == empty
+        assert keys(voice.measure(junk)) == empty
     m = voice.measure("a b  c\n\nd", role="owner")
-    assert set(m) == MEASURE_KEYS and all(type(v) is int for v in m.values())
+    assert MEASURE_KEYS <= set(m) and all(type(m[k]) is int for k in MEASURE_KEYS)
     assert m["words"] == 4 and E.words("a b  c\n\nd") == 4
 
     # A paragraph is a maximal run of non-blank lines; a wall is more than 120 words.
@@ -119,18 +123,31 @@ def test_voice_measure_and_version():
     assert E.voice_shares([voice.measure(_w(121)), voice.measure(_w(120))])["walls_share"] == 0.5
     assert E.voice_shares([{"pointers": True}])["pointer_share"] == 0.0  # a bool is not a number
 
-    # The rubric's identity: six dimensions in D5 order, all @1, and the judge anchors.
+    # The rubric's identity: six dimensions in D5 order, each at its current version, and
+    # the judge anchors. A loop that bumps one edits its literal here.
     assert tuple(E.DIMENSIONS) == E.JUDGE_DIMS + E.DETERMINISTIC_DIMS == (
         "verdict_grounded", "edits_address_concerns", "concern_coverage",
         "efficiency", "concision", "verdict_consistency",
     )
-    assert all(v == f"{k}@1" for k, v in E.DIMENSIONS.items())
+    assert E.DIMENSIONS == {
+        "verdict_grounded": "verdict_grounded@1",
+        "edits_address_concerns": "edits_address_concerns@2",
+        "concern_coverage": "concern_coverage@1",
+        "efficiency": "efficiency@1",
+        "concision": "concision@1",
+        "verdict_consistency": "verdict_consistency@2",
+    }
     assert (E.MIN_ANCHORS, E.QUOTE_MAX, E.EVIDENCE_MAX, E.FENCE_TAG) == (2, 300, 5, "hermes-eval")
     assert E.VERBATIM in E.RUBRIC and all(d in E.RUBRIC for d in E.JUDGE_DIMS)
     # D5's run-9 absent-stakeholder note stays out of the judge's rubric (G13).
     assert "Security" not in E.RUBRIC and "run-9" not in E.RUBRIC
-    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "4cf6cb0f", (
-        "RUBRIC text changed: bump the affected judge dimension's version in DIMENSIONS, then re-pin this hash"
+    # No two edits_address_concerns anchors describe the same edit (@2).
+    assert "3: some edits resolve their concern, others only partly." in E.RUBRIC
+    assert "1: cosmetic or unrelated edits, or edits that leave the concern unresolved." in E.RUBRIC
+    assert "partial." not in E.RUBRIC
+    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "96377104", (
+        "RUBRIC text changed: bump the affected judge dimension's version in DIMENSIONS, "
+        "re-pin this hash, and update the verbatim block and hash in docs/specs/committee-eval.md"
     )
 
     # A rules swap moves concision's version and the rubric version, and nothing else.
@@ -1243,12 +1260,12 @@ def test_run9_flags_pinned(tmp_path):
 
 
 def test_deterministic_scores_pinned(tmp_path):
-    """T4: efficiency/concision/verdict_consistency are 3/1/1 (run-9) and 3/1/5 (run-2)."""
+    """T4: efficiency/concision/verdict_consistency are 3/1/3 (run-9) and 3/1/5 (run-2)."""
     got = {}
     for sub, name in (("nine", "run-9"), ("two", "run-2")):
         home, run_id = _home(tmp_path, sub, name)
         got[name] = E.measure_target(str(home), run_id)["deterministic"]
-    for name, want in (("run-9", (3, 1, 1)), ("run-2", (3, 1, 5))):
+    for name, want in (("run-9", (3, 1, 3)), ("run-2", (3, 1, 5))):
         det = got[name]
         assert list(det) == list(E.DETERMINISTIC_DIMS)
         assert tuple(det[k]["score"] for k in E.DETERMINISTIC_DIMS) == want, name
@@ -1265,13 +1282,11 @@ def test_deterministic_scores_pinned(tmp_path):
         "start 1 (median_reviewer_owner 825.0 > 800); "
         f"walls_share {RUN9_VOICE['walls_share']} > 0.25: -1; floor 1")
     assert nine["concision"]["evidence"][0]["quote"] == "words.median_reviewer_owner=825.0"
-    assert nine["verdict_consistency"]["rationale"] == (
-        "start 5; verdict_count_mismatch x1: -2; delegation_truncated_but_applied x4: -2")
-    # The contradicting sentence first (what headline, show and the view quote), then the
-    # truncations; the rechecks_verified metric only stands in when no flag counts.
+    # Only the chair's own claim counts (verdict_consistency@2): run-9's four cut-off
+    # delegations are the re-check footer's claim, reported by their flag, never scored here.
+    assert nine["verdict_consistency"]["rationale"] == "start 5; verdict_count_mismatch x1: -2"
     assert [(e["where"], e["turn"], e["line"]) for e in nine["verdict_consistency"]["evidence"]] == [
-        ("decision", None, 820), ("turn", 6, 130), ("turn", 9, 244), ("turn", 15, 424),
-        ("turn", 18, 519)]
+        ("decision", None, 820)]
     assert "Seven edits landed" in nine["verdict_consistency"]["evidence"][0]["quote"]
     # run-2 has no cost-state line, so its cost is unknown: a failed check, not a pass
     assert two["efficiency"]["rationale"] == (
@@ -1459,7 +1474,7 @@ def test_deterministic_rules():
     assert (floored["score"], floored["rationale"]) == (1, (
         "start 1 (median_reviewer_owner 801 > 800); walls_share 1.0 > 0.25: -1; floor 1"))
 
-    # verdict_consistency: 5 - 2 x mismatches - min(2, truncations), floor 1
+    # verdict_consistency@2: 5 - 2 x mismatches, floor 1. Only the chair's own claims count.
     mismatch = {"id": "verdict_count_mismatch", "turn": None, "line": 820,
                 "quote": "Seven edits landed:", "claimed": 7, "recorded": 8}
     truncated = {"id": "delegation_truncated_but_applied", "turn": 6, "line": 130,
@@ -1473,15 +1488,12 @@ def test_deterministic_rules():
     # a counted flag replaces the rechecks_verified metric as the evidence
     assert one["evidence"] == [{"turn": None, "where": "decision", "line": 820,
                                 "quote": "Seven edits landed:", "verified": True}]
-    assert score("verdict_consistency", [truncated]) == 4
+    # A cut-off delegation is the re-check footer's claim, not the chair's: report-only.
     three = _det([truncated] * 3)["verdict_consistency"]
-    assert (three["score"], three["rationale"]) == (
-        3, "start 5; delegation_truncated_but_applied x3: -2")
-    assert three["evidence"] == [{"turn": 6, "where": "turn", "line": 130,
-                                  "quote": "your message was cut off", "verified": True}] * 3
-    # the chair's contradicting sentence leads, whatever order the flags came in
+    assert (three["score"], three["rationale"]) == (5, "start 5")
+    assert [e["quote"] for e in three["evidence"]] == ["rechecks_verified=3"]
     mixed = _det([truncated, mismatch])["verdict_consistency"]
-    assert [e["where"] for e in mixed["evidence"]] == ["decision", "turn"]
+    assert (mixed["score"], [e["where"] for e in mixed["evidence"]]) == (3, ["decision"])
     low = _det([mismatch] * 3)["verdict_consistency"]
     assert (low["score"], low["rationale"]) == (1, "start 5; verdict_count_mismatch x3: -6; floor 1")
 
@@ -1666,7 +1678,8 @@ def test_judge_goal_under_budget():
     assert at == sorted(at), list(zip(marks, at))
     for piece in (*E.JUDGE_DIMS, '"score"', "1-5", '"rationale"', '"evidence"', '"turn"',
                   '"where"', '"quote"', '"decision"', '"header"', '"original"', '"revised"',
-                  "at most 5 evidence items", "at most 300 characters"):
+                  "at most 5 evidence items", "at most 300 characters",
+                  "each rationale at most 4000 characters"):
         assert piece in goal, piece
     # The rubric is named, never inlined.
     assert E.RUBRIC not in goal and "asserts things nobody said" not in goal
@@ -1818,7 +1831,11 @@ def test_concern_detail_is_bounded_and_verified(tmp_path):
     dims, rejected = _score(answer, inputs, OPEN_METRICS)
     got = dims["concern_coverage"]
     assert (got["score"], rejected) == (4, 0)  # detail is not evidence: never counted
-    assert got["rationale"] == "r" * E.RATIONALE_MAX
+    # A clipped rationale says so, and still fits RATIONALE_MAX; one at the limit is whole.
+    assert E.RATIONALE_MAX == 4000
+    assert got["rationale"] == "r" * (E.RATIONALE_MAX - 1) + "…"
+    whole = {**answer, "concern_coverage": {**cc, "rationale": "w" * E.RATIONALE_MAX}}
+    assert _score(whole, inputs, OPEN_METRICS)[0]["concern_coverage"]["rationale"] == "w" * E.RATIONALE_MAX
     kept = got["detail"]["concerns"]
     assert len(kept) == E.DETAIL_MAX
     assert kept[0] == {"member": "tpm", "concern": "x" * E.QUOTE_MAX,
