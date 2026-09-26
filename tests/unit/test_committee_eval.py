@@ -10,8 +10,10 @@ the repo's docs/.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -970,3 +972,323 @@ def test_per_edit_from_snapshots(tmp_path):
     assert target.original_source == "live"
     assert E.compute_metrics(target)["edits"] == {
         "per_edit": "unavailable", "steps": [], "total": RUN9_TOTAL}
+
+
+# --- D4 flags, D5 deterministic scores, C5 headline, D7 block (Task 6) --------
+
+# Each clipped action's last 40 chars (C5: 6 of run-9's 8 actions are exactly 200).
+RUN9_CLIPPED_TAILS = [
+    "at requester's security-owner sign-off, ",
+    "health, marked as a hard funding precond",
+    "ents, not the `parked_ratio_high` attent",
+    "y when hosts existed in a zone the root ",
+    "-result fence belongs at parent intake, ",
+    "ove batch-submit (no UI uses it) to §15'",
+]
+
+
+def _home(tmp_path, sub, name):
+    """A fixture home in its own directory, so two builds never share an artifact copy."""
+    (tmp_path / sub).mkdir()
+    return build_home(tmp_path / sub, name)
+
+
+def test_run9_flags_pinned(tmp_path):
+    """T3: run-9's own contradictions, each at its thread.md line (G1); run-2 only clips."""
+    home, run_id = _home(tmp_path, "nine", "run-9")
+    flags = E.measure_target(str(home), run_id)["flags"]
+    lines = (home / "runs" / run_id / "thread.md").read_text(encoding="utf-8").splitlines()
+
+    assert [f["id"] for f in flags] == (
+        ["delegation_truncated_but_applied"] * 4 + ["action_clipped"] * 6
+        + ["verdict_count_mismatch"])
+    truncated, clipped, mismatch = flags[:4], flags[4:10], flags[10]
+    assert [(f["turn"], f["line"]) for f in truncated] == [(6, 130), (9, 244), (15, 424), (18, 519)]
+    assert [f["quote"] for f in truncated] == [
+        lines[n - 1].strip()[:E.QUOTE_MAX] for n in (130, 244, 424, 519)]
+    assert all("cut off" in f["quote"] for f in truncated)
+    assert [(f["turn"], f["line"]) for f in clipped] == [
+        (3, 861), (6, 863), (9, 865), (15, 869), (18, 871), (24, 875)]
+    assert [f["quote"] for f in clipped] == RUN9_CLIPPED_TAILS
+    assert all(lines[f["line"] - 1].startswith(f"- re-check of turn {f['turn']:02d} ")
+               for f in clipped)
+    assert mismatch == {
+        "id": "verdict_count_mismatch", "turn": None, "line": 820,
+        "quote": lines[819].strip()[:E.QUOTE_MAX], "claimed": 7, "recorded": 8,
+    }
+    assert "Seven edits landed" in mismatch["quote"]
+
+    home2, run2 = _home(tmp_path, "two", "run-2")
+    flags2 = E.measure_target(str(home2), run2)["flags"]
+    assert [(f["id"], f["turn"], f["line"]) for f in flags2] == [
+        ("action_clipped", n, line)
+        for n, line in zip((3, 6, 9, 12, 15, 18), range(966, 977, 2))]
+
+
+def test_deterministic_scores_pinned(tmp_path):
+    """T4: efficiency/concision/verdict_consistency are 3/1/1 (run-9) and 4/1/5 (run-2)."""
+    got = {}
+    for sub, name in (("nine", "run-9"), ("two", "run-2")):
+        home, run_id = _home(tmp_path, sub, name)
+        got[name] = E.measure_target(str(home), run_id)["deterministic"]
+    for name, want in (("run-9", (3, 1, 1)), ("run-2", (4, 1, 5))):
+        det = got[name]
+        assert list(det) == list(E.DETERMINISTIC_DIMS)
+        assert tuple(det[k]["score"] for k in E.DETERMINISTIC_DIMS) == want, name
+        assert all(d["scorer"] == "deterministic" and d["error"] is None for d in det.values())
+        assert all(e["verified"] is True for d in det.values() for e in d["evidence"])
+    nine, two = got["run-9"], got["run-2"]
+    assert nine["efficiency"]["rationale"] == (
+        "start 5; cost_usd 30.3875 > 20: -1; summed_attempt_s 3284.0 > 3000: -1")
+    assert [e["quote"] for e in nine["efficiency"]["evidence"]] == [
+        "cost_usd=30.3875", "time.summed_attempt_s=3284.0", "turns=24", "cap=30",
+        "dropped.delegation=null", "dropped.floor_requests=[]"]
+    # Only walls_share crosses its threshold on either baseline (Task 5's golden shares).
+    assert nine["concision"]["rationale"] == (
+        "start 1 (median_reviewer_owner 825.0 > 800); "
+        f"walls_share {RUN9_VOICE['walls_share']} > 0.25: -1; floor 1")
+    assert nine["concision"]["evidence"][0]["quote"] == "words.median_reviewer_owner=825.0"
+    assert nine["verdict_consistency"]["rationale"] == (
+        "start 5; verdict_count_mismatch x1: -2; delegation_truncated_but_applied x4: -2")
+    assert [(e["where"], e["turn"], e["line"]) for e in nine["verdict_consistency"]["evidence"]] == [
+        ("metric", None, None), ("turn", 6, 130), ("turn", 9, 244), ("turn", 15, 424),
+        ("turn", 18, 519), ("decision", None, 820)]
+    assert two["efficiency"]["rationale"] == "start 5; summed_attempt_s 3279.4 > 3000: -1"
+    assert two["efficiency"]["evidence"][0]["quote"] == "cost_usd=null"
+    assert two["concision"]["rationale"] == (
+        "start 1 (median_reviewer_owner 1393.5 > 800); "
+        f"walls_share {RUN2_VOICE['walls_share']} > 0.25: -1; floor 1")
+    assert two["verdict_consistency"]["rationale"] == "start 5"
+    assert [e["quote"] for e in two["verdict_consistency"]["evidence"]] == ["rechecks_verified=6"]
+
+
+def test_deterministic_block_byte_identical(tmp_path):
+    """T5: two measures of one target give the same bytes, free of time, run id and paths."""
+    home, run_id = build_home(tmp_path, "run-9")
+    blocks = []
+    for _ in range(2):
+        measured = E.measure_target(str(home), run_id)
+        blocks.append(E.deterministic_block(
+            measured["metrics"], measured["flags"], measured["deterministic"]))
+    assert blocks[0] == blocks[1]
+    parsed = json.loads(blocks[0])
+    assert list(parsed) == ["deterministic", "flags", "metrics"]
+    assert blocks[0] == E.canonical(parsed)
+    assert parsed["flags"] == measured["flags"]
+    for leak in (str(tmp_path), os.path.realpath(tmp_path), "evaluated_at", "eval_run", '"ts"'):
+        assert leak not in blocks[0], leak
+    assert E.canonical({"b": [1, 2.5], "a": "§3 é"}) == '{"a":"§3 é","b":[1,2.5]}'
+
+
+def _patch_reductions(home, run_id, patch):
+    """Rewrite reduction json in a throwaway fixture home; ``patch`` returns None to keep a row."""
+    with closing(sqlite3.connect(str(home / "queue.db"))) as conn:
+        rows = conn.execute(
+            "SELECT id, kind, json FROM reductions WHERE run_id = ? ORDER BY id", (run_id,)
+        ).fetchall()
+        for rid, kind, raw in rows:
+            new = patch(kind, json.loads(raw))
+            if new is not None:
+                conn.execute("UPDATE reductions SET json = ? WHERE id = ?", (json.dumps(new), rid))
+        conn.commit()
+
+
+def test_voice_metrics_from_reduction(tmp_path):
+    """T16: a voice dict is used verbatim, voice: null is unmeasured, action_chars rules clipping."""
+    home, run_id = build_home(tmp_path, "run-9")
+    loud = {"words": 7, "pointers": 3, "examples": 2, "longest_paragraph_words": 500,
+            "filler_hits": 9, "action_chars": 230}
+    quiet = {"words": 1, "pointers": 0, "examples": 0, "longest_paragraph_words": 1,
+             "filler_hits": 0, "action_chars": 150}
+    short = "a" * 199  # under ACTION_MAX, but t02's voice says it was cut from 230
+
+    def patch(kind, doc):
+        if kind == "decision":  # t03's re-check carries the owner's (now short) action
+            checks = [dict(c) for c in doc["rechecks"]]
+            checks[0]["action"] = short
+            return {**doc, "rechecks": checks}
+        if kind != "turn":
+            return None
+        return {2: {**doc, "voice": loud, "action": short},  # delegated t03
+                4: {**doc, "voice": None},                   # manager: unmeasured
+                5: {**doc, "voice": quiet}}.get(doc["turn"])  # delegated t06, 200-char action
+
+    _patch_reductions(home, run_id, patch)
+    measured = E.measure_target(str(home), run_id)
+    target, metrics = measured["target"], measured["metrics"]
+    rows = [loud if n == 2 else quiet if n == 5 else voice.measure(E.body(target, n))
+            for n, doc in target.turns.items()
+            if doc["role"] != "junior_ic" and doc.get("delivered") and n != 4]
+    assert len(rows) == 15 and metrics["voice"]["n"] == 15  # 16 at baseline, minus t04
+    assert metrics["voice"] == E.voice_shares(rows)
+
+    clipped = [(f["turn"], f["quote"]) for f in measured["flags"] if f["id"] == "action_clipped"]
+    # t03 fires on voice.action_chars 230 > 200 with a 199-char action; t06 does not,
+    # because its owner turn has a voice dict (150), which outranks the 200-char length.
+    assert [turn for turn, _ in clipped] == [3, 9, 15, 18, 24]
+    assert clipped[0] == (3, "a" * 40)
+
+
+def _det(flags=(), **over):
+    """score_deterministic on metrics no rule penalises; ``a__b=v`` sets metrics["a"]["b"]."""
+    metrics = {
+        "cost_usd": 10.0, "time": {"summed_attempt_s": 100.0}, "turns": 10, "cap": 30,
+        "dropped": {"delegation": None, "floor_requests": []}, "rechecks_verified": 3,
+        "words": {"median_reviewer_owner": 100.0},
+        "voice": {"n": 4, "pointer_share": 1.0, "walls_share": 0.0,
+                  "example_share": 1.0, "filler_per_turn": 0.0},
+    }
+    for dotted, value in over.items():
+        *path, leaf = dotted.split("__")
+        node = metrics
+        for key in path:
+            node = node[key]
+        node[leaf] = value
+    return E.score_deterministic(metrics, list(flags))
+
+
+def test_deterministic_rules():
+    """T29: D5 at every edge: the bands, each penalty alone, the floor, the rationale."""
+    base = _det()
+    assert {k: d["score"] for k, d in base.items()} == {
+        "efficiency": 5, "concision": 5, "verdict_consistency": 5}
+    assert base["efficiency"]["rationale"] == "start 5"
+    assert base["concision"]["rationale"] == "start 5 (median_reviewer_owner 100.0 <= 150)"
+    assert base["verdict_consistency"]["rationale"] == "start 5"
+    assert [e["quote"] for e in base["concision"]["evidence"]] == [
+        "words.median_reviewer_owner=100.0", "voice.walls_share=0.0",
+        "voice.pointer_share=1.0", "voice.example_share=1.0", "voice.filler_per_turn=0.0",
+    ]
+    assert [e["quote"] for e in base["verdict_consistency"]["evidence"]] == ["rechecks_verified=3"]
+    assert all(
+        e == {"turn": None, "where": "metric", "line": None, "quote": e["quote"], "verified": True}
+        for d in base.values() for e in d["evidence"]
+    )
+
+    def score(dim, flags=(), **over):
+        return _det(flags, **over)[dim]["score"]
+
+    for median, band in ((150, 5), (151, 4), (300, 4), (301, 3), (500, 3), (501, 2), (800, 2), (801, 1)):
+        assert score("concision", words__median_reviewer_owner=median) == band, median
+    assert _det(words__median_reviewer_owner=301)["concision"]["rationale"] == (
+        "start 3 (median_reviewer_owner 301 <= 500)")
+    assert _det(words__median_reviewer_owner=801)["concision"]["rationale"] == (
+        "start 1 (median_reviewer_owner 801 > 800)")
+    assert score("concision", words__median_reviewer_owner=None) == 5
+
+    # efficiency: each penalty alone, then all four together
+    assert score("efficiency", cost_usd=20) == 5
+    assert _det(cost_usd=20.0001)["efficiency"]["rationale"] == "start 5; cost_usd 20.0001 > 20: -1"
+    assert score("efficiency", cost_usd=None) == 5
+    assert score("efficiency", time__summed_attempt_s=3000) == 5
+    assert _det(time__summed_attempt_s=3000.1)["efficiency"]["rationale"] == (
+        "start 5; summed_attempt_s 3000.1 > 3000: -1")
+    assert _det(turns=30)["efficiency"]["rationale"] == "start 5; turns 30 >= cap 30: -1"
+    assert score("efficiency", turns=29) == 5
+    assert score("efficiency", turns=99, cap=None) == 5
+    assert _det(dropped__delegation="edit §3")["efficiency"]["rationale"] == (
+        "start 5; dropped delegation or floor request: -1")
+    assert score("efficiency", dropped__floor_requests=["tpm"]) == 4
+    assert score("efficiency", dropped__delegation="edit §3", dropped__floor_requests=["tpm"]) == 4
+    worst = _det(cost_usd=21, time__summed_attempt_s=3001, turns=30,
+                 dropped__floor_requests=["pm"])["efficiency"]
+    assert (worst["score"], worst["rationale"]) == (1, (
+        "start 5; cost_usd 21 > 20: -1; summed_attempt_s 3001 > 3000: -1; "
+        "turns 30 >= cap 30: -1; dropped delegation or floor request: -1"))
+
+    # concision: each share threshold alone; a null share never subtracts
+    for key, fine, bad, step in (
+        ("walls_share", 0.25, 0.2501, "walls_share 0.2501 > 0.25: -1"),
+        ("pointer_share", 0.5, 0.4999, "pointer_share 0.4999 < 0.5: -1"),
+        ("example_share", 0.5, 0.4999, "example_share 0.4999 < 0.5: -1"),
+        ("filler_per_turn", 1, 1.0001, "filler_per_turn 1.0001 > 1: -1"),
+    ):
+        assert score("concision", **{f"voice__{key}": fine}) == 5, key
+        assert score("concision", **{f"voice__{key}": None}) == 5, key
+        assert _det(**{f"voice__{key}": bad})["concision"]["rationale"] == (
+            f"start 5 (median_reviewer_owner 100.0 <= 150); {step}")
+    floored = _det(words__median_reviewer_owner=801, voice__walls_share=1.0)["concision"]
+    assert (floored["score"], floored["rationale"]) == (1, (
+        "start 1 (median_reviewer_owner 801 > 800); walls_share 1.0 > 0.25: -1; floor 1"))
+
+    # verdict_consistency: 5 - 2 x mismatches - min(2, truncations), floor 1
+    mismatch = {"id": "verdict_count_mismatch", "turn": None, "line": 820,
+                "quote": "Seven edits landed:", "claimed": 7, "recorded": 8}
+    truncated = {"id": "delegation_truncated_but_applied", "turn": 6, "line": 130,
+                 "quote": "your message was cut off"}
+    noise = [{"id": "action_clipped", "turn": 3, "line": 861, "quote": "x"},
+             {"id": "thread_missing", "turn": None, "line": None, "quote": ""}]
+    assert score("verdict_consistency", noise) == 5
+    one = _det([mismatch])["verdict_consistency"]
+    assert (one["score"], one["rationale"]) == (3, "start 5; verdict_count_mismatch x1: -2")
+    assert one["evidence"][1] == {"turn": None, "where": "decision", "line": 820,
+                                  "quote": "Seven edits landed:", "verified": True}
+    assert score("verdict_consistency", [truncated]) == 4
+    three = _det([truncated] * 3)["verdict_consistency"]
+    assert (three["score"], three["rationale"]) == (
+        3, "start 5; delegation_truncated_but_applied x3: -2")
+    assert three["evidence"][1] == {"turn": 6, "where": "turn", "line": 130,
+                                    "quote": "your message was cut off", "verified": True}
+    low = _det([mismatch] * 3)["verdict_consistency"]
+    assert (low["score"], low["rationale"]) == (1, "start 5; verdict_count_mismatch x3: -6; floor 1")
+
+
+def _dim(score, *quotes, verified=True):
+    """A C5 dimension carrying one evidence item per quote."""
+    return {"scorer": "judge", "score": score, "rationale": "", "error": None,
+            "evidence": [{"turn": 1, "where": "turn", "line": 5, "quote": q, "verified": verified}
+                         for q in quotes]}
+
+
+def test_headline():
+    """T30: the lowest score wins, ties go to D5 order, nothing scored names the error."""
+    order = list(E.DIMENSIONS)
+    dims = {key: _dim(4, f"{key} said so") for key in reversed(order)}  # dict order is not D5 order
+    assert E.headline(dims, None) == (
+        "weakest: verdict_grounded 4/5: verdict_grounded said so")
+    dims["concision"] = _dim(2, "c" * 200)
+    dims["efficiency"] = _dim(2, "e")
+    assert E.headline(dims, None) == "weakest: efficiency 2/5: e"
+    dims["efficiency"] = _dim(3, "e")
+    assert E.headline(dims, None) == "weakest: concision 2/5: " + "c" * 120
+    dims["verdict_consistency"] = _dim(1, "made up", verified=False)
+    dims["verdict_consistency"]["evidence"] += _dim(1, "on the record")["evidence"]
+    assert E.headline(dims, None) == (
+        "weakest: verdict_consistency 1/5: on the record")
+
+    unscored = {key: _dim(None) for key in order}
+    assert E.headline(unscored, "no parseable hermes-eval fence") == (
+        "not scored: no parseable hermes-eval fence")
+    partial = {**unscored, "efficiency": _dim(3, "cost_usd=30.3875")}
+    assert E.headline(partial, "no verifiable evidence") == (
+        "weakest: efficiency 3/5: cost_usd=30.3875")
+
+
+def test_verdict_count_words_and_every_match(tmp_path):
+    """G2: digits and number words up to thirty; every mismatching claim is one flag."""
+    home, run_id = build_home(tmp_path, "run-9")
+    target = E.load_target(str(home), run_id)
+    metrics = E.compute_metrics(target)
+
+    def claims(prose, recorded):
+        # A decision `body` is the chair prose (D3), so the claim text is exactly `prose`.
+        chaired = dataclasses.replace(target, decision={**target.decision, "body": prose})
+        flags = E.compute_flags(chaired, {**metrics, "rechecks_verified": recorded})
+        return [(f["claimed"], f["recorded"], f["quote"])
+                for f in flags if f["id"] == "verdict_count_mismatch"]
+
+    assert len(E.NUMBER_WORDS) == 39
+    assert E.NUMBER_WORDS["twenty-one"] == E.NUMBER_WORDS["twenty one"] == 21
+    assert claims("Seven edits landed.", 7) == []
+    assert claims("Seven edits landed.", 8) == [(7, 8, "Seven edits landed.")]
+    assert claims("Twenty-one edits were made.", 21) == []
+    assert claims("Twenty-one edits were made.", 1) == [(21, 1, "Twenty-one edits were made.")]
+    assert claims("twenty one edits applied", 20) == [(21, 20, "twenty one edits applied")]
+    assert claims("Thirty edits landed", 3) == [(30, 3, "Thirty edits landed")]
+    assert claims("30 edits landed", 30) == []
+    assert claims("30 edits landed", 29) == [(30, 29, "30 edits landed")]
+    assert claims("One edit applied.", 1) == []
+    both = "Seven edits landed; later six edits were made."
+    assert claims(both, 8) == [(7, 8, both), (6, 8, both)]
+    assert claims("Seven edits landed.\n\nEight edits landed.", 8) == [(7, 8, "Seven edits landed.")]
+    assert claims("The edits landed. Several edits were made.", 8) == []

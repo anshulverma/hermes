@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine import config
-from playbooks.committee import cast, thread
+from playbooks.committee import cast, thread, turnblock
 from playbooks.committee.playbook import _SIMULATION
 from playbooks.committee.voice import RULES, measure
 
@@ -760,3 +760,238 @@ def _prose_metrics(target: Target) -> dict:
         },
         "edits": _edit_counts(target),
     }
+
+
+# --- D4 flags: the record's own contradictions (measure only, G1, G2) --------
+
+TRUNCATION = re.compile(r"(?i)\b(cut off|truncated|stopped at)\b")
+
+_ONES = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
+_TENS = ("ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+         "seventeen", "eighteen", "nineteen", "twenty")
+# G2: one..twenty, twenty-one..twenty-nine (hyphen or space), thirty.
+NUMBER_WORDS: dict[str, int] = {
+    **{word: n for n, word in enumerate(_ONES, 1)},
+    **{word: n for n, word in enumerate(_TENS, 10)},
+    **{f"twenty{sep}{word}": 20 + n for sep in ("-", " ") for n, word in enumerate(_ONES, 1)},
+    "thirty": 30,
+}
+# Longest first, so the alternation never settles for "twenty" in "twenty-one".
+EDIT_CLAIM = re.compile(
+    r"(?i)\b(\d+|" + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True))
+    + r") edits? (landed|applied|were made)\b"
+)
+FLAG_ORDER = (
+    "delegation_truncated_but_applied", "action_clipped",
+    "verdict_count_mismatch", "thread_missing",
+)
+
+
+def _claimed(match: re.Match) -> int:
+    """The number an EDIT_CLAIM match states, digits or words."""
+    said = match.group(1).lower()
+    return int(said) if said.isdigit() else NUMBER_WORDS[said]
+
+
+def _span(target: Target, n: int | None) -> tuple[int, int] | None:
+    """Turn ``n``'s (or, for None, the decision's) thread.md line range."""
+    parsed = target.thread or {}
+    entry = parsed.get("decision") if n is None else (parsed.get("turns") or {}).get(n)
+    if not isinstance(entry, dict):
+        return None
+    start, end = entry.get("line_start"), entry.get("line_end")
+    return (start, end) if isinstance(start, int) and isinstance(end, int) else None
+
+
+def _find_line(lines: list[str] | None, span, test, after: int = 0) -> int | None:
+    """The first 1-based line in ``span`` past ``after`` that passes ``test``."""
+    if lines is None or span is None:
+        return None
+    for n in range(max(span[0], after + 1), min(span[1], len(lines)) + 1):
+        if test(lines[n - 1]):
+            return n
+    return None
+
+
+def _delegator(target: Target, n: int) -> dict | None:
+    """The owner turn whose delegation junior turn ``n`` applied (D4)."""
+    by = (target.turns.get(n) or {}).get("delegated_by_turn")
+    if isinstance(by, int) and not isinstance(by, bool):
+        return target.turns.get(by)
+    earlier = [
+        m for m, j in target.turns.items()
+        if m < n and j.get("role") == cast.OWNER and j.get("delivered") and j.get("delegate")
+    ]
+    return target.turns[max(earlier)] if earlier else None
+
+
+def compute_flags(target: Target, metrics: dict) -> list[dict]:
+    """D4 flags, every field per G1 and every claim per G2. Never raises on odd json."""
+    lines = None if target.thread_text is None else target.thread_text.splitlines()
+    decision = target.decision if isinstance(target.decision, dict) else {}
+    flags: list[dict] = []
+    for n in sorted(target.turns):
+        turn = target.turns[n]
+        if turn.get("role") != cast.JUNIOR or turn.get("verified") is not True:
+            continue
+        hit = next((ln.strip() for ln in body(target, n).splitlines() if TRUNCATION.search(ln)), None)
+        if hit is None:
+            continue
+        line = _find_line(lines, _span(target, n), TRUNCATION.search)
+        flags.append({
+            "id": "delegation_truncated_but_applied", "turn": n, "line": line,
+            "quote": (lines[line - 1].strip() if line else hit)[:QUOTE_MAX],
+        })
+    checks = decision.get("rechecks")
+    for check in checks if isinstance(checks, list) else []:
+        n = check.get("turn") if isinstance(check, dict) else None
+        if not isinstance(n, int) or isinstance(n, bool):
+            continue
+        action = check.get("action") if isinstance(check.get("action"), str) else ""
+        voice = (_delegator(target, n) or {}).get("voice")
+        if isinstance(voice, dict):
+            chars = voice.get("action_chars")
+            clipped = (isinstance(chars, (int, float)) and not isinstance(chars, bool)
+                       and chars > turnblock.ACTION_MAX)
+        else:
+            clipped = len(action) >= turnblock.ACTION_MAX
+        if clipped:
+            prefix = f"- re-check of turn {n:02d} "
+            flags.append({
+                "id": "action_clipped", "turn": n, "quote": action[-40:],
+                "line": _find_line(lines, _span(target, None), lambda ln: ln.startswith(prefix)),
+            })
+    recorded = metrics.get("rechecks_verified")
+    after = 0
+    for raw in chair_prose(decision).splitlines():
+        text = raw.strip()
+        wrong = [m for m in EDIT_CLAIM.finditer(text) if _claimed(m) != recorded]
+        if not wrong:
+            continue
+        line = _find_line(lines, _span(target, None), lambda ln: text in ln, after)
+        after = line or after
+        quote = (lines[line - 1].strip() if line else text)[:QUOTE_MAX]
+        flags.extend({
+            "id": "verdict_count_mismatch", "turn": None, "line": line, "quote": quote,
+            "claimed": _claimed(m), "recorded": recorded,
+        } for m in wrong)
+    if not target.legacy and target.thread_text is None:
+        flags.append({"id": "thread_missing", "turn": None, "line": None, "quote": ""})
+    return sorted(flags, key=lambda f: (
+        FLAG_ORDER.index(f["id"]), f["turn"] is None, f["turn"] or 0,
+        f["line"] is None, f["line"] or 0,
+    ))
+
+
+# --- D5 deterministic dimensions, C5 headline, D7 canonical block -----------
+
+_BANDS = ((150, 5), (300, 4), (500, 3), (800, 2))
+_EFFICIENCY_KEYS = (
+    "cost_usd", "time.summed_attempt_s", "turns", "cap",
+    "dropped.delegation", "dropped.floor_requests",
+)
+_CONCISION_KEYS = (
+    "words.median_reviewer_owner", "voice.walls_share", "voice.pointer_share",
+    "voice.example_share", "voice.filler_per_turn",
+)
+_COUNTED = ("delegation_truncated_but_applied", "verdict_count_mismatch")
+
+
+def _metric(metrics: dict, dotted: str):
+    """``metrics`` at a dotted key, None where any step is missing."""
+    value = metrics
+    for key in dotted.split("."):
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
+
+
+def _scored(start: int, first: str, penalties: list[tuple], evidence: list[dict]) -> dict:
+    """One deterministic dimension: ``start`` minus each hit's points, floor 1 (D5)."""
+    hits = [(points, step) for points, step in penalties if points]
+    score = start - sum(points for points, _ in hits)
+    steps = [first] + [step for _, step in hits] + (["floor 1"] if score < 1 else [])
+    return {"scorer": "deterministic", "score": max(score, 1),
+            "rationale": "; ".join(steps), "evidence": evidence, "error": None}
+
+
+def _metric_evidence(metrics: dict, keys: tuple[str, ...]) -> list[dict]:
+    """One D5 evidence item per input the rule reads, in D5 table order."""
+    return [{"turn": None, "where": "metric", "line": None,
+             "quote": f"{key}={json.dumps(_metric(metrics, key))}", "verified": True}
+            for key in keys]
+
+
+def score_deterministic(metrics: dict, flags: list[dict]) -> dict[str, dict]:
+    """efficiency, concision and verdict_consistency, each with its rationale (D5)."""
+    cost, secs = _metric(metrics, "cost_usd"), _metric(metrics, "time.summed_attempt_s")
+    turns, cap = _metric(metrics, "turns"), _metric(metrics, "cap")
+    dropped = _metric(metrics, "dropped.delegation") or _metric(metrics, "dropped.floor_requests")
+    efficiency = _scored(5, "start 5", [
+        (cost is not None and cost > 20, f"cost_usd {cost} > 20: -1"),
+        (secs is not None and secs > 3000, f"summed_attempt_s {secs} > 3000: -1"),
+        (cap is not None and turns is not None and turns >= cap, f"turns {turns} >= cap {cap}: -1"),
+        (bool(dropped), "dropped delegation or floor request: -1"),
+    ], _metric_evidence(metrics, _EFFICIENCY_KEYS))
+
+    median = _metric(metrics, "words.median_reviewer_owner")
+    start, first = 5, "start 5 (median_reviewer_owner null)"  # a null never subtracts
+    if median is not None:
+        start, first = next(
+            ((band, f"start {band} (median_reviewer_owner {median} <= {edge})")
+             for edge, band in _BANDS if median <= edge),
+            (1, f"start 1 (median_reviewer_owner {median} > 800)"),
+        )
+    walls, pointer, example, filler = (_metric(metrics, key) for key in _CONCISION_KEYS[1:])
+    concision = _scored(start, first, [
+        (walls is not None and walls > 0.25, f"walls_share {walls} > 0.25: -1"),
+        (pointer is not None and pointer < 0.5, f"pointer_share {pointer} < 0.5: -1"),
+        (example is not None and example < 0.5, f"example_share {example} < 0.5: -1"),
+        (filler is not None and filler > 1, f"filler_per_turn {filler} > 1: -1"),
+    ], _metric_evidence(metrics, _CONCISION_KEYS))
+
+    counted = [f for f in flags if isinstance(f, dict) and f.get("id") in _COUNTED]
+    mismatch = sum(f["id"] == "verdict_count_mismatch" for f in counted)
+    truncated = len(counted) - mismatch
+    consistency = _scored(5, "start 5", [
+        (2 * mismatch, f"verdict_count_mismatch x{mismatch}: -{2 * mismatch}"),
+        (min(2, truncated), f"delegation_truncated_but_applied x{truncated}: -{min(2, truncated)}"),
+    ], _metric_evidence(metrics, ("rechecks_verified",)) + [
+        {"turn": f.get("turn"), "line": f.get("line"), "quote": f.get("quote", ""),
+         "where": "decision" if f["id"] == "verdict_count_mismatch" else "turn",
+         "verified": True}
+        for f in counted
+    ])
+    return {"efficiency": efficiency, "concision": concision, "verdict_consistency": consistency}
+
+
+def headline(dimensions: dict[str, dict], judge_error: str | None) -> str:
+    """C5: the weakest scored dimension, ties to D5 order, with its first verified quote."""
+    scored = [
+        (dim["score"], i, key) for i, key in enumerate(DIMENSIONS)
+        if isinstance(dim := dimensions.get(key), dict) and isinstance(dim.get("score"), int)
+    ]
+    if not scored:
+        return f"not scored: {judge_error}"
+    score, _, key = min(scored)
+    quote = next((str(item.get("quote", "")) for item in dimensions[key].get("evidence") or []
+                  if isinstance(item, dict) and item.get("verified") is True), "")
+    return f"weakest: {key} {score}/5: {quote[:120]}"
+
+
+def canonical(obj) -> str:
+    """D7's canonical JSON: sorted keys, raw unicode, no spaces."""
+    return json.dumps(obj, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def deterministic_block(metrics: dict, flags: list[dict], deterministic: dict) -> str:
+    """The measure half of an eval, byte-identical for the same target (D7)."""
+    return canonical({"metrics": metrics, "flags": flags, "deterministic": deterministic})
+
+
+def measure_target(home: str, run_id: str) -> dict:
+    """Load one target and compute everything measure owns: metrics, flags, scores."""
+    target = load_target(home, run_id)
+    metrics = compute_metrics(target)
+    flags = compute_flags(target, metrics)
+    return {"target": target, "metrics": metrics, "flags": flags,
+            "deterministic": score_deterministic(metrics, flags)}
