@@ -2,10 +2,15 @@
 
 A committee run reduced before doc/ snapshots existed kept only its final
 revised copy, but its junior-IC workers' traces still hold every Edit they
-made. Applying each turn's edits, in order, to the original rebuilds every
-intermediate version exactly. ``scripts/backfill_doc_snapshots.py`` writes them
-out for one run; an eval can rebuild them in memory for a run nobody
-backfilled. Pure: reads a trace, writes nothing.
+made. Applying each turn's edits, in order, to the original rebuilds each
+intermediate version -- IF the worker changed the file only through Edit calls.
+A Bash write (``sed -i``, a redirect) never appears as an Edit, so this cannot
+see it, and the rebuilt version silently lacks it. Exactness is therefore not
+this module's promise: ``scripts/backfill_doc_snapshots.py`` earns it by
+checking each turn's replay against its recorded re-check and the last one
+byte for byte against the revised copy, and writes nothing if any check
+fails. An eval rebuilding a run in memory must make the same checks before
+trusting a version. Pure: reads a trace, writes nothing.
 
 Stdlib-only.
 """

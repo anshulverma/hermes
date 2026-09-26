@@ -34,8 +34,12 @@ from playbooks.committee.replay import ReplayError, apply_edits, edit_calls  # n
 
 
 def open_db(home: Path) -> sqlite3.Connection:
-    """``home/queue.db``, read-only: any write through it raises."""
-    return sqlite3.connect(f"file:{home}/queue.db?mode=ro", uri=True)
+    """``home/queue.db``, read-only: any write through it raises.
+
+    ``as_uri`` percent-encodes the path, so a ``?``, ``#`` or ``%`` in the home
+    is a path character, not URI syntax that would drop ``mode=ro``.
+    """
+    return sqlite3.connect(Path(home, "queue.db").as_uri() + "?mode=ro", uri=True)
 
 
 def changed(before: bytes, after: bytes) -> tuple[int, int]:
@@ -141,7 +145,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         backfill(args.run, args.rev, args.path, dry_run=args.dry_run)
-    except (ReplayError, OSError, sqlite3.Error, subprocess.CalledProcessError) as exc:
+    # ConfigError: a networked home. ValueError: a trace or reduction that is not
+    # UTF-8 or not JSON. Every one is raised before the first write.
+    except (ReplayError, OSError, sqlite3.Error, subprocess.CalledProcessError,
+            config.ConfigError, ValueError) as exc:
         print(f"backfill: aborted, nothing written: {exc}", file=sys.stderr)
         return 1
     return 0

@@ -285,6 +285,63 @@ def test_an_existing_doc_directory_is_never_overwritten(home, capsys):
     assert list((home / "runs" / RUN / "doc").iterdir()) == []
 
 
+def test_a_failed_write_leaves_neither_doc_nor_the_temp_directory(home, capsys, monkeypatch):
+    """Every check passed; the second file's write fails. Nothing is left behind."""
+    _seed(home)
+    created = []
+    real_open = os.open
+
+    def flaky(path, flags, *args, **kwargs):
+        if flags & os.O_CREAT:
+            created.append(path)
+            if len(created) == 2:
+                raise OSError("disk full")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(backfill.os, "open", flaky)
+
+    assert _run() == 1
+    assert len(created) == 2
+    assert "backfill: aborted, nothing written: disk full" in capsys.readouterr().err
+    assert not (home / "runs" / RUN / "doc").exists()
+    assert not (home / "runs" / RUN / ".doc-tmp").exists()
+
+
+def test_every_failure_before_a_write_is_one_aborted_line_not_a_traceback(
+    home, capsys, monkeypatch
+):
+    """A networked home (ConfigError) and a trace that is not UTF-8 (ValueError)."""
+    from engine import config
+
+    _seed(home)
+    (home / "runs" / RUN / "traces" / "101.jsonl").write_bytes(b"\xff\xfe not utf-8\n")
+    assert _run() == 1
+    assert "backfill: aborted, nothing written: " in capsys.readouterr().err
+
+    monkeypatch.setattr(config, "_default_networked_check", lambda path: True)
+    assert _run() == 1
+    assert "backfill: aborted, nothing written: HERMES_HOME must not be on a networked" \
+        in capsys.readouterr().err
+    assert not (home / "runs" / RUN / "doc").exists()
+
+
+def test_the_database_uri_survives_a_home_with_uri_characters(tmp_path):
+    """?, # and % in the home are path characters, not URI syntax -- and `?`
+    must not swallow mode=ro."""
+    odd = tmp_path / "homes" / "a?b#c%41 d"
+    odd.mkdir(parents=True)
+    apply_migrations(str(odd / "queue.db"))
+
+    conn = backfill.open_db(odd)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM runs").fetchone() == (0,)
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            conn.execute("INSERT INTO events (ts, kind) VALUES (0, 'x')")
+    finally:
+        conn.close()
+    assert [p.name for p in odd.parent.iterdir()] == ["a?b#c%41 d"]  # no stray file "a"
+
+
 def test_a_dry_run_prints_every_step_and_writes_nothing(home, capsys):
     _seed(home)
 
