@@ -403,9 +403,9 @@ _DONE_TURN = (
     "hermes-turn block."
 )
 _DONE_DECISION = (
-    "Done when: your answer is the committee's decision — approve / approve "
-    "with changes / do not approve — with the reasons, and states that this "
-    "verdict is a simulation, not an approval."
+    "Done when: your answer is the committee's decision (approve, approve with "
+    "changes, or do not approve) with the reasons, and says in one clause that "
+    "it is a simulation, not an approval."
 )
 _GUARDRAIL = (
     "This review lands nothing, submits nothing and touches no repository. "
@@ -505,8 +505,8 @@ def test_junior_goal_names_the_revised_path_and_the_delegated_action():
     # Its block keys are all ignored (§5.4), so it is not asked for a block.
     assert "hermes-turn" not in g
     assert g.endswith(
-        f"Done when: {_REVISED} carries the delegated change and your answer "
-        "states in one line what you changed."
+        f"Done when: {_REVISED} carries the delegated change and your answer is "
+        "one sentence of 40 words or fewer saying what you changed."
     )
 
     # The action is clipped to ACTION_MAX, not to the charge's CHARGE_MAX: it
@@ -666,12 +666,13 @@ def test_the_guardrail_survives_a_maximal_charge():
 
 
 def test_every_goal_stays_under_the_budget_at_maximum_size():
-    """Longest persona, an over-length charge and action, and deep paths.
+    """Every shape, take 1 and retake, at its maximum size stays under GOAL_MAX.
 
-    Also the cast's one safety invariant: under ``--permission-mode
-    bypassPermissions`` the guardrail sentence is the only thing standing
-    between a persona and the filesystem, so exactly ONE of the ten goals may
-    permit a write, and the other nine must forbid every write outright.
+    Longest persona, an over-length charge, action and retake note, a 48-char
+    image stem and deep paths. Also the cast's write invariant under
+    bypassPermissions, in three classes: the junior's take 1 may write the
+    revised copy and nothing else; the owner and the reviewers may write one
+    image and nothing else; the chair and a junior retake may write nothing.
     """
     # Pinned literally: both are read as budgets elsewhere, and a mutant that
     # widens either passes every length assertion below.
@@ -682,26 +683,112 @@ def test_every_goal_stays_under_the_budget_at_maximum_size():
     thread = f"{deep}/thread.md"
     revised = f"{deep}/revised/proposal-under-review.md"
     for role in list(cast.CAST) + [cast.CHAIR]:
-        g = cast.goal(
-            role,
-            charge="c" * 5000,
-            artifact=artifact,
-            thread=thread,
-            revised=revised,
-            action="a" * 5000,
-        )
-        assert len(g) < cast.GOAL_MAX, f"{role}: {len(g)}"
-        assert len(g) > 1500, f"{role}: {len(g)}"
+        for retake in (None, "r" * 5000):
+            g = cast.goal(
+                role,
+                charge="c" * 5000,
+                artifact=artifact,
+                thread=thread,
+                revised=revised,
+                action="a" * 5000,
+                image="x" * 48,
+                retake=retake,
+            )
+            shape = f"{role} retake={retake is not None}"
+            assert len(g) < cast.GOAL_MAX, f"{shape}: {len(g)}"
+            assert len(g) > 1500, f"{shape}: {len(g)}"
+            # Case-folded: a second, contradictory sentence reads exactly the
+            # same to a worker whatever its capitalisation.
+            low = g.lower()
+            if role == cast.JUNIOR and retake is None:
+                assert "the only file you may write" in low and revised in g, shape
+                assert "write no file at all" not in low and "one image" not in low, shape
+            elif role in (cast.CHAIR, cast.JUNIOR):
+                assert "write no file at all" in low, shape
+                assert "the only file you may write" not in low, shape
+            else:
+                assert "the only file you may write is one image" in low, shape
+                assert "images folder beside the thread" in low, shape
+                assert "write no file at all" not in low, shape
 
-        want, unwanted = (
-            ("the only file you may write", "write no file at all")
-            if role == cast.JUNIOR
-            else ("write no file at all", "the only file you may write")
-        )
-        # Case-folded: a second, contradictory sentence added to the junior's
-        # goal reads exactly the same to a worker whatever its capitalisation.
-        assert want in g.lower(), role
-        assert unwanted not in g.lower(), role
+
+def _goal(role, **over):
+    kw = dict(charge=_CHARGE, artifact=_ARTIFACT, thread=_THREAD, revised=_REVISED,
+              action="add a rollback section naming who pages")
+    kw.update(over)
+    return cast.goal(role, **kw)
+
+
+@pytest.mark.parametrize("role", list(cast.CAST) + [cast.CHAIR])
+def test_every_goal_points_at_the_ground_rules_with_its_cap_and_carries_no_dash(role):
+    from playbooks.committee import voice
+
+    pointer = (
+        "Follow the ground rules at the top of the thread; they outrank your style. "
+        f"Your cap: {voice.cap_text(role)}."
+    )
+    for g in (_goal(role), _goal(role, retake="Retake 2 of 3."), _goal(role, image="t02-x")):
+        assert pointer in g, role
+        assert "—" not in g and " -- " not in g, role
+    # built without `image`, no goal offers an image file
+    assert "image, .svg" not in _goal(role)
+
+
+def test_a_retake_note_is_its_own_paragraph_before_the_done_line_and_is_clipped():
+    from playbooks.committee import voice
+
+    note = "Retake 2 of 3. Your last take broke the ground rules: 212 words (cap 150). Say it again within them."
+    assert f"\n\n{note}\n\n{_DONE_TURN}" in _goal("tl", retake=note)
+    assert _goal("tl", retake=note).endswith(_DONE_TURN)
+    assert f"\n\n{note}\n\n{_DONE_DECISION}" in _goal(cast.CHAIR, retake=note)
+    long = _goal("tl", retake="r" * 5000)
+    assert "r" * voice.RETAKE_NOTE_MAX not in long
+    assert "r" * (voice.RETAKE_NOTE_MAX - 1) in long
+
+
+def test_the_junior_retake_is_report_only():
+    g = _goal(cast.JUNIOR, retake="Retake 2 of 3. Say it again within them.")
+
+    _labelled(
+        g,
+        f"The revised copy you edit: {_REVISED}",
+        "The owner delegated this to you: add a rollback section naming who pages",
+    )
+    assert "Your edit is already in the revised copy; do not edit it again." in g
+    assert "Retake 2 of 3. Say it again within them." in g
+    assert _GUARDRAIL in g and "the only file you may write" not in g.lower()
+    assert g.endswith(
+        "Done when: your answer is one sentence of 40 words or fewer saying what you changed."
+    )
+    assert "Your edit is already" not in _goal(cast.JUNIOR)  # take 1 edits
+
+
+def test_owner_and_reviewers_may_write_one_image_named_for_their_phase():
+    g = _goal("owner", image="t02-owner")
+
+    assert (
+        "The only file you may write is one image, t02-owner.svg or t02-owner.png, "
+        "in the images folder beside the thread; write nothing else."
+    ) in g
+    assert _GUARDRAIL not in g
+    assert _GUARDRAIL in _goal("tl")  # no image stem, no write
+    assert _GUARDRAIL in _goal(cast.CHAIR, image="decision")  # the chair never gets one
+
+
+def test_a_retake_title_says_which_take():
+    assert cast.title("tpm", "turn", turn=5, take=1) == "turn 5 — Sam Iyer (tpm) takes the floor"
+    assert cast.title("tpm", "turn", turn=5, take=2) == (
+        "turn 5 — Sam Iyer (tpm) takes the floor (take 2)"
+    )
+    assert cast.title(cast.CHAIR, "decision", turn=0, take=3).endswith("decision (take 3)")
+
+
+def test_the_tpm_and_tl_styles_ask_one_question_at_a_time():
+    assert cast.CAST["tpm"]["style"] == "asks for dates and names; one question per risk."
+    assert cast.CAST["tl"]["style"] == (
+        "draws the boundary and asks where the proposal sits on it."
+    )
+    assert cast.CAST["senior_director"]["altitude"] == "company: three orgs and a year out."
 
 
 # --- thread.md: the transcript ---

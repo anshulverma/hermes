@@ -16,9 +16,10 @@ transcript worth reading.
 
 No goal-budget machinery. Research divides one budget between an unbounded,
 runtime-sized set of material blocks; a committee goal has a fixed shape with
-exactly two runtime-variable strings. Clip those two -- the charge to
-``CHARGE_MAX``, a delegated action to ``turnblock.ACTION_MAX`` -- and the whole
-thing lands around 2400 characters against a 3600 budget. The assembled string
+three runtime-variable strings. Clip those three -- the charge to
+``CHARGE_MAX``, a delegated action to ``turnblock.ACTION_MAX``, a retake note to
+``voice.RETAKE_NOTE_MAX`` -- and the largest shape, the owner's retake, lands
+around 3450 characters against a 3600 budget. The assembled string
 is never clipped from the end, which is what keeps the read-only guardrail and
 the completion condition in every goal; ``GOAL_MAX`` and the unit test are what
 keep that honest.
@@ -28,6 +29,7 @@ Stdlib-only.
 from __future__ import annotations
 
 from playbooks.committee import turnblock as _turnblock
+from playbooks.committee import voice as _voice
 
 # Role keys the state machine branches on.
 OWNER = "owner"
@@ -76,7 +78,7 @@ CAST: dict[str, dict] = {
         "role": "senior_director",
         "name": "Dana Whitfield",
         "title": "Senior Director of Engineering",
-        "altitude": "company — three orgs and a year out.",
+        "altitude": "company: three orgs and a year out.",
         "goal": (
             "make sure this is the right bet for the company, not merely a "
             "good idea."
@@ -121,7 +123,7 @@ CAST: dict[str, dict] = {
             "sequencing, external dependencies, what blocks what, the risk "
             "with no owner."
         ),
-        "style": "enumerates; asks for dates and names.",
+        "style": "asks for dates and names; one question per risk.",
     },
     "pm": {
         "role": "pm",
@@ -154,10 +156,7 @@ CAST: dict[str, dict] = {
             "how it fits what exists, what it duplicates, migration cost, what "
             "becomes legacy on day one."
         ),
-        "style": (
-            "narrative; draws the boundary and asks where the proposal sits on "
-            "it."
-        ),
+        "style": "draws the boundary and asks where the proposal sits on it.",
     },
     "staff_ic": {
         "role": "staff_ic",
@@ -266,21 +265,26 @@ def brief(role: str) -> str:
     )
 
 
-def title(role: str, kind: str, *, turn: int, action: str | None = None) -> str:
+def title(
+    role: str, kind: str, *, turn: int, action: str | None = None, take: int = 1
+) -> str:
     """The ticket payload's one-line title, for a turn, an edit or the decision.
 
     The parenthetical is the role as the state machine knows it, so the chair's
     decision ticket reads ``(chair)`` even though the name comes from the
     ``senior_director`` persona. ``turn`` has no default because a title that
     says "turn 0" is wrong. The decision is not a turn, so its title ignores it.
+    A retake says which take it is; the payload keys are frozen, so the title
+    and the goal are the only channels a retake has.
 
     An unknown ``kind`` raises ``KeyError``, like ``persona``: a fallback to
     ``turn`` would title the DECISION ticket "takes the floor".
     """
-    return _TITLES[kind].format(
+    text = _TITLES[kind].format(
         name=persona(role)["name"], role=role, n=turn,
         action=clip(action, _TITLE_ACTION_MAX),
     )
+    return f"{text} (take {take})" if take > 1 else text
 
 
 # --- the goal ---------------------------------------------------------------
@@ -301,7 +305,7 @@ _GUARDRAIL_EDIT = (
     "This review lands nothing, submits nothing and touches no repository. "
     "The revised copy named above is the only file you may write: leave every "
     "other file, the original artifact included, exactly as you found it. That "
-    "copy is already a byte copy of the original — change only what was "
+    "copy is already a byte copy of the original: change only what was "
     "delegated and leave the rest of it alone."
 )
 
@@ -329,7 +333,7 @@ _GUARDRAIL_EDIT = (
 # the other way.
 _UNCHANGED_ORIGINAL = (
     "The original artifact is never modified: every delegated edit lands in a "
-    "separate revised copy, and that is by design — an unchanged original is "
+    "separate revised copy, and that is by design: an unchanged original is "
     "the guarantee holding, not an edit that failed. What this committee "
     "produces is a recommendation plus that copy, not a landed change."
 )
@@ -337,7 +341,7 @@ _UNCHANGED_ORIGINAL = (
 _FLOOR_OWNER = (
     "You wrote this proposal and you are accountable for it. Answer the member "
     "who spoke last, directly and in your own voice: concede what their "
-    "argument earns and defend what it does not. You make no edits yourself — "
+    "argument earns and defend what it does not. You make no edits yourself; "
     "an edit is something you delegate. You cannot close the discussion until "
     "every member of the committee has taken an opening turn: a close before "
     "that is ignored."
@@ -357,15 +361,40 @@ _DONE_TURN = (
 )
 
 _DONE_EDIT = (
-    "Done when: {revised} carries the delegated change and your answer states "
-    "in one line what you changed."
+    "Done when: {revised} carries the delegated change and your answer is one "
+    "sentence of 40 words or fewer saying what you changed."
+)
+
+_DONE_EDIT_RETAKE = (
+    "Done when: your answer is one sentence of 40 words or fewer saying what "
+    "you changed."
 )
 
 _DONE_DECISION = (
-    "Done when: your answer is the committee's decision — approve / approve "
-    "with changes / do not approve — with the reasons, and states that this "
-    "verdict is a simulation, not an approval."
+    "Done when: your answer is the committee's decision (approve, approve with "
+    "changes, or do not approve) with the reasons, and says in one clause that "
+    "it is a simulation, not an approval."
 )
+
+# Every shape, before its guardrail. The rules themselves are in the thread
+# header, written once at `open`; the goal carries the pointer and the cap.
+_RULES_POINTER = (
+    "Follow the ground rules at the top of the thread; they outrank your style. "
+    "Your cap: {cap}."
+)
+
+# The owner and the reviewers only, and only when seed names the stem: the
+# speaker's take-1 phase name, so a retake overwrites its own file and two
+# phases never share one. The folder is derived from the thread path already
+# in the goal, so no second absolute path is added.
+_GUARDRAIL_IMAGE = (
+    "This review lands nothing, submits nothing and touches no repository. Read "
+    "the artifact and the thread. The only file you may write is one image, "
+    "{image}.svg or {image}.png, in the images folder beside the thread; write "
+    "nothing else."
+)
+
+_ALREADY_EDITED = "Your edit is already in the revised copy; do not edit it again."
 
 
 def clip(text: str | None, limit: int) -> str:
@@ -384,15 +413,24 @@ def goal(
     thread: str,
     revised: str,
     action: str | None = None,
+    image: str = "",
+    retake: str | None = None,
 ) -> str:
     """The whole goal string handed to one worker.
 
-    Three shapes: the chair's decision, the junior IC's edit, and the turn a
-    reviewer or the owner takes. Only the charge and a delegated action are
-    bounded; everything else is fixed prose, so the assembled goal has a known
-    size and the unit test holds it under ``GOAL_MAX``.
+    Four shapes: the chair's decision, the junior IC's edit, the junior IC's
+    report-only retake, and the turn a reviewer or the owner takes. Every shape
+    carries the rules pointer with the speaker's cap. ``image`` is the owner's or
+    a reviewer's take-1 phase name, the stem of the one image file it may write;
+    empty means no file at all. ``retake`` is ``voice.note(...)`` on a retake,
+    clipped to ``voice.RETAKE_NOTE_MAX`` and set as its own paragraph before the
+    Done line. Only the charge, a delegated action and the note are bounded, so
+    the assembled goal has a known size and the unit test holds it under
+    ``GOAL_MAX``.
     """
     charge = clip(charge, CHARGE_MAX)
+    pointer = _RULES_POINTER.format(cap=_voice.cap_text(role))
+    again = f"{clip(retake, _voice.RETAKE_NOTE_MAX)}\n\n" if retake is not None else ""
 
     if role == CHAIR:
         return (
@@ -421,7 +459,9 @@ def goal(
             # (the junior IC's required output, `lens`) do not cover the chair,
             # and _DONE_DECISION already states the output required.
             "Read the thread end to end and rule on the charge.\n\n"
+            f"{pointer}\n\n"
             f"{_GUARDRAIL}\n\n"
+            f"{again}"
             f"{_DONE_DECISION}"
         )
 
@@ -431,7 +471,7 @@ def goal(
         # rather than dispatching a worker with nothing to do.
         if not str(action or "").strip():
             raise ValueError("a junior_ic goal needs the delegated action")
-        return (
+        head = (
             f"{brief(JUNIOR)}\n\n"
             "You support the owner of a proposal under committee review, and "
             "you speak only when the owner delegates something to you.\n\n"
@@ -442,11 +482,21 @@ def goal(
             "The owner delegated this to you: "
             f"{clip(action, _turnblock.ACTION_MAX)}\n\n"
             f"{_UNCHANGED_ORIGINAL}\n\n"
-            f"{_GUARDRAIL_EDIT}\n\n"
+        )
+        if retake is not None:
+            # Report-only: take 1's edit is already in the copy and its
+            # re-check measures that edit, so this take writes nothing.
+            return (
+                f"{head}{_ALREADY_EDITED}\n\n{again}{pointer}\n\n"
+                f"{_GUARDRAIL}\n\n{_DONE_EDIT_RETAKE}"
+            )
+        return (
+            f"{head}{pointer}\n\n{_GUARDRAIL_EDIT}\n\n"
             f"{_DONE_EDIT.format(revised=revised)}"
         )
 
     floor = _FLOOR_OWNER if role == OWNER else _FLOOR_REVIEWER
+    guardrail = _GUARDRAIL_IMAGE.format(image=image) if image else _GUARDRAIL
     instruction = _turnblock.instruction(owner=role == OWNER).strip()
     return (
         f"{brief(role)}\n\n"
@@ -455,11 +505,13 @@ def goal(
         f"The artifact under review: {artifact}\n"
         f"The thread: {thread}\n\n"
         "The thread is one single-threaded channel: one speaker at a time, "
-        "appended in order. Your answer becomes the next entry -- Hermes "
+        "appended in order. Your answer becomes the next entry; Hermes "
         "appends it for you. Read the artifact and the thread first.\n\n"
         f"{floor}\n\n"
         f"{_UNCHANGED_ORIGINAL}\n\n"
-        f"{_GUARDRAIL}\n\n"
+        f"{pointer}\n\n"
+        f"{guardrail}\n\n"
         f"{instruction}\n\n"
+        f"{again}"
         f"{_DONE_TURN}"
     )
