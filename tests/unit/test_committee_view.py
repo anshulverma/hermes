@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from engine.models import Reduction, Run
-from playbooks.committee import cast, thread, voice
+from playbooks.committee import cast, selection, thread, voice
 from playbooks.committee import eval as ev
 from playbooks.committee.view import view_data
 
@@ -111,13 +111,13 @@ def test_view_data_returns_every_block_the_contract_names(run2):
 
     assert set(data) == {
         "kind", "roster", "progress", "timeline", "verdict", "document", "evaluation",
-        "voice",
+        "voice", "selection",
     }
     assert data["evaluation"] is None  # never scored: no runs/<id>/eval.json
     assert data["kind"] == "committee"
     assert len(data["roster"]) == 9
     assert all(
-        set(row) == {"role", "name", "title", "state", "stance"}
+        set(row) == {"role", "name", "title", "state", "stance", *_ROW_KEYS}
         for row in data["roster"]
     )
     assert set(data["progress"]) == {"turn", "cap", "holder", "queue", "ended"}
@@ -132,6 +132,9 @@ def test_view_data_returns_every_block_the_contract_names(run2):
     assert set(data["document"]) == {
         "name", "captured", "original", "steps", "final", "dropped_delegation",
     }
+    # selection C6: run-2 predates selection, so no block and no seat reasons.
+    assert data["selection"] is None
+    assert all(row[key] is None for row in data["roster"] for key in _ROW_KEYS)
 
 
 def test_the_timeline_reads_oldest_first_and_names_every_speaker(run2):
@@ -1336,3 +1339,327 @@ def test_the_voice_rows_the_view_labels_are_the_keys_summary_returns():
     ])
 
     assert labelled == list(summary)
+
+
+# --- selection (selection C6) -------------------------------------------------
+
+_ROW_KEYS = ("rationale", "nominated_by", "nominated_by_name", "source")
+_SELECTOR = {1: "owner", 2: "manager", 3: "senior_director"}
+
+# A derived seat at plain sizes, the way selection.validate builds one.
+_CREW_OWNER = {
+    "name": "Priya Nair", "title": "Crew Owner, fleet team",
+    "altitude": "the fleet crews, this year.", "goal": "keep crews team-owned.",
+    "ambition": "", "stake": "owns the crews federation would share.",
+    "lens": "who can touch a host.", "style": cast.DERIVED_STYLE,
+}
+
+RUN9 = Path(__file__).parent.parent / "data" / "committee-eval" / "run-9"
+
+
+def _sel(stage: int, **over) -> Reduction:
+    """A kept stage's `selection` reduction as `_reduce_select` writes it (C5)."""
+    role = _SELECTOR[stage]
+    doc = {
+        "stage": stage, "role": role, "final": stage == 3, "delivered": True,
+        "body": f"Stage {stage}: everyone below has a stake in this proposal.",
+        "parsed": True, "code": None, "proposed": [], "proposed_dropped": 0,
+        "error": None, "cap": 30, "take": 1, "takes": 1, "kept": True, "voice": None,
+        "violations": [], "flags": [],
+    }
+    doc.update(over)
+    return Reduction(kind="selection", json=doc, phase=f"s{stage}-{role}")
+
+
+def _seat(role: str, nominated_by: str, **derived) -> dict:
+    """A seat record as `selection.resolve` builds it: library, or derived."""
+    persona = derived or dict(cast.LIBRARY[role])
+    return {
+        **persona, "role": role, "rationale": f"{role} has a stake in this proposal",
+        "nominated_by": nominated_by, "source": "derived" if derived else "library",
+    }
+
+
+def _seated(*reviewers) -> list:
+    """Roster order: owner, the chair, the manager, the reviewers, the junior IC."""
+    fixed = selection.fixed_seats()
+    return [fixed["owner"], fixed["senior_director"], fixed["manager"],
+            *reviewers, fixed["junior_ic"]]
+
+
+def _ratified(*reviewers: dict, **over) -> Reduction:
+    """The chair's final reduction, seating `reviewers` after the fixed two."""
+    slugs = ["senior_director", "manager"] + [seat["role"] for seat in reviewers]
+    doc = {"seated": _seated(*reviewers), "reviewers": slugs, "considered": [],
+           "considered_dropped": 0, "invalid_dropped": 0, "fallback": None,
+           "cap": 2 * len(slugs) + 16}
+    doc.update(over)
+    return _sel(3, **doc)
+
+
+def _said(n: int, role: str, **over) -> Reduction:
+    """A delivered meeting turn by `role`, with the keys `_reduce_turn` writes."""
+    doc = {
+        "role": role, "turn": n, "delivered": True, "body": f"Turn {n:02d} by {role}.",
+        "stance": None, "request_floor": False, "delegate": False, "close": False,
+        "action": None, "verified": None, "error": None, "cap": 24,
+    }
+    doc.update(over)
+    return Reduction(kind="turn", json=doc, phase=f"t{n:02d}-{role}")
+
+
+def _run9_reductions() -> list[Reduction]:
+    """run-9's reduction rows from eval's committed fixture, hydrated as the queue does."""
+    [rows] = sorted(RUN9.glob("*reductions*.json"))
+    out = []
+    for row in json.loads(rows.read_text(encoding="utf-8")):
+        doc = json.loads(row["json"]) if isinstance(row["json"], str) else row["json"]
+        out.append(Reduction(kind=row["kind"], json=doc, phase=row.get("phase"),
+                             review_state=row.get("review_state") or "pending"))
+    return out
+
+
+def test_selection_states_selecting_and_lost_show_the_fixed_four():
+    fixed = ["owner", "senior_director", "manager", "junior_ic"]
+    lost = Reduction(kind="lost", json={"error": "the meeting was lost"})
+    cases = [
+        ("s1-owner", [], "selecting", 0),                 # s1 minted, nothing reduced yet
+        ("s2-manager-take2", [_sel(1)], "selecting", 1),  # a selector's retake
+        ("s2-manager", [_sel(1), lost], "lost", 1),
+    ]
+    for phase, reductions, state, stages in cases:
+        data = view_data(_run(phase), reductions)
+        rows = data["roster"]
+
+        assert data["selection"]["state"] == state, phase
+        assert len(data["selection"]["stages"]) == stages, phase
+        assert data["selection"]["fallback"] is None
+        assert data["selection"]["considered"] == []
+        assert (data["selection"]["considered_dropped"],
+                data["selection"]["invalid_dropped"]) == (0, 0)
+        assert [row["role"] for row in rows] == fixed, phase
+        assert data["progress"]["holder"] is None
+        assert {row["state"] for row in rows} == {"idle"}
+        assert [row["rationale"] for row in rows] == [cast.FIXED_RATIONALE[r] for r in fixed]
+        assert {(row["nominated_by"], row["nominated_by_name"], row["source"])
+                for row in rows} == {("fixed", None, "fixed")}
+        assert data["timeline"] == [] and data["verdict"] is None
+
+    # Not yet past open, or already at the chair or the ruling: nothing to select.
+    for phase in (None, "open", "ruling", "decision", "decision-take2"):
+        assert view_data(_run(phase), [])["selection"] is None, phase
+
+
+def test_a_seated_run_before_t01_carries_the_roster_and_the_selection_block():
+    security = _seat("security", "owner")
+    crew = _seat("crew_owner", "manager", **_CREW_OWNER)
+    considered = [
+        {"stakeholder": "Legal", "role": None,
+         "reason": "no legal exposure in the document", "represented_by": "security"},
+        {"stakeholder": "Release engineering", "role": None,
+         "reason": "dropped by Ruth Delgado", "represented_by": None},
+    ]
+    proposed = [{"role": "security", "name": security["name"],
+                 "title": "Security Engineer", "rationale": security["rationale"]}]
+    reductions = [
+        _sel(1, proposed=proposed, proposed_dropped=5), _sel(2),
+        # decisions 5/8: what resolve's caps cut is counted, never lost silently
+        _ratified(security, crew, considered=considered,
+                  considered_dropped=3, invalid_dropped=2),
+    ]
+
+    data = view_data(_run("t01-senior_director"), reductions)
+    rows = {row["role"]: row for row in data["roster"]}
+
+    assert list(rows) == [
+        "owner", "senior_director", "manager", "security", "crew_owner", "junior_ic",
+    ]
+    assert (rows["security"]["name"], rows["security"]["title"]) == (
+        security["name"], "Security Engineer")
+    assert rows["security"]["rationale"] == "security has a stake in this proposal"
+    assert (rows["security"]["nominated_by"], rows["security"]["nominated_by_name"],
+            rows["security"]["source"]) == ("owner", "Maya Okonkwo", "library")
+    assert (rows["crew_owner"]["name"], rows["crew_owner"]["title"]) == (
+        "Priya Nair", "Crew Owner, fleet team")
+    assert (rows["crew_owner"]["nominated_by_name"], rows["crew_owner"]["source"]) == (
+        "Ruth Delgado", "derived")
+    assert rows["owner"]["rationale"] == cast.FIXED_RATIONALE["owner"]
+    assert (rows["owner"]["nominated_by"], rows["owner"]["nominated_by_name"]) == ("fixed", None)
+    assert {row["state"] for row in rows.values()} == {"idle"}
+    # Four reviewers resolve to 2*4+16 = 24, read off the final reduction: never
+    # the default 30 this process would otherwise guess.
+    assert data["progress"] == {
+        "turn": 0, "cap": 24, "holder": None, "queue": [], "ended": None,
+    }
+    assert data["timeline"] == [] and data["document"]["name"] is None
+
+    block = data["selection"]
+    assert set(block) == {
+        "state", "stages", "fallback", "considered", "considered_dropped", "invalid_dropped",
+    }
+    assert (block["state"], block["fallback"]) == ("seated", None)
+    assert (block["considered_dropped"], block["invalid_dropped"]) == (3, 2)
+    assert [(s["stage"], s["role"], s["name"]) for s in block["stages"]] == [
+        (1, "owner", "Maya Okonkwo"), (2, "manager", "Ruth Delgado"),
+        (3, "senior_director", "Dana Whitfield"),
+    ]
+    assert block["stages"][0]["proposed"] == proposed
+    assert [s["proposed_dropped"] for s in block["stages"]] == [5, 0, 0]
+    assert block["considered"] == [
+        {**considered[0], "represented_by_name": security["name"]},
+        {**considered[1], "represented_by_name": None},
+    ]
+    json.dumps(data, allow_nan=False)
+
+
+def test_a_fallback_selection_is_reported():
+    resolved = selection.fallback("chair_failed")
+    chair = _sel(3, delivered=False, body="", parsed=False, code="no_answer", **resolved)
+
+    data = view_data(_run("t01-senior_director"), [_sel(1), _sel(2), chair])
+
+    block = data["selection"]
+    assert (block["state"], block["fallback"], block["considered"]) == (
+        "fallback", "chair_failed", [])
+    assert block["stages"][2]["delivered"] is False
+    assert "no_turn" in block["stages"][2]["badges"]
+    rows = {row["role"]: row for row in data["roster"]}
+    assert list(rows) == list(cast.CAST)  # today's nine, in today's order
+    assert rows["tpm"]["rationale"] == "default committee (selection fell back: chair_failed)"
+    assert (rows["tpm"]["nominated_by"], rows["tpm"]["nominated_by_name"],
+            rows["tpm"]["source"]) == ("default", None, "library")
+
+    # "default" and "fixed" are legal derived slugs (neither is reserved), and
+    # a seat by either name is still nobody's nominator.
+    odd = dict(chair.json, seated=[
+        *resolved["seated"], _seat("default", "senior_director", **_CREW_OWNER),
+        _seat("fixed", "owner", **_CREW_OWNER),
+    ])
+    data = view_data(_run("t01-senior_director"), [Reduction(kind="selection", json=odd)])
+    rows = {row["role"]: row for row in data["roster"]}
+    assert (rows["tpm"]["nominated_by_name"], rows["owner"]["nominated_by_name"]) == (None, None)
+    assert rows["default"]["nominated_by_name"] == "Dana Whitfield"
+
+
+def test_a_stage_carries_voice_fields_badges_and_segments():
+    body = (
+        "Seat security before anyone else.\n"
+        "Figure: who sits where\n"
+        "```mermaid\ngraph TD; A-->B\n```\n"
+        "Description: the owner seats security first."
+    )
+    soft = ["no_pointer", "no_example", "tells", "dashes", "long_first_line"]
+    kept = _sel(1, body=body, voice=voice.measure(body, "owner"), take=3, takes=3,
+                violations=["over_cap"], flags=soft)
+
+    stage = view_data(_run("s2-manager"), [kept])["selection"]["stages"][0]
+
+    assert set(stage) == {
+        "stage", "role", "name", "delivered", "body", "proposed", "proposed_dropped",
+        "segments", "badges", "take", "takes", "violations", "flags",
+    }
+    assert (stage["take"], stage["takes"]) == (3, 3)
+    assert (stage["violations"], stage["flags"]) == (["over_cap"], soft)
+    # decision 11: a selector is asked for no pointer or example, so voice's
+    # soft flags ride on `flags` and are never badged; the hard rules still are.
+    assert stage["badges"] == ["voice_flag", "retaken"]
+    assert stage["body"] == body
+    mermaid = [seg for seg in stage["segments"] if seg["kind"] == "mermaid"]
+    assert [seg["source"] for seg in mermaid] == ["graph TD; A-->B"]
+
+
+def test_a_stage_image_that_checked_ok_is_ok():
+    body = "Seat security.\n![who sits where](images/s1-owner.svg)\nDescription: the seats."
+    checked = voice.measure(body, "owner")
+    checked["images"][0]["ok"] = True        # what the master's _grade recorded
+    unchecked = voice.measure(body, "owner")  # ok stays None: never assumed
+
+    def image(metrics):
+        doc = _sel(1, body=body, voice=metrics)
+        stage = view_data(_run("s2-manager"), [doc])["selection"]["stages"][0]
+        return next(seg for seg in stage["segments"] if seg["kind"] == "image")
+
+    assert (image(checked)["ok"], image(checked)["name"]) == (True, "s1-owner.svg")
+    assert image(unchecked)["ok"] is False
+
+
+def test_a_legacy_run_lost_mid_meeting_has_no_selection(run2):
+    lost = Reduction(kind="lost", json={"error": "the meeting was lost"})
+
+    data = view_data(_run("t05-senior_director"), run2[:4] + [lost])
+
+    assert data["selection"] is None
+    assert [row["role"] for row in data["roster"]] == list(cast.CAST)
+    assert all(row[key] is None for row in data["roster"] for key in _ROW_KEYS)
+
+
+def test_a_derived_seat_is_named_in_floor_stances_and_entries():
+    crew = _seat("crew_owner", "manager", **_CREW_OWNER)
+    reductions = [
+        _sel(1), _sel(2), _ratified(crew),
+        _said(1, "crew_owner", stance="defer until crews can opt out", request_floor=True),
+        _said(2, "owner"),
+    ]
+
+    data = view_data(_run("t03-senior_director"), reductions)
+    entry = data["timeline"][0]
+    rows = {row["role"]: row for row in data["roster"]}
+
+    assert (entry["role"], entry["name"], entry["title"]) == (
+        "crew_owner", "Priya Nair", "Crew Owner, fleet team")      # _entry
+    assert "unattributed" not in entry["badges"]
+    assert data["progress"]["queue"] == ["crew_owner"]              # _floor
+    assert data["progress"]["holder"] == "owner"
+    assert rows["crew_owner"]["state"] == "queued"
+    assert rows["crew_owner"]["stance"] == "defer until crews can opt out"  # _stances
+
+
+def test_an_unknown_role_is_unattributed_and_never_raises():
+    final = _ratified(
+        seated=_seated(7, {"role": "nameless"}),  # junk only a hand edit writes
+        considered=[{"stakeholder": "Legal", "role": None, "reason": "no exposure",
+                     "represented_by": "tpm"}, "junk"],
+        proposed=[{"role": "tpm"}, 3],
+        proposed_dropped=float("nan"), considered_dropped="many", invalid_dropped=-4,
+    )
+    reductions = [
+        _sel(1, role="ghost"), Reduction(kind="selection", json=["junk"]), final,
+        _said(1, "tpm", request_floor=True, stance="I was never seated"),
+        _said(2, "ghost"),
+    ]
+
+    data = view_data(_run("t03-owner"), reductions)
+
+    json.dumps(data, allow_nan=False)
+    assert [row["role"] for row in data["roster"]] == [
+        "owner", "senior_director", "manager", "junior_ic",
+    ]
+    assert [e["name"] for e in data["timeline"]] == ["unattributed", "unattributed"]
+    assert all("unattributed" in e["badges"] for e in data["timeline"])
+    assert data["progress"]["queue"] == [] and data["progress"]["holder"] is None
+    assert all(row["stance"] is None for row in data["roster"])
+    stages = data["selection"]["stages"]
+    assert stages[0]["name"] == "unattributed"
+    assert stages[1]["proposed"] == [{"role": "tpm", "name": "", "title": "", "rationale": ""}]
+    assert stages[1]["proposed_dropped"] == 0
+    assert (data["selection"]["considered_dropped"], data["selection"]["invalid_dropped"]) == (0, 0)
+    assert data["selection"]["considered"] == [{
+        "stakeholder": "Legal", "role": None, "reason": "no exposure",
+        "represented_by": "tpm", "represented_by_name": None,
+    }]
+
+
+def test_run9_renders_the_nine_unchanged():
+    """AC9 over the real run-9 rows: a legacy run keeps today's nine, unexplained."""
+    reductions = _run9_reductions()
+    assert any(r.kind == "turn" for r in reductions)  # really a meeting's rows
+
+    data = view_data(_run("ruling"), reductions)
+
+    assert data["selection"] is None
+    assert [(row["role"], row["name"], row["title"]) for row in data["roster"]] == [
+        (role, who["name"], who["title"]) for role, who in cast.CAST.items()
+    ]
+    assert all(row[key] is None for row in data["roster"] for key in _ROW_KEYS)
+    assert all(entry["name"] == cast.CAST[entry["role"]]["name"]
+               for entry in data["timeline"] if entry["role"] in cast.CAST)

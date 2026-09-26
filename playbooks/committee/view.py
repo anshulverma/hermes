@@ -30,7 +30,7 @@ from pathlib import Path
 
 from engine import config
 from engine.models import Reduction, Run
-from playbooks.committee import cast, thread, voice
+from playbooks.committee import cast, selection, thread, voice
 
 
 def view_data(run: Run, reductions: list[Reduction]) -> dict:
@@ -54,12 +54,14 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
     )
     decision = decision_row.json if decision_row is not None else None
     lost = any(r.kind == "lost" for r in reductions)
-    holder, queue, spoken = _floor(run, turns, decision)
-    stances = _stances(turns)
+    # Every name on screen resolves through the run's own seats (selection D4).
+    seats = _seats(run, reductions)
+    holder, queue, spoken = _floor(run, turns, decision, seats)
+    stances = _stances(turns, seats)
 
     return {
         "kind": "committee",
-        "roster": _roster(spoken, holder, queue, stances),
+        "roster": _roster(spoken, holder, queue, stances, seats),
         "progress": {
             "turn": _turn_no(turns[-1].json) if turns else 0,
             "cap": _cap(reductions),
@@ -67,12 +69,15 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
             "queue": queue,
             "ended": (decision or {}).get("ended"),
         },
-        "timeline": [_entry(r.json) for r in turns],
+        "timeline": [_entry(r.json, seats) for r in turns],
         # No top-level `stances` block: `_stances` feeds `_roster`, which is the
         # only surface that renders a stance. The payload key was typed, fixtured
         # and asserted on both sides of the seam, and read by nothing.
         "verdict": _verdict(decision),
         "document": _document(run, turns, decision_row, lost),
+        # selection C6: the stages, who was considered and any fallback. None
+        # for a legacy run, a run lost mid-meeting, or one not yet past open.
+        "selection": _selection(run, reductions, seats),
         # committee-eval D10/C7: None until the run is scored from this home.
         "evaluation": _evaluation(run.id),
         # voice C11 over the rows eval's voice_summary reads -- the last turn
@@ -89,7 +94,7 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
 # --- the floor -------------------------------------------------------------
 
 def _floor(
-    run: Run, turns: list[Reduction], decision: dict | None
+    run: Run, turns: list[Reduction], decision: dict | None, seats: dict[str, dict]
 ) -> tuple[str | None, list[str], list[str]]:
     """Who has spoken, who is waiting, and who holds the floor right now.
 
@@ -109,7 +114,7 @@ def _floor(
     for reduction in turns:
         doc = reduction.json
         role = _role(doc)
-        if role not in cast.CAST:
+        if role not in seats:
             # Fail closed, the way `_reduce_turn` does: a turn nobody can be
             # named for is attributed to nobody here either.
             continue
@@ -147,14 +152,22 @@ def _floor(
 
 
 def _roster(
-    spoken: list[str], holder: str | None, queue: list[str], stances: dict
+    spoken: list[str], holder: str | None, queue: list[str], stances: dict,
+    seats: dict[str, dict],
 ) -> list[dict]:
-    """The nine personas and where each of them stands, in seniority order."""
-    # `persona` maps the chair sentinel back to the reviewer seat it chairs
-    # from, so "the chair is ruling" lights up that member's row.
-    seat = cast.persona(holder)["role"] if holder else None
+    """The run's seats and where each of them stands, in roster order.
+
+    ``seats`` is ``_seats``: owner, reviewers in opening order, junior IC, which
+    for a legacy run is ``cast.CAST``'s own order. Why a seat is there and who
+    put it forward come off its seat record; a legacy persona has neither, so
+    all four keys are None.
+    """
+    # The chair sentinel lights up the reviewer seat it chairs from. Mapped
+    # here rather than through `cast.persona`, which raises on a role outside
+    # the static cast.
+    seat = cast.CHAIR_ROLE if holder == cast.CHAIR else holder
     rows = []
-    for role, who in cast.CAST.items():
+    for role, who in seats.items():
         if role == seat:
             state = "holds_floor"
         elif role in queue:
@@ -164,22 +177,29 @@ def _roster(
         else:
             state = "idle"
         said = stances.get(role)
+        nominated = _str(who.get("nominated_by")) or None
+        # "fixed" and "default" are not people, so they name nobody.
+        by = seats.get(nominated) if nominated in _SELECTORS else None
         rows.append({
             "role": role,
             "name": who["name"],
             "title": who["title"],
             "state": state,
             "stance": said[-1]["text"] if said else None,
+            "rationale": _str(who.get("rationale")) or None,
+            "nominated_by": nominated,
+            "nominated_by_name": by["name"] if by else None,
+            "source": _str(who.get("source")) or None,
         })
     return rows
 
 
 # --- the transcript --------------------------------------------------------
 
-def _entry(doc: dict) -> dict:
+def _entry(doc: dict, seats: dict[str, dict]) -> dict:
     """One turn, as the timeline reads it."""
     role = _role(doc)
-    who = cast.persona(role) if role in cast.CAST else None
+    who = seats.get(role)
     action = doc.get("action")
     # The same guard `_stances` uses: absent, blank or junk is None, never "".
     stance = doc.get("stance")
@@ -328,7 +348,7 @@ def _badges(doc: dict, *, attributed: bool) -> list[str]:
     return badges
 
 
-def _stances(turns: list[Reduction]) -> dict[str, list[dict]]:
+def _stances(turns: list[Reduction], seats: dict[str, dict]) -> dict[str, list[dict]]:
     """Every stance stated, by role, oldest first.
 
     Absent stays absent: a persona that stated none has no key here at all,
@@ -339,7 +359,7 @@ def _stances(turns: list[Reduction]) -> dict[str, list[dict]]:
         doc = reduction.json
         role = _role(doc)
         text = doc.get("stance")
-        if role in cast.CAST and isinstance(text, str) and text.strip():
+        if role in seats and isinstance(text, str) and text.strip():
             out.setdefault(role, []).append({"turn": _turn_no(doc), "text": text.strip()})
     return out
 
@@ -370,6 +390,138 @@ def _verdict(decision: dict | None) -> dict | None:
         # the fail-safe direction. A flag nothing reads is a flag that can be
         # flipped to False with no test noticing and no notice disappearing.
     }
+
+
+# --- selection (selection C6) ----------------------------------------------
+
+# The three selectors, whose nominations the roster names by person.
+_SELECTORS = (cast.OWNER, "manager", cast.CHAIR_ROLE)
+# voice's soft flags. A selector is asked for no pointer or example, so on a
+# stage they ride on `flags` and are never badged (orchestrator decision 11).
+_SOFT_BADGES = ("no_pointer", "no_example", "tells")
+
+
+def _final(reductions: list[Reduction]) -> dict | None:
+    """The latest ``selection`` reduction with ``final: true``, or None."""
+    return next(
+        (r.json for r in reversed(reductions)
+         if r.kind == "selection" and isinstance(r.json, dict)
+         and r.json.get("final") is True),
+        None,
+    )
+
+
+def _selection_state(run: Run, reductions: list[Reduction]) -> str | None:
+    """seated | fallback | lost | selecting, or None (selection C6).
+
+    The phase is compared, never parsed: while no turn exists, anything that is
+    not a static or decision phase is an s-phase or one of its retakes.
+    """
+    # Imported here rather than at module scope, as in `_floor`: playbook.py
+    # imports this module.
+    from playbooks.committee.playbook import DECISION_PHASES
+
+    final = _final(reductions)
+    if final is not None:
+        return "fallback" if _str(final.get("fallback")) else "seated"
+    kinds = {r.kind for r in reductions}
+    if "turn" in kinds:
+        return None  # a legacy run, lost mid-meeting or not
+    if "lost" in kinds:
+        return "lost"
+    if run.phase in (None, "open", "ruling") or run.phase in DECISION_PHASES:
+        return None
+    return "selecting"
+
+
+def _seats(run: Run, reductions: list[Reduction]) -> dict[str, dict]:
+    """slug -> seat record for this run, read off its reductions alone.
+
+    The ratified roster once the final selection reduction exists; the fixed
+    four while selection runs or after it was lost; ``cast.CAST`` for a run
+    reduced before selection existed. A seat without a string role, name and
+    title is dropped here, so every reader may index those three.
+    """
+    final = _final(reductions)
+    if final is None:
+        if _selection_state(run, reductions) in ("selecting", "lost"):
+            return selection.fixed_seats()
+        return dict(cast.CAST)
+    seats: dict[str, dict] = {}
+    for seat in _as_list(final.get("seated")):
+        if isinstance(seat, dict) and all(
+            isinstance(seat.get(key), str) for key in ("role", "name", "title")
+        ):
+            seats.setdefault(seat["role"], seat)
+    return seats
+
+
+def _selection(
+    run: Run, reductions: list[Reduction], seats: dict[str, dict]
+) -> dict | None:
+    """The Selection card: each kept stage, who was considered, any fallback.
+
+    ``considered_dropped`` and ``invalid_dropped`` count what resolve's caps
+    cut, so the card can say how many more there were (decisions 5 and 8).
+    """
+    state = _selection_state(run, reductions)
+    if state is None:
+        return None
+    final = _final(reductions) or {}
+    return {
+        "state": state,
+        # Only a kept take is a `selection` reduction (a discarded one is a
+        # voice `take`), so this is one entry per kept stage, in stage order.
+        "stages": [_stage(r.json, seats) for r in reductions
+                   if r.kind == "selection" and isinstance(r.json, dict)],
+        "fallback": _str(final.get("fallback")) or None,
+        "considered": [_considered(c, seats) for c in _as_list(final.get("considered"))
+                       if isinstance(c, dict)],
+        "considered_dropped": _count(final.get("considered_dropped")),
+        "invalid_dropped": _count(final.get("invalid_dropped")),
+    }
+
+
+def _stage(doc: dict, seats: dict[str, dict]) -> dict:
+    """One kept stage, with voice's fields as a timeline entry has them."""
+    who = seats.get(_role(doc))
+    body = doc.get("body")
+    return {
+        "stage": _int(doc.get("stage")),
+        "role": _role(doc),
+        "name": who["name"] if who else "unattributed",
+        "delivered": bool(doc.get("delivered")),
+        "body": body if isinstance(body, str) else "",
+        "proposed": [
+            {key: _str(p.get(key)) or "" for key in ("role", "name", "title", "rationale")}
+            for p in _as_list(doc.get("proposed")) if isinstance(p, dict)
+        ],
+        "proposed_dropped": _count(doc.get("proposed_dropped")),
+        "segments": _segments(doc),
+        "badges": [b for b in _badges(doc, attributed=True) if b not in _SOFT_BADGES],
+        "take": _int(doc.get("take")),
+        "takes": _int(doc.get("takes")),
+        "violations": _strings(doc.get("violations")),
+        "flags": _strings(doc.get("flags")),
+    }
+
+
+def _considered(entry: dict, seats: dict[str, dict]) -> dict:
+    """A stakeholder considered but not seated, and who speaks for them."""
+    rep = _str(entry.get("represented_by")) or None
+    who = seats.get(rep) if rep else None
+    return {
+        "stakeholder": _str(entry.get("stakeholder")) or "",
+        "role": _str(entry.get("role")) or None,
+        "reason": _str(entry.get("reason")) or "",
+        "represented_by": rep,
+        "represented_by_name": who["name"] if who else None,
+    }
+
+
+def _count(value: object) -> int:
+    """A non-negative int count, or 0 for anything else."""
+    return max(0, _int(value) or 0)
 
 
 # --- the document's versions ----------------------------------------------
