@@ -19,6 +19,7 @@ boundary. Stdlib-only: no SSH, no Meta, no real ``claude``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -28,11 +29,13 @@ from pathlib import Path
 
 import pytest
 
-from engine import contracts, crew, dispatch, queue
+from engine import config, contracts, crew, dispatch, queue
+from engine import playbook as playbook_registry
 from engine.db.migrate import apply_migrations, connect
 from engine.models import Check, Result
 from playbooks.committee import cast, thread, turnblock
 from playbooks.committee import playbook as committee
+from playbooks.committee import eval as committee_eval
 
 
 # --- fixtures --------------------------------------------------------------
@@ -847,3 +850,386 @@ def test_failed_chair_turn_fails_the_run(
     # The transcript still stands: turn 01 was delivered.
     assert [h for h, _ in _turns(run_id)] == [_heading(1, "senior_director")]
     assert _turns(run_id)[0][1] != thread.NO_TURN
+
+
+# --- committee-eval: the scripted judge and T22-T25 -------------------------
+
+
+def test_eval_scores_scripted_run(eval_home, source_repo, artifact, local_site, monkeypatch):
+    """T22: a scripted committee run, then a scripted judge -> the eval run is done.
+
+    All six dimensions score, each on at least one verified evidence item, and
+    the ledger gains exactly one line. The target (its rows and its files) is
+    exactly as it was, except for the one file Q5 allows: runs/<target>/eval.json.
+    """
+    conn = eval_home
+    target = _committee_target(conn, local_site, "committee-20260925-000022", monkeypatch)
+    home = committee_eval.eval_home()
+    run_dir = Path(home) / "runs" / target
+    rows, files = _target_rows(conn, target), _tree(run_dir)
+    assert {"thread.md", "revised/proposal.md", "doc/00-original.md", "doc/t03.md"} <= set(files)
+
+    eval_run = _eval(conn, local_site, ScriptedJudgeAgent(), target)
+
+    assert _run_state(conn, eval_run) == "done"
+    assert _dispatched_phases(conn, eval_run) == ["judge"]
+    path = committee_eval.eval_json_path(home, home, target)
+    assert path == run_dir / "eval.json"
+    body = json.loads(path.read_text())
+    reductions = _reductions(conn, eval_run)
+    assert [(phase, kind) for phase, kind, _ in reductions] == [
+        ("measure", "eval_target"), ("judge", "eval"),
+    ]
+    assert reductions[-1][2] == body
+    assert (body["schema"], body["eval_run"]) == (1, eval_run)
+    assert (body["target"]["home"], body["target"]["run"]) == (home, target)
+    assert body["judge"]["status"] == "ok", body["judge"]
+
+    dims = body["dimensions"]
+    assert set(dims) == set(committee_eval.DIMENSIONS)
+    for dim, doc in dims.items():
+        assert isinstance(doc["score"], int) and 1 <= doc["score"] <= 5, (dim, doc)
+        assert any(item["verified"] is True for item in doc["evidence"]), (dim, doc)
+    for dim in committee_eval.DETERMINISTIC_DIMS:
+        assert dims[dim]["scorer"] == "deterministic"
+    for dim, cited in JUDGE_EVIDENCE.items():
+        assert dims[dim]["scorer"] == "judge"
+        [item] = dims[dim]["evidence"]
+        assert {key: item[key] for key in cited} == cited, (dim, item)
+        assert item["verified"] is True and isinstance(item["line"], int), (dim, item)
+    assert dims["verdict_grounded"]["score"] == JUDGE_SCORES["verdict_grounded"]
+    assert dims["edits_address_concerns"]["score"] == JUDGE_SCORES["edits_address_concerns"]
+    # G7: concern_coverage is the judge's 5, capped by this run's own record.
+    # The cap of 4 left t04 (manager) unanswered, and five reviewers never spoke.
+    metrics = body["metrics"]
+    assert metrics["seats"]["unheard"] == ["tpm", "pm", "tl", "staff_ic", "data_scientist"]
+    assert metrics["unanswered_reviewer_turns"] == [4]
+    assert dims["concern_coverage"]["score"] == committee_eval.concern_cap(
+        JUDGE_SCORES["concern_coverage"], metrics
+    ) == 3
+
+    lines = committee_eval.ledger_path(home).read_text().splitlines()
+    assert len(lines) == 1
+    line = json.loads(lines[0])
+    assert (line["source"], line["eval_run"], line["judge_status"]) == ("eval", eval_run, "ok")
+
+    assert _target_rows(conn, target) == rows
+    after = _tree(run_dir)
+    assert after.pop("eval.json") == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert after == files
+
+
+def test_eval_failed_judge(eval_home, source_repo, artifact, local_site, monkeypatch):
+    """T23: a judge whose worker fails ends the eval run failed, and still writes.
+
+    The deterministic half survives: eval.json and one ledger line are written,
+    status is failed and the judge dimensions are null. The target is left
+    waiting on its ruling on purpose. Evaluability never depends on the ruling
+    (Q1/R1), and the target must still be waiting after the eval, untouched.
+    """
+    conn = eval_home
+    target = _committee_target(
+        conn, local_site, "committee-20260925-000023", monkeypatch, rule=False
+    )
+    home = committee_eval.eval_home()
+    run_dir = Path(home) / "runs" / target
+    rows, files = _target_rows(conn, target), _tree(run_dir)
+
+    eval_run = _eval(conn, local_site, ScriptedJudgeAgent(fail=True), target)
+
+    assert _run_state(conn, eval_run) == "failed"
+    assert conn.execute(
+        "SELECT state FROM tickets WHERE id=?", (f"{eval_run}/judge",)
+    ).fetchone()[0] == "failed"
+    body = json.loads(committee_eval.eval_json_path(home, home, target).read_text())
+    assert body["judge"]["status"] == "failed"
+    dims = body["dimensions"]
+    assert all(dims[dim]["score"] is None for dim in committee_eval.JUDGE_DIMS)
+    assert all(isinstance(dims[dim]["score"], int) for dim in committee_eval.DETERMINISTIC_DIMS)
+    lines = committee_eval.ledger_path(home).read_text().splitlines()
+    assert [json.loads(line)["judge_status"] for line in lines] == ["failed"]
+
+    assert _run_state(conn, target) == "running"
+    assert _target_rows(conn, target) == rows
+    after = _tree(run_dir)
+    after.pop("eval.json")
+    assert after == files
+
+
+def test_eval_detects_source_write(eval_home, source_repo, artifact, local_site, monkeypatch):
+    """T24: a judge that writes what it was told only to read is caught.
+
+    It writes once into the SOURCE (the target's thread.md), and once into its
+    own inputs/ copy (entries.json, the file its quotes are verified against,
+    where a planted line could forge a "verified" quote). Either way,
+    judge.reduce's re-hash flags target_changed_during_eval, nulls the judge
+    scores and fails the eval run, whatever the judge's answer said.
+    """
+    conn = eval_home
+    target = _committee_target(conn, local_site, "committee-20260925-000024", monkeypatch)
+    home = committee_eval.eval_home()
+    source = Path(home) / "runs" / target / "thread.md"
+    # _eval names its runs <target>-eval-<n>, so the second run's inputs/
+    # can be aimed at before that run exists.
+    copy = Path(home) / "runs" / f"{target}-eval-2" / "inputs" / "entries.json"
+
+    for written in (source, copy):
+        eval_run = _eval(conn, local_site, ScriptedJudgeAgent(write_to=str(written)), target)
+        assert written.read_text().endswith(PLANTED + "\n")  # the double really wrote
+        assert _run_state(conn, eval_run) == "failed"
+        (_, _, measured), (_, _, body) = _reductions(conn, eval_run)
+        changed = [f for f in body["flags"] if f["id"] == "target_changed_during_eval"]
+        assert len(changed) == 1, body["flags"]
+        assert (changed[0]["turn"], changed[0]["line"], changed[0]["quote"]) == (None, None, "")
+        assert os.path.realpath(written) in {os.path.realpath(p) for p in changed[0]["paths"]}
+        assert body["judge"]["status"] == "failed"
+        assert all(body["dimensions"][dim]["score"] is None for dim in committee_eval.JUDGE_DIMS)
+        # Not a measure flag (D7): the deterministic block never carries it.
+        assert all(f["id"] != "target_changed_during_eval" for f in measured["flags"])
+
+    assert eval_run == f"{target}-eval-2"
+    assert json.loads(committee_eval.eval_json_path(home, home, target).read_text()) == body
+    lines = committee_eval.ledger_path(home).read_text().splitlines()
+    assert [json.loads(line)["judge_status"] for line in lines] == ["failed", "failed"]
+
+
+def test_eval_foreign_home_read_only(
+    eval_home, source_repo, artifact, local_site, monkeypatch, tmp_path
+):
+    """T25: a foreign source home is read and never written.
+
+    The committee run lives under HERMES_HOME=A. The eval runs under B with
+    HERMES_COMMITTEE_EVAL_HOME=A. The result lands in B's evals/, named for A's
+    realpath. Afterwards A (its queue.db and every file under it) is
+    byte-identical, and no file has been added. queue.db-shm is exempt from the
+    byte check only, because a mode=ro reader of a WAL database updates its
+    read marks there.
+    """
+    target = _committee_target(eval_home, local_site, "committee-20260925-000025", monkeypatch)
+    home_a = committee_eval.eval_home()
+    rows, before = _target_rows(eval_home, target), _tree(Path(home_a))
+    assert "queue.db" in before
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home-b"))
+    db_b = str(config.resolve_home() / "queue.db")
+    apply_migrations(db_b)
+    conn_b = connect(db_b)
+    try:
+        eval_run = _eval(conn_b, local_site, ScriptedJudgeAgent(), target, source_home=home_a)
+        assert _run_state(conn_b, eval_run) == "done"
+    finally:
+        conn_b.close()
+
+    home_b = committee_eval.eval_home()
+    tag = hashlib.sha1(home_a.encode()).hexdigest()[:8]
+    path = Path(home_b) / "evals" / f"{tag}-{target}.json"
+    assert committee_eval.eval_json_path(home_b, home_a, target) == path
+    body = json.loads(path.read_text())
+    assert (body["target"]["home"], body["judge"]["status"]) == (home_a, "ok")
+    lines = committee_eval.ledger_path(home_b).read_text().splitlines()
+    assert [json.loads(line)["target"]["home"] for line in lines] == [home_a]
+
+    after = _tree(Path(home_a))
+    assert sorted(after) == sorted(before)  # no file added under A, eval.json included
+    after.pop("queue.db-shm", None)
+    before.pop("queue.db-shm", None)
+    assert after == before  # queue.db and every run file are byte-identical
+    assert _target_rows(eval_home, target) == rows
+
+
+# The scripted committee's fixed prose (ScriptedCommitteeAgent._answer). The
+# judge quotes it verbatim, so every quote verifies against inputs/entries.json.
+CHAIR_PROSE = "Approve with changes: fund the migration once the rollback plan lands."
+OWNER_PROSE = "Fair point; here is where I land on it."
+REVIEWER_PROSE = "Reading this as"
+# What the judge double appends to a file it was told only to read (T24).
+PLANTED = "The committee agreed that every edit landed exactly as asked."
+# Three different values, so a swapped dimension cannot pass.
+JUDGE_SCORES = {"verdict_grounded": 4, "edits_address_concerns": 2, "concern_coverage": 5}
+JUDGE_EVIDENCE = {
+    "verdict_grounded": {"turn": None, "where": "decision", "quote": CHAIR_PROSE},
+    "edits_address_concerns": {"turn": 2, "where": "turn", "quote": OWNER_PROSE},
+    "concern_coverage": {"turn": 1, "where": "turn", "quote": REVIEWER_PROSE},
+}
+
+
+def _judge_answer() -> str:
+    """Prose, then one hermes-eval fence scoring every judge dimension."""
+    scores = {
+        dim: {
+            "score": JUDGE_SCORES[dim],
+            "rationale": f"scripted judge: {dim}",
+            "evidence": [JUDGE_EVIDENCE[dim]],
+        }
+        for dim in committee_eval.JUDGE_DIMS
+    }
+    return f"Scored the run.\n\n{FENCE}{committee_eval.FENCE_TAG}\n{json.dumps(scores)}\n{FENCE}\n"
+
+
+class ScriptedJudgeAgent:
+    """The committee-eval judge double: one hermes-eval fence, always the same.
+
+    ScriptedCommitteeAgent cannot serve a judge ticket, because every kind it
+    does not know falls through to reviewer prose, which carries no hermes-eval
+    fence. This double answers a pure function of the payload: a constant, and
+    it refuses any ticket that is not the eval's judge. The constant scores the
+    three judge dimensions, each on a verbatim quote of the scripted
+    committee's fixed prose: the chair's verdict (`decision`), the owner's
+    reply at t02, and the opening reviewer's line at t01 (`turn`).
+    `_committee_target` makes sure those turns exist.
+
+    ``fail=True`` returns driver_failed / driver_error, as a crashed worker does.
+    ``write_to`` makes the worker append PLANTED to that path through ``sh -c``
+    with positional args. This is the edit double's trick: the path and the
+    text are never interpolated into the script. It stands in for a judge
+    writing what it was told only to read. Integrity is honoured as in
+    ScriptedCommitteeAgent: a ``payload_sha256`` mismatch is a contract_fail.
+    """
+
+    name = "scripted_judge"
+
+    def __init__(self, *, fail: bool = False, write_to: str | None = None):
+        self.fail = fail
+        self.write_to = write_to
+
+    def build_invocation(self, envelope: dict, driver) -> list[str]:
+        if self.write_to is None:
+            return ["true"]
+        return ["sh", "-c", 'printf "%s\\n" "$2" >> "$1"', "sh", self.write_to, PLANTED]
+
+    def parse_result(self, raw: str, envelope: dict) -> Result:
+        now = time.time()
+        payload = envelope.get("payload") or {}
+
+        def failed(reason: str, summary: str) -> Result:
+            return Result(
+                outcome="driver_failed", termination_reason=reason, result_ref=None,
+                error_summary=summary, started_at=now, ended_at=now, payload={},
+                evidence_ref=None,
+            )
+
+        expected = envelope.get("payload_sha256")
+        actual = contracts.payload_sha256(payload)
+        if expected is not None and expected != actual:
+            return failed("contract_fail", f"payload_sha256 mismatch: expected {expected}, got {actual}")
+        if payload.get("kind") != "judge":
+            return failed("contract_fail", f"scripted judge got a {payload.get('kind')!r} ticket")
+        if self.fail:
+            return failed("driver_error", "scripted judge failure")
+        return Result(
+            outcome="ok",
+            termination_reason="goal_met",
+            result_ref=f"result://{envelope.get('ticket_id')}",
+            error_summary=None,
+            started_at=now, ended_at=now,
+            payload={"answer": _judge_answer()},
+            evidence_ref=None,
+        )
+
+    def health_checks(self, host: str, site) -> list[Check]:
+        # crew.add and every heartbeat sweep re-probe these under this agent.
+        return [
+            Check("agent", True, "scripted judge agent available"),
+            Check("auth", True, "scripted judge auth ok"),
+        ]
+
+
+@pytest.fixture
+def eval_home(tmp_path, monkeypatch):
+    """A HERMES_HOME whose queue.db lives inside it, as a real home's does.
+
+    The eval reads its source as ``<home>/queue.db`` (mode=ro). The module's
+    ``db_path``/``conn`` put queue.db beside the home, not in it, so the eval
+    would find nothing there. The fixture yields the connection. The scripted
+    committee run and the eval run share it, just as they share
+    ~/.hermes/queue.db live.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home-a"))
+    db = str(config.resolve_home() / "queue.db")
+    apply_migrations(db)
+    connection = connect(db)
+    yield connection
+    connection.close()
+
+
+def _committee_target(conn, site, run_id, monkeypatch, *, rule=True):
+    """Run the four-turn scripted committee that every eval test scores; return its id.
+
+    The turns are t01 senior_director, t02 owner and t03 junior_ic. The owner
+    delegates at t02, so t03 makes a real edit and revised/ and doc/ exist.
+    Then come t04 manager and the chair, at the cap of 4. The cap leaves t04
+    unanswered and five reviewers unheard, which gives the concern_coverage cap
+    something to bite on. ``rule=False`` leaves the verdict waiting on a human.
+    The run then stays ``running``, and it is evaluable all the same (spec R1).
+    """
+    monkeypatch.setenv(committee.ENV_MAX_TURNS, "4")
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(owner_block=OWNER_DELEGATES, owner_phases={"t02-owner"})
+    host = _start(conn, run_id, pb, site, agent)
+    assert _drive(conn, run_id, pb, site, agent, host) == "running"
+    assert _dispatched_phases(conn, run_id) == [
+        "t01-senior_director", "t02-owner", "t03-junior_ic", "t04-manager", "decision",
+    ]
+    if rule:
+        assert _rule(conn, run_id, pb, site, agent, host, accept=True) == "done"
+    return run_id
+
+
+def _eval(conn, site, agent, target_run, *, source_home=None):
+    """Start one committee-eval run of ``target_run`` on ``conn``, drive it, return its id.
+
+    This is what `eval_cli run` does through `engine.cli`, minus the agent
+    registry. The target rides in the environment, where measure.reduce reads
+    it once. The run is inserted at phase 0 and seeded (measure seeds nothing).
+    The host is re-admitted under this agent, and `_drive` runs the eval to its
+    end. The id is ``<target>-eval-<n>``, where n counts this connection's
+    committee-eval runs, so a test can aim at a path inside a run before it
+    exists.
+    """
+    pb = playbook_registry.load("committee-eval")
+    count = conn.execute(
+        "SELECT COUNT(*) FROM runs WHERE playbook='committee-eval'"
+    ).fetchone()[0]
+    eval_run = f"{target_run}-eval-{count + 1}"
+    now = time.time()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv(committee_eval.ENV_RUN, target_run)
+        if source_home is None:
+            mp.delenv(committee_eval.ENV_HOME, raising=False)
+        else:
+            mp.setenv(committee_eval.ENV_HOME, source_home)
+        conn.execute(
+            """INSERT INTO runs (id, playbook, site, base_ref, config_json, state,
+                                 phase, created_at, updated_at)
+               VALUES (?, 'committee-eval', ?, 'HEAD', '{}', 'running', ?, ?, ?)""",
+            (eval_run, site.name, pb.phases[0], now, now),
+        )
+        conn.commit()
+        assert queue.seed_tickets(conn, queue.load_run(conn, eval_run), pb, site) == []
+        host = site.discover_hosts()[0]
+        crew.add(conn, site, agent, host=host, base_ref="HEAD", now=1000.0)
+        _drive(conn, eval_run, pb, site, agent, host)
+    return eval_run
+
+
+def _target_rows(conn, run_id):
+    """Every row the target owns, in id order (runs, tickets, attempts, events, reductions)."""
+    queries = {
+        "runs": "SELECT * FROM runs WHERE id=?1",
+        "tickets": "SELECT * FROM tickets WHERE run_id=?1 ORDER BY id",
+        "attempts": """SELECT a.* FROM attempts a JOIN tickets t ON t.id = a.ticket_id
+                       WHERE t.run_id=?1 ORDER BY a.id""",
+        "events": """SELECT * FROM events WHERE run_id=?1
+                     OR ticket_id IN (SELECT id FROM tickets WHERE run_id=?1) ORDER BY id""",
+        "reductions": "SELECT * FROM reductions WHERE run_id=?1 ORDER BY id",
+    }
+    return {name: conn.execute(sql, (run_id,)).fetchall() for name, sql in queries.items()}
+
+
+def _tree(root: Path) -> dict[str, str]:
+    """{relative path: sha256} of every regular file under ``root``."""
+    return {
+        str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+    }
