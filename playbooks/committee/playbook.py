@@ -207,6 +207,21 @@ class CommitteePlaybook:
                 # turn the cap would have stopped anyway -- and nothing anywhere
                 # said which of the two it was.
                 "ended": None,
+                # Retakes (voice D3). `base` is the take-1 phase name of the
+                # speaking phase in progress; take k is `{base}-take{k}`, and
+                # the owner's or a reviewer's one image file is `{base}.svg|png`.
+                "base": "",
+                "take": 1,
+                # the note for the NEXT take, set when reduce discards one;
+                # `_retake` moves it into `note`, which seed hands the worker.
+                "retake": None,
+                "note": None,
+                # the discarded take kept in reserve: {"answer", "take"}. A
+                # retake that delivers nothing falls back to it.
+                "held": None,
+                # the revised copy's digest after a discarded junior take 1, so
+                # a report-only retake that edits again is caught.
+                "edit_digest": "",
             }
             self._state_by_run[run.id] = s
         return s
@@ -220,6 +235,25 @@ class CommitteePlaybook:
         re-mint ``t01`` over a ticket that exists.
         """
         return run.phase not in (None, "open") and s["current_role"] is None
+
+    def _begin(self, s: dict, base: str) -> None:
+        """Start a speaking phase: take 1 of ``base``, nothing pending or held.
+
+        Every mint of a speaking phase calls this with its take-1 name, here and
+        in any later loop, so retake and image names never repeat.
+        """
+        s.update(base=base, take=1, note=None, held=None, edit_digest="")
+
+    def _retake(self, s: dict) -> str:
+        """Mint the next take of the phase in progress: same speaker, same turn.
+
+        Reads only ``base`` and ``take``. It never goes through ``_turn``, so the
+        turn counter, ``current_turn``, ``last_speaker`` and the cap are
+        untouched: a retake is the same turn said again, not a new one.
+        """
+        s["take"] += 1
+        s["note"], s["retake"] = s["retake"], None
+        return f"{s['base']}-take{s['take']}"
 
     def _turn(
         self, s: dict, role: str, *, answers: int | None = None,
@@ -240,6 +274,7 @@ class CommitteePlaybook:
         s["current_role"] = role
         # the junior IC speaks FOR the owner, so it does not trigger an owner reply
         s["last_speaker"] = cast.OWNER if role in (cast.OWNER, cast.JUNIOR) else role
+        self._begin(s, name)
         return name
 
     def _decision(self, s: dict, ended: str) -> str:
@@ -252,6 +287,7 @@ class CommitteePlaybook:
         """
         s["current_role"] = cast.CHAIR  # `decision` never passes through _turn
         s["ended"] = ended
+        self._begin(s, "decision")
         if s["delegation"]:
             # only reachable when the CAP cut the edit off; reduce("decision")
             # names it in the verdict rather than dropping it silently.
@@ -398,6 +434,18 @@ class CommitteePlaybook:
             else:
                 kind, action = "turn", None
 
+        # The owner's and a reviewer's one image, named for the phase. Made
+        # here, 0700, not by the worker (0755): a run opened before `open`
+        # made the folder has none. A folder that is refused (a planted
+        # symlink or file) offers no image rather than failing the run.
+        image = ""
+        if kind == "turn" and s["base"]:
+            try:
+                thread.images_dir(run.id)
+                image = s["base"]
+            except (OSError, ValueError):
+                pass
+
         return [Ticket(
             id=f"{run.id}/{phase}",
             run_id=run.id,
@@ -408,7 +456,9 @@ class CommitteePlaybook:
             attempts=0,
             payload={
                 "role": role,
-                "title": cast.title(role, kind, turn=s["current_turn"], action=action),
+                "title": cast.title(
+                    role, kind, turn=s["current_turn"], action=action, take=s["take"]
+                ),
                 "goal": cast.goal(
                     role,
                     charge=s["charge"],
@@ -416,6 +466,8 @@ class CommitteePlaybook:
                     thread=str(thread.path(run.id)),
                     revised=s["revised"],
                     action=action,
+                    image=image,
+                    retake=s["note"],
                 ),
                 "kind": kind,
                 "action": action,
@@ -548,6 +600,94 @@ class CommitteePlaybook:
             return self._reduce_decision(run, s, findings)
         return self._reduce_turn(run, s, findings)
 
+    # --- the voice gate (voice D3) --------------------------------------
+
+    def _grade(
+        self, run: Run, s: dict, role: str, answer: str, *, file_images: bool = True
+    ) -> tuple[bool, dict | None, list[str], list[str]]:
+        """(discard, metrics, violations, flags) for one take. Never raises.
+
+        Runs BEFORE any side effect of the take: a take sent back never reaches
+        thread.md, never moves a gate, never runs a re-check. metrics is None
+        for an undelivered or signals-only take, which is never discarded.
+        ``file_images=False`` refuses every file image (a phase whose images/
+        name could collide), so a file reference there forces a retake. So
+        does an images folder ``thread.images_dir`` refuses (a planted symlink
+        or file): nothing reached through it is the speaker's own file.
+        """
+        try:
+            body = turnblock.strip(answer)
+            if not answer or not body:
+                return False, None, [], []
+            metrics = voice.measure(body, role)
+            metrics.update(turnblock.lengths(answer))
+            images = metrics["images"]
+            folder = None
+            if file_images and any(image["kind"] == "image" for image in images):
+                try:
+                    folder = thread.images_dir(run.id)
+                except (OSError, ValueError):
+                    folder = None
+            metrics["images"] = (
+                voice.check_images(images, folder, s["base"]) if folder is not None
+                else [{**image, "ok": image["kind"] == "mermaid"} for image in images]
+            )
+            violations = voice.violations(metrics, role)
+            flags = voice.flags(metrics, role)
+        except Exception:  # never raise out of reduce
+            return False, None, [], []
+        return bool(violations) and s["take"] < voice.MAX_TAKES, metrics, violations, flags
+
+    def _discard(
+        self, run: Run, s: dict, role: str, answer: str, metrics: dict | None,
+        violations: list[str], flags: list[str], turn: int | None,
+        extra: dict | None = None,
+    ) -> list[Reduction]:
+        """Hold a take that broke a hard rule and ask the same speaker again.
+
+        Writes nothing to thread.md and applies no gate. The take survives only
+        on its ``take`` reduction, which carries no ``artifact``, ``revised`` or
+        ``cap`` (the keys the kind-agnostic readers scan) and never routes a
+        ticket. ``extra`` is a later loop's own keys (``stage``, ``seq``).
+        """
+        block = turnblock.parse(answer)
+        s["held"] = {"answer": answer, "take": s["take"]}
+        s["retake"] = voice.note(metrics or {}, violations, take=s["take"] + 1)
+        doc = {
+            "phase": s["base"],
+            "role": role,
+            "turn": turn,
+            "take": s["take"],
+            "kept": False,
+            "delivered": True,
+            "body": turnblock.strip(answer),
+            "stance": block.get("stance"),
+            "action": block.get("action"),
+            "voice": metrics,
+            "violations": violations,
+            "flags": flags,
+            "error": None,
+        }
+        doc.update(extra or {})
+        return [Reduction(kind="take", json=doc)]
+
+    def _keep(
+        self, run: Run, s: dict, role: str, answer: str, metrics: dict | None,
+        violations: list[str], flags: list[str],
+    ) -> tuple[str, int, int, dict | None, list[str], list[str]]:
+        """(answer, take, takes, metrics, violations, flags) of the take to keep.
+
+        This take, unless it delivered nothing and an earlier take is held: then
+        the held take is kept, graded again, with ``retake_failed`` added.
+        """
+        takes = take = s["take"]
+        if metrics is None and s["held"]:
+            answer, take = s["held"]["answer"], s["held"]["take"]
+            _, metrics, violations, flags = self._grade(run, s, role, answer)
+            violations = [*violations, "retake_failed"]
+        s["held"] = s["retake"] = None
+        return answer, take, takes, metrics, violations, flags
+
     def _reduce_turn(
         self, run: Run, s: dict, findings: list[Finding]
     ) -> list[Reduction]:
@@ -556,6 +696,12 @@ class CommitteePlaybook:
         role = s["current_role"]  # never None here: `reduce` checked `_lost`
         turn = s["current_turn"]
         answer = _latest_answer(findings)
+        discard, metrics, violations, flags = self._grade(run, s, role, answer)
+        if discard:
+            return self._discard(run, s, role, answer, metrics, violations, flags, turn)
+        answer, take, takes, metrics, violations, flags = self._keep(
+            run, s, role, answer, metrics, violations, flags
+        )
         body = turnblock.strip(answer)
         # A turn whose whole answer was the block is a DELIVERED turn with no
         # prose -- not a failed one. Only a genuinely absent answer gets the
@@ -679,6 +825,14 @@ class CommitteePlaybook:
             # turn order instead.
             "answers_turn": s["answers_turn"],
             "delegated_by_turn": s["delegated_by_turn"],
+            # voice C4: which take was kept, how many were dispatched, and what
+            # the rules made of it. voice is null for an undelivered take.
+            "take": take,
+            "takes": takes,
+            "kept": True,
+            "voice": metrics,
+            "violations": violations,
+            "flags": flags,
             "error": "; ".join(errors) or None,
         })]
 
@@ -774,6 +928,10 @@ class CommitteePlaybook:
         s = self._state(run)
         if self._lost(run, s):
             return None  # -> is_done, which has no verdict: the run ends failed
+        if s["retake"]:
+            # Above delegation, close and the cap: a retake is the same turn
+            # said again, and whatever it delegates follows it.
+            return self._retake(s)
         # a delegation outranks `close`: an edit the owner asked for still happens,
         # and costs one turn. The cap outranks BOTH, so this can never mint t31.
         if s["delegation"] and s["turn"] <= s["max_turns"]:

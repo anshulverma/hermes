@@ -1199,7 +1199,10 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
         "revised", "roster", "max_turns", "ended",
         "delegation_turn", "dropped_delegation_turn", "answers_turn", "delegated_by_turn",
         "snapshot_note",
+        "base", "take", "retake", "note", "held", "edit_digest",
     }
+    assert (s["base"], s["take"], s["retake"], s["note"], s["held"], s["edit_digest"]) == (
+        "", 1, None, None, None, "")
     assert s["delegation_turn"] is None and s["dropped_delegation_turn"] is None
     assert s["answers_turn"] is None and s["delegated_by_turn"] is None
     assert s["turn"] == 1
@@ -1280,15 +1283,24 @@ def _drive(script, max_turns=30):
         assert len(seen) < 400, f"NON-TERMINATION: {seen[:40]}..."
         seen.append(nxt)
         run.phase = nxt
+        block = script(nxt, s) if callable(script) else dict(script.get(nxt, {}))
+        if block.get("_retake"):
+            # A take reduce discarded: its gates never run, and the same
+            # speaker is asked again (`_discard` sets exactly this).
+            s["retake"] = "Retake note."
         if nxt == "decision":
             speakers.append("chair")
             delivered.append(True)
             continue
-        # the turn number reduce() reads must match the name next_phase minted
-        assert nxt == f"t{s['current_turn']:02d}-{s['current_role']}"
+        # the turn number reduce() reads must match the name next_phase minted;
+        # a retake is `{base}-take{k}` of the same speaker and the same NN
+        want = (f"t{s['current_turn']:02d}-{s['current_role']}" if s["take"] == 1
+                else f"{s['base']}-take{s['take']}")
+        assert nxt == want, (nxt, want)
         speakers.append(s["current_role"])
-        block = script(nxt, s) if callable(script) else dict(script.get(nxt, {}))
         delivered.append(bool(block.get("_ok", True)))
+        if block.get("_retake"):
+            continue
         # The product's gates, including what a turn with no finding does to the
         # machine. `_drive` transcribes none of that -- deleting a gate from
         # _apply_block turns every layer below RED.
@@ -1296,12 +1308,25 @@ def _drive(script, max_turns=30):
     return pb, run, s, seen, speakers, delivered
 
 
+def _kept(phases):
+    """Which phases were kept: a take is discarded iff its retake follows it."""
+    out = []
+    for i, phase in enumerate(phases):
+        base, _, k = phase.partition("-take")
+        nxt = f"{base}-take{int(k or 1) + 1}"
+        out.append(not (i + 1 < len(phases) and phases[i + 1] == nxt))
+    return out
+
+
 def check_invariants(s, seen, speakers, max_turns=30, delivered=None):
     """Every property the model asserted on every run it drove."""
     assert len(seen) == len(set(seen)), "duplicate phase name"
     assert seen[-1] == "decision", f"did not end at decision: {seen[-1]}"
-    assert seen.count("decision") == 1, "decision reached more than once"
-    nums = [int(p[1:3]) for p in seen if p.startswith("t")]
+    kept = _kept(seen[1:])  # seen[0] is `open`; speakers run parallel to seen[1:]
+    assert sum(
+        1 for phase, k in zip(seen[1:], kept) if phase == "decision" and k
+    ) == 1, "not exactly one kept decision"
+    nums = [int(p[1:3]) for p in seen if p.startswith("t") and "-take" not in p]
     if nums:
         assert max(nums) <= max_turns, f"turn cap exceeded: max NN={max(nums)} > {max_turns}"
         assert nums == sorted(nums), "turn numbers out of order"
@@ -1311,8 +1336,10 @@ def check_invariants(s, seen, speakers, max_turns=30, delivered=None):
     # clears it unconditionally -- so assert the property that actually discriminates.
     if s["dropped_delegation"]:
         assert s["turn"] > s["max_turns"], "a delegation was dropped with turns to spare"
-    body = speakers[:-1]  # drop the chair
-    said = (delivered or [True] * len(speakers))[:-1]
+    # kept speakers only: a discarded take is followed by its own retake, never
+    # by the owner, and it said nothing the room heard
+    body = [who for who, k in zip(speakers, kept) if k][:-1]  # drop the chair
+    said = [d for d, k in zip(delivered or [True] * len(speakers), kept) if k][:-1]
     for i, who in enumerate(body):
         if i + 1 >= len(body):
             break  # a trailing reviewer is the documented cap cut-off
@@ -3593,6 +3620,312 @@ def test_the_decision_reduction_always_names_an_ending():
         _NamedSite("local"),
     )[0]
     assert fallback.json["ended"] == "queue empty"
+
+
+# --- retakes (voice D3) ------------------------------------------------------
+
+def test_retakes_keep_every_invariant_and_consume_no_turns():
+    """T11: a retake is the same turn said again, so the default run's NN
+    sequence is unchanged and every model invariant still holds."""
+    script = {
+        "t02-owner": {"_retake": True},
+        "t02-owner-take2": {"_retake": True},
+        "t05-tpm": {"_retake": True},
+    }
+    _, _, s, seen, sp, ok = _drive(script)
+
+    check_invariants(s, seen, sp, delivered=ok)
+    assert seen[2:5] == ["t02-owner", "t02-owner-take2", "t02-owner-take3"]
+    assert "t05-tpm-take2" in seen
+    assert [p for p in seen if "-take" not in p] == _drive({})[3]
+    assert s["turn"] == 15
+
+
+def test_a_pending_retake_runs_before_a_pending_delegation_and_the_cap():
+    pb = _committee()
+    run = _run(phase="t30-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=30, turn=31, max_turns=30, opening=[],
+             delegation="Cut the ask.", delegation_turn=30)
+    pb._begin(s, "t30-owner")
+    s["retake"] = "Retake 2 of 3."
+
+    assert pb.next_phase(run) == "t30-owner-take2"
+    assert s["delegation"] == "Cut the ask." and s["turn"] == 31
+    run.phase = "t30-owner-take2"
+    assert pb.next_phase(run) == "decision"  # the cap still drops the delegation
+    assert s["dropped_delegation"] == "Cut the ask."
+
+    early = _run(phase="t04-owner")
+    early.id = "committee-early"
+    e = pb._state(early)
+    e.update(current_role="owner", current_turn=4, turn=5, opening=[],
+             delegation="Cut the ask.", delegation_turn=4)
+    pb._begin(e, "t04-owner")
+    e["retake"] = "Retake 2 of 3."
+    assert pb.next_phase(early) == "t04-owner-take2"
+    early.phase = "t04-owner-take2"
+    assert pb.next_phase(early) == "t05-junior_ic"  # the delegation follows
+
+
+# 202 words and one bold span: over the cap and bold, for any speaker.
+_WALL = "**Bold** claim. " + "word " * 200
+
+
+def _speaking(pb, run, role, turn, *, base=None):
+    """State for a speaking phase next_phase just minted: speaker, NN, take 1."""
+    s = pb._state(run)
+    s.update(current_role=role, current_turn=turn, opening=[], turn=turn + 1)
+    pb._begin(s, base or f"t{turn:02d}-{role}")
+    return s
+
+
+def test_a_violating_take_is_discarded_and_retaken_under_the_same_turn():
+    """T4: nothing of the discarded take reaches the room or moves a gate."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t02-owner")
+    s = _speaking(pb, run, "owner", 2)
+    answer = _turn_answer(_WALL, delegate="yes", action="Cut the staffing ask.", close="yes")
+
+    red = pb.reduce(run, "t02-owner", [_finding(run, f"{run.id}/t02-owner", answer)],
+                    _NamedSite("local"))
+
+    assert [r.kind for r in red] == ["take"]
+    doc = red[0].json
+    assert (doc["phase"], doc["role"], doc["turn"], doc["take"]) == ("t02-owner", "owner", 2, 1)
+    assert doc["kept"] is False and doc["delivered"] is True
+    assert doc["violations"] == ["over_cap", "bold"]
+    assert doc["voice"]["words"] == 202 and doc["action"] == "Cut the staffing ask."
+    assert "needs_human_ticket_ids" not in doc
+    assert not {"artifact", "revised", "cap"} & set(doc)
+    assert not thread.path(run.id).exists()
+    assert s["delegation"] is None and s["closed"] is False
+    assert s["held"] == {"answer": answer, "take": 1}
+
+    assert pb.next_phase(run) == "t02-owner-take2"
+    assert (s["turn"], s["current_turn"], s["last_speaker"]) == (3, 2, "owner")
+    assert s["note"] == (
+        "Retake 2 of 3. Rules broken: 202 words (cap 150); 1 bold. Say it again within them."
+    )
+
+
+def test_a_discarded_reviewer_take_queues_no_floor_request():
+    pb = _committee()
+    run = _run(phase="t03-tl")
+    s = _speaking(pb, run, "tl", 3)
+
+    pb.reduce(run, "t03-tl",
+              [_finding(run, f"{run.id}/t03-tl", _turn_answer(_WALL, request_floor="yes"))],
+              _NamedSite("local"))
+
+    assert s["queue"] == [] and s["last_speaker"] == "owner"
+
+
+def test_discard_merges_a_later_loops_extra_keys():
+    pb = _committee()
+    run = _run(phase="s1-owner")
+    s = _speaking(pb, run, "owner", 0, base="s1-owner")
+    discard, metrics, violations, flags = pb._grade(run, s, "owner", _WALL)
+
+    red = pb._discard(run, s, "owner", _WALL, metrics, violations, flags, None, extra={"stage": 1})
+
+    assert discard is True and red[0].kind == "take"
+    assert red[0].json["stage"] == 1 and red[0].json["turn"] is None
+    assert red[0].json["phase"] == "s1-owner"
+
+
+def test_retake_and_image_names_key_on_the_base_not_on_turn_and_role():
+    pb = _committee()
+    site = _NamedSite("local")
+    names, goals = [], []
+    for base in ("s1-owner", "o01-owner"):
+        run = _run(phase=base)
+        run.id = f"committee-{base}"
+        s = _speaking(pb, run, "owner", 0, base=base)
+        goals.append(pb.seed(run, site)[0].payload["goal"])
+        s["retake"] = "Retake 2 of 3."
+        names.append(pb.next_phase(run))
+
+    assert names == ["s1-owner-take2", "o01-owner-take2"]
+    assert "one image, s1-owner.svg or s1-owner.png" in goals[0]
+    assert "one image, o01-owner.svg or o01-owner.png" in goals[1]
+
+
+def test_grade_without_file_images_never_accepts_a_file():
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="o01-owner")
+    s = _speaking(pb, run, "owner", 0, base="o01-owner")
+    (thread.images_dir(run.id) / "o01-owner.svg").write_bytes(b"<svg></svg>")
+    answer = "Staffing is flat.\n![curve](images/o01-owner.svg)\nDescription: engineers per week."
+
+    assert pb._grade(run, s, "owner", answer)[2] == []
+    discard, metrics, violations, _ = pb._grade(run, s, "owner", answer, file_images=False)
+    assert violations == ["image_missing"] and discard is True
+    assert metrics["images"][0]["ok"] is False
+
+
+def test_a_refused_images_folder_is_an_image_not_ok_and_never_raises(tmp_path):
+    """A worker that plants images/ as a symlink gets no image through it, and
+    reduce still returns: take 1 is sent back, take 3 is kept and flagged."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t02-owner")
+    s = _speaking(pb, run, "owner", 2)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "t02-owner.svg").write_bytes(b"<svg></svg>")  # a valid file, behind the link
+    (tmp_path / "runs" / run.id).mkdir(parents=True)
+    (tmp_path / "runs" / run.id / "images").symlink_to(elsewhere, target_is_directory=True)
+    answer = "Staffing is flat.\n![curve](images/t02-owner.svg)\nDescription: engineers per week."
+
+    discard, metrics, violations, _ = pb._grade(run, s, "owner", answer)
+    assert (discard, violations, metrics["images"][0]["ok"]) == (True, ["image_missing"], False)
+
+    s["take"] = 3
+    doc = pb.reduce(run, "t02-owner-take3", [_finding(run, f"{run.id}/t02-owner-take3", answer)],
+                    _NamedSite("local"))[0]
+    assert doc.kind == "turn" and doc.json["violations"] == ["image_missing"]
+    assert doc.json["voice"]["images"][0]["ok"] is False
+    assert "## turn 02" in thread.path(run.id).read_text()
+
+
+def test_a_turn_seed_makes_the_images_folder_and_offers_no_image_through_a_refused_one(tmp_path):
+    """A run opened before the images folder existed gets it (0700) from the
+    turn that offers the image, not from a worker at 0755. A planted symlink
+    makes seed offer no image instead of failing the run."""
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t02-owner")
+    _speaking(pb, run, "owner", 2)
+    folder = tmp_path / "runs" / run.id / "images"
+    assert not folder.exists()
+
+    offered = pb.seed(run, site)[0].payload["goal"]
+
+    assert folder.is_dir() and (folder.stat().st_mode & 0o777) == 0o700
+    assert "one image, t02-owner.svg or t02-owner.png" in offered
+
+    planted = _run(phase="t03-tl")
+    planted.id = "committee-planted"
+    _speaking(pb, planted, "tl", 3)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "runs" / planted.id).mkdir(parents=True)
+    (tmp_path / "runs" / planted.id / "images").symlink_to(elsewhere, target_is_directory=True)
+
+    refused = pb.seed(planted, site)[0].payload["goal"]
+
+    assert "one image" not in refused and "write no file at all" in refused
+
+
+def test_a_retake_ticket_names_its_take_and_carries_the_note():
+    pb = _committee()
+    run = _run(phase="t02-owner")
+    s = _speaking(pb, run, "owner", 2)
+    s["retake"] = "Retake 2 of 3. Your last take broke the ground rules: 1 bold."
+    run.phase = pb.next_phase(run)
+
+    ticket = pb.seed(run, _NamedSite("local"))[0]
+
+    assert ticket.id == f"{run.id}/t02-owner-take2"
+    assert ticket.payload["title"] == "turn 2 — Maya Okonkwo (owner) takes the floor (take 2)"
+    assert "Retake 2 of 3. Your last take broke the ground rules: 1 bold." in ticket.payload["goal"]
+    assert "one image, t02-owner.svg or t02-owner.png" in ticket.payload["goal"]
+    assert set(ticket.payload) == {"role", "title", "goal", "kind", "action"}
+
+
+def test_a_fresh_process_after_a_discarded_take_leaves_the_thread_at_the_last_kept_turn():
+    from playbooks.committee import thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t01-tl")
+    _speaking(pb, run, "tl", 1)
+    pb.reduce(run, "t01-tl", [_finding(run, f"{run.id}/t01-tl", "Defer it.")], site)
+    _speaking(pb, run, "owner", 2)
+    pb.reduce(run, "t02-owner", [_finding(run, f"{run.id}/t02-owner", _WALL)], site)
+
+    fresh = _committee()
+    run.phase = "t02-owner-take2"
+    assert fresh.next_phase(run) is None
+    assert fresh.reduce(run, "t02-owner-take2", [], site)[0].kind == "lost"
+    text = thread.path(run.id).read_text()
+    assert "## turn 01" in text and "## turn 02" not in text
+
+
+def test_the_third_take_is_kept_verbatim_and_flagged():
+    """T5: never clipped, recorded as the turn, with the rules it broke."""
+    from playbooks.committee import thread, turnblock
+
+    pb = _committee()
+    run = _run(phase="t02-owner-take3")
+    s = _speaking(pb, run, "owner", 2)
+    s.update(take=3, held={"answer": "earlier", "take": 2}, retake=None)
+    answer = _turn_answer(_WALL, close="no")
+
+    doc = pb.reduce(run, "t02-owner-take3", [_finding(run, f"{run.id}/t02-owner-take3", answer)],
+                    _NamedSite("local"))[0]
+
+    assert doc.kind == "turn"
+    assert (doc.json["take"], doc.json["takes"], doc.json["kept"]) == (3, 3, True)
+    assert doc.json["violations"] == ["over_cap", "bold"]
+    assert doc.json["flags"] == ["no_pointer", "no_example", "long_first_line"]
+    assert doc.json["body"] == turnblock.strip(answer)
+    assert turnblock.strip(answer) in thread.path(run.id).read_text()
+    assert s["held"] is None and s["retake"] is None
+
+
+def test_a_kept_take_one_records_its_voice():
+    pb = _committee()
+    run = _run(phase="t03-staff_ic")
+    _speaking(pb, run, "staff_ic", 3)
+    answer = _turn_answer("Defer it: `engine/dispatch.py:284` drops the lease, e.g. at 3 s.",
+                          stance="defer")
+
+    doc = pb.reduce(run, "t03-staff_ic", [_finding(run, f"{run.id}/t03-staff_ic", answer)],
+                    _NamedSite("local"))[0].json
+
+    assert (doc["take"], doc["takes"], doc["kept"]) == (1, 1, True)
+    assert doc["violations"] == [] and doc["flags"] == []
+    assert doc["voice"]["pointers"] == 1 and doc["voice"]["stance_chars"] == 5
+
+
+@pytest.mark.parametrize("retake", ["undelivered", "signals only"])
+def test_a_retake_that_delivers_nothing_keeps_the_held_take(retake):
+    from playbooks.committee import thread, turnblock
+
+    pb = _committee()
+    run = _run(phase="t02-owner-take2")
+    s = _speaking(pb, run, "owner", 2)
+    held = _turn_answer("Defer it: " + "word " * 160, close="no", stance="defer")
+    s.update(take=2, held={"answer": held, "take": 1})
+    findings = [] if retake == "undelivered" else [
+        _finding(run, f"{run.id}/t02-owner-take2", _turn_answer("", close="no"))]
+
+    doc = pb.reduce(run, "t02-owner-take2", findings, _NamedSite("local"))[0].json
+
+    assert (doc["take"], doc["takes"]) == (1, 2)
+    assert doc["violations"] == ["over_cap", "retake_failed"]
+    assert doc["voice"]["words"] == 162 and doc["voice"]["stance_chars"] == 5  # re-graded
+    assert doc["delivered"] is True and doc["body"] == turnblock.strip(held)
+    assert thread.path(run.id).read_text().count("## turn 02") == 1
+    assert s["held"] is None
+
+
+def test_an_undelivered_take_one_is_kept_with_no_voice():
+    pb = _committee()
+    run = _run(phase="t03-tl")
+    _speaking(pb, run, "tl", 3)
+
+    doc = pb.reduce(run, "t03-tl", [], _NamedSite("local"))[0].json
+
+    assert doc["delivered"] is False and doc["voice"] is None
+    assert (doc["take"], doc["takes"], doc["violations"], doc["flags"]) == (1, 1, [], [])
 
 
 # --- registration and wiring ---------------------------------------------
