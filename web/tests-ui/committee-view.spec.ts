@@ -241,6 +241,104 @@ function seedVoice(): void {
   }
 }
 
+/** A third run: its committee is seated and nobody has spoken yet. The chair's
+ *  ratification has reduced, `next_phase` minted t01 and that worker has not
+ *  answered, so there is one final `selection` reduction and no turn. That is
+ *  the state that used to render "Nothing said yet". */
+const SELECTION_RUN = 'committee-e2e-selection';
+/** 2 x 4 reviewers + 16. The container runs without HERMES_COMMITTEE_MAX_TURNS,
+ *  so its env fallback is 30: a 24 can only have come off the reduction. */
+const SELECTION_CAP = 24;
+const SECURITY_WHY = 'the federation layer opens a trust boundary between teams';
+/** A derived seat's rationale is a selector's words, stored as written: the tag
+ *  must show as typed and its image must never load. */
+const CREW_WHY =
+  'owns a crew the federation layer would schedule work onto <img src="https://outside.example/crew.png">';
+/** The chair's own figure points off-site, so voice never passed it: it stays a
+ *  placeholder and the browser never fetches it. */
+const PAGER = 'https://outside.example/pager.png';
+
+type Nominator = 'owner' | 'manager' | 'senior_director' | 'fixed' | 'default';
+
+/** A C3 seat record, as `_apply_selection` installs it and the final reduction
+ *  carries it. The view reads role, name, title, rationale, nominated_by and
+ *  source, so the brief fields stay empty here. */
+function seatRecord(
+  role: string, name: string, title: string, rationale: string,
+  nominated_by: Nominator, source: 'fixed' | 'library' | 'derived',
+) {
+  return {
+    role, name, title, altitude: '', goal: '', ambition: '', stake: '', lens: '', style: '',
+    rationale, nominated_by, source,
+  };
+}
+
+/** Roster order: owner, the reviewers in opening order, junior_ic. */
+const SEATED = [
+  seatRecord('owner', 'Maya Okonkwo', 'Staff Engineer & proposal owner',
+    'wrote the proposal and answers every reviewer', 'fixed', 'fixed'),
+  seatRecord('senior_director', 'Dana Whitfield', 'Senior Director of Engineering',
+    'chairs the committee and delivers its decision', 'fixed', 'fixed'),
+  seatRecord('manager', 'Ruth Delgado', 'Engineering Manager',
+    'manages the owner and staffs whatever is decided', 'fixed', 'fixed'),
+  seatRecord('security', 'Nadia Haddad', 'Security Engineer', SECURITY_WHY, 'owner', 'library'),
+  seatRecord('crew_owner', 'Iris Kovacs', 'Engineering Lead, crew owner team', CREW_WHY,
+    'manager', 'derived'),
+  seatRecord('junior_ic', 'Alex Moreau', 'Software Engineer',
+    'makes the edits the owner delegates', 'fixed', 'fixed'),
+];
+
+/** The chair's stage-3 take, kept on her third take with the off-site figure
+ *  flagged (voice keeps the last take and runs on): C5's per-stage keys plus the
+ *  final ones. voice.words is the prose alone; the figure lines are not prose. */
+const RATIFIED = {
+  stage: 3, role: 'senior_director', final: true, delivered: true,
+  body: 'Seat both. Security signs off the trust boundary and the crew owner carries the work.\n'
+    + `![pager rota](${PAGER})\nDescription: who carries the pager each week`,
+  parsed: true, code: null,
+  proposed: SEATED.filter((s) => s.source !== 'fixed')
+    .map(({ role, name, title, rationale }) => ({ role, name, title, rationale })),
+  error: null, cap: SELECTION_CAP, take: 3, takes: 3, kept: true,
+  voice: {
+    words: 15,
+    images: [{
+      kind: 'image', name: PAGER, ref: PAGER, caption: 'pager rota',
+      description: 'who carries the pager each week', ok: false,
+    }],
+  },
+  violations: ['image_missing'], flags: [],
+  seated: SEATED,
+  reviewers: ['senior_director', 'manager', 'security', 'crew_owner'],
+  considered: [{
+    stakeholder: 'On-call SRE', role: null,
+    reason: 'the crews keep their own pager, so their owner speaks for on-call',
+    represented_by: 'crew_owner',
+  }],
+  fallback: null,
+};
+
+/** Idempotent, like `seed()`. Rows only: the off-site figure has no file. */
+function seedSelection(): void {
+  const db = new DatabaseSync(`${HOME}/queue.db`);
+  try {
+    const now = Date.now() / 1000;
+    db.prepare('DELETE FROM reductions WHERE run_id = ?').run(SELECTION_RUN);
+    db.prepare('DELETE FROM runs WHERE id = ?').run(SELECTION_RUN);
+    db.prepare(
+      `INSERT INTO runs (id, playbook, site, base_ref, config_json, state, phase,
+                         created_at, updated_at)
+       VALUES (?, 'committee', 'local', 'main', '{}', 'running', 't01-senior_director', ?, ?)`,
+    ).run(SELECTION_RUN, now, now);
+    // The phase `record_reduction` writes for the chair's ratification.
+    db.prepare(
+      `INSERT INTO reductions (run_id, phase, kind, json, review_state, created_at, updated_at)
+       VALUES (?, 's3-senior_director-take3', 'selection', ?, 'pending', ?, ?)`,
+    ).run(SELECTION_RUN, JSON.stringify(RATIFIED), now, now);
+  } finally {
+    db.close();
+  }
+}
+
 /** Open the committee tab for the seeded run and wait for real content. */
 async function openCommittee(page: Page): Promise<void> {
   await page.goto(`/#playbook?run=${RUN}`);
@@ -254,6 +352,7 @@ test.beforeAll(() => {
   if (!HOME) return;
   seed();
   seedVoice();
+  seedSelection();
 });
 
 test('the seeded run is served with a view', async ({ request }) => {
@@ -467,4 +566,71 @@ test('one injected script tag, and the host React is the only React', async ({ p
   // A second React copy does not fail a build or a jsdom test -- it throws here.
   const hookErrors = fatal.filter((e) => /Invalid hook call|Minified React error/i.test(e));
   expect(hookErrors, hookErrors.join('\n')).toEqual([]);
+});
+
+test('the committee tab shows the seated roster before the first turn', async ({ page, request }) => {
+  // The server half, inside the container: the baked view.py builds the roster
+  // and the selection block from the one reduction, with no turn to lean on.
+  const data = await (await request.get(`/api/runs/${SELECTION_RUN}/view`)).json();
+  expect(data.timeline).toEqual([]);
+  expect(data.selection?.state).toBe('seated');
+  expect(data.progress.cap).toBe(SELECTION_CAP);
+  expect(data.roster.map((p: { role: string }) => p.role)).toEqual(SEATED.map((s) => s.role));
+  expect(data.roster.find((p: { role: string }) => p.role === 'crew_owner')).toMatchObject({
+    name: 'Iris Kovacs', rationale: CREW_WHY, nominated_by: 'manager',
+    nominated_by_name: 'Ruth Delgado', source: 'derived',
+  });
+
+  // Image requests only, attached before the page loads (as the voice case does).
+  const images: string[] = [];
+  page.on('request', (r) => { if (r.resourceType() === 'image') images.push(r.url()); });
+
+  await page.goto(`/#playbook?run=${SELECTION_RUN}`);
+  await expect(page.getByLabel('Hermes')).toBeVisible();
+  const why = (role: string) => page.locator(`[data-testid="roster-why-${role}"]`);
+  const by = (role: string) => page.locator(`[data-testid="roster-nominated-${role}"]`);
+  await expect(why('security')).toBeVisible({ timeout: 15000 });
+
+  // A library seat and a derived seat: why each is there and who put it forward.
+  // The derived rationale's tag is text: textContent keeps it only if nothing parsed it.
+  await expect(why('security')).toContainText(`why: ${SECURITY_WHY}`);
+  await expect(by('security')).toContainText('put forward by Maya Okonkwo');
+  await expect(page.locator('[data-testid="roster-security"]')).not.toContainText('derived seat');
+  const crew = page.locator('[data-testid="roster-crew_owner"]');
+  await expect(crew).toContainText('Iris Kovacs');
+  await expect(crew).toContainText('crew_owner · derived seat');
+  await expect(why('crew_owner')).toContainText(`why: ${CREW_WHY}`);
+  await expect(by('crew_owner')).toContainText('put forward by Ruth Delgado');
+  // A seat nobody had to put forward.
+  await expect(by('owner')).toContainText('fixed seat');
+  // The cap the master resolved, not the server's env guess of 30.
+  await expect(page.locator('[data-testid="turn-count"]')).toHaveText(`turn 0 of ${SELECTION_CAP}`);
+
+  // The Selection card: the chair's ratification, its seats, who was considered.
+  await expect(page.locator('[data-testid="selection-card"]')).toBeVisible();
+  const stage = page.locator('[data-testid="selection-stage-3"]');
+  await expect(stage).toContainText('Dana Whitfield');
+  await expect(stage).toContainText('ratifies');
+  await expect(stage).toContainText('broke the ground rules');
+  await expect(stage).toContainText('Security signs off the trust boundary');
+  // Her off-site figure reached the card as a figure, and was not drawn.
+  await expect(stage.locator('[data-testid="image-unavailable"]')).toBeVisible();
+  await expect(stage.getByText('who carries the pager each week')).toBeVisible();
+  const proposed = page.locator('[data-testid="selection-proposed-3"]');
+  await expect(proposed).toContainText('crew_owner · derived seat: Iris Kovacs');
+  await expect(proposed).toContainText(CREW_WHY);
+  const considered = page.locator('[data-testid="selection-considered"]');
+  await expect(considered).toContainText('On-call SRE');
+  await expect(considered).toContainText('Represented by Iris Kovacs');
+
+  // Neither worker-written image became an <img>, and nothing on the page asked
+  // another origin for one. The DOM check holds even where the CSP would have
+  // blocked the request before the listener saw it.
+  await expect(page.locator('img[src*="outside.example"]')).toHaveCount(0);
+  const origin = new URL(page.url()).origin;
+  const outside = images.filter((u) => /^https?:/.test(u) && new URL(u).origin !== origin);
+  expect(outside, outside.join('\n')).toEqual([]);
+
+  // Asserted only once the roster has rendered, so it cannot pass on a blank page.
+  await expect(page.getByText('Nothing said yet')).toHaveCount(0);
 });
