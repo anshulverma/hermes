@@ -57,6 +57,12 @@ DECISION_PHASES: tuple[str, ...] = ("decision",) + tuple(
     f"decision-take{k}" for k in range(2, voice.MAX_TAKES + 1)
 )
 
+# What the final selection reduction adds (selection C5, and the counts of the
+# FIX_SA amendment): `resolve` and `fallback` return exactly these.
+_FINAL_KEYS = (
+    "seated", "reviewers", "considered", "considered_dropped", "invalid_dropped", "fallback",
+)
+
 
 def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> None:
     """The gates of spec 5.4, applied to one settled turn.
@@ -93,6 +99,23 @@ def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> 
         if block.get("delegate") and block.get("action"):
             s["delegation"] = block["action"]
             s["delegation_turn"] = s["current_turn"]
+
+
+def _apply_selection(s: dict, resolved: dict) -> None:
+    """Install the ratified committee on the run's state (selection D1, D2).
+
+    After ``open`` seats the fixed four, this is the only writer of
+    ``roster``, ``reviewers`` and ``opening``, and only ``_reduce_select``
+    calls it, on the chair's kept take. ``resolved`` is the dict
+    ``selection.resolve`` or ``selection.fallback`` returns. All three are
+    built before any is assigned, so a malformed ``resolved`` raises with the
+    state untouched and the caller installs the fallback: ``opening`` is
+    inside ``roster`` before t01 is seeded.
+    """
+    roster = {seat["role"]: seat for seat in resolved["seated"]}
+    reviewers = list(resolved["reviewers"])
+    # `opening` a copy: the opening round is popped as it runs, `reviewers` never is
+    s.update(roster=roster, reviewers=reviewers, opening=list(reviewers))
 
 
 def _latest_answer(findings: list[Finding] | None) -> str:
@@ -539,8 +562,11 @@ class CommitteePlaybook:
                 last_take=s["last_take"],
             )
         else:
+            # Named through the run's own committee: a library or derived seat
+            # is not in cast.CAST, and {} (a state that never ran `open`) is CAST.
             title = cast.title(
-                role, kind, turn=s["current_turn"], action=action, take=s["take"]
+                role, kind, turn=s["current_turn"], action=action, take=s["take"],
+                roster=s["roster"] or None,
             )
             goal = cast.goal(
                 role,
@@ -552,6 +578,7 @@ class CommitteePlaybook:
                 image=image,
                 retake=s["note"],
                 last_take=s["last_take"],
+                roster=s["roster"] or None,
             )
 
         return [Ticket(
@@ -846,6 +873,35 @@ class CommitteePlaybook:
         s["stages"].append(
             {"stage": stage, "role": role, "delivered": delivered, "doc": doc, "code": code}
         )
+        # The chair's kept take ratifies (D2 rule 1): resolve and install the
+        # committee HERE, before next_phase can mint t01, so the opening round
+        # only ever names a seated reviewer. Stage 3's record and thread entry
+        # are already written, so resolve sees all three stages and `## committee
+        # seated` follows the ratification. Never raises: a resolve that raises
+        # (a malformed stage record can), or returns what cannot be installed,
+        # seats the default committee with the reason on `error`.
+        final: dict = {}
+        if stage == 3:
+            try:
+                resolved = selection.resolve(s["stages"], cast.LIBRARY)
+                final = {key: resolved[key] for key in _FINAL_KEYS}
+                _apply_selection(s, final)
+            except Exception as exc:  # never raise out of reduce
+                final = selection.fallback("unparseable")  # reads no stage data
+                _apply_selection(s, final)
+                errors.append(f"resolve: {exc}")
+            try:
+                thread.append_seated(
+                    run.id,
+                    seated=final["seated"],
+                    considered=final["considered"],
+                    fallback=final["fallback"],
+                    roster=s["roster"],
+                    # what resolve's caps cut, counted in one line (decision 8)
+                    dropped=final["considered_dropped"] + final["invalid_dropped"],
+                )
+            except Exception as exc:  # never raise out of reduce
+                errors.append(f"thread: {exc}")
         return [Reduction(kind="selection", json={
             "stage": stage,
             "role": role,
@@ -871,6 +927,10 @@ class CommitteePlaybook:
             "voice": metrics,
             "violations": violations,
             "flags": flags,
+            # the ratified committee, on the final stage only (C5). Readers take
+            # the latest selection reduction with `final: true`; view_data runs
+            # in the server process and learns the committee from here alone.
+            **final,
         })]
 
     def _reduce_turn(
@@ -903,7 +963,9 @@ class CommitteePlaybook:
         # An empty body makes `append_turn` write the NO_TURN stub, so a failed
         # turn is visible in the transcript rather than missing from it.
         try:
-            thread.append_turn(run.id, turn=turn, role=role, body=body)
+            thread.append_turn(
+                run.id, turn=turn, role=role, body=body, roster=s["roster"] or None
+            )
         except Exception as exc:  # never raise out of reduce
             errors.append(f"thread: {exc}")
 

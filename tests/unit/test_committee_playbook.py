@@ -5247,7 +5247,7 @@ def test_selection_phases_precede_the_opening_round(artifact):
 
     _, _, d, seen, sp, ok = _drive(script, selection=DEFAULT_SELECTION)
 
-    check_invariants(d, seen, sp, delivered=ok)
+    check_invariants(d, seen, sp, delivered=ok, reviewers=d["reviewers"])
     assert seen[:5] == ["open", *stages, "t01-senior_director"]
     assert seen[5:7] == ["t02-owner", "t03-junior_ic"]
     # a junior turn is "turn" too; the last mint was the decision
@@ -5395,7 +5395,235 @@ def test_a_selectors_turn_block_is_stripped_and_ignored():
     assert pb.next_phase(run) == "s2-manager"
 
 
-# --- registration and wiring ---------------------------------------------
+# --- the ratified committee runs the meeting (selection D1, D2, D4) ----------
+
+# A seat neither cast.CAST nor cast.LIBRARY holds: one the selectors derive from
+# the document. Any name lookup that skips the run's roster raises KeyError on it.
+_CREW = {
+    "role": "crew_owner",
+    "name": "Noor Haddad",
+    "title": "Crew Owner, dependent team",
+    "lens": "what the crews lose when a lease drops",
+    "rationale": "owns the crews this layer would schedule",
+}
+
+
+def test_the_ratified_list_takes_the_opening_round(artifact):
+    """The chair's library seat and derived seat speak by name, in her order,
+    after the two fixed reviewers. The tickets for the derived seat's turn,
+    its retake included, are built from the run's roster, not from cast.CAST."""
+    from playbooks.committee import thread
+
+    sel = {
+        "owner": _selection_answer(["security"]),
+        "manager": _selection_answer(["security", _CREW]),
+        "senior_director": _selection_answer(["security", _CREW]),
+    }
+    _, _, s, seen, sp, ok = _drive({}, selection=sel)
+
+    check_invariants(s, seen, sp, delivered=ok, reviewers=s["reviewers"])
+    assert seen[:4] == ["open", "s1-owner", "s2-manager", "s3-senior_director"]
+    assert seen[4:] == [
+        "t01-senior_director", "t02-owner", "t03-manager", "t04-owner",
+        "t05-security", "t06-owner", "t07-crew_owner", "t08-owner", "decision",
+    ]
+    assert list(s["roster"]) == [
+        "owner", "senior_director", "manager", "security", "crew_owner", "junior_ic"]
+    assert s["reviewers"] == ["senior_director", "manager", "security", "crew_owner"]
+    assert {role: seat["nominated_by"] for role, seat in s["roster"].items()} == {
+        "owner": "fixed", "senior_director": "fixed", "manager": "fixed",
+        "security": "owner", "crew_owner": "manager", "junior_ic": "fixed",
+    }
+    assert s["roster"]["security"]["name"] == cast.LIBRARY["security"]["name"]
+    assert (s["roster"]["crew_owner"]["name"], s["roster"]["crew_owner"]["source"]) == (
+        "Noor Haddad", "derived")
+
+    # The real seed and reduce, from `open`. No turn delivers, so the owner
+    # answers nobody and the fourth turn belongs to the derived seat.
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(config={"goals": ["Decide whether to fund the migration."]})
+    run.id = "committee-seated"
+    pb.seed(run, site)
+    state = pb._state(run)
+    for _ in range(3):
+        run.phase = pb.next_phase(run)
+        answer = sel[state["current_role"]]
+        pb.reduce(run, run.phase, [_finding(run, f"{run.id}/{run.phase}", answer)], site)
+    walked = []
+    for _ in range(4):
+        run.phase = pb.next_phase(run)
+        walked.append(run.phase)
+        if run.phase != "t04-crew_owner":
+            pb.reduce(run, run.phase, [], site)
+    assert walked == ["t01-senior_director", "t02-manager", "t03-security", "t04-crew_owner"]
+
+    ticket = pb.seed(run, site)[0]
+    assert ticket.payload["title"] == "turn 4 — Noor Haddad (crew_owner) takes the floor"
+    goal = ticket.payload["goal"]
+    assert "You are Noor Haddad, Crew Owner, dependent team." in goal
+    assert f"style: {cast.DERIVED_STYLE}" in goal
+    assert "one image, t04-crew_owner.svg or t04-crew_owner.png" in goal  # voice's image
+    assert len(goal) < cast.GOAL_MAX
+
+    # A take voice sends back: the retake is still the derived seat's, named
+    # through the roster, and names the take it replaces (voice's last_take).
+    sent_back = pb.reduce(run, run.phase, [_finding(run, ticket.id, _WALL)], site)[0]
+    assert sent_back.kind == "take"
+    run.phase = pb.next_phase(run)
+    assert run.phase == "t04-crew_owner-take2"
+    retake = pb.seed(run, site)[0]
+    assert retake.payload["title"] == (
+        "turn 4 — Noor Haddad (crew_owner) takes the floor (take 2)")
+    goal = retake.payload["goal"]
+    assert goal.startswith("You are Noor Haddad, Crew Owner, dependent team.\n")
+    assert "\nYour last take is in takes/t04-crew_owner-take1.md beside the thread" in goal
+    assert "one image, t04-crew_owner.svg or t04-crew_owner.png" in goal
+    assert len(goal) < cast.GOAL_MAX
+
+    said = [_finding(run, retake.id, "Crews break first when a lease drops.")]
+    red = pb.reduce(run, run.phase, said, site)[0]
+    assert red.kind == "turn" and red.json["error"] is None and red.json["take"] == 2
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert "## turn 04 — Noor Haddad, Crew Owner, dependent team (crew_owner)" in text
+
+
+def test_a_fallback_selection_leaves_todays_phase_sequence():
+    """AC4: a chair whose list is unusable seats today's seven, the fallback
+    code is recorded, and the meeting after s3 is exactly today's meeting."""
+    chairs = {
+        "chair_failed": None,  # undelivered
+        "no_block": "We keep the usual committee and add nobody.",
+        "unparseable": "Seats below.\n\n```hermes-selection\n{not json\n```\n",
+        "too_few": _selection_answer(["chair", "owner"]),  # reserved slugs only
+    }
+    today = _drive({})[3]
+    for code, chair in chairs.items():
+        log = []
+        _, _, s, seen, sp, ok = _drive(
+            {}, selection={**DEFAULT_SELECTION, "senior_director": chair}, reductions=log)
+
+        check_invariants(s, seen, sp, delivered=ok, reviewers=s["reviewers"])
+        finals = [r.json for _, r in log if r.kind == "selection" and r.json["final"]]
+        assert len(finals) == 1, code
+        assert finals[0]["fallback"] == code
+        assert finals[0]["reviewers"] == s["reviewers"] == list(cast.SENIORITY), code
+        assert list(s["roster"]) == list(cast.CAST), code
+        assert s["roster"]["tpm"]["nominated_by"] == "default", code
+        assert seen[1:4] == ["s1-owner", "s2-manager", "s3-senior_director"], code
+        assert seen[4:] == today[1:], code
+
+
+def test_reduce_select_never_raises_and_routes_nothing_to_review(monkeypatch):
+    """D2: a resolve that raises installs the default committee with its text
+    on `error`, and a seated entry that cannot be written costs only that
+    line. Either way every reviewer is seated before t01 is seeded, and no
+    selection reduction routes a ticket to review (Q3: no gate)."""
+    from playbooks.committee import selection, thread
+
+    def ratify(run_id, stages=()):
+        pb = _committee()
+        run = _run()
+        run.id = run_id
+        s = pb._state(run)
+        # what `open` leaves, plus any stage records already on the state
+        s.update(roster=selection.fixed_seats(), selection_next=1, stages=list(stages))
+        out = []
+        for _ in range(3):
+            run.phase = pb.next_phase(run)
+            answer = DEFAULT_SELECTION[s["current_role"]]
+            out.append(pb.reduce(run, run.phase, [_finding(run, f"{run.id}/{run.phase}", answer)],
+                                 _NamedSite("local")))
+        return pb, run, s, out
+
+    # A malformed stage record makes the real resolve raise (Task 3 review):
+    # the default committee is seated and its entry still reaches the thread.
+    _, run, s, out = ratify("committee-junk-stage", stages=["junk"])
+    final = out[-1][0].json
+    assert final["fallback"] == "unparseable" and final["error"].startswith("resolve: ")
+    assert final["reviewers"] == s["reviewers"] == s["opening"] == list(cast.SENIORITY)
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert "\n## committee seated\n" in text and "\nFallback: unparseable\n" in text
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(selection, "resolve", boom)
+    monkeypatch.setattr(thread, "append_seated", boom)
+    pb, run, s, out = ratify("committee-boom")
+
+    assert [[r.kind for r in red] for red in out] == [["selection"]] * 3
+    assert not any("needs_human_ticket_ids" in red[0].json for red in out)
+    final = out[-1][0].json
+    assert final["final"] is True and final["fallback"] == "unparseable"
+    assert "resolve: boom" in final["error"] and "thread: boom" in final["error"]
+    assert [seat["role"] for seat in final["seated"]] == list(cast.CAST)
+    assert final["reviewers"] == s["reviewers"] == s["opening"] == list(cast.SENIORITY)
+    assert (final["considered"], final["considered_dropped"], final["invalid_dropped"]) == (
+        [], 0, 0)
+    assert set(s["opening"]) <= set(s["roster"])
+    assert pb.next_phase(run) == "t01-senior_director"
+
+
+def test_a_failed_first_stage_never_triggers_a_fallback():
+    """Gap 3: a stage-1 list that is not a list is that stage's `too_few`,
+    never the run's fallback. Only the chair's code decides."""
+    owner = 'Security first.\n\n```hermes-selection\n{"seats": "security"}\n```\n'
+    log = []
+    _, _, s, seen, sp, ok = _drive(
+        {}, selection={**DEFAULT_SELECTION, "owner": owner}, reductions=log)
+
+    check_invariants(s, seen, sp, delivered=ok, reviewers=s["reviewers"])
+    first, final = log[0][1].json, log[-1][1].json
+    assert (first["stage"], first["parsed"], first["code"]) == (1, True, "too_few")
+    assert s["stages"][0]["code"] == "too_few"
+    assert final["final"] is True and final["fallback"] is None
+    assert final["reviewers"] == s["reviewers"] == list(cast.SENIORITY)
+    # the manager listed them first: stage 1 put nobody forward
+    assert (s["roster"]["tpm"]["nominated_by"], s["roster"]["tpm"]["source"]) == (
+        "manager", "library")
+
+
+def test_the_committee_seated_entry_follows_the_ratification():
+    """D3: the chair's reduce appends `## committee seated` straight after her
+    `## selection 3:` entry and before t01, with one line per seat in roster
+    order, each saying why and who put the seat forward. What resolve cut from
+    a long list is counted there and on the final reduction (decisions 5, 8)."""
+    from playbooks.committee import selection, thread
+
+    sel = {**DEFAULT_SELECTION, "senior_director": _selection_answer(["security", "tpm"])}
+    _, run, s, _, _, _ = _drive({}, selection=sel)
+
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    headings = [h.split(":", 1)[0] for h in re.findall(r"^## [^\n]*", text, flags=re.M)]
+    assert headings == ["## selection 1", "## selection 2", "## selection 3",
+                        "## committee seated"]
+    seated = text.split("## committee seated", 1)[1].strip().split("\n\n", 1)[0]
+    lines = seated.splitlines()
+    assert list(s["roster"]) == [
+        "owner", "senior_director", "manager", "security", "tpm", "junior_ic"]
+    assert [line.split(":", 1)[0] for line in lines] == [f"- {role}" for role in s["roster"]]
+    assert all(". Why: " in line and ". Put forward by " in line for line in lines), lines
+
+    # 25 bad slugs and 25 notes: 20 invalid kept of 25, then 40 considered of 45
+    bad = [{"role": f"Bad {i:02d}", "rationale": "named in the plan"} for i in range(25)]
+    notes = [{"stakeholder": f"Team {i:02d}", "reason": "no change for them"}
+             for i in range(25)]
+    one = _selection_answer(["security"])
+    log = []
+    _, run, s, _, _, _ = _drive({}, selection={
+        "owner": one, "manager": one,
+        "senior_director": _selection_answer(["security", *bad], not_seated=notes),
+    }, reductions=log)
+
+    final = log[-1][1].json
+    assert (final["fallback"], s["reviewers"]) == (None, ["senior_director", "manager", "security"])
+    assert len(final["considered"]) == selection.CONSIDERED_MAX
+    assert (final["considered_dropped"], final["invalid_dropped"]) == (5, 5)
+    entry = thread.path(run.id).read_text(encoding="utf-8").split("## committee seated", 1)[1]
+    assert "\nConsidered, not seated:\n" in entry
+    assert "\n- 10 more not listed.\n" in entry  # both counts, summed
+
 
 
 def test_registration_importing_the_package_registers_committee():
