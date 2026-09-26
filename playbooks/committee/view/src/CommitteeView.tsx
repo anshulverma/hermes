@@ -76,6 +76,10 @@ export type EvaluationDimension = {
   quote: string | null;
   /** calibrated · off (Δn) · uncalibrated · unknown on a judge row; null on a deterministic one. */
   calibration: string | null;
+  /** Why the scorer gave that score, clipped by the server; null when none. Optional, like the next: older payloads lack both. */
+  rationale?: string | null;
+  /** Scored under an older definition of the dimension than the current one. */
+  stale?: boolean;
 };
 
 /**
@@ -772,6 +776,9 @@ function EvaluationBlock({
   scorable: boolean;
 }) {
   const { Badge } = ds();
+  // Runnable as written: no bare `python` on the user's PATH, `playbooks` is
+  // importable only from the checkout, and run ids are per home.
+  const command = <code style={mono}>{`.venv/bin/python -m playbooks.committee.eval_cli run ${runId}`}</code>;
   let body: React.ReactNode;
 
   if (evaluation === null && !scorable) {
@@ -781,13 +788,10 @@ function EvaluationBlock({
       </div>
     );
   } else if (evaluation === null) {
-    // Runnable as written: no bare `python` on the user's PATH, `playbooks` is
-    // importable only from the checkout, and run ids are per home.
     body = (
       <div data-testid="evaluation-empty" style={quiet}>
-        Not evaluated. Score it with{' '}
-        <code style={mono}>{`.venv/bin/python -m playbooks.committee.eval_cli run ${runId}`}</code> from the
-        hermes checkout, with HERMES_HOME set to this control plane's home.
+        Not evaluated. Score it with {command} from the hermes checkout, with HERMES_HOME set to this control
+        plane's home.
       </div>
     );
   } else if (evaluation.state === 'error') {
@@ -845,6 +849,7 @@ function EvaluationBlock({
                   <td style={{ ...cell, whiteSpace: 'nowrap' }}>
                     <span data-testid={`eval-score-${id}`} style={mono}>
                       {d.score === null ? <span aria-label="not scored">—</span> : d.score}
+                      {d.stale && '*'}
                     </span>
                     {d.scorer === 'judge' && d.calibration !== 'calibrated' && (
                       <span style={{ marginLeft: 6 }}>
@@ -871,12 +876,25 @@ function EvaluationBlock({
                     }}
                   >
                     {d.quote ?? 'no verified quote'}
+                    {/* Folded: up to ~1000 chars per row would bury the scores. */}
+                    {d.rationale && (
+                      <details data-testid={`eval-why-${id}`}>
+                        <summary style={{ cursor: 'pointer', color: 'var(--text-muted)' }}>why</summary>
+                        <div style={{ whiteSpace: 'pre-wrap', color: 'var(--text-secondary)' }}>{d.rationale}</div>
+                      </details>
+                    )}
                   </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+        {/* eval_cli's STALE_NOTE, with this run for its <target>. */}
+        {ids.some((id) => dims[id].stale) && (
+          <div data-testid="eval-stale-note" style={quiet}>
+            * older definition; re-run {command}
+          </div>
+        )}
         <div data-testid="eval-flags" style={quiet}>
           Flags:{' '}
           {flags.size === 0

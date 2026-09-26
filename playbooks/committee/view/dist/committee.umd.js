@@ -1798,6 +1798,10 @@
 	};
 	function EvaluationBlock({ runId, evaluation, scorable }) {
 		const { Badge } = ds();
+		const command = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
+			style: mono,
+			children: `.venv/bin/python -m playbooks.committee.eval_cli run ${runId}`
+		});
 		let body;
 		if (evaluation === null && !scorable) body = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 			"data-testid": "evaluation-empty",
@@ -1808,12 +1812,8 @@
 			"data-testid": "evaluation-empty",
 			style: quiet,
 			children: [
-				"Not evaluated. Score it with",
-				" ",
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
-					style: mono,
-					children: `.venv/bin/python -m playbooks.committee.eval_cli run ${runId}`
-				}),
+				"Not evaluated. Score it with ",
+				command,
 				" from the hermes checkout, with HERMES_HOME set to this control plane's home."
 			]
 		});
@@ -1890,13 +1890,13 @@
 										...cell,
 										whiteSpace: "nowrap"
 									},
-									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 										"data-testid": `eval-score-${id}`,
 										style: mono,
-										children: d.score === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										children: [d.score === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 											"aria-label": "not scored",
 											children: "—"
-										}) : d.score
+										}) : d.score, d.stale && "*"]
 									}), d.scorer === "judge" && d.calibration !== "calibrated" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										style: { marginLeft: 6 },
 										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Badge, {
@@ -1915,18 +1915,38 @@
 									},
 									children: d.scorer
 								}),
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("td", {
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("td", {
 									style: {
 										...cell,
 										width: "100%",
 										overflowWrap: "anywhere",
 										color: d.quote ? "var(--text-secondary)" : "var(--text-muted)"
 									},
-									children: d.quote ?? "no verified quote"
+									children: [d.quote ?? "no verified quote", d.rationale && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("details", {
+										"data-testid": `eval-why-${id}`,
+										children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("summary", {
+											style: {
+												cursor: "pointer",
+												color: "var(--text-muted)"
+											},
+											children: "why"
+										}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+											style: {
+												whiteSpace: "pre-wrap",
+												color: "var(--text-secondary)"
+											},
+											children: d.rationale
+										})]
+									})]
 								})
 							]
 						}, id);
 					}) })]
+				}),
+				ids.some((id) => dims[id].stale) && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "eval-stale-note",
+					style: quiet,
+					children: ["* older definition; re-run ", command]
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "eval-flags",

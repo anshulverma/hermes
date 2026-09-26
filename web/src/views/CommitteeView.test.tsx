@@ -1962,6 +1962,103 @@ describe('CommitteeView evaluation on the Metrics tab', () => {
     expect(screen.queryAllByLabelText('not scored')).toHaveLength(0);
   });
 
+  it("puts the judge's reason under its quote, folded behind a why, as plain text, and nothing when it gave none", () => {
+    const why = 'Cites <b>t03</b> and t07;\nthe rollback plan is the condition.';
+    metrics({
+      ...EVAL_OK,
+      dimensions: {
+        ...EVAL_OK.dimensions,
+        verdict_grounded: { ...EVAL_OK.dimensions.verdict_grounded, rationale: why },
+        concern_coverage: { ...EVAL_OK.dimensions.concern_coverage, rationale: null },
+      },
+    });
+
+    const evidence = within(screen.getByTestId('eval-dim-verdict_grounded')).getAllByRole('cell')[3];
+    const details = within(evidence).getByTestId('eval-why-verdict_grounded');
+    expect(evidence.firstChild!.textContent).toBe(EVAL_OK.dimensions.verdict_grounded.quote);
+    expect(details.tagName).toBe('DETAILS');
+    // A native disclosure: its summary takes focus and opens it from the keyboard.
+    const summary = details.firstElementChild as HTMLElement;
+    expect(summary.tagName).toBe('SUMMARY');
+    expect(summary.textContent).toBe('why');
+    expect(details).not.toHaveAttribute('open');
+    fireEvent.click(summary);
+    expect(details).toHaveAttribute('open');
+    // Text, never markup: the judge wrote it.
+    expect(details.textContent).toBe(`why${why}`);
+    expect(details.querySelector('b')).toBeNull();
+
+    // null, and a payload from before the eval sent a rationale at all.
+    expect(screen.getAllByTestId(/^eval-why-/)).toHaveLength(1);
+    expect(within(screen.getByTestId('eval-dim-concern_coverage')).getAllByRole('cell')[3].textContent).toBe(
+      EVAL_OK.dimensions.concern_coverage.quote,
+    );
+  });
+
+  it('stars a score taken under an older definition, and says once under the table how to re-score it', () => {
+    const { unmount } = metrics({
+      ...EVAL_OK,
+      dimensions: {
+        ...EVAL_OK.dimensions,
+        verdict_grounded: { ...EVAL_OK.dimensions.verdict_grounded, stale: true },
+        concision: { ...EVAL_OK.dimensions.concision, stale: true },
+        efficiency: { ...EVAL_OK.dimensions.efficiency, stale: false },
+      },
+    });
+
+    expect(screen.getByTestId('eval-score-verdict_grounded')).toHaveTextContent(/^4\*$/);
+    expect(screen.getByTestId('eval-score-concision')).toHaveTextContent(/^1\*$/);
+    expect(screen.getByTestId('eval-score-efficiency')).toHaveTextContent(/^3$/);
+    expect(screen.getByTestId('eval-score-concern_coverage')).toHaveTextContent(/^3$/);
+    const notes = screen.getAllByTestId('eval-stale-note');
+    expect(notes).toHaveLength(1);
+    expect(notes[0].textContent).toBe(`* older definition; re-run ${COMMAND}`);
+    expect(within(notes[0]).getByText(COMMAND).tagName).toBe('CODE');
+    const table = screen.getByRole('table', { name: 'Evaluation scores' });
+    expect(table.compareDocumentPosition(notes[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    unmount();
+
+    // Nothing stale, or a payload from before the eval said: no star, no note.
+    for (const stale of [undefined, false]) {
+      const dimensions = Object.fromEntries(
+        Object.entries(EVAL_OK.dimensions).map(([id, d]) => [id, stale === undefined ? d : { ...d, stale }]),
+      );
+      const { unmount: done } = metrics({ ...EVAL_OK, dimensions });
+      expect(screen.queryByTestId('eval-stale-note')).toBeNull();
+      expect(screen.getByRole('table', { name: 'Evaluation scores' }).textContent).not.toContain('*');
+      done();
+    }
+  });
+
+  it('badges a judge score as unknown when the calibration ledger could not be read', () => {
+    metrics({
+      ...EVAL_OK,
+      dimensions: { ...EVAL_OK.dimensions, verdict_grounded: dim(4, 'judge', 'q', 'unknown') },
+    });
+
+    expect(screen.getByTestId('eval-uncalibrated-verdict_grounded')).toHaveTextContent(/^unknown$/);
+  });
+
+  it('draws a dimension this bundle does not know yet after the six it does, whatever order it arrives in', () => {
+    const { verdict_consistency, ...rest } = EVAL_OK.dimensions;
+    metrics({
+      ...EVAL_OK,
+      dimensions: {
+        voice_register: dim(2, 'deterministic', 'hedges=9', null),
+        ...rest,
+        voice_turns: dim(5, 'deterministic', 'turns=3', null),
+        verdict_consistency,
+      },
+    });
+
+    expect(screen.getAllByTestId(/^eval-dim-/).map((r) => r.getAttribute('data-testid'))).toEqual(
+      [...D5, 'voice_register', 'voice_turns'].map((id) => `eval-dim-${id}`),
+    );
+    expect(within(screen.getByTestId('eval-dim-voice_register')).getAllByRole('cell')[0]).toHaveTextContent(
+      /^voice register$/,
+    );
+  });
+
   it('names the table and reads a missing score as not scored', () => {
     const noJudge = dim(null, 'judge', null, 'uncalibrated');
     metrics({
