@@ -96,6 +96,9 @@ function stage(n: number, role: string, body: string, proposed: Array<[string, s
     })),
     code: null,
     proposed_dropped: 0,
+    not_seated: [],
+    not_seated_dropped: 0,
+    invalid_count: 0,
     segments: [{ kind: 'text', text: body }],
     badges: [],
     take: 1,
@@ -194,7 +197,14 @@ export const selectingData: CommitteeData = {
   timeline: [],
   verdict: null,
   document: DOCUMENT,
-  selection: { state: 'selecting', stages: [PROPOSES], fallback: null, considered: [], ...UNCUT },
+  selection: {
+    state: 'selecting',
+    stages: [PROPOSES],
+    fallback: null,
+    considered: [],
+    ...UNCUT,
+    current: { role: 'manager', name: 'Ruth Delgado', verb: 'amending' },
+  },
 };
 
 /** The chair has ratified and t01 has not settled. The cap is 2 x 5 reviewers + 16 = 26. */
@@ -300,11 +310,28 @@ const CARD_RATIFIED: Array<[string, string]> = [
   ['zone_owner', 'federation crosses her zone boundary'],
 ];
 
+/** The manager's note on the PM she dropped, as her stage carries it. */
+const PM_NOTE = {
+  stakeholder: 'Product Manager',
+  reason: "the roadmap slot is Sam's call this half.",
+  represented_by: 'tpm',
+  represented_by_name: 'Sam Iyer',
+};
+
+/** The chair's note on a stakeholder nobody seated, and nobody speaks for. */
+const LEGAL_NOTE = {
+  stakeholder: 'Legal',
+  reason: 'no contract or licence question in this proposal',
+  represented_by: null,
+  represented_by_name: null,
+};
+
 /**
  * A committee seated before t01, for the Selection card. The owner proposes
  * three seats, the manager swaps the PM for the staff engineer and names who
  * speaks for the PM, and the chair ratifies the manager's list. `zone_owner` is
- * a derived seat, and the roster says so. One stakeholder considered has a
+ * a derived seat, and the roster says so. The manager's and the chair's stages
+ * each leave one stakeholder out, and `considered` holds both: one has a
  * representative and one has none, and the represented one's reason ends in a
  * full stop the card must not double.
  */
@@ -328,24 +355,15 @@ export const cardData: CommitteeData = {
         ['pm', 'owns the roadmap slot it takes'],
         CARD_RATIFIED[2],
       ]),
-      stage(2, 'manager', 'Priya carries the on-call cost, so she sits instead of Elena.', CARD_RATIFIED),
-      stage(3, 'senior_director', 'Ratified as amended.', CARD_RATIFIED),
+      {
+        ...stage(2, 'manager', 'Priya carries the on-call cost, so she sits instead of Elena.', CARD_RATIFIED),
+        not_seated: [PM_NOTE],
+      },
+      { ...stage(3, 'senior_director', 'Ratified as amended.', CARD_RATIFIED), not_seated: [LEGAL_NOTE] },
     ],
     considered: [
-      {
-        stakeholder: 'Product Manager',
-        role: 'pm',
-        reason: "the roadmap slot is Sam's call this half.",
-        represented_by: 'tpm',
-        represented_by_name: 'Sam Iyer',
-      },
-      {
-        stakeholder: 'Legal',
-        role: null,
-        reason: 'no contract or licence question in this proposal',
-        represented_by: null,
-        represented_by_name: null,
-      },
+      { ...PM_NOTE, role: 'pm' },
+      { ...LEGAL_NOTE, role: null },
     ],
     ...UNCUT,
   },

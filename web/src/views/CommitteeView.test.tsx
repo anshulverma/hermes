@@ -2683,7 +2683,8 @@ describe('CommitteeView before t01 and the seated roster', () => {
     expect(screen.getByTestId('committee-view')).toBeInTheDocument();
     // `_seats` while selecting is the fixed four: no reviewer is seated yet.
     expect(screen.getByText('Committee — 4')).toBeInTheDocument();
-    for (const role of ['owner', 'senior_director', 'manager', 'junior_ic']) {
+    // The manager is amending the list, so she holds the floor; nobody has spoken.
+    for (const role of ['owner', 'senior_director', 'junior_ic']) {
       expect(screen.getByTestId(`roster-${role}`)).toHaveTextContent('has not spoken');
     }
     expect(screen.queryByTestId('roster-tpm')).toBeNull();
@@ -2924,8 +2925,8 @@ describe('CommitteeView selection card', () => {
 
     // The reason's own full stop is not doubled, and no representative means no sentence.
     expect(items.map((li) => li.textContent)).toEqual([
-      "Product Manager: the roadmap slot is Sam's call this half. Represented by Sam Iyer",
-      'Legal: no contract or licence question in this proposal',
+      "Product Manager: the roadmap slot is Sam's call this half. Represented by Sam Iyer.",
+      'Legal: no contract or licence question in this proposal. Not represented.',
     ]);
     unmount();
 
@@ -3050,6 +3051,12 @@ describe('CommitteeView selection card', () => {
           body: hostile,
           segments: [{ kind: 'text' as const, text: hostile }],
           proposed: st.proposed.map((p) => ({ ...p, name: hostile, title: hostile, rationale: hostile })),
+          not_seated: st.not_seated?.map((n) => ({
+            ...n,
+            stakeholder: hostile,
+            reason: hostile,
+            represented_by_name: n.represented_by_name && hostile,
+          })),
         })),
         considered: sel.considered.map((c) => ({
           ...c,
@@ -3069,6 +3076,9 @@ describe('CommitteeView selection card', () => {
     const considered = within(card).getByTestId('selection-considered');
     expect(considered).toHaveTextContent(`${hostile}: ${hostile}. Represented by ${hostile}`);
     expect(considered.querySelector('img, a, strong, script, iframe')).toBeNull();
+    const leftOut = within(card).getByTestId('selection-left-out-2');
+    expect(leftOut).toHaveTextContent(`Left out: ${hostile}: ${hostile}. Represented by ${hostile}`);
+    expect(leftOut.querySelector('img, a, strong, script, iframe')).toBeNull();
     // The prose is Markdown, as a turn's is, but it draws no image and runs no script.
     expect(card.querySelector('img, script, iframe')).toBeNull();
     for (const a of card.querySelectorAll('a')) expect(a.getAttribute('href') ?? '').not.toMatch(/^javascript:/i);
@@ -3126,8 +3136,8 @@ describe('CommitteeView selection card', () => {
     expect(
       within(screen.getByTestId('selection-considered')).getAllByRole('listitem').map((li) => li.textContent),
     ).toEqual([
-      "Product Manager: the roadmap slot is Sam's call this half. Represented by Sam Iyer",
-      `Legal: no contract or licence question in this proposal. Represented by ${lookalike} (zone_owner · derived seat)`,
+      "Product Manager: the roadmap slot is Sam's call this half. Represented by Sam Iyer.",
+      `Legal: no contract or licence question in this proposal. Represented by ${lookalike} (zone_owner · derived seat).`,
     ]);
   });
 
@@ -3223,6 +3233,77 @@ describe('CommitteeView selection card', () => {
     show(fallbackData);
     expect(screen.queryByTestId('selection-code-1')).toBeNull();
     expect(screen.queryByTestId('selection-code-3')).toBeNull();
+  });
+
+  it('while a selector works, the card says who is choosing and that seat holds the floor', () => {
+    const { unmount } = show(selectingData);
+    const card = screen.getByTestId('selection-card');
+
+    // After the stage already kept: the manager's is the one being written.
+    expect(within(card).getByTestId('selection-current')).toHaveTextContent('Ruth Delgado is amending the committee.');
+    expect(follows(within(card).getByTestId('selection-stage-1'), within(card).getByTestId('selection-current'))).toBe(
+      true,
+    );
+    expect(screen.getByTestId('roster-manager')).toHaveTextContent('has the floor');
+    expect(screen.getByTestId('roster-owner')).toHaveTextContent('has not spoken');
+    unmount();
+
+    // Once seated, or once lost, nobody is choosing.
+    const seated = show(cardData);
+    expect(screen.queryByTestId('selection-current')).toBeNull();
+    expect(screen.getByTestId('roster-manager')).toHaveTextContent('has not spoken');
+    seated.unmount();
+    show(lostData);
+    expect(screen.queryByTestId('selection-current')).toBeNull();
+    expect(screen.getByTestId('roster-manager')).toHaveTextContent('has not spoken');
+  });
+
+  it('each stage lists who it left out and who speaks for them, and counts what it cut', () => {
+    const items = (n: number) =>
+      within(screen.getByTestId(`selection-left-out-${n}`))
+        .getAllByRole('listitem')
+        .map((li) => li.textContent);
+    const { unmount } = show(cardData);
+
+    // Under the stage's own list, with the reason's full stop not doubled.
+    expect(items(2)).toEqual(["Left out: Product Manager: the roadmap slot is Sam's call this half. Represented by Sam Iyer."]);
+    expect(items(3)).toEqual(['Left out: Legal: no contract or licence question in this proposal. Not represented.']);
+    expect(screen.getByRole('list', { name: 'Left out by Ruth Delgado' })).toBeInTheDocument();
+    expect(follows(screen.getByTestId('selection-proposed-2'), screen.getByTestId('selection-left-out-2'))).toBe(true);
+    // A stage that left nobody out draws no list, and nothing was cut.
+    expect(screen.queryByTestId('selection-left-out-1')).toBeNull();
+    expect(within(screen.getByTestId('selection-card')).queryByText(/left out, not listed|invalid entries/)).toBeNull();
+    unmount();
+
+    // While selecting only the fixed four are seated, so a derived representative
+    // is marked off the stage's own list; and each count shows only when it cut some.
+    const sel = seatedData.selection!;
+    const amends = {
+      ...sel.stages[1],
+      not_seated: [
+        { ...cardData.selection!.stages[1].not_seated![0], represented_by: 'crew_owner', represented_by_name: 'Noor Haddad' },
+      ],
+      not_seated_dropped: 2,
+      invalid_count: 3,
+    };
+    show({ ...selectingData, selection: { ...selectingData.selection!, stages: [sel.stages[0], amends] } });
+    expect(items(2)).toEqual([
+      "Left out: Product Manager: the roadmap slot is Sam's call this half. Represented by Noor Haddad (crew_owner · derived seat).",
+    ]);
+    const s2 = screen.getByTestId('selection-stage-2');
+    expect(within(s2).getByText('2 more left out, not listed.')).toBeInTheDocument();
+    expect(within(s2).getByText('3 invalid entries, not listed.')).toBeInTheDocument();
+    expect(within(screen.getByTestId('selection-stage-1')).queryByText(/not listed/)).toBeNull();
+  });
+
+  it('a fallback card lists what it could not seat, and no seat list for a chair that gave none', () => {
+    show(fallbackData);
+
+    expect(
+      within(screen.getByTestId('selection-considered')).getAllByRole('listitem').map((li) => li.textContent),
+    ).toEqual(['Owner, team-owned crews: not in the default committee (fallback: chair_failed). Not represented.']);
+    expect(screen.queryByTestId('selection-proposed-3')).toBeNull();
+    expect(screen.getByTestId('selection-proposed-2')).toBeInTheDocument();
   });
 });
 

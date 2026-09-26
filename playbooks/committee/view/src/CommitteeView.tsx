@@ -66,6 +66,11 @@ export type SelectionStage = {
   proposed_dropped?: number;
   /** selection.stage_code: why this list could seat nobody (no_answer, no_block, too_few, unparseable), else null. */
   code?: string | null;
+  /** The stakeholders this selector left out, the first thread.LIST_MAX; absent on older payloads. */
+  not_seated?: Array<Omit<Considered, 'role'>>;
+  /** How many more it left out, and how many of its entries validate refused; absent reads as 0. */
+  not_seated_dropped?: number;
+  invalid_count?: number;
   segments: Segment[];
   badges: string[];
   take: number | null;
@@ -92,6 +97,8 @@ export type Selection = {
   /** What resolve's caps cut (spec amendment FIX_SA); absent reads as 0. */
   considered_dropped?: number;
   invalid_dropped?: number;
+  /** The selector working now, only while `selecting`; absent on older payloads. */
+  current?: { role: string; name: string; verb: 'proposing' | 'amending' | 'ratifying' } | null;
 };
 
 export type Entry = {
@@ -530,6 +537,15 @@ const selectionCount = { fontSize: 11.5, fontStyle: 'italic', color: 'var(--text
 /** A derived seat's marker (decision 12): its name is a selector's words, the slug is not. */
 const derivedSeat = (role: string) => `${role} · derived seat`;
 
+/**
+ * Who speaks for a stakeholder nobody seated, or that nobody does. The name
+ * check is exact, so a lookalike name passes it: a derived seat's slug is the defence.
+ */
+function represented(slug: string | null, name: string | null, isDerived: boolean): string {
+  if (!slug) return 'Not represented.';
+  return `Represented by ${name ?? slug}${isDerived ? ` (${derivedSeat(slug)})` : ''}.`;
+}
+
 /** thread._NO_LIST: a stage's code in the words its thread entry uses. */
 const NO_LIST: Record<string, string> = { no_block: 'no_block', unparseable: 'unparseable', too_few: 'no valid seats' };
 
@@ -631,6 +647,27 @@ function SelectionCard({
               </ul>
             )}
             {(st.proposed_dropped ?? 0) > 0 && <div style={selectionCount}>{st.proposed_dropped} more not listed.</div>}
+            {/* A representative is on this stage's list or the fixed four, so a
+                derived one the chair later dropped is marked off that list. */}
+            {!!st.not_seated?.length && (
+              <ul data-testid={`selection-left-out-${st.stage}`} aria-label={`Left out by ${st.name}`} style={selectionList}>
+                {st.not_seated.map((n, j) => (
+                  <li key={j}>
+                    Left out: {n.stakeholder}: {n.reason.replace(/\.$/, '')}.{' '}
+                    {represented(
+                      n.represented_by,
+                      n.represented_by_name,
+                      derived.has(n.represented_by ?? '') ||
+                        st.proposed.some((p) => p.role === n.represented_by && p.source === 'derived'),
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(st.not_seated_dropped ?? 0) > 0 && (
+              <div style={selectionCount}>{st.not_seated_dropped} more left out, not listed.</div>
+            )}
+            {(st.invalid_count ?? 0) > 0 && <div style={selectionCount}>{st.invalid_count} invalid entries, not listed.</div>}
             {/* As its thread entry says it; an undelivered stage says so through its badge and body. */}
             {st.code && st.code !== 'no_answer' && (
               <div data-testid={`selection-code-${st.stage}`} style={selectionCount}>
@@ -639,6 +676,12 @@ function SelectionCard({
             )}
           </div>
         ))}
+        {/* The stage in progress, after the ones kept: its selector's worker is still writing. */}
+        {selection.current && (
+          <div data-testid="selection-current" style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            {selection.current.name} is {selection.current.verb} the committee.
+          </div>
+        )}
         {settled && (
           <div
             data-testid="selection-considered"
@@ -655,10 +698,8 @@ function SelectionCard({
                   <ul aria-label="Considered, not seated" style={selectionList}>
                     {selection.considered.map((c, j) => (
                       <li key={j}>
-                        {c.stakeholder}: {c.reason.replace(/\.$/, '')}
-                        {c.represented_by_name && `. Represented by ${c.represented_by_name}`}
-                        {/* The name check is exact, so a lookalike name passes it: the slug is the defence. */}
-                        {c.represented_by && derived.has(c.represented_by) && ` (${derivedSeat(c.represented_by)})`}
+                        {c.stakeholder}: {c.reason.replace(/\.$/, '')}.{' '}
+                        {represented(c.represented_by, c.represented_by_name, derived.has(c.represented_by ?? ''))}
                       </li>
                     ))}
                   </ul>
@@ -1419,10 +1460,13 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   // has already kept the original. doc-diff's pre-t01 card stays on the gate's
   // empty-state branch above, for runs with `selection` null.
   if (data.timeline.length === 0) {
+    // The selector at work holds the floor, which only a turn sets on the server's rows.
+    const current = data.selection?.current;
+    const roster = data.roster.map((p) => (p.role === current?.role ? { ...p, state: 'holds_floor' } : p));
     return (
       <div data-testid="committee-view" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <ProgressBar progress={data.progress} legacy={legacy} />
-        <Roster roster={data.roster} legacy={legacy} />
+        <Roster roster={roster} legacy={legacy} />
         {data.selection != null && <SelectionCard selection={data.selection} runId={runId} derived={derived} />}
       </div>
     );

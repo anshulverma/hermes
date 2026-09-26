@@ -1682,6 +1682,14 @@
 	};
 	/** A derived seat's marker (decision 12): its name is a selector's words, the slug is not. */
 	var derivedSeat = (role) => `${role} · derived seat`;
+	/**
+	* Who speaks for a stakeholder nobody seated, or that nobody does. The name
+	* check is exact, so a lookalike name passes it: a derived seat's slug is the defence.
+	*/
+	function represented(slug, name, isDerived) {
+		if (!slug) return "Not represented.";
+		return `Represented by ${name ?? slug}${isDerived ? ` (${derivedSeat(slug)})` : ""}.`;
+	}
 	/** thread._NO_LIST: a stage's code in the words its thread entry uses. */
 	var NO_LIST = {
 		no_block: "no_block",
@@ -1793,6 +1801,28 @@
 								style: selectionCount,
 								children: [st.proposed_dropped, " more not listed."]
 							}),
+							!!st.not_seated?.length && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+								"data-testid": `selection-left-out-${st.stage}`,
+								"aria-label": `Left out by ${st.name}`,
+								style: selectionList,
+								children: st.not_seated.map((n, j) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", { children: [
+									"Left out: ",
+									n.stakeholder,
+									": ",
+									n.reason.replace(/\.$/, ""),
+									".",
+									" ",
+									represented(n.represented_by, n.represented_by_name, derived.has(n.represented_by ?? "") || st.proposed.some((p) => p.role === n.represented_by && p.source === "derived"))
+								] }, j))
+							}),
+							(st.not_seated_dropped ?? 0) > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								style: selectionCount,
+								children: [st.not_seated_dropped, " more left out, not listed."]
+							}),
+							(st.invalid_count ?? 0) > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								style: selectionCount,
+								children: [st.invalid_count, " invalid entries, not listed."]
+							}),
 							st.code && st.code !== "no_answer" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								"data-testid": `selection-code-${st.stage}`,
 								style: selectionCount,
@@ -1800,6 +1830,19 @@
 							})
 						]
 					}, i)),
+					selection.current && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "selection-current",
+						style: {
+							fontSize: 12,
+							color: "var(--text-secondary)"
+						},
+						children: [
+							selection.current.name,
+							" is ",
+							selection.current.verb,
+							" the committee."
+						]
+					}),
 					settled && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 						"data-testid": "selection-considered",
 						style: {
@@ -1821,8 +1864,9 @@
 									c.stakeholder,
 									": ",
 									c.reason.replace(/\.$/, ""),
-									c.represented_by_name && `. Represented by ${c.represented_by_name}`,
-									c.represented_by && derived.has(c.represented_by) && ` (${derivedSeat(c.represented_by)})`
+									".",
+									" ",
+									represented(c.represented_by, c.represented_by_name, derived.has(c.represented_by ?? ""))
 								] }, j))
 							}),
 							considered > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -2568,29 +2612,36 @@
 				scorable: !!data.verdict?.text
 			})]
 		});
-		if (data.timeline.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-			"data-testid": "committee-view",
-			style: {
-				display: "flex",
-				flexDirection: "column",
-				gap: 16
-			},
-			children: [
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, {
-					progress: data.progress,
-					legacy
-				}),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, {
-					roster: data.roster,
-					legacy
-				}),
-				data.selection != null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectionCard, {
-					selection: data.selection,
-					runId,
-					derived
-				})
-			]
-		});
+		if (data.timeline.length === 0) {
+			const current = data.selection?.current;
+			const roster = data.roster.map((p) => p.role === current?.role ? {
+				...p,
+				state: "holds_floor"
+			} : p);
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				"data-testid": "committee-view",
+				style: {
+					display: "flex",
+					flexDirection: "column",
+					gap: 16
+				},
+				children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, {
+						progress: data.progress,
+						legacy
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, {
+						roster,
+						legacy
+					}),
+					data.selection != null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectionCard, {
+						selection: data.selection,
+						runId,
+						derived
+					})
+				]
+			});
+		}
 		const edits = /* @__PURE__ */ new Map();
 		if (data.document.captured) data.document.steps.forEach((step, i) => {
 			if (step.reviewer_turn !== null) edits.set(step.reviewer_turn, [i + 1, step.turn]);
