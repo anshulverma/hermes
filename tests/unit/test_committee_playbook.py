@@ -4022,6 +4022,103 @@ def test_a_fresh_process_after_a_discarded_chair_take_goes_to_ruling_and_fails()
     assert fresh.is_done(_run(phase="ruling", reductions=[take])) is False
 
 
+def _junior_take_one_discarded(pb, run, tmp_path):
+    """A junior take 1 that edited the copy and then broke the one-sentence rule."""
+    from playbooks.committee import thread
+
+    copy = _junior_turn(pb, run, tmp_path)
+    s = pb._state(run)
+    pb._begin(s, "t05-junior_ic")
+    copy.write_text("the original proposal\nand a rollback paragraph\n")
+    red = pb.reduce(run, "t05-junior_ic", [_finding(
+        run, f"{run.id}/t05-junior_ic", "I added the rollback paragraph. It names the owner.",
+    )], _NamedSite("local"))
+    assert red[0].kind == "take" and red[0].json["violations"] == ["multi_sentence"]
+    assert s["edit_digest"] == thread.digest(copy)
+    return copy, s
+
+
+def test_a_discarded_junior_take_is_retaken_report_only(tmp_path):
+    """T7: the retake edits nothing, and the kept report still verifies take 1's edit."""
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t05-junior_ic")
+    copy, s = _junior_take_one_discarded(pb, run, tmp_path)
+    before = s["pre_edit_digest"]
+
+    assert pb.next_phase(run) == "t05-junior_ic-take2"
+    run.phase = "t05-junior_ic-take2"
+    ticket = pb.seed(run, site)[0]
+    assert ticket.payload["kind"] == "edit"
+    assert ticket.payload["action"] == "add a rollback paragraph"
+    assert s["pre_edit_digest"] == before  # no re-snapshot on a retake
+    assert "write no file at all" in ticket.payload["goal"].lower()
+    assert "Do not edit the revised copy again" in ticket.payload["goal"]
+
+    kept = pb.reduce(run, "t05-junior_ic-take2", [_finding(
+        run, ticket.id, "I added the rollback paragraph.")], site)[0]
+    assert kept.kind == "turn" and kept.json["verified"] is True
+    assert kept.json["error"] is None and (kept.json["take"], kept.json["takes"]) == (2, 2)
+    assert (tmp_path / "runs" / run.id / "doc" / "t05.md").read_bytes() == copy.read_bytes()
+
+
+def test_a_junior_retake_that_edits_the_copy_records_the_error(tmp_path):
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    copy, s = _junior_take_one_discarded(pb, run, tmp_path)
+    run.phase = pb.next_phase(run)
+    copy.write_text("the original proposal\nand a rollback paragraph\nand another edit\n")
+
+    kept = pb.reduce(run, run.phase, [_finding(
+        run, f"{run.id}/{run.phase}", "I added the rollback paragraph.")], _NamedSite("local"))[0]
+
+    assert kept.json["error"] == "retake modified the revised copy"
+    assert kept.json["verified"] is True
+
+
+def test_a_junior_retake_that_writes_a_copy_take_one_removed_records_the_error(tmp_path):
+    """Take 1 left no regular copy, so there is no digest to compare; a
+    report-only retake that writes one anyway is still caught."""
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t05-junior_ic")
+    copy = _junior_turn(pb, run, tmp_path)
+    pb._begin(pb._state(run), "t05-junior_ic")
+    copy.unlink()
+    pb.reduce(run, "t05-junior_ic", [_finding(
+        run, f"{run.id}/t05-junior_ic", "The copy was gone. I wrote nothing.")], site)
+    run.phase = pb.next_phase(run)
+    pb.seed(run, site)
+    assert not copy.exists()  # a retake never re-copies the file
+    copy.write_text("a copy the retake wrote\n")
+
+    kept = pb.reduce(run, run.phase, [_finding(
+        run, f"{run.id}/{run.phase}", "My first take changed nothing.")], site)[0]
+
+    assert kept.json["error"] == "retake modified the revised copy"
+
+
+def test_a_later_junior_turn_starts_clean_after_an_earlier_retake(tmp_path):
+    from playbooks.committee import thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t05-junior_ic")
+    copy, s = _junior_take_one_discarded(pb, run, tmp_path)
+    run.phase = pb.next_phase(run)
+    pb.reduce(run, run.phase, [_finding(run, f"{run.id}/{run.phase}", "Done.")], site)
+
+    s.update(current_turn=7)
+    pb._begin(s, "t07-junior_ic")
+    s["pre_edit_digest"] = thread.digest(copy)
+    copy.write_text(copy.read_text() + "and a second delegated edit\n")
+    kept = pb.reduce(run, "t07-junior_ic", [_finding(
+        run, f"{run.id}/t07-junior_ic", "I added the second edit.")], site)[0]
+
+    assert kept.json["error"] is None and kept.json["verified"] is True
+    assert kept.json["take"] == 1
+
+
 # --- registration and wiring ---------------------------------------------
 
 

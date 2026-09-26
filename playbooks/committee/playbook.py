@@ -115,6 +115,16 @@ def _latest_answer(findings: list[Finding] | None) -> str:
     return answer
 
 
+def _copy_digest(data: bytes | None) -> str:
+    """The revised copy's state for the report-only retake check (voice D3.6).
+
+    ``data`` is ``thread.read_regular``'s bytes. No regular file reads as
+    ``"absent"``, never ``""``: a take 1 that left no copy must still catch a
+    retake that writes one.
+    """
+    return hashlib.sha256(data).hexdigest() if data is not None else "absent"
+
+
 # Criterion 9. Only a human's accept ends the run `done`, but the verdict is
 # read in thread.md and the Outputs tab, which never pass through that gate --
 # so nothing there distinguishes it from a sign-off unless the text itself does.
@@ -193,7 +203,8 @@ class CommitteePlaybook:
                 "snapshot_note": None,
                 "rechecks": [],
                 # the revised copy's sha256 as seed() found it, just before a
-                # junior-IC worker ran; reduce compares against this rather than
+                # junior-IC take 1 ran (a retake keeps it: its re-check still
+                # measures take 1's edit); reduce compares against this rather than
                 # against the original, so a second edit that changed nothing
                 # still fails its re-check (spec 7).
                 "pre_edit_digest": "",
@@ -227,8 +238,8 @@ class CommitteePlaybook:
                 # the discarded take kept in reserve: {"answer", "take"}. A
                 # retake that delivers nothing falls back to it.
                 "held": None,
-                # the revised copy's digest after a discarded junior take 1, so
-                # a report-only retake that edits again is caught.
+                # the revised copy's `_copy_digest` after a discarded junior
+                # take 1, so a report-only retake that edits again is caught.
                 "edit_digest": "",
             }
             self._state_by_run[run.id] = s
@@ -411,10 +422,17 @@ class CommitteePlaybook:
             role, kind, action = cast.CHAIR, "decision", None
         else:
             role = s["current_role"]
+            kind, action = "turn", None
             if role == cast.JUNIOR:
-                kind = "edit"
                 # next_phase sets pending_action before it mints a junior turn.
-                action = str(s["pending_action"] or "")
+                # A retake keeps kind "edit" and the action (the payload keys
+                # are frozen), so its card still names the edit.
+                kind, action = "edit", str(s["pending_action"] or "")
+            if role == cast.JUNIOR and s["take"] == 1:
+                # Take 1 only. A retake is report-only (its goal forbids every
+                # write), and its re-check still measures take 1's edit, so the
+                # copy is never re-made and the snapshot stays the one taken
+                # before take 1 ran.
                 try:
                     revised, s["snapshot_note"] = thread.ensure_revised(
                         run.id, s["artifact"], s["artifact_digest"]
@@ -440,8 +458,6 @@ class CommitteePlaybook:
                 # describes; on the second and later ones it is the only
                 # comparison that can still fail.
                 s["pre_edit_digest"] = thread.digest(revised)
-            else:
-                kind, action = "turn", None
 
         # The owner's and a reviewer's one image, named for the phase. Made
         # here, 0700, not by the worker (0755): a run opened before `open`
@@ -707,6 +723,12 @@ class CommitteePlaybook:
         answer = _latest_answer(findings)
         discard, metrics, violations, flags = self._grade(run, s, role, answer)
         if discard:
+            if role == cast.JUNIOR and s["take"] == 1:
+                # What the report-only retakes must leave alone. The same read
+                # as their re-check: `read_regular` (O_NOFOLLOW, O_NONBLOCK),
+                # never `thread.digest`, which follows a symlink and blocks on
+                # a FIFO.
+                s["edit_digest"] = _copy_digest(thread.read_regular(s["revised"]))
             return self._discard(run, s, role, answer, metrics, violations, flags, turn)
         answer, take, takes, metrics, violations, flags = self._keep(
             run, s, role, answer, metrics, violations, flags
@@ -760,8 +782,8 @@ class CommitteePlaybook:
                 # snapshot is exactly the bytes the re-check judged. A symlinked
                 # or FIFO revised copy reads as absent (`read_regular`).
                 data = thread.read_regular(s["revised"]) if s["revised"] else None
-                # `seed` sets this on every junior-IC phase; there is no
-                # fallback, per the RULE above.
+                # `seed` sets this on every junior-IC take 1, and a retake
+                # keeps it; there is no fallback, per the RULE above.
                 before = s["pre_edit_digest"]
                 # An empty `before` is not a digest -- `digest` of a zero-byte
                 # file is e3b0c442..., never "" -- it means the snapshot itself
@@ -778,6 +800,10 @@ class CommitteePlaybook:
                 )
             except Exception as exc:  # never raise out of reduce
                 errors.append(f"recheck: {exc}")
+            # A report-only retake that edited anyway. `verified` above still
+            # measures take 1's edit against take 1's snapshot.
+            if s["take"] > 1 and s["edit_digest"] and _copy_digest(data) != s["edit_digest"]:
+                errors.append("retake modified the revised copy")
             # Every junior-IC turn, delivered or not: an undelivered turn's
             # snapshot is the unchanged copy, which is what the stepper shows.
             try:
