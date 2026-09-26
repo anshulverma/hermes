@@ -32,7 +32,7 @@ import pytest
 from engine import config, contracts, crew, dispatch, queue
 from engine import playbook as playbook_registry
 from engine.db.migrate import apply_migrations, connect
-from engine.models import Check, Result
+from engine.models import Check, Reduction, Result, Run
 from playbooks.committee import cast, thread, turnblock
 from playbooks.committee import playbook as committee
 from playbooks.committee import eval as committee_eval
@@ -180,8 +180,9 @@ def _turns(run_id):
     return [(h, b) for h, b in _entries(run_id) if h.startswith("## turn ")]
 
 
-def _heading(number, role):
-    persona = cast.CAST[role]
+def _heading(number, role, persona=None):
+    """Turn ``number``'s thread heading; ``persona`` names a seat outside cast.CAST."""
+    persona = persona or cast.CAST[role]
     return f"## turn {number:02d} — {persona['name']}, {persona['title']} ({role})"
 
 
@@ -1435,3 +1436,241 @@ def _tree(root: Path) -> dict[str, tuple]:
         digest = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() and not p.is_symlink() else None
         tree[str(p.relative_to(root))] = (digest, info.st_mode, info.st_mtime_ns, info.st_ino)
     return tree
+
+
+# --- selection, end to end (selection AC1, AC4, AC10) ------------------------
+
+# A library seat and a derived one. No rationale ends in "." (the thread adds
+# it), and nothing here carries U+2013/U+2014, so the seated lines are exact.
+SECURITY_SEAT = {
+    "role": "security",
+    "rationale": "the move changes which security zone ingest runs in",
+}
+CREW_SEAT = {
+    "role": "crew_owner",
+    "rationale": "the crews that run ingest are owned by one team",
+    "name": "Ines Duarte",
+    "title": "Crew Owner, ingest team",
+    "lens": "what the migration costs the team that runs the ingest crews",
+}
+STAKE = "These are the people with a stake in this proposal."
+
+
+def _view(conn, run_id):
+    """view_data over EVERY reduction of the run, from a fresh playbook.
+
+    ``queue.load_run`` carries only the prior phase's reductions, so the rows
+    are loaded in the server view route's order (ORDER BY id; review_state is
+    left pending, which nothing here reads), and the fresh instance has no
+    meeting state, as in the server process.
+    """
+    run = queue.load_run(conn, run_id)
+    reductions = [
+        Reduction(kind=kind, json=doc, phase=phase)
+        for phase, kind, doc in _reductions(conn, run_id)
+    ]
+    return committee.CommitteePlaybook().view_data(run, reductions)
+
+
+def test_selection_seats_a_library_and_a_derived_reviewer(
+    home, source_repo, artifact, conn, local_site
+):
+    """AC1, engine half: the owner puts Security forward, her manager adds a
+    derived crew owner, the chair ratifies both. Both are named in the seated
+    entry before turn 01, take the opening round as tNN-security and
+    tNN-crew_owner, and appear by name in the view's roster and timeline."""
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(selection_blocks={
+        cast.OWNER: _selection(STAKE, [SECURITY_SEAT]),
+        "manager": _selection(STAKE, [SECURITY_SEAT, CREW_SEAT]),
+        "senior_director": _selection(STAKE, [SECURITY_SEAT, CREW_SEAT]),
+    })
+    run_id = "committee-20260925-000101"
+
+    host = _start(conn, run_id, pb, local_site, agent)
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+
+    phases = _dispatched_phases(conn, run_id)
+    assert phases == [
+        "s1-owner", "s2-manager", "s3-senior_director",
+        "t01-senior_director", "t02-owner", "t03-manager", "t04-owner",
+        "t05-security", "t06-owner", "t07-crew_owner", "t08-owner", "decision",
+    ]
+    final = _reduction_for(conn, run_id, "s3-senior_director")
+    assert final["final"] is True
+    assert final["fallback"] is None
+    assert final["reviewers"] == ["senior_director", "manager", "security", "crew_owner"]
+    assert final["cap"] == 2 * 4 + 16  # MAX_TURNS unset: two per reviewer plus sixteen
+
+    owner, manager, chair = (cast.CAST[r] for r in (cast.OWNER, "manager", "senior_director"))
+    security = cast.LIBRARY["security"]
+    headings = [h for h, _ in _entries(run_id)]
+    assert headings[:5] == [
+        f"## selection 1: {owner['name']}, {owner['title']} (owner) proposes",
+        f"## selection 2: {manager['name']}, {manager['title']} (manager) amends",
+        f"## selection 3: {chair['name']}, {chair['title']} (senior_director) ratifies",
+        "## committee seated",
+        _heading(1, "senior_director"),
+    ]
+    seated = dict(_entries(run_id))["## committee seated"].splitlines()
+    assert [line.split(":", 1)[0] for line in seated if line.startswith("- ")] == [
+        "- owner", "- senior_director", "- manager", "- security", "- crew_owner",
+        "- junior_ic",
+    ]
+    assert (
+        f"- security: {security['name']}, {security['title']}. "
+        f"Why: {SECURITY_SEAT['rationale']}. Put forward by {owner['name']}."
+    ) in seated
+    assert (
+        f"- crew_owner: {CREW_SEAT['name']}, {CREW_SEAT['title']}. "
+        f"Why: {CREW_SEAT['rationale']}. Put forward by {manager['name']}."
+    ) in seated
+    assert "Everyone considered was seated." in seated
+    assert not any(line.startswith("Fallback:") for line in seated)
+    # the thread names both new seats on their own turns
+    assert _heading(5, "security", security) in headings
+    assert _heading(7, "crew_owner", CREW_SEAT) in headings
+
+    data = _view(conn, run_id)
+    rows = {row["role"]: row for row in data["roster"]}
+    assert list(rows) == [
+        "owner", "senior_director", "manager", "security", "crew_owner", "junior_ic",
+    ]
+    keys = ("name", "title", "rationale", "nominated_by", "nominated_by_name", "source")
+    assert {k: rows["security"][k] for k in keys} == {
+        "name": security["name"], "title": "Security Engineer",
+        "rationale": SECURITY_SEAT["rationale"], "nominated_by": "owner",
+        "nominated_by_name": owner["name"], "source": "library",
+    }
+    assert {k: rows["crew_owner"][k] for k in keys} == {
+        "name": CREW_SEAT["name"], "title": CREW_SEAT["title"],
+        "rationale": CREW_SEAT["rationale"], "nominated_by": "manager",
+        "nominated_by_name": manager["name"], "source": "derived",
+    }
+    names = {r: cast.CAST[r]["name"] for r in (cast.OWNER, "manager", "senior_director")}
+    names |= {"security": security["name"], "crew_owner": CREW_SEAT["name"]}
+    turn_roles = [p.split("-", 1)[1] for p in phases[3:-1]]
+    assert [(e["role"], e["name"]) for e in data["timeline"]] == [
+        (role, names[role]) for role in turn_roles
+    ]
+
+
+def test_a_failed_chair_selection_runs_the_default_committee(
+    home, source_repo, artifact, conn, local_site
+):
+    """AC4, engine half: the chair's select ticket fails (driver_failed, no
+    finding), so the default seven sit, the meeting after s3 is today's
+    exactly, and the run still reaches a decision a human can accept."""
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(fail_select={"senior_director"})
+    run_id = "committee-20260925-000102"
+
+    host = _start(conn, run_id, pb, local_site, agent)
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+
+    phases = _dispatched_phases(conn, run_id)
+    assert phases[:3] == SELECTION_PHASES
+    assert phases[3:] == OPENING_ROUND + ["decision"]
+    assert conn.execute(
+        "SELECT state FROM tickets WHERE id=?", (f"{run_id}/s3-senior_director",)
+    ).fetchone()[0] == "failed"
+
+    final = _reduction_for(conn, run_id, "s3-senior_director")
+    assert (final["final"], final["delivered"], final["code"]) == (True, False, "no_answer")
+    assert final["fallback"] == "chair_failed"
+    assert final["reviewers"] == list(cast.SENIORITY)
+    assert [seat["role"] for seat in final["seated"]] == [
+        cast.OWNER, *cast.SENIORITY, cast.JUNIOR,
+    ]
+    assert final["cap"] == 2 * len(cast.SENIORITY) + 16  # 30, today's cap
+
+    chair = cast.CAST["senior_director"]
+    entries = dict(_entries(run_id))
+    ratified = f"## selection 3: {chair['name']}, {chair['title']} (senior_director) ratifies"
+    assert entries[ratified] == thread.NO_TURN
+    assert "Fallback: chair_failed" in entries["## committee seated"].splitlines()
+    assert [h for h, _ in _turns(run_id)] == [
+        _heading(i + 1, p.split("-", 1)[1]) for i, p in enumerate(OPENING_ROUND)
+    ]
+
+    data = _view(conn, run_id)
+    assert (data["selection"]["state"], data["selection"]["fallback"]) == (
+        "fallback", "chair_failed",
+    )
+    assert [row["role"] for row in data["roster"]] == [
+        cast.OWNER, *cast.SENIORITY, cast.JUNIOR,
+    ]
+    assert {
+        row["nominated_by"] for row in data["roster"]
+        if row["role"] not in (cast.OWNER, "senior_director", "manager", cast.JUNIOR)
+    } == {"default"}
+
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
+
+
+def test_a_delegation_answering_a_selected_seat_names_it(
+    home, source_repo, artifact, conn, local_site, monkeypatch
+):
+    """AC10: Security, a seat cast.CAST never held, speaks at t05; the owner's
+    reply delegates an edit and closes; the junior IC makes it at t07. The
+    edit step's reviewer turn resolves to Security by name in the timeline
+    doc-diff's stepper reads, nobody is "unattributed", and eval (measured in
+    process over a copy of this run's queue.db under HERMES_HOME) seats and
+    hears "security" and counts no selection phase as a turn."""
+    pb = committee.CommitteePlaybook()
+    security_only = _selection(STAKE, [SECURITY_SEAT])
+    agent = ScriptedCommitteeAgent(
+        owner_block=OWNER_DELEGATES,
+        owner_phases={"t06-owner"},
+        selection_blocks={r: security_only for r in (cast.OWNER, "manager", "senior_director")},
+    )
+    run_id = "committee-20260925-000103"
+
+    host = _start(conn, run_id, pb, local_site, agent)
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+    assert _dispatched_phases(conn, run_id)[3:] == [
+        "t01-senior_director", "t02-owner", "t03-manager", "t04-owner",
+        "t05-security", "t06-owner", "t07-junior_ic", "decision",
+    ]
+
+    data = _view(conn, run_id)
+    [step] = data["document"]["steps"]
+    assert (step["turn"], step["owner_turn"], step["reviewer_turn"], step["provenance"]) == (
+        7, 6, 5, "recorded",
+    )
+    security = cast.LIBRARY["security"]
+    raised = next(e for e in data["timeline"] if e["n"] == step["reviewer_turn"])
+    assert (raised["role"], raised["name"], raised["title"]) == (
+        "security", security["name"], security["title"],
+    )
+    assert all(
+        e["name"] != "unattributed" and "unattributed" not in e["badges"]
+        for e in data["timeline"]
+    )
+    assert {row["role"]: row["state"] for row in data["roster"]}["security"] == "spoke"
+
+    # eval's half: the source home must hold queue.db beside runs/<id>/, so copy
+    # the run's database there (the backup the moved-home test above uses too).
+    copy = sqlite3.connect(Path(os.environ["HERMES_HOME"]) / "queue.db")
+    conn.backup(copy)
+    copy.close()
+    monkeypatch.setenv(committee_eval.ENV_RUN, run_id)
+    monkeypatch.delenv(committee_eval.ENV_HOME, raising=False)
+    measure = Run(
+        id="committee-eval-20260925-000103", playbook="committee-eval", site="local",
+        base_ref="HEAD", config={}, phase="measure", reductions=[],
+    )
+    [target] = committee_eval.CommitteeEvalPlaybook().reduce(measure, "measure", [], local_site)
+    assert target.kind == "eval_target"
+    assert target.json.get("error") is None, target.json.get("error")
+    metrics = target.json["metrics"]
+    assert metrics["seats"]["roster"] == [
+        cast.OWNER, "senior_director", "manager", "security", cast.JUNIOR,
+    ]
+    assert metrics["seats"]["spoken"] == ["senior_director", "manager", "security"]
+    assert metrics["other_kinds"]["selection"] == 3
+    # seven meeting turns; a counted s-phase would bump owner, manager or the chair
+    assert metrics["turns"] == 7
+    assert metrics["turns_by_role"] == {
+        "senior_director": 1, cast.OWNER: 3, "manager": 1, "security": 1, cast.JUNIOR: 1,
+    }
