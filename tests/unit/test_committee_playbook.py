@@ -80,16 +80,33 @@ def test_every_key_in_the_declared_vocabulary_is_one_the_parser_reads():
     """KEYS is "the closed vocabulary" -- so `_one` must parse against it.
 
     `_FLAGS` used to be a second hand-written list, which made KEYS dead: a
-    sixth signal declared there would be a key the parser silently drops, with
-    a green suite either way. The two free-text keys are named here rather than
-    read out of `_TEXT`: `_FLAGS` is derived from `_TEXT`, so comparing the two
+    new signal declared there would be a key the parser silently drops, with
+    a green suite either way. Both sets are pinned literally rather than read
+    out of `_TEXT`: `_FLAGS` is derived from `_TEXT`, so comparing the two
     would be true by construction whatever KEYS says.
     """
-    assert set(T.KEYS) == set(T._FLAGS) | {T.ACTION, T.STANCE}
-    for flag in T._FLAGS:
+    text_keys = (T.ACTION, T.STANCE, "agreed", "still_open", "align",
+                 "meet_1", "meet_2", "meet_3")
+    flags = ("request_floor", "delegate", "close", "aligned")
+    assert set(T._TEXT) == set(text_keys)
+    assert set(T._FLAGS) == set(flags)
+    assert set(T.KEYS) == set(flags) | set(text_keys)
+    for flag in flags:
         assert T.parse(_fenced(f"{flag}: yes")) == {flag: True}, flag
-    assert T.parse(_fenced(f"{T.ACTION}: cut the appendix")) == {T.ACTION: "cut the appendix"}
-    assert T.parse(_fenced(f"{T.STANCE}: unconvinced")) == {T.STANCE: "unconvinced"}
+    # A text value survives whole, colon included: `align` and `meet_N` carry one.
+    for key in text_keys:
+        assert T.parse(_fenced(f"{key}: tpm tl: cut the appendix")) == {
+            key: "tpm tl: cut the appendix"}, key
+    # Pinned literally, as ACTION_MAX is: each value rides back into a goal or
+    # the thread, so a silent change silently changes what a reader is handed.
+    assert T.PAIR_MAX == 200 and T.OUTCOME_MAX == 200
+    for key, cap in (("align", T.PAIR_MAX), ("meet_3", T.PAIR_MAX),
+                     ("agreed", T.OUTCOME_MAX), ("still_open", T.OUTCOME_MAX)):
+        assert len(T.parse(_fenced(f"{key}: keep-this " + "z" * 500))[key]) <= cap, key
+    # voice's `lengths` measures the action and the stance only. The new text
+    # keys must not leak `agreed_chars` and the like into a take's metrics.
+    assert T.lengths(_fenced(
+        "agreed: ship it\nalign: tpm tl: order\nmeet_1: owner tpm: cost")) == {}
 
 
 def test_a_malformed_block_yields_nothing():
@@ -267,22 +284,61 @@ def test_the_reviewer_instruction_documents_the_floor_request_and_the_stance():
         assert key not in text
 
 
-def test_the_owner_instruction_documents_all_five_keys():
-    text = T.instruction(owner=True)
-
+def test_the_owner_meeting_instruction_offers_align_only_when_asked():
+    """The owner's meeting block documents the five meeting keys. `align` is
+    offered only when the caller asks (seed does, for the owner and the manager
+    while the 1:1 budget allows a 1:1), so a run with 1:1s off never shows it.
+    The manager takes the reviewer branch, so that branch gets the offer too,
+    and it still documents no owner key."""
     # The closed vocabulary, pinned literally: `for key in T.KEYS` passes just as
     # happily against a one-element KEYS, which is the whole test gone.
-    assert T.KEYS == ("request_floor", "delegate", "action", "close", "stance")
-    assert T.FENCE_TAG in text
-    for key in T.KEYS:
-        assert key in text
+    assert T.KEYS == (
+        "request_floor", "delegate", "action", "close", "stance",
+        "aligned", "agreed", "still_open", "align", "meet_1", "meet_2", "meet_3",
+    )
+    for owner in (True, False):
+        plain = T.instruction(owner=owner)
+        asked = T.instruction(owner=owner, align=True)
+        assert T.instruction(owner=owner, align=False) == plain, owner
+        assert asked.startswith(plain), owner
+        assert "align:" not in plain and "committee seated" not in plain, owner
+        assert "`align: <role> <role>: <topic>`" in asked, owner
+        assert "## committee seated" in asked, owner
+
+    owner_text = T.instruction(owner=True, align=True)
+    assert T.FENCE_TAG in owner_text
+    for key in ("request_floor", "delegate", "action", "close", "stance"):
+        assert key in owner_text, key
+    manager_text = T.instruction(align=True)
+    for key in ("delegate", "action", "close"):
+        assert key not in manager_text, key
+
+
+# (host, owner, closing) for every 1:1 speaker: a guest, the owner hosting,
+# the manager hosting, and the closing exchange by the owner and by the manager.
+_ONE_ON_ONE_SHAPES = (
+    (False, False, False),
+    (True, True, False),
+    (True, False, False),
+    (True, True, True),
+    (True, False, True),
+)
 
 
 def test_the_instructions_are_small_enough_to_ride_in_every_goal():
-    """Both ride in a goal capped at 3600 characters that it shares with the
-    persona, the charge and two paths."""
+    """Each rides in a goal with a hard character cap that it shares with the
+    persona, the charge and two paths. The align offer is the one thing a
+    meeting goal pays for 1:1s, so it is held to one short sentence (the hard
+    gate is the goal budget test)."""
     assert len(T.instruction()) < 500
     assert len(T.instruction(owner=True)) < 500
+    assert len(T.plan_instruction()) < 500
+    for host, owner, closing in _ONE_ON_ONE_SHAPES:
+        text = T.one_on_one_instruction(host=host, owner=owner, closing=closing)
+        assert len(text) < 500, (host, owner, closing)
+    for owner in (False, True):
+        extra = len(T.instruction(owner=owner, align=True)) - len(T.instruction(owner=owner))
+        assert 0 < extra <= 120, (owner, extra)
 
 
 def test_what_the_instruction_asks_for_is_what_parse_accepts():
@@ -301,6 +357,95 @@ def test_what_the_instruction_asks_for_is_what_parse_accepts():
         "delegate": False,
         "close": False,
     }
+
+    # The plan's example is one placeholder line. parse reads it and pair
+    # splits it, and `_apply_plan` then drops it as `unknown role` (gap 6), so
+    # a verbatim copy schedules nothing.
+    plan = re.search(pattern, T.plan_instruction(), re.S)
+    assert plan, "the plan instruction must contain a worked example"
+    assert T.parse(_fenced(plan.group(1))) == {"meet_1": "<host> <guest>: <topic>"}
+    assert T.pair("<host> <guest>: <topic>") == ("<host>", "<guest>", "<topic>")
+
+    templated = {
+        (False, False, False): {"aligned": False},
+        (True, True, False): {"aligned": False, "delegate": False},
+        (True, False, False): {"aligned": False},
+        (True, True, True): {"delegate": False},
+    }
+    for (host, owner_, closing), signals in templated.items():
+        text = T.one_on_one_instruction(host=host, owner=owner_, closing=closing)
+        found = re.search(pattern, text, re.S)
+        assert found, (host, owner_, closing)
+        assert T.parse(_fenced(found.group(1))) == signals, (host, owner_, closing)
+    # The manager's closing exchange has no flag to state, so no template.
+    manager_close = T.one_on_one_instruction(host=True, owner=False, closing=True)
+    assert re.search(pattern, manager_close, re.S) is None
+
+
+def test_the_plan_instruction_documents_the_meet_lines():
+    """The plan asks for up to three 1:1s, one `meet_N` line each, hosted by the
+    owner or the manager. The plan is not a meeting turn, so no meeting key is
+    offered, and no `align` either."""
+    text = T.plan_instruction()
+
+    assert T.FENCE_TAG in text
+    for part in ("meet_1", "meet_2", "meet_3", "<host> <guest>: <topic>",
+                 "`owner`", "`manager`", "`junior_ic`"):
+        assert part in text, part
+    for key in ("meet_4", "request_floor", "delegate", "action", "close", "stance", "align"):
+        assert key not in text, key
+
+
+def test_the_one_on_one_instruction_documents_its_keys_by_shape():
+    """Each 1:1 speaker is shown the keys it may use and no others (spec C4): a
+    member states `aligned`, the host keeps `agreed`/`still_open` current and
+    the owner may hold a delegation. Nothing inside a 1:1 honours a meeting
+    key, so none is shown, and no added text carries a dash voice bans."""
+    guest, owner_host, manager_host, owner_close, manager_close = (
+        T.one_on_one_instruction(host=host, owner=owner, closing=closing)
+        for host, owner, closing in _ONE_ON_ONE_SHAPES
+    )
+
+    for text in (guest, owner_host, manager_host):
+        assert "aligned: no" in text
+    for text in (owner_close, manager_close):
+        assert "aligned" not in text
+    for text in (owner_host, manager_host, owner_close, manager_close):
+        assert "`agreed: <one line>`" in text and "`still_open: <one line>`" in text
+    assert "agreed" not in guest and "still_open" not in guest
+    for text in (owner_host, owner_close):
+        assert "delegate: no" in text and f"`{T.ACTION}: <" in text
+    for text in (guest, manager_host, manager_close):
+        assert "delegate" not in text and "action" not in text
+    assert T.FENCE_TAG in manager_close
+    for text in (guest, owner_host, manager_host, owner_close, manager_close):
+        for key in ("request_floor", "close:", "align:", "meet_", "stance"):
+            assert key not in text, key
+        assert "–" not in text and "—" not in text and " -- " not in text
+
+
+def test_pair_splits_roles_and_topic():
+    """`align` and `meet_N` carry two role keys and a topic on one line. The
+    roles may be split by a comma or by spaces, in any case; only the first
+    colon splits, so a topic keeps its own colons."""
+    assert T.pair("tpm tl: rollout order") == ("tpm", "tl", "rollout order")
+    assert T.pair("TPM, Staff_IC : cost: who pays") == ("tpm", "staff_ic", "cost: who pays")
+    assert T.pair("  manager,tpm:rollback plan  ") == ("manager", "tpm", "rollback plan")
+    assert T.pair("owner\tdata_scientist:  metrics ") == ("owner", "data_scientist", "metrics")
+
+
+def test_pair_reports_malformed_before_no_topic():
+    """The two drop reasons pair owns, in C4's order: a line with no colon, or
+    without exactly two roles, is `malformed` even when it has no topic either."""
+    assert T.pair("tpm tl rollout order") == "malformed"   # no colon
+    assert T.pair("tpm tl") == "malformed"                 # no colon, no topic
+    assert T.pair("tpm: rollout order") == "malformed"     # one role
+    assert T.pair("tpm tl pm: rollout order") == "malformed"
+    assert T.pair(": rollout order") == "malformed"
+    assert T.pair("") == "malformed"
+    assert T.pair("tpm:") == "malformed"                   # one role beats no topic
+    assert T.pair("tpm tl:") == "no topic"
+    assert T.pair("tpm, tl:   ") == "no topic"
 
 
 # --- the cast ---------------------------------------------------------------
