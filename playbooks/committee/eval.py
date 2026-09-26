@@ -17,11 +17,13 @@ Stdlib-only.
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
 import re
 import sqlite3
+import statistics
 import urllib.parse
 from collections.abc import Mapping
 from contextlib import closing
@@ -601,8 +603,8 @@ def compute_metrics(target: Target) -> dict:
 
     Turns are the winning reduction per number (Task 3). Time, cost, tokens and
     traces cover every attempt on the run's tickets in ascending attempt id, so
-    selection, 1:1 and retake work is in the bill. Task 5 adds the prose and
-    document keys.
+    selection, 1:1 and retake work is in the bill. ``_prose_metrics`` adds the
+    prose and document keys: words, voice, bytes and edits.
     """
     turns, decision = target.turns, target.decision
     delivered = [t for t in turns.values() if t.get("delivered")]
@@ -648,4 +650,113 @@ def compute_metrics(target: Target) -> dict:
                    "with_cost": totals["with_cost"]},
         "other_kinds": dict(target.other_kinds),
         "extra_takes": target.takes + target.duplicate_turns,
+        **_prose_metrics(target),
+    }
+
+
+# --- the prose and the document (C5 words, voice, bytes, edits; D3 per-edit) --
+
+
+def changed(before: bytes, after: bytes) -> tuple[int, int]:
+    """``(lines_added, lines_removed)`` from ``before`` to ``after``.
+
+    ``difflib.unified_diff(n=0)`` over the utf-8 lines (undecodable bytes
+    replaced), skipping its two file-header lines, then the lines that start
+    ``+`` and ``-``. doc-diff's backfill counts the same way (D3).
+    """
+    a = before.decode("utf-8", "replace").splitlines(keepends=True)
+    b = after.decode("utf-8", "replace").splitlines(keepends=True)
+    added = removed = 0
+    for line in list(difflib.unified_diff(a, b, n=0))[2:]:
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def _prose_population(target: Target) -> list[int]:
+    """The delivered reviewer and owner turns, ascending: voice's population P (C8)."""
+    return [n for n in sorted(target.turns)
+            if target.turns[n].get("delivered") and target.turns[n].get("role") != cast.JUNIOR]
+
+
+def _chair_entry(target: Target) -> str:
+    """The full decision text: the thread entry on a legacy run, else the verdict."""
+    entry = (target.thread or {}).get("decision") if target.legacy else None
+    if isinstance(entry, dict) and isinstance(entry.get("body"), str):
+        return entry["body"]
+    verdict = target.decision.get("verdict")
+    return verdict if isinstance(verdict, str) else ""
+
+
+def _prose_words(target: Target) -> dict:
+    """``words``: all delivered prose plus the decision entry, the reviewer/owner median, the chair."""
+    delivered = [n for n in sorted(target.turns) if target.turns[n].get("delivered")]
+    counts = [words(body(target, n)) for n in _prose_population(target)]
+    entry = _chair_entry(target)
+    return {
+        "prose_total": sum(words(body(target, n)) for n in delivered) + words(entry),
+        # statistics.median raises on an empty list: no reviewer or owner prose is null
+        "median_reviewer_owner": float(statistics.median(counts)) if counts else None,
+        "chair_entry": words(entry),
+        "chair_prose": words(chair_prose(target.decision)),
+    }
+
+
+def _prose_voice(target: Target) -> dict:
+    """``voice``: C8's shares over P (D11).
+
+    A reduction's ``voice`` dict is used verbatim. ``voice: null`` (voice's
+    undelivered or signals-only take) is unmeasured and left out of every
+    share. Any other turn is measured from its body.
+    """
+    rows = []
+    for n in _prose_population(target):
+        rec = target.turns[n]
+        if "voice" in rec and rec["voice"] is None:
+            continue
+        recorded = rec.get("voice")
+        rows.append(recorded if isinstance(recorded, dict)
+                    else measure(body(target, n), rec.get("role") or "reviewer"))
+    return voice_shares(rows)
+
+
+def _edit_counts(target: Target) -> dict:
+    """``edits``: per-edit counts from the doc/ snapshots, and the whole-run total (D3).
+
+    Step N is diffed against step N-1's snapshot, and the first step against
+    doc/00-original. A step whose file or predecessor is unreadable gets null
+    counts. Without the original snapshot there is no per-edit history
+    ("unavailable"), because the eval never replays traces. ``total`` is the
+    original against the revised copy, null when either is missing.
+    """
+    total = None
+    if target.original is not None and target.revised is not None:
+        added, removed = changed(target.original, target.revised)
+        total = {"lines_added": added, "lines_removed": removed}
+    if target.original_source != "snapshot":
+        return {"per_edit": "unavailable", "steps": [], "total": total}
+    steps, before = [], target.original
+    for step in target.steps:
+        after = step["data"]
+        added = removed = None
+        if before is not None and after is not None:
+            added, removed = changed(before, after)
+        steps.append({"turn": step["turn"], "lines_added": added, "lines_removed": removed})
+        before = after
+    partial = any(s["lines_added"] is None for s in steps)
+    return {"per_edit": "partial" if partial else "snapshot", "steps": steps, "total": total}
+
+
+def _prose_metrics(target: Target) -> dict:
+    """C5's prose and document half, merged into ``compute_metrics``."""
+    return {
+        "words": _prose_words(target),
+        "voice": _prose_voice(target),
+        "bytes": {
+            "original": None if target.original is None else len(target.original),
+            "revised": None if target.revised is None else len(target.revised),
+        },
+        "edits": _edit_counts(target),
     }

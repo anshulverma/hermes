@@ -783,3 +783,190 @@ def test_unknown_kinds_retakes_new_seats(tmp_path):
     for key in ("owner_turns_delivered", "delegations", "rechecks", "rechecks_verified",
                 "floor_requests", "ended", "cap", "outside_room_mentions"):
         assert m[key] == before[key], key
+
+
+# --- the prose and the document, both baselines pinned whole (T1, T2, T18) ----
+
+BASELINE_REVIEWERS = ["senior_director", "manager", "tpm", "pm", "tl", "staff_ic", "data_scientist"]
+BASELINE_SEATS = {"roster": ["owner", *BASELINE_REVIEWERS, "junior_ic"],
+                  "reviewers": BASELINE_REVIEWERS, "spoken": BASELINE_REVIEWERS, "unheard": []}
+# doc-diff's backfill counts for run-9 (its AC9, spec A3), as (turn, added, removed).
+RUN9_STEPS = [
+    {"turn": t, "lines_added": a, "lines_removed": r}
+    for t, a, r in ((3, 7, 2), (6, 13, 6), (9, 27, 0), (12, 8, 2),
+                    (15, 18, 11), (18, 6, 5), (21, 4, 2), (24, 17, 13))
+]
+RUN9_TOTAL = {"lines_added": 87, "lines_removed": 28}
+# Golden (C5): what C8 gives on the fixtures, pinned in this first green commit.
+RUN9_VOICE = {"n": 16, "pointer_share": 0.9375, "walls_share": 0.625,
+              "example_share": 0.875, "filler_per_turn": 0.0}
+RUN2_VOICE = {"n": 14, "pointer_share": 0.9286, "walls_share": 0.7143,
+              "example_share": 1.0, "filler_per_turn": 0.0}
+
+
+def _mentions(home: Path, run_id: str, *numbers: int) -> list[dict]:
+    """outside_room_mentions items for these thread.md lines: the stripped line, clipped."""
+    lines = (home / "runs" / run_id / "thread.md").read_text(encoding="utf-8").splitlines()
+    return [{"line": n, "quote": lines[n - 1].strip()[:E.QUOTE_MAX]} for n in numbers]
+
+
+def test_run9_metrics_pinned(tmp_path):
+    """T1: every C5 metric of run-9 equals its pin exactly, with no tolerance."""
+    home, run_id = build_home(tmp_path, "run-9")
+    target = E.load_target(str(home), run_id)
+    assert (target.legacy, target.original_source) == (False, "snapshot")
+    m = E.compute_metrics(target)
+    assert m == {
+        "turns": 24,
+        "turns_by_role": {"owner": 8, "junior_ic": 8, "senior_director": 2, "manager": 1,
+                          "tpm": 1, "pm": 1, "tl": 1, "staff_ic": 1, "data_scientist": 1},
+        "undelivered_turns": 0,
+        "owner_turns_delivered": 8,
+        "delegations": 8,
+        "rechecks": 8,
+        "rechecks_verified": 8,
+        "floor_requests": [{"turn": 1, "role": "senior_director"}],
+        "errors": 0,
+        "ended": "queue empty",
+        "cap": 30,
+        "artifact_intact": True,
+        "dropped": {"delegation": None, "floor_requests": []},
+        "seats": BASELINE_SEATS,
+        "unanswered_reviewer_turns": [],
+        "outside_room_mentions": _mentions(home, run_id, 29, 37, 253, 309),
+        "words": {"prose_total": 15498, "median_reviewer_owner": 825.0,
+                  "chair_entry": 1862, "chair_prose": 1518},
+        "voice": RUN9_VOICE,
+        "bytes": {"original": 11397, "revised": 14931},
+        "edits": {"per_edit": "snapshot", "steps": RUN9_STEPS, "total": RUN9_TOTAL},
+        "time": {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0},
+        "cost_usd": 30.3875,
+        "tokens": {"input": 402, "output": 278815, "cache_creation": 2304109,
+                   "cache_read": 13727431},
+        "traces": {"expected": 25, "found": 25, "with_cost": 25},
+        "other_kinds": {},
+        "extra_takes": 0,
+    }
+    assert type(m["words"]["median_reviewer_owner"]) is float  # medians are floats (D7)
+
+
+def test_run2_legacy_metrics_pinned(tmp_path):
+    """T2: every C5 metric of legacy run-2, from thread.md, equals its pin exactly."""
+    home, run_id = build_home(tmp_path, "run-2")
+    target = E.load_target(str(home), run_id)
+    assert (target.legacy, target.original_source) == (True, "live")
+    m = E.compute_metrics(target)
+    assert m == {
+        "turns": 20,
+        "turns_by_role": {"owner": 7, "junior_ic": 6, "senior_director": 1, "manager": 1,
+                          "tpm": 1, "pm": 1, "tl": 1, "staff_ic": 1, "data_scientist": 1},
+        "undelivered_turns": 0,
+        "owner_turns_delivered": 7,
+        "delegations": 6,
+        "rechecks": 6,
+        "rechecks_verified": 6,
+        "floor_requests": [],
+        "errors": 0,
+        "ended": "owner closed",
+        "cap": None,
+        "artifact_intact": True,
+        "dropped": {"delegation": None, "floor_requests": []},
+        "seats": BASELINE_SEATS,
+        "unanswered_reviewer_turns": [],
+        "outside_room_mentions": _mentions(home, run_id, 43, 315),
+        "words": {"prose_total": 21728, "median_reviewer_owner": 1393.5,
+                  "chair_entry": 2202, "chair_prose": 1934},
+        "voice": RUN2_VOICE,
+        "bytes": {"original": 11397, "revised": 19100},
+        "edits": {"per_edit": "unavailable", "steps": [],
+                  "total": {"lines_added": 208, "lines_removed": 88}},
+        "time": {"summed_attempt_s": 3279.4, "wall_clock_s": 3516.0},
+        "cost_usd": None,
+        "tokens": {"input": 214, "output": 183920, "cache_creation": 1768249,
+                   "cache_read": 6785620},
+        "traces": {"expected": 21, "found": 21, "with_cost": 0},
+        "other_kinds": {},
+        "extra_takes": 0,
+    }
+    assert type(m["words"]["median_reviewer_owner"]) is float
+
+
+def _t18_home(tmp_path: Path, case: str) -> tuple[Path, str, Path]:
+    """A fresh run-9 home under tmp_path/case: (home, run id, its doc/ directory)."""
+    base = tmp_path / case
+    base.mkdir()
+    home, run_id = build_home(base, "run-9")
+    return home, run_id, home / "runs" / run_id / "doc"
+
+
+def _edits_of(home: Path, run_id: str) -> dict:
+    return E.compute_metrics(E.load_target(str(home), run_id))["edits"]
+
+
+def test_per_edit_from_snapshots(tmp_path):
+    """T18: per-edit counts via snapshot_key; a gap is null and partial; no original snapshot is unavailable."""
+    # changed(): unified_diff with n=0 over the lines, its two file-header lines skipped
+    assert E.changed(b"a\nb\n", b"a\nc\nd\n") == (2, 1)
+    assert E.changed(b"same\n", b"same\n") == (0, 0)
+    assert E.changed(b"", b"x\ny\n") == (2, 0)
+    full = {"per_edit": "snapshot", "steps": RUN9_STEPS, "total": RUN9_TOTAL}
+
+    # a suffixed artifact: doc/00-original.md and doc/tNN.md
+    home, run_id, doc = _t18_home(tmp_path, "suffixed")
+    assert _edits_of(home, run_id) == full
+
+    # a suffixless artifact: snapshot_key drops the suffix (doc/00-original, doc/tNN),
+    # and the revised copy is revised/<basename>, suffixless too
+    home, run_id, doc = _t18_home(tmp_path, "suffixless")
+    copy = tmp_path / "suffixless" / "artifact" / "federation-future.md"
+    bare = copy.with_suffix("")
+    bare.write_bytes(copy.read_bytes())
+    conn = sqlite3.connect(home / "queue.db")
+    with conn:  # commits
+        for rid, raw in conn.execute(
+                "SELECT id, json FROM reductions WHERE run_id = ?", (run_id,)).fetchall():
+            data = json.loads(raw)
+            if "artifact" in data:
+                data["artifact"] = str(bare)
+                conn.execute("UPDATE reductions SET json = ? WHERE id = ?", (json.dumps(data), rid))
+    conn.close()
+    for snap in list(doc.iterdir()):
+        snap.rename(snap.with_suffix(""))
+    revised = home / "runs" / run_id / "revised"
+    (revised / "federation-future.md").rename(revised / "federation-future")
+    assert sorted(p.name for p in doc.iterdir())[:2] == ["00-original", "t03"]
+    assert _edits_of(home, run_id) == full
+
+    # a t100 step: named doc/t100.md, and ordered by turn (after t24), never by file name
+    home, run_id, doc = _t18_home(tmp_path, "t100")
+    (doc / "t100.md").write_bytes((doc / "t24.md").read_bytes() + b"one more line\n")
+    conn = sqlite3.connect(home / "queue.db")
+    with conn:
+        rows = conn.execute(
+            "SELECT json FROM reductions WHERE run_id = ? AND kind = 'turn'", (run_id,)).fetchall()
+        t100 = next(d for d in (json.loads(r[0]) for r in rows) if d["turn"] == 24)
+        t100["turn"] = 100
+        conn.execute(
+            "INSERT INTO reductions (run_id, kind, json, review_state, created_at, updated_at, phase)"
+            " VALUES (?, 'turn', ?, 'pending', 0, 0, 't100-junior_ic')", (run_id, json.dumps(t100)))
+    conn.close()
+    assert _edits_of(home, run_id) == {
+        **full, "steps": [*RUN9_STEPS, {"turn": 100, "lines_added": 1, "lines_removed": 0}]}
+
+    # a missing step: null counts for it and for the step diffed against it, so partial
+    home, run_id, doc = _t18_home(tmp_path, "missing")
+    (doc / "t12.md").unlink()
+    gap = {"lines_added": None, "lines_removed": None}
+    assert _edits_of(home, run_id) == {
+        "per_edit": "partial",
+        "steps": [{**s, **gap} if s["turn"] in (12, 15) else s for s in RUN9_STEPS],
+        "total": RUN9_TOTAL,
+    }
+
+    # no original snapshot: the original is the live artifact, and there is no per-edit history
+    home, run_id, doc = _t18_home(tmp_path, "no-original")
+    (doc / "00-original.md").unlink()
+    target = E.load_target(str(home), run_id)
+    assert target.original_source == "live"
+    assert E.compute_metrics(target)["edits"] == {
+        "per_edit": "unavailable", "steps": [], "total": RUN9_TOTAL}
