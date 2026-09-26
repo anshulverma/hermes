@@ -192,6 +192,12 @@ fields first, then `thread.md`, then the fixed layout.
     `Seat library:` seats nobody.
   - That list is unioned with the roles on turn reductions, in first-appearance order.
   - `reviewers(target)` is the roster minus `cast.OWNER` and `cast.JUNIOR`.
+  - A run with a `selection` reduction marked `final: true` (the latest wins, `Target.selection`)
+    reports that committee instead: `metrics.seats.roster` is its `seated` roles and
+    `metrics.seats.reviewers` its `reviewers`, both in roster order, and the header is never read
+    for seats. spoken and unheard keep the rule above, and `seats.considered` is its
+    `considered` as `{stakeholder, represented_by}`. `unanswered_reviewer_turns` keeps
+    `reviewers(target)`: every role with a turn is in both.
   - eval.py never imports `cast.CAST`, `cast.SENIORITY` or `cast.persona`, and never assumes the
     nine-seat cast or the tNN alternation.
 - **Chair prose** (`chair_prose(decision)`). The decision's `body` when present. Otherwise its
@@ -256,9 +262,9 @@ target, the metrics, the flags and the deterministic scores. Pins are exact, wit
 | `errors` | turn and decision reductions with a non-null `error` | 0 | 0 |
 | `ended` / `cap` / `artifact_intact` | as above / the cap of the latest turn that records one, or null / the decision's field | queue empty / 30 / true | owner closed / null / true |
 | `dropped` | `{delegation, floor_requests}` | null, [] | null, [] |
-| `seats` | `{roster, reviewers, spoken, unheard}` in roster order; spoken = reviewers with a delivered turn | unheard [] | unheard [] |
+| `seats` | `{roster, reviewers, spoken, unheard}` in roster order; spoken = reviewers with a delivered turn. A run with a final `selection` reduction takes roster and reviewers from it and adds `considered: [{stakeholder, represented_by}]`; without one the key is absent | unheard [] | unheard [] |
 | `unanswered_reviewer_turns` | as above | [] | [] |
-| `outside_room_mentions` | `[{line, quote}]` for lines in turn or decision entries matching `OUTSIDE_ROOM`, `(?i)\b(outside\|not in) this room\b`; without thread.md, bodies and chair prose with line null | lines 29, 37, 253, 309 | lines 43, 315 |
+| `outside_room_mentions` | `[{line, quote}]` for body lines of turn or decision entries (never the heading, which carries the run's roster names and titles) matching `OUTSIDE_ROOM`, `(?i)\b(outside\|not in) this room\b`; without thread.md, bodies and chair prose with line null | lines 29, 37, 253, 309 | lines 43, 315 |
 | `words` | `{prose_total, median_reviewer_owner, chair_entry, chair_prose}`. prose_total = every delivered body plus the full decision entry. The median is a float over P, null when P is empty. | 15498 / 825.0 / 1862 / 1518 | 21728 / 1393.5 / 2202 / 1934 |
 | `voice` | `{n, pointer_share, walls_share, example_share, filler_per_turn}` over P (see voice.py) | 16 / 0.9375 / 0.625 / 0.875 / 2.8125 | 14 / 0.9286 / 0.7143 / 1.0 / 7.7143 |
 | `bytes` | `{original, revised}` | 11397 / 14931 | 11397 / 19100 |
@@ -372,13 +378,13 @@ only.
   concern_coverage
   5: every seated member's main concerns were answered by the owner or by an edit, and the thread names no needed stakeholder missing from the room.
   1: major concerns went unanswered, or a missing function is named repeatedly.
-  Concerns come from each member's own turns, never from persona config. The judge also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`.
+  Concerns come from each member's own turns, never from persona config. The judge also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`. A stakeholder in seats.considered with a non-null represented_by counts as represented, not missing; a stakeholder the thread names who is in neither seats.roster nor seats.considered counts as missing.
 
   Evidence: every quote is verbatim and contiguous from the place it cites (no ellipses, no paraphrase).
   ```
 
   - The text is pinned: `test_voice_measure_and_version` asserts the first 8 hex of its sha256
-    (`96377104`). An edit fails that test until the affected judge dimension's `@n` is bumped and
+    (`7db8cd4c`). An edit fails that test until the affected judge dimension's `@n` is bumped and
     the hash re-pinned. The same change updates the block above and this hash.
   - The planning spec's closing sentence ("The run-9 baseline for absent stakeholders includes at
     least Security and on-call/SRE.") is left out of `RUBRIC` on purpose (G13): it is an
@@ -402,8 +408,10 @@ only.
     `"start 1 (median_reviewer_owner 825.0 > 800)"`. It ends `"; floor 1"` when the floor bit.
 - **Versions.**
   - `DIMENSIONS` maps each id to an explicit `"<id>@<n>"`. Today `edits_address_concerns@2`,
-    `concision@2` and `verdict_consistency@2`, the rest `@1`. edits_address_concerns@2 rewrote
-    anchors 3 and 1, which both said "partial" at @1. concision@2 reads voice's new counts (see
+    `concern_coverage@2`, `concision@2` and `verdict_consistency@2`, the rest `@1`.
+    edits_address_concerns@2 rewrote anchors 3 and 1, which both said "partial" at @1.
+    concern_coverage@2 (committee-selection) gives the judge `seats.considered` and the anchor
+    sentence that a considered stakeholder with a represented_by is represented, not missing. concision@2 reads voice's new counts (see
     voice.py below). verdict_consistency@2 counts only the chair's claims; @1 also took up to 2
     points for `delegation_truncated_but_applied` flags (run-9 scored 1).
   - `dimension_versions(rules=RULES)` returns `DIMENSIONS` with concision suffixed
@@ -872,10 +880,12 @@ spec, and compares it against run-9 and run-2.
     redefinition moves `filler_per_turn`.
   - `extra_takes` already counts its `take` reductions, and a turn recorded with `voice: null`
     is already out of P.
-- **committee-selection** takes `seats.roster` and `seats.reviewers` from its final `selection`
-  reduction when present, and bumps concern_coverage. If it edits `RUBRIC` (a concern_coverage
-  sentence, say), the bump and the hash re-pin go in the same change. The header parser already
-  ignores its pre-t01 lines, and `outside_room_mentions` counts only turn and decision entries.
+- **committee-selection** (as built) takes `seats.roster` and `seats.reviewers` from its final
+  `selection` reduction when present, adds `seats.considered`, and bumped concern_coverage to @2
+  with its `RUBRIC` sentence and hash re-pin in the same change. The header parser already
+  ignores its pre-t01 lines. `outside_room_mentions` counts only body lines of turn and decision
+  entries: selection amendment, because a turn heading now carries the run's roster name and
+  title, which a selector may write for a derived seat.
 - **committee-one-on-ones.**
   - Up-front `## 1:1 …` outcome lines before t01 belong to no entry, so they are never header
     evidence.

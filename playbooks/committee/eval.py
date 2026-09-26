@@ -48,7 +48,7 @@ from playbooks.committee.voice import RULES, measure, summary
 DIMENSIONS: dict[str, str] = {
     "verdict_grounded": "verdict_grounded@1",
     "edits_address_concerns": "edits_address_concerns@2",  # @2: anchors 3 and 1 no longer overlap
-    "concern_coverage": "concern_coverage@1",
+    "concern_coverage": "concern_coverage@2",  # @2: seats.considered, and a represented stakeholder is not missing
     "efficiency": "efficiency@1",
     "concision": "concision@2",  # @2: voice words skip fences and image lines; filler_hits sums every tell
     "verdict_consistency": "verdict_consistency@2",  # @2: only the chair's own claims count
@@ -92,7 +92,10 @@ RUBRIC = "\n".join((
     "and the thread names no needed stakeholder missing from the room.",
     "1: major concerns went unanswered, or a missing function is named repeatedly.",
     "Concerns come from each member's own turns, never from persona config. The judge "
-    "also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`.",
+    "also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`. "
+    "A stakeholder in seats.considered with a non-null represented_by counts as "
+    "represented, not missing; a stakeholder the thread names who is in neither "
+    "seats.roster nor seats.considered counts as missing.",
     "",
     f"Evidence: {VERBATIM}.",
 ))
@@ -257,6 +260,17 @@ def _decision(rows: list[tuple[str, str, object]]) -> tuple[dict, str]:
     return {}, ""
 
 
+def _final_selection(rows: list[tuple[str, str, object]]) -> dict | None:
+    """The latest ``selection`` reduction marked ``final: true``, or None (selection C5).
+
+    A malformed doc is skipped, never raised on.
+    """
+    for kind, _, doc in reversed(rows):
+        if kind == "selection" and isinstance(doc, dict) and doc.get("final") is True:
+            return doc
+    return None
+
+
 def _legacy(rows: list[tuple[str, str, object]]) -> bool:
     """D2: a turn reduction without ``body`` marks a run read through thread.md."""
     return any(kind == "turn" and isinstance(doc, dict) and "body" not in doc
@@ -329,6 +343,8 @@ class Target:
     # the work
     attempts: list[dict]  # {"id", "started_at", "ended_at", "outcome"}, ascending id
     traces: dict[int, bytes | None]
+    # selection D8: the latest final selection reduction's json, or None
+    selection: dict | None = None
 
 
 def _lines(text: str) -> list[str]:
@@ -479,6 +495,7 @@ def load_target(home: str, run_id: str) -> Target:
         attempts=attempts,
         traces={a["id"]: thread.read_regular(run_dir / "traces" / f"{a['id']}.jsonl")
                 for a in attempts},
+        selection=_final_selection(rows),
     )
 
 
@@ -686,11 +703,13 @@ def _ended(target: Target) -> str:
 
 
 def _outside_room_mentions(target: Target) -> list[dict]:
-    """Lines inside turn and decision entries that name someone outside the room.
+    """Body lines of turn and decision entries that name someone outside the room.
 
     Lines before t01 (the header, selection, 1:1 plans) belong to no entry (D3).
-    With no thread.md, the turn bodies and the chair prose are scanned instead,
-    with ``line`` null. ``quote`` is the stripped line clipped to QUOTE_MAX.
+    An entry's heading is never scanned: it carries the run's roster name and
+    title, which a selector may write for a derived seat. With no thread.md,
+    the turn bodies and the chair prose are scanned instead, with ``line``
+    null. ``quote`` is the stripped line clipped to QUOTE_MAX.
     """
     if target.thread is None or target.thread_text is None:
         texts = [body(target, n) for n in target.turns] + [chair_prose(target.decision)]
@@ -702,10 +721,41 @@ def _outside_room_mentions(target: Target) -> list[dict]:
         entries.append(target.thread["decision"])
     hits = sorted({
         i for e in entries
-        for i in range(e["line_start"], min(e["line_end"], len(lines)) + 1)
+        for i in range(e["line_start"] + 1, min(e["line_end"], len(lines)) + 1)
         if OUTSIDE_ROOM.search(lines[i - 1])
     })
     return [{"line": i, "quote": lines[i - 1].strip()[:QUOTE_MAX]} for i in hits]
+
+
+def _selected_seats(seats: dict, final: dict | None) -> dict:
+    """``metrics.seats`` for a run that seated its own committee (selection D8).
+
+    With no final selection reduction, ``seats`` comes back untouched with no
+    ``considered`` key, so legacy runs' metrics stay byte-identical. With one,
+    the roster and reviewers are the ratified ones in roster order, and the
+    header has no say. spoken and unheard keep today's rule: today's ``spoken``
+    already holds every reviewer role with a delivered turn, because the header
+    roster is unioned with every turn role. A final doc missing a key leaves
+    today's seats in place.
+    """
+    if final is None:
+        return seats
+    try:
+        roster = [seat["role"] for seat in final["seated"]]
+        reviewers = list(final["reviewers"])
+        considered = [{"stakeholder": c["stakeholder"], "represented_by": c["represented_by"]}
+                      for c in final["considered"]]
+    except (KeyError, TypeError):
+        return seats
+    heard = set(seats["spoken"])
+    return {
+        **seats,
+        "roster": roster,
+        "reviewers": reviewers,
+        "spoken": [r for r in reviewers if r in heard],
+        "unheard": [r for r in reviewers if r not in heard],
+        "considered": considered,
+    }
 
 
 def compute_metrics(target: Target) -> dict:
@@ -749,8 +799,10 @@ def compute_metrics(target: Target) -> dict:
             "delegation": decision.get("dropped_delegation"),
             "floor_requests": list(dropped_floor) if isinstance(dropped_floor, list) else [],
         },
-        "seats": {"roster": seated, "reviewers": revs, "spoken": spoken,
-                  "unheard": [r for r in revs if r not in spoken]},
+        # selection D8: a run that seated its own committee reports that committee
+        "seats": _selected_seats({"roster": seated, "reviewers": revs, "spoken": spoken,
+                                  "unheard": [r for r in revs if r not in spoken]},
+                                 target.selection),
         "unanswered_reviewer_turns": unanswered_reviewer_turns(target),
         "outside_room_mentions": _outside_room_mentions(target),
         "time": _time(target.attempts),

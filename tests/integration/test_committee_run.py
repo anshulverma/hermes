@@ -1059,13 +1059,14 @@ def test_eval_scores_scripted_run(eval_home, source_repo, artifact, local_site, 
     assert dims["verdict_grounded"]["score"] == JUDGE_SCORES["verdict_grounded"]
     assert dims["edits_address_concerns"]["score"] == JUDGE_SCORES["edits_address_concerns"]
     # G7: concern_coverage is the judge's 5, capped by this run's own record.
-    # The cap of 4 left t04 (manager) unanswered. The header now names only the
-    # fixed four and eval still reads its seats there, so the two fixed
-    # reviewers are its whole roster and both spoke; the five library seats
-    # come back as unheard once eval reads the final selection reduction (D8).
+    # The cap of 4 left t04 (manager) unanswered. eval reads the seats from the
+    # final selection reduction (D8), so the five library seats the default
+    # selection seated, none of whom got a turn, are unheard.
     metrics = body["metrics"]
-    assert metrics["seats"]["reviewers"] == ["senior_director", "manager"]
-    assert metrics["seats"]["unheard"] == []
+    assert metrics["seats"]["reviewers"] == [
+        "senior_director", "manager", "tpm", "pm", "tl", "staff_ic", "data_scientist",
+    ]
+    assert metrics["seats"]["unheard"] == ["tpm", "pm", "tl", "staff_ic", "data_scientist"]
     assert metrics["other_kinds"] == {"selection": 3}
     assert metrics["unanswered_reviewer_turns"] == [4]
     assert dims["concern_coverage"]["score"] == committee_eval.concern_cap(

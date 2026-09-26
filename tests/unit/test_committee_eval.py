@@ -29,9 +29,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from engine.db.migrate import apply_migrations
+from engine.db.migrate import apply_migrations, connect
+from engine.models import Run
 from playbooks.committee import eval as E
-from playbooks.committee import turnblock, voice
+from playbooks.committee import cast, selection, turnblock, voice
 
 MEASURE_KEYS = {"words", "pointers", "examples", "longest_paragraph_words", "filler_hits"}
 
@@ -134,7 +135,7 @@ def test_voice_measure_and_version():
     assert E.DIMENSIONS == {
         "verdict_grounded": "verdict_grounded@1",
         "edits_address_concerns": "edits_address_concerns@2",
-        "concern_coverage": "concern_coverage@1",
+        "concern_coverage": "concern_coverage@2",
         "efficiency": "efficiency@1",
         "concision": "concision@2",
         "verdict_consistency": "verdict_consistency@2",
@@ -147,7 +148,7 @@ def test_voice_measure_and_version():
     assert "3: some edits resolve their concern, others only partly." in E.RUBRIC
     assert "1: cosmetic or unrelated edits, or edits that leave the concern unresolved." in E.RUBRIC
     assert "partial." not in E.RUBRIC
-    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "96377104", (
+    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "7db8cd4c", (
         "RUBRIC text changed: bump the affected judge dimension's version in DIMENSIONS, "
         "re-pin this hash, and update the verbatim block and hash in docs/specs/committee-eval.md"
     )
@@ -3613,3 +3614,252 @@ def test_a_voice_era_header_seats_the_same_roster_under_eval_d3(tmp_path, monkey
     assert "**Committee:**" in bold
     assert (E.parse_thread(plain)["roster"] == E.parse_thread(bold)["roster"]
             == ["owner", "tl", "staff_ic"])
+
+
+# --- committee-selection: seats from the final selection reduction (selection D8) ---
+
+SEL_RUN = "run-sel"
+
+# The sentence selection adds to RUBRIC's concern_coverage anchor (selection D8).
+REPRESENTED_RULE = (
+    "A stakeholder in seats.considered with a non-null represented_by counts as "
+    "represented, not missing; a stakeholder the thread names who is in neither "
+    "seats.roster nor seats.considered counts as missing."
+)
+
+# The one line inside a turn entry that says it: the scanner's positive control.
+ROOM_TURN_LINE = "The on-call rotation is outside this room, so the rollback plan has no owner."
+
+SEL_TURNS = (  # (turn, role, body): every seated reviewer but tpm speaks
+    (1, "senior_director", "Fund it or defer it: say which, and what it costs.\n\n" + ROOM_TURN_LINE),
+    (2, "owner", "Fund it: two engineers for one quarter."),
+    (3, "manager", "My team is committed this half; two engineers means a slip."),
+    (4, "owner", "Then one engineer, and the schedule moves a month."),
+    (5, "security", "Every crew that crosses a zone needs its own credential."),
+    (6, "owner", "Agreed: one credential per crew, written into section 4."),
+)
+
+SEL_REVIEWERS = ["senior_director", "manager", "security", "tpm"]
+
+SEL_CONSIDERED = [
+    {"stakeholder": "Site Reliability Engineer, on-call", "role": "sre",
+     "reason": "on-call is outside this room; security speaks for it",
+     "represented_by": "security"},
+    {"stakeholder": "Partner crews", "role": None,
+     "reason": "the document names no partner change", "represented_by": None},
+]
+
+
+def _sel_seated():
+    """The ratified roster, in roster order, as selection.resolve records it."""
+    fixed = selection.fixed_seats()
+
+    def library(slug, why, by):
+        return {**cast.LIBRARY[slug], "role": slug, "rationale": why,
+                "nominated_by": by, "source": "library"}
+
+    return [fixed["owner"], fixed["senior_director"], fixed["manager"],
+            library("security", "signs the security review this must pass", "owner"),
+            library("tpm", "owns the schedule this would move", "manager"),
+            fixed["junior_ic"]]
+
+
+def _sel_thread(artifact, seated):
+    """A selection-era thread.md (selection D3), with the planted pm line."""
+    who = {s["role"]: f"{s['name']}, {s['title']}" for s in seated}
+    name = {s["role"]: s["name"] for s in seated}
+    lines = [f"# Committee: {SEL_RUN}", "", "Charge: Decide whether to fund the layer now.", "",
+             f"Artifact: {artifact}", "", "Committee:", ""]
+    lines += [f"- {r} — {who[r]}" for r in ("owner", "senior_director", "manager", "junior_ic")]
+    lines += ["- pm — Elena Vargas, Product Manager", "- Reviewer seats: chosen below", "",
+              "Seat library:", "- security: Security Engineer. Lens: trust boundaries.", "",
+              "Ground rules for every speaker:", "- Lead with the point.", ""]
+    for stage, role, verb, body in (
+        (1, "owner", "proposes", "Security is outside this room today and should be seated."),
+        (2, "manager", "amends", "Add the program manager."),
+        (3, "senior_director", "ratifies", "Ratified as amended."),
+    ):
+        lines += [f"## selection {stage}: {who[role]} ({role}) {verb}", "", body, ""]
+    lines.append("## committee seated")
+    for s in seated:
+        by = "fixed seat" if s["nominated_by"] == "fixed" else name[s["nominated_by"]]
+        lines.append(f"- {s['role']}: {who[s['role']]}. Why: {s['rationale']}. Put forward by {by}.")
+    lines += ["", "Considered, not seated:",
+              f"- Site Reliability Engineer, on-call: {SEL_CONSIDERED[0]['reason']}. "
+              f"Represented by {name['security']}.",
+              f"- Partner crews: {SEL_CONSIDERED[1]['reason']}.", ""]
+    for turn, role, body in SEL_TURNS:
+        lines += [f"## turn {turn:02d} — {who[role]} ({role})", "", body, ""]
+    lines += [f"## decision — {who['senior_director']}", "", "Defer the layer one quarter.", ""]
+    return "\n".join(lines)
+
+
+def _sel_stage(stage, role, seats, **final):
+    """One kept stage's `selection` reduction (selection C5); the chair's adds `final`."""
+    return {"stage": stage, "role": role, "final": stage == 3, "delivered": True,
+            "body": "Seats as listed.", "parsed": True, "code": None,
+            "proposed": [{k: s[k] for k in ("role", "name", "title", "rationale")} for s in seats],
+            "error": None, "cap": 24 if stage == 3 else 30, "take": 1, "takes": 1,
+            "kept": True, "voice": None, "violations": [], "flags": [], **final}
+
+
+def _sel_home(home, artifact, *, selected):
+    """A source home holding SEL_RUN. Both variants share thread.md, the turns,
+    the decision, the tickets and the attempts; `selected` adds the three
+    `selection` reductions, the chair's one final. So their metrics may differ
+    only where selection reaches."""
+    seated = _sel_seated()
+    run_dir = home / "runs" / SEL_RUN
+    (run_dir / "revised").mkdir(parents=True)
+    apply_migrations(str(home / "queue.db"))
+    (run_dir / "thread.md").write_text(_sel_thread(artifact, seated), encoding="utf-8")
+    revised = run_dir / "revised" / Path(artifact).name
+    revised.write_text(Path(artifact).read_text(encoding="utf-8"), encoding="utf-8")
+
+    rows = []
+    if selected:
+        rows += [
+            ("s1-owner", "selection", _sel_stage(1, "owner", seated[3:4])),
+            ("s2-manager", "selection", _sel_stage(2, "manager", seated[3:5])),
+            ("s3-senior_director", "selection", _sel_stage(
+                3, "senior_director", seated[3:5], seated=seated,
+                reviewers=SEL_REVIEWERS, considered=SEL_CONSIDERED, fallback=None)),
+        ]
+    for turn, role, body in SEL_TURNS:
+        rows.append((f"t{turn:02d}-{role}", "turn", {
+            "role": role, "turn": turn, "delivered": True, "body": body, "stance": None,
+            "artifact": artifact, "revised": str(revised), "cap": 24,
+            "request_floor": False, "delegate": False, "close": turn == 6, "action": None,
+            "verified": None, "answers_turn": turn - 1 if role == "owner" else None,
+            "delegated_by_turn": None, "error": None}))
+    rows.append(("decision", "decision", {
+        "needs_human_ticket_ids": [f"{SEL_RUN}/decision"],
+        "verdict": "Defer the layer one quarter.", "body": "Defer the layer one quarter.",
+        "delivered": True, "rechecks": [], "artifact_intact": True,
+        "dropped_delegation": None, "dropped_delegation_turn": None,
+        "dropped_floor_requests": [], "ended": "owner closed",
+        "artifact": artifact, "revised": str(revised), "error": None}))
+    phases = (["s1-owner", "s2-manager", "s3-senior_director"]
+              + [f"t{t:02d}-{r}" for t, r, _ in SEL_TURNS] + ["decision"])
+
+    conn = connect(str(home / "queue.db"))
+    try:
+        conn.execute(
+            "INSERT INTO runs (id, playbook, site, base_ref, config_json, state, phase,"
+            " created_at, updated_at) VALUES (?, 'committee', 'local', 'main', '{}',"
+            " 'running', 'decision', 1000, 1000)", (SEL_RUN,))
+        for phase, kind, doc in rows:
+            conn.execute(
+                "INSERT INTO reductions (run_id, phase, kind, json, review_state,"
+                " created_at, updated_at) VALUES (?, ?, ?, ?, 'pending', 0, 0)",
+                (SEL_RUN, phase, kind, json.dumps(doc)))
+        for i, phase in enumerate(phases):
+            ticket = f"{SEL_RUN}/{phase}"
+            conn.execute(
+                "INSERT INTO tickets (id, run_id, phase, state, created_at, updated_at)"
+                " VALUES (?, ?, ?, 'done', 0, 0)", (ticket, SEL_RUN, phase))
+            conn.execute(
+                "INSERT INTO attempts (ticket_id, phase, host, attempt, started_at,"
+                " ended_at, outcome) VALUES (?, ?, 'localhost', 1, ?, ?, 'ok')",
+                (ticket, phase, 1000.0 + 100 * i, 1060.0 + 100 * i))
+        conn.commit()
+    finally:
+        conn.close()
+    return home
+
+
+def _sel_artifact(tmp_path):
+    path = tmp_path / "plan.md"
+    path.write_text("# Plan\n\nFund the layer this quarter.\n", encoding="utf-8")
+    return str(path)
+
+
+def _sel_measure(monkeypatch, home, eval_run):
+    """eval's measure phase, in process, with `home` as both eval and source home."""
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_COMMITTEE_EVAL_RUN", SEL_RUN)
+    monkeypatch.delenv("HERMES_COMMITTEE_EVAL_HOME", raising=False)
+    run = Run(id=eval_run, playbook="committee-eval", site="local", base_ref="main",
+              config={}, phase="measure", reductions=[])
+    out = E.CommitteeEvalPlaybook().reduce(run, "measure", [], SimpleNamespace(name="local"))
+    assert [r.kind for r in out] == ["eval_target"]
+    assert out[0].json.get("error") is None, out[0].json.get("error")
+    return out[0].json
+
+
+def _except(metrics, *keys):
+    return {k: v for k, v in metrics.items() if k not in keys}
+
+
+def test_seats_come_from_the_final_selection_reduction(tmp_path, monkeypatch):
+    artifact = _sel_artifact(tmp_path)
+    plain = _sel_home(tmp_path / "plain", artifact, selected=False)
+    chosen = _sel_home(tmp_path / "chosen", artifact, selected=True)
+
+    before = _sel_measure(monkeypatch, plain, "committee-eval-plain")["metrics"]
+    after = _sel_measure(monkeypatch, chosen, "committee-eval-chosen")["metrics"]
+
+    # No final selection reduction: today's rule, the header parsed, no `considered`.
+    assert "pm" in before["seats"]["roster"]
+    assert "considered" not in before["seats"]
+    assert before["other_kinds"] == {}
+    # With one: the ratified committee in roster order. The header's pm is ignored,
+    # and spoken/unheard keep today's rule over the ratified reviewers.
+    assert after["seats"] == {
+        "roster": ["owner", "senior_director", "manager", "security", "tpm", "junior_ic"],
+        "reviewers": ["senior_director", "manager", "security", "tpm"],
+        "spoken": ["senior_director", "manager", "security"],
+        "unheard": ["tpm"],
+        "considered": [
+            {"stakeholder": "Site Reliability Engineer, on-call", "represented_by": "security"},
+            {"stakeholder": "Partner crews", "represented_by": None},
+        ],
+    }
+    # Selection reductions are other kinds, never turns, and nothing else moves.
+    assert after["other_kinds"] == {"selection": 3}
+    assert after["turns"] == before["turns"] == 6
+    assert _except(after, "seats", "other_kinds") == _except(before, "seats", "other_kinds")
+    # The judge reads `seats` from inputs/metrics.json, so `considered` reaches
+    # the concern_coverage inputs with no other change.
+    inputs = chosen / "runs" / "committee-eval-chosen" / "inputs"
+    assert "Partner crews" in (inputs / "metrics.json").read_text(encoding="utf-8")
+
+
+def test_committee_seated_lines_never_count_as_outside_room(tmp_path, monkeypatch):
+    home = _sel_home(tmp_path / "chosen", _sel_artifact(tmp_path), selected=True)
+    text = (home / "runs" / SEL_RUN / "thread.md").read_text(encoding="utf-8")
+    # The fixture really says it before t01: in selection 1 and under `## committee seated`.
+    assert text[:text.index("\n## turn 01 ")].count("outside this room") == 2
+
+    mentions = _sel_measure(monkeypatch, home, "committee-eval-room")["metrics"][
+        "outside_room_mentions"]
+
+    assert [m["quote"] for m in mentions] == [ROOM_TURN_LINE]
+
+
+def test_a_turn_heading_never_counts_as_outside_room():
+    """A turn heading carries the run's own roster name and title, which a
+    selector may write for a derived seat, so only entry bodies are scanned."""
+    text = "\n".join([
+        "# Committee: run-h", "",
+        "## turn 01 — Ada Park, Liaison for teams outside this room (liaison)", "",
+        "Nobody spoke for them.", "",
+        "## decision — Dana Whitfield, Senior Director of Engineering", "",
+        "On-call is not in this room either.", ""])
+    target = SimpleNamespace(thread=E.parse_thread(text), thread_text=text)
+
+    assert E._outside_room_mentions(target) == [
+        {"line": 9, "quote": "On-call is not in this room either."}]
+
+
+def test_concern_coverage_is_at_version_two_with_the_represented_rule(tmp_path, monkeypatch):
+    assert "concern_coverage@2" in repr(E.DIMENSIONS)
+    assert "concern_coverage@1" not in repr(E.DIMENSIONS)
+    assert REPRESENTED_RULE in " ".join(E.RUBRIC.split())
+
+    home = _sel_home(tmp_path / "chosen", _sel_artifact(tmp_path), selected=True)
+    _sel_measure(monkeypatch, home, "committee-eval-rubric")
+    rubric_md = (home / "runs" / "committee-eval-rubric" / "inputs" / "rubric.md").read_text(
+        encoding="utf-8")
+
+    assert REPRESENTED_RULE in " ".join(rubric_md.split())
