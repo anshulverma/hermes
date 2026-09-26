@@ -31,6 +31,7 @@ import re
 import shutil
 import stat
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 
 from engine import config as _config
@@ -59,6 +60,25 @@ def _entry(run_id: str, heading: str, body: str) -> None:
     _append(run_id, f"\n{heading}\n\n{text or NO_TURN}\n")
 
 
+# Voice's rule 5: no en or em dash in a line the master renders from worker text.
+_DASHES = str.maketrans({"\u2013": "-", "\u2014": "-"})
+
+
+def _one(text) -> str:
+    """Worker text on one dash-free line, so it can never open a line of its own.
+
+    Not a heading (eval reads ``## turn`` and ``## decision`` anywhere) and not
+    a roster seat (a word, then an em dash). selection.validate already cleans
+    every field; this holds for whatever a caller passes.
+    """
+    return " ".join(str(text or "").translate(_DASHES).split())
+
+
+def _bare(text) -> str:
+    """``_one`` without trailing full stops, so a template's own ``.`` is never doubled."""
+    return _one(text).rstrip(".").rstrip()
+
+
 # The header line naming the artifact; `header_artifact` reads it back. Plain,
 # like every voice-era label; a thread written before voice has the bold form,
 # and a pre-voice run still open reads it back too.
@@ -68,13 +88,19 @@ _ARTIFACT_LINES = (_ARTIFACT_LINE, "**Artifact:** ")
 
 def write_header(
     run_id: str, *, charge: str, artifact: str, roster: list[str],
-    rules: tuple[str, ...] = (),
+    rules: tuple[str, ...] = (), library: Iterable[tuple[str, dict]] = (),
 ) -> None:
     """Open the transcript with the charge, the artifact path, the roster and the ground rules.
 
     Plain labels, no bold: the header is the first thing every speaker reads,
     and it is held to the rules it states. ``rules`` follow the roster after a
     blank line, one per line, so every later speaker has them in the thread.
+
+    ``library`` is (slug, persona) pairs; the playbook passes
+    ``cast.LIBRARY.items()``. When it is non-empty, the Committee block ends
+    with ``- Reviewer seats: chosen below`` and a ``Seat library:`` block, one
+    ``- slug: Title. Lens: ...`` line per pair, comes before the rules. Empty
+    (the default), the header is voice's byte for byte.
     """
     lines = [
         f"# Committee — {run_id}",
@@ -87,6 +113,16 @@ def write_header(
         "",
     ]
     lines.extend(f"- {member}" for member in roster)
+    seats = list(library)
+    if seats:
+        # A selection run: the fixed four above, every other seat chosen in the
+        # thread from this library or derived from the document. `- slug:` lines
+        # never match eval's header roster regex, and "Seat library:" ends its block.
+        lines.append("- Reviewer seats: chosen below")
+        lines.extend(["", "Seat library:"])
+        lines.extend(
+            f"- {slug}: {_bare(p['title'])}. Lens: {_one(p['lens'])}" for slug, p in seats
+        )
     if rules:
         lines.extend(["", "Ground rules for every speaker:", *rules])
     _append(run_id, "\n".join(lines) + "\n")
@@ -165,9 +201,12 @@ def write_take(run_id: str, name: str, body: str) -> str:
     return f"takes/{name}"
 
 
-def append_turn(run_id: str, *, turn: int, role: str, body: str) -> None:
+def append_turn(
+    run_id: str, *, turn: int, role: str, body: str, roster: dict | None = None,
+) -> None:
     """Append one speaker's turn under ``## turn NN — Name, Title (role)``."""
-    who = cast.persona(role)
+    # ``roster`` is the run's own (slug -> seat record); None reads cast.CAST.
+    who = cast.persona(role, roster)
     _entry(run_id, f"## turn {turn:02d} — {who['name']}, {who['title']} ({role})", body)
 
 
@@ -175,6 +214,113 @@ def append_decision(run_id: str, *, body: str) -> None:
     """Append the chair's decision. The chair signs by name, not by role."""
     who = cast.persona(cast.CHAIR_ROLE)
     _entry(run_id, f"## decision — {who['name']}, {who['title']}", body)
+
+
+# --- selection: the stage entries and the seated committee (selection D3) ------
+
+_VERB = {1: "proposes", 2: "amends", 3: "ratifies"}
+# What a delivered stage with no usable seat list says in place of its lists.
+_NO_LIST = {"no_block": "no_block", "unparseable": "unparseable", "too_few": "no valid seats"}
+_PUT_FORWARD = {"fixed": "fixed seat", "default": "default"}
+# Lines per list in one stage's entry. validate keeps no cap, so a 200 KB block
+# can name thousands of seats: the rest are counted in one line, never lost silently.
+LIST_MAX = 20
+# A heading in a selector's prose (0-3 spaces, then "#") is escaped, so it reads
+# as text and never as an entry: eval reads `## turn` and `## decision` anywhere.
+_HEADING = re.compile(r"^ {0,3}(?=#)", re.MULTILINE)
+
+
+def _name_of(slug, seats, roster) -> str | None:
+    """``slug``'s name from ``seats``, else ``roster`` (None reads cast.CAST), else None."""
+    for seat in seats:
+        if seat.get("role") == slug:
+            return seat.get("name")
+    seat = (roster or cast.CAST).get(slug) if isinstance(slug, str) else None
+    return seat.get("name") if seat else None
+
+
+def _seat(seat: dict) -> str:
+    """``- slug: Name, Title. Why: rationale.``"""
+    return (
+        f"- {_one(seat.get('role'))}: {_one(seat.get('name'))}, {_bare(seat.get('title'))}. "
+        f"Why: {_bare(seat.get('rationale'))}."
+    )
+
+
+def _represented(entry: dict, seats, roster) -> str:
+    """``- stakeholder: reason.``, plus ``Represented by Name.`` when a seat speaks for it."""
+    line = f"- {_one(entry.get('stakeholder'))}: {_bare(entry.get('reason'))}."
+    # A derived seat's name is worker text: "J. Smith Jr." must not render "Jr..".
+    name = _bare(_name_of(entry.get("represented_by"), seats, roster))
+    return f"{line} Represented by {name}." if name else line
+
+
+def _listed(label: str, lines, more: int) -> str:
+    """``label`` over ``lines``, then ``- N more not listed.`` when ``more`` were cut."""
+    return "\n".join([label, *lines, *([f"- {more} more not listed."] if more > 0 else [])])
+
+
+def append_selection(
+    run_id: str, *, stage: int, role: str, body: str, seats: list[dict],
+    not_seated: list[dict], code: str | None, roster: dict | None = None,
+) -> None:
+    """Append one stage under ``## selection N: Name, Title (role) proposes|amends|ratifies``.
+
+    ``body`` is the selector's prose, its fences already stripped by the
+    caller; empty, it is the ``NO_TURN`` stub, and a heading in it is escaped.
+    A usable list (``code`` None) follows as master-rendered ``Seats:`` and
+    ``Not seated:`` lines, which is where the next selector reads it: pass the
+    whole lists, and each shows its first LIST_MAX entries and counts the rest.
+    A delivered stage with no usable list says why instead, and an undelivered
+    one (``no_answer``) is the stub alone. A representative is named only when
+    it is in ``seats`` or ``roster``.
+    """
+    who = cast.persona(role, roster)
+    text = _HEADING.sub(r"\\", body.strip()) if isinstance(body, str) else ""
+    text = text or NO_TURN
+    if code is None:
+        shown = map(_seat, seats[:LIST_MAX])
+        text += "\n\n" + _listed("Seats:", shown, len(seats) - LIST_MAX)
+        if not_seated:
+            notes = (_represented(entry, seats, roster) for entry in not_seated[:LIST_MAX])
+            text += "\n\n" + _listed("Not seated:", notes, len(not_seated) - LIST_MAX)
+    elif code != "no_answer":
+        text += f"\n\n_(no usable seat list: {_NO_LIST.get(code, _one(code))})_"
+    heading = f"## selection {stage}: {who['name']}, {who['title']} ({role}) {_VERB[stage]}"
+    _entry(run_id, heading, text)
+
+
+def append_seated(
+    run_id: str, *, seated: list[dict], considered: list[dict], fallback: str | None,
+    roster: dict, dropped: int = 0,
+) -> None:
+    """Append ``## committee seated``, after the chair's kept take and before t01.
+
+    One line per seat in roster order, with why and who put it forward (a
+    selector's name, ``fixed seat`` or ``default``). Then the stakeholders
+    considered but not seated, each with its representative when one is
+    seated, and ``- N more not listed.`` for the ``dropped`` ones resolve cut
+    (its ``considered_dropped`` plus ``invalid_dropped``); or ``Everyone
+    considered was seated.``. Then ``Fallback: <code>`` when selection fell
+    back to the default committee.
+    """
+    lines = []
+    for seat in seated:
+        nominated_by = seat.get("nominated_by")
+        by = (
+            _PUT_FORWARD.get(nominated_by)
+            or _bare(_name_of(nominated_by, (), roster))
+            or _one(nominated_by)
+        )
+        lines.append(f"{_seat(seat)} Put forward by {by}.")
+    if considered or dropped > 0:
+        entries = (_represented(entry, seated, roster) for entry in considered)
+        lines += ["", _listed("Considered, not seated:", entries, dropped)]
+    else:
+        lines += ["", "Everyone considered was seated."]
+    if fallback:
+        lines += ["", f"Fallback: {_one(fallback)}"]
+    _entry(run_id, "## committee seated", "\n".join(lines))
 
 
 def revised_path(run_id: str, artifact: str) -> Path:
