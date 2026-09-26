@@ -36,7 +36,7 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
     """The whole view payload for one committee run.
 
     ``run`` is read for exactly one thing -- whether the chair has the floor --
-    and its phase name is compared against the static ``"decision"``, never
+    and its phase name is checked against the static ``DECISION_PHASES``, never
     parsed for a speaker (the runtime phase name is display-only, §5.6).
     """
     # Nothing `reduce` writes reaches the out-of-contract shapes guarded below
@@ -89,6 +89,10 @@ def _floor(
     it, so replaying those two rules over the turns in order reproduces the
     queue the state machine holds and this process cannot see.
     """
+    # Imported here rather than at module scope: playbook.py imports this
+    # module, so importing it back at module scope would be a cycle.
+    from playbooks.committee.playbook import DECISION_PHASES
+
     spoken: list[str] = []
     queue: list[str] = []
     last: str | None = None
@@ -126,8 +130,8 @@ def _floor(
         # that will never come. The verdict card tells that story in the past
         # tense, off the decision's own `dropped_floor_requests`.
         holder, queue = None, []
-    elif run.phase == "decision":
-        holder = cast.CHAIR  # the chair is writing the verdict
+    elif run.phase in DECISION_PHASES:
+        holder = cast.CHAIR  # the chair is writing the verdict, or a retake of it
     else:
         holder = last
     return holder, queue, spoken

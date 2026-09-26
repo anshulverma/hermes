@@ -315,6 +315,12 @@ def test_the_chair_holds_the_floor_while_the_decision_is_running(run2):
     assert data["verdict"] is None
 
 
+def test_the_chair_holds_the_floor_during_a_decision_retake(run2):
+    data = view_data(_run("decision-take2"), run2[:20])
+
+    assert data["progress"]["holder"] == cast.CHAIR
+
+
 def test_progress_counts_the_turns_against_the_cap_the_run_used(run2, monkeypatch):
     """The cap rides on the reductions, NOT on this process's environment.
 

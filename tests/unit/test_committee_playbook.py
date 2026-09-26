@@ -21,7 +21,7 @@ import pytest
 from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
 from playbooks.committee import cast, turnblock
 from playbooks.committee import turnblock as T
-from playbooks.committee.playbook import _apply_block
+from playbooks.committee.playbook import DECISION_PHASES, _apply_block
 
 
 @pytest.fixture(autouse=True)
@@ -1288,7 +1288,7 @@ def _drive(script, max_turns=30):
             # A take reduce discarded: its gates never run, and the same
             # speaker is asked again (`_discard` sets exactly this).
             s["retake"] = "Retake note."
-        if nxt == "decision":
+        if nxt in DECISION_PHASES:
             speakers.append("chair")
             delivered.append(True)
             continue
@@ -1321,10 +1321,10 @@ def _kept(phases):
 def check_invariants(s, seen, speakers, max_turns=30, delivered=None):
     """Every property the model asserted on every run it drove."""
     assert len(seen) == len(set(seen)), "duplicate phase name"
-    assert seen[-1] == "decision", f"did not end at decision: {seen[-1]}"
+    assert seen[-1] in DECISION_PHASES, f"did not end at a decision phase: {seen[-1]}"
     kept = _kept(seen[1:])  # seen[0] is `open`; speakers run parallel to seen[1:]
     assert sum(
-        1 for phase, k in zip(seen[1:], kept) if phase == "decision" and k
+        1 for phase, k in zip(seen[1:], kept) if phase in DECISION_PHASES and k
     ) == 1, "not exactly one kept decision"
     nums = [int(p[1:3]) for p in seen if p.startswith("t") and "-take" not in p]
     if nums:
@@ -3926,6 +3926,100 @@ def test_an_undelivered_take_one_is_kept_with_no_voice():
 
     assert doc["delivered"] is False and doc["voice"] is None
     assert (doc["take"], doc["takes"], doc["violations"], doc["flags"]) == (1, 1, [], [])
+
+
+def test_a_chair_retake_keeps_every_invariant():
+    _, _, s, seen, sp, ok = _drive({"decision": {"_retake": True}, "decision-take2": {"_retake": True}})
+
+    check_invariants(s, seen, sp, delivered=ok)
+    assert seen[-3:] == ["decision", "decision-take2", "decision-take3"]
+
+
+# The chair: 400 words under a `## Ruling` header, 402 by the count. Over the
+# chair's cap of 300.
+_CHAIR_WALL = "## Ruling\n\n" + "word " * 400
+
+
+def _chairing(pb, run):
+    s = pb._state(run)
+    s["opening"] = []
+    pb._decision(s, "queue empty")
+    return s
+
+
+def test_a_chair_take_over_the_cap_is_discarded_and_decision_take2_is_kept():
+    """T6: only the kept verdict is written and held, under its own phase."""
+    from playbooks.committee import thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="decision")
+    _chairing(pb, run)
+
+    red = pb.reduce(run, "decision", [_finding(run, f"{run.id}/decision", _CHAIR_WALL)], site)
+
+    assert red[0].kind == "take" and red[0].json["turn"] is None
+    assert red[0].json["violations"] == ["over_cap", "headers"]
+    assert "needs_human_ticket_ids" not in red[0].json
+    assert not thread.path(run.id).exists()
+    assert pb.next_phase(run) == "decision-take2"
+
+    run.phase = "decision-take2"
+    ticket = pb.seed(run, site)[0]
+    assert ticket.id == f"{run.id}/decision-take2" and ticket.payload["kind"] == "decision"
+    assert ticket.payload["title"].endswith("delivers the committee decision (take 2)")
+    assert (
+        "Retake 2 of 3. Rules broken: 402 words (cap 300); 1 headers. Say it again within them."
+        in ticket.payload["goal"]
+    )
+
+    prose = "Approve with changes: land the rollback plan first."
+    kept = pb.reduce(run, "decision-take2", [_finding(run, ticket.id, prose)], site)[0]
+    assert kept.kind == "decision"
+    assert kept.json["needs_human_ticket_ids"] == [f"{run.id}/decision-take2"]
+    assert (kept.json["take"], kept.json["takes"], kept.json["body"]) == (2, 2, prose)
+    assert kept.json["voice"]["words"] == 8 and kept.json["violations"] == []
+    assert thread.path(run.id).read_text().count("## decision") == 1
+    assert pb.next_phase(run) == "ruling"
+    ruled = _run(phase="ruling", reductions=[
+        Reduction(kind="decision", json=kept.json, review_state="accepted")])
+    assert pb.is_done(ruled) is True
+
+
+def test_a_failed_chair_retake_records_the_held_prose_unruled_and_the_run_fails():
+    from playbooks.committee import thread, turnblock
+    from playbooks.committee.playbook import _SIMULATION
+
+    pb = _committee()
+    run = _run(phase="decision-take2")
+    s = _chairing(pb, run)
+    s.update(take=2, held={"answer": _CHAIR_WALL, "take": 1})
+
+    doc = pb.reduce(run, "decision-take2", [], _NamedSite("local"))[0].json
+
+    assert doc["delivered"] is False and doc["ended"] == "chair retake failed"
+    assert doc["needs_human_ticket_ids"] == []
+    assert doc["body"] == turnblock.strip(_CHAIR_WALL)
+    assert doc["verdict"].startswith("## Ruling") and _SIMULATION in doc["verdict"]
+    assert doc["violations"] == ["over_cap", "headers", "retake_failed"]
+    assert (doc["take"], doc["takes"]) == (1, 2)
+    assert "## decision" in thread.path(run.id).read_text()
+    ruled = _run(phase="ruling", reductions=[
+        Reduction(kind="decision", json=doc, review_state="pending")])
+    assert pb.is_done(ruled) is False
+
+
+def test_a_fresh_process_after_a_discarded_chair_take_goes_to_ruling_and_fails():
+    pb = _committee()
+    run = _run(phase="decision")
+    _chairing(pb, run)
+    take = pb.reduce(run, "decision", [_finding(run, f"{run.id}/decision", _CHAIR_WALL)],
+                     _NamedSite("local"))[0]
+
+    fresh = _committee()
+    assert fresh.next_phase(run) == "ruling"
+    assert fresh._state_by_run == {}  # a read, not a state it grows
+    assert fresh.is_done(_run(phase="ruling", reductions=[take])) is False
 
 
 # --- registration and wiring ---------------------------------------------

@@ -47,6 +47,14 @@ DEFAULT_CHARGE = "Decide whether to approve this proposal."
 # A turn that was delivered but carried only its hermes-turn block.
 _SIGNALS_ONLY = "_(the speaker sent signals only, no prose)_"
 
+# The chair's phase and its retakes (C8: take k of a phase is `{base}-take{k}`).
+# Everything that used to compare against the literal "decision" checks
+# membership here instead, so a verdict kept under `decision-take2` is still
+# the decision. `self.phases` stays open/decision/ruling.
+DECISION_PHASES: tuple[str, ...] = ("decision",) + tuple(
+    f"decision-take{k}" for k in range(2, voice.MAX_TAKES + 1)
+)
+
 
 def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> None:
     """The gates of spec 5.4, applied to one settled turn.
@@ -309,7 +317,8 @@ class CommitteePlaybook:
           the turn cap — builds the per-run state and writes the thread header.
           No worker runs: an owner opening would only paraphrase a document that
           every reviewer is told to read for itself.
-        * ``decision`` is one ticket for the chair.
+        * ``decision``, or a retake of it (``DECISION_PHASES``), is one ticket
+          for the chair.
         * anything else is one ticket for ``s["current_role"]``, the speaker
           ``_turn`` recorded when it minted this phase. A junior-IC turn
           byte-copies the artifact into the revised directory first, so the
@@ -398,7 +407,7 @@ class CommitteePlaybook:
             )
             return []
 
-        if phase == "decision":
+        if phase in DECISION_PHASES:
             role, kind, action = cast.CHAIR, "decision", None
         else:
             role = s["current_role"]
@@ -596,8 +605,8 @@ class CommitteePlaybook:
         s = self._state(run)
         if self._lost(run, s):
             return [Reduction(kind="lost", json={"error": _LOST})]
-        if phase == "decision":
-            return self._reduce_decision(run, s, findings)
+        if phase in DECISION_PHASES:
+            return self._reduce_decision(run, s, findings, phase)
         return self._reduce_turn(run, s, findings)
 
     # --- the voice gate (voice D3) --------------------------------------
@@ -837,11 +846,20 @@ class CommitteePlaybook:
         })]
 
     def _reduce_decision(
-        self, run: Run, s: dict, findings: list[Finding]
+        self, run: Run, s: dict, findings: list[Finding], phase: str
     ) -> list[Reduction]:
         """The chair's turn: the verdict, every re-check by name, the disclaimer."""
         errors: list[str] = []
         answer = _latest_answer(findings)
+        discard, metrics, violations, flags = self._grade(run, s, cast.CHAIR, answer)
+        if discard:
+            return self._discard(run, s, cast.CHAIR, answer, metrics, violations, flags, None)
+        # A retake that delivered nothing falls back to the held take: its prose
+        # is recorded, but its ticket has already failed and cannot be routed.
+        retake_failed = metrics is None and bool(s["held"])
+        answer, take, takes, metrics, violations, flags = self._keep(
+            run, s, cast.CHAIR, answer, metrics, violations, flags
+        )
         body = turnblock.strip(answer)
 
         # The other half of criterion 6, and the half nothing else re-checks: the
@@ -889,13 +907,14 @@ class CommitteePlaybook:
         except Exception as exc:  # never raise out of reduce
             errors.append(f"thread: {exc}")
 
-        return [Reduction(kind="decision", json={
-            # The verdict goes to a human: the chair's own ticket (seed mints
-            # it as `<run>/decision`) is held `needs_human`, so the run ends
-            # `done` on accept and `failed` on reject. Everything above is
-            # already banked; only the terminal state waits. A failed chair
-            # has nothing to rule on and routes nothing.
-            "needs_human_ticket_ids": [f"{run.id}/decision"] if body else [],
+        doc = {
+            # The verdict goes to a human: the chair's own ticket for this
+            # phase (`<run>/decision` or `<run>/decision-take{k}`) is held
+            # `needs_human`, so the run ends `done` on accept and `failed` on
+            # reject. Everything above is already banked; only the terminal
+            # state waits. A failed chair has nothing to rule on and routes
+            # nothing.
+            "needs_human_ticket_ids": [f"{run.id}/{phase}"] if body else [],
             # the assembled text, so the reduction a reviewer reads carries the
             # re-checks and the disclaimer; empty iff the chair delivered nothing.
             "verdict": text if body else "",
@@ -916,12 +935,36 @@ class CommitteePlaybook:
             # the database; the view takes only the name.
             "artifact": s["artifact"],
             "revised": s["revised"],
+            # voice C4, as on a turn: the kept take, how many were dispatched,
+            # and what the rules made of it.
+            "body": body,
+            "take": take,
+            "takes": takes,
+            "kept": True,
+            "voice": metrics,
+            "violations": violations,
+            "flags": flags,
             "error": "; ".join(errors) or None,
-        })]
+        }
+        if retake_failed:
+            # The held verdict is on the record, unruled: the chair's ticket for
+            # this phase failed, so there is nothing `record_reduction` can
+            # route, and the run ends failed like any undelivered decision.
+            doc.update(
+                needs_human_ticket_ids=[], verdict=text, delivered=False,
+                ended="chair retake failed",
+            )
+        return [Reduction(kind="decision", json=doc)]
 
     def next_phase(self, run: Run) -> str | None:
         """Who speaks next, then the human's ruling, then None."""
-        if run.phase == "decision":
+        if run.phase in DECISION_PHASES:
+            # A read, never `_state`: a process that never held the meeting must
+            # not grow a state here, and it goes to `ruling`, where is_done
+            # finds no kept decision and the run ends failed.
+            s = self._state_by_run.get(run.id)
+            if s and s["retake"]:
+                return self._retake(s)
             return "ruling"  # reached once the human has ruled on the held verdict
         if run.phase == "ruling":
             return None  # -> is_done
