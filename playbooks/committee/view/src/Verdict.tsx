@@ -102,7 +102,9 @@ function Rechecks({ checks }: { checks: VerdictData['checks'] }) {
 }
 
 function Stamp({ runId }: { runId: string }) {
-  const [stamp, setStamp] = useState<{ id: number; review_state: string } | null>(null);
+  const [stamp, setStamp] = useState<{ id: number; review_state: string; delivered: boolean } | null>(
+    null,
+  );
   const [lookupError, setLookupError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -113,7 +115,7 @@ function Stamp({ runId }: { runId: string }) {
     // Every reduction, not `?phase=decision`: a verdict kept after a retake is
     // banked under `decision-take2`, and the reverse find below still lands on
     // the last decision reduction whatever phase it carries.
-    apiGet<Array<{ id: number; kind: string; review_state: string }>>(
+    apiGet<Array<{ id: number; kind: string; review_state: string; json?: { delivered?: unknown } }>>(
       `/api/runs/${runId}/reductions`,
     )
       .then((rows) => {
@@ -124,8 +126,11 @@ function Stamp({ runId }: { runId: string }) {
         // ruling and stamps another.
         const row = [...rows].reverse().find((r) => r.kind === 'decision');
         if (!live) return;
-        if (row) setStamp({ id: row.id, review_state: row.review_state });
-        else setLookupError('no decision reduction is banked for this run');
+        if (row) {
+          setStamp({ id: row.id, review_state: row.review_state, delivered: Boolean(row.json?.delivered) });
+        } else {
+          setLookupError('no decision reduction is banked for this run');
+        }
       })
       .catch((err) => {
         if (live) setLookupError(err instanceof Error ? err.message : String(err));
@@ -148,7 +153,7 @@ function Stamp({ runId }: { runId: string }) {
       );
       // The SERVER's state, never the requested one. An optimistic card would
       // be indistinguishable here and would lie the moment the two differ.
-      setStamp({ id: stamp.id, review_state: res.review_state });
+      setStamp({ ...stamp, review_state: res.review_state });
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Could not record the decision');
       // Re-read it. The lookup ran once on mount, so if another operator
@@ -168,14 +173,23 @@ function Stamp({ runId }: { runId: string }) {
     );
   }
   if (!stamp) return null;
+  // A failed chair turn, or a chair retake that delivered nothing, holds no
+  // ticket and the run ends failed; the server would still stamp the pending
+  // reduction, recording a ruling on a verdict nobody delivered.
+  if (!stamp.delivered) {
+    return (
+      <div data-testid="stamp-undelivered" style={note('muted')}>
+        The chair delivered no verdict, so there is nothing to accept or reject.
+      </div>
+    );
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div data-testid="stamp-note" style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-        Accepting or rejecting stamps this reduction in the audit trail and emits an event. It
-        settles no tickets and changes no run state — the committee&rsquo;s decision holds no
-        needs_human ticket — and it lands nothing and reverts nothing. It records that a person
-        read the verdict.
+        Accepting settles the chair&rsquo;s ticket and ends the run done; rejecting ends it failed.
+        Either way it stamps this reduction in the audit trail and emits an event, and it lands
+        nothing and reverts nothing.
       </div>
       {/* `review_state &&`: a malformed server response with no state rendered
           "Recorded as ." — falling back to the buttons says less and no lies. */}

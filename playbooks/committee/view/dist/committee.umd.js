@@ -331,7 +331,8 @@
 				if (!live) return;
 				if (row) setStamp({
 					id: row.id,
-					review_state: row.review_state
+					review_state: row.review_state,
+					delivered: Boolean(row.json?.delivered)
 				});
 				else setLookupError("no decision reduction is banked for this run");
 			}).catch((err) => {
@@ -348,7 +349,7 @@
 			try {
 				const res = await apiPost(`/api/reductions/${stamp.id}/${accept ? "accept" : "reject"}`);
 				setStamp({
-					id: stamp.id,
+					...stamp,
 					review_state: res.review_state
 				});
 			} catch (err) {
@@ -364,6 +365,11 @@
 			children: ["Could not read this verdict’s review state: ", lookupError]
 		});
 		if (!stamp) return null;
+		if (!stamp.delivered) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "stamp-undelivered",
+			style: note$1("muted"),
+			children: "The chair delivered no verdict, so there is nothing to accept or reject."
+		});
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			style: {
 				display: "flex",
@@ -378,7 +384,7 @@
 						color: "var(--text-muted)",
 						lineHeight: 1.5
 					},
-					children: "Accepting or rejecting stamps this reduction in the audit trail and emits an event. It settles no tickets and changes no run state — the committee’s decision holds no needs_human ticket — and it lands nothing and reverts nothing. It records that a person read the verdict."
+					children: "Accepting settles the chair’s ticket and ends the run done; rejecting ends it failed. Either way it stamps this reduction in the audit trail and emits an event, and it lands nothing and reverts nothing."
 				}),
 				stamp.review_state && stamp.review_state !== "pending" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "stamp-state",

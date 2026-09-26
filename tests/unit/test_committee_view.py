@@ -15,6 +15,7 @@ capture and says so.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1232,3 +1233,18 @@ def test_evaluation_payload_carries_only_what_the_ui_renders(tmp_path):
         out = view_data(_run("decision"), [])["evaluation"]
         assert (out["state"], out["evaluated_at"]) == ("ok", None), raw
         json.dumps(out, allow_nan=False)
+
+
+def test_the_voice_rows_the_view_labels_are_the_keys_summary_returns():
+    # The Metrics tab renders one row per VOICE_LABEL key and reads voice[key]:
+    # a key renamed on one side only shows a dash forever, with every test green.
+    source = (Path(__file__).parents[2] / "playbooks" / "committee" / "view" / "src"
+              / "CommitteeView.tsx").read_text(encoding="utf-8")
+    block = source.split("const VOICE_LABEL", 1)[1].split("];", 1)[0]
+    labelled = re.findall(r"\[\s*'(\w+)',", block)
+    summary = voice.summary([
+        ("turn", {"role": "tl", "voice": voice.measure("A point, see §2.")}),
+        ("decision", {"voice": voice.measure("Approve.", "chair")}),
+    ])
+
+    assert labelled == list(summary)

@@ -125,6 +125,12 @@ describe('CommitteeView timeline', () => {
     fireEvent.click(screen.getByTestId('expand-all'));
     expect(screen.queryByText(/your question to me first/)).toBeNull();
   });
+
+  it('shows the chair’s ruling below the turns', () => {
+    show();
+
+    expect(screen.getByTestId('verdict-prose')).toHaveTextContent('Verdict: do not approve. Drop.');
+  });
 });
 
 describe('CommitteeView badges and re-checks', () => {
@@ -538,7 +544,7 @@ const DECISION_ROW = {
   run_id: 'run-2',
   phase: 'decision',
   kind: 'decision',
-  json: {},
+  json: { delivered: true },
   review_state: 'pending',
   member_ticket_ids: [],
   member_tickets: [],
@@ -683,11 +689,16 @@ describe('Verdict accept/reject', () => {
     );
   });
 
-  it('is accurate that the stamp settles nothing', async () => {
+  it('is accurate about what the stamp settles', async () => {
+    // Since the chair's ticket is held for review, accept_reduction settles it
+    // done and the run ends done; reject settles it failed and the run fails.
     render(<Verdict runId="run-2" verdict={VERDICT} />);
     const stampNote = await screen.findByTestId('stamp-note');
-    expect(stampNote).toHaveTextContent('settles no tickets and changes no run state');
+    expect(stampNote).toHaveTextContent(
+      'Accepting settles the chair’s ticket and ends the run done; rejecting ends it failed.',
+    );
     expect(stampNote).toHaveTextContent('lands nothing and reverts nothing');
+    expect(stampNote).not.toHaveTextContent('settles no tickets');
   });
 
   it('accepts through the existing endpoint and shows the recorded state', async () => {
@@ -703,7 +714,7 @@ describe('Verdict accept/reject', () => {
     expect(await screen.findByTestId('stamp-state')).toHaveTextContent('Recorded as accepted.');
   });
 
-  it('rejects without a confirm prompt, because it fails nothing', async () => {
+  it('rejects without a confirm prompt', async () => {
     fetchMock.mockImplementation((url: string) =>
       String(url).startsWith('/api/runs/') ? ok([DECISION_ROW]) : ok({ review_state: 'rejected' }),
     );
@@ -855,6 +866,37 @@ describe('Verdict accept/reject', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
     expect(screen.queryByTestId('stamp-state')).toBeNull();
     expect(screen.getByRole('button', { name: /accept/i })).toBeInTheDocument();
+  });
+
+  // The server stamps any pending reduction, so a button here would record a
+  // ruling on a verdict the chair never delivered; the run ends failed either way.
+  const expectNoStamp = async () => {
+    expect(await screen.findByTestId('stamp-undelivered')).toHaveTextContent(
+      'The chair delivered no verdict, so there is nothing to accept or reject.',
+    );
+    expect(screen.queryByRole('button', { name: /accept|reject/i })).toBeNull();
+    expect(screen.queryByTestId('stamp-note')).toBeNull();
+  };
+
+  it('offers no stamp when the chair turn failed', async () => {
+    fetchMock.mockImplementation(() =>
+      ok([{ ...DECISION_ROW, json: { delivered: false, needs_human_ticket_ids: [], ended: 'chair turn failed' } }]),
+    );
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+    await expectNoStamp();
+  });
+
+  it('offers no stamp when the chair retake delivered nothing', async () => {
+    // The held first take is recorded unruled under decision-take2.
+    fetchMock.mockImplementation(() =>
+      ok([
+        { ...DECISION_ROW, id: 20, kind: 'take', json: { delivered: true, kept: false } },
+        { ...DECISION_ROW, id: 21, phase: 'decision-take2',
+          json: { delivered: false, needs_human_ticket_ids: [], ended: 'chair retake failed' } },
+      ]),
+    );
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+    await expectNoStamp();
   });
 });
 
@@ -2468,9 +2510,15 @@ describe('CommitteeView voice metrics and verdict', () => {
     const section = screen.getByTestId('voice-metrics');
 
     expect(within(section).getAllByTestId(/^voice-metric-/)).toHaveLength(Object.keys(SUMMARY).length);
-    expect(screen.getByTestId('voice-metric-owner_reviewer_median_words')).toHaveTextContent('120');
-    expect(screen.getByTestId('voice-metric-junior_pct_compliant')).toHaveTextContent('—');
-    expect(screen.getByTestId('voice-metric-retakes_by_role')).toHaveTextContent('owner 2, tl 0, chair 0');
+    // Keyed off the payload, not the view's own label list, so a key renamed on
+    // either side has no row to find.
+    for (const [key, value] of Object.entries(SUMMARY)) {
+      const shown =
+        value === null ? '—'
+        : typeof value === 'object' ? Object.entries(value).map(([r, n]) => `${r} ${n}`).join(', ')
+        : String(value);
+      expect(screen.getByTestId(`voice-metric-${key}`).lastElementChild?.textContent).toBe(shown);
+    }
   });
 
   it('says a run from before voice was not measured, and hides nothing', () => {
@@ -2505,7 +2553,7 @@ describe('CommitteeView voice metrics and verdict', () => {
     // `?phase=decision` lookup finds nothing here and renders stamp-error.
     const rows = [
       { id: 30, kind: 'take', phase: 't02-owner-take2', review_state: 'pending' },
-      { id: 31, kind: 'decision', phase: 'decision-take2', review_state: 'pending' },
+      { id: 31, kind: 'decision', phase: 'decision-take2', review_state: 'pending', json: { delivered: true } },
     ];
     const fetchMock = vi.fn((url: string) => {
       if (!String(url).startsWith('/api/runs/')) return ok({ review_state: 'accepted' });

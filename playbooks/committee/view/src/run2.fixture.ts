@@ -188,13 +188,19 @@ const roster: Persona[] = Object.keys(CAST).map((role) => ({
   stance: stanceAt(role, 20),
 }));
 
+/** run-2's decision text, trimmed. */
+const VERDICT_TEXT =
+  "I've read the artifact, the revised copy, and all twenty turns.\n\n---\n\n# Decision — Hermes federation layer\n\n**Chair: Dana Whitfield, Senior Director of Engineering**\n**Charge: fund now / defer again / drop**\n\n## Verdict: do not approve. Drop.\n\n`docs/specs/federation-future.md` is retired whole — frame included, not renamed, not re-scoped, not deferred a third time. Nothing is funded. The successor, if one exists, is a new proposal with a new author.\n\nI opened this review with defer, a date and a named owner. I am ruling against my own turn-01 position, and I'll say why in the record rather than let it be inferred.\n\n---\n\n## Why defer no longer survives\n\nMy turn-01 defer rested on three things\n\n…";
+
 export const run2: CommitteeData = {
   kind: 'committee',
   roster,
   progress: { turn: 20, cap: 20, holder: null, queue: [], ended: 'owner closed' },
   timeline,
   verdict: {
-    text: "I've read the artifact, the revised copy, and all twenty turns.\n\n---\n\n# Decision — Hermes federation layer\n\n**Chair: Dana Whitfield, Senior Director of Engineering**\n**Charge: fund now / defer again / drop**\n\n## Verdict: do not approve. Drop.\n\n`docs/specs/federation-future.md` is retired whole — frame included, not renamed, not re-scoped, not deferred a third time. Nothing is funded. The successor, if one exists, is a new proposal with a new author.\n\nI opened this review with defer, a date and a named owner. I am ruling against my own turn-01 position, and I'll say why in the record rather than let it be inferred.\n\n---\n\n## Why defer no longer survives\n\nMy turn-01 defer rested on three things\n\n…",
+    text: VERDICT_TEXT,
+    // What `view._verdict` sends beside it; the card renders the ruling from this.
+    segments: [{ kind: 'text', text: VERDICT_TEXT }],
     checks: CHECKS,
     artifact_intact: true,
     dropped_delegation: null,
