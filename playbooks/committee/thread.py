@@ -55,23 +55,36 @@ def _entry(run_id: str, heading: str, body: str) -> None:
     _append(run_id, f"\n{heading}\n\n{text or NO_TURN}\n")
 
 
-# The header line naming the artifact; `header_artifact` reads it back.
-_ARTIFACT_LINE = "**Artifact:** "
+# The header line naming the artifact; `header_artifact` reads it back. Plain,
+# like every voice-era label; a thread written before voice has the bold form,
+# and a pre-voice run still open reads it back too.
+_ARTIFACT_LINE = "Artifact: "
+_ARTIFACT_LINES = (_ARTIFACT_LINE, "**Artifact:** ")
 
 
-def write_header(run_id: str, *, charge: str, artifact: str, roster: list[str]) -> None:
-    """Open the transcript with the charge, the artifact path and the roster."""
+def write_header(
+    run_id: str, *, charge: str, artifact: str, roster: list[str],
+    rules: tuple[str, ...] = (),
+) -> None:
+    """Open the transcript with the charge, the artifact path, the roster and the ground rules.
+
+    Plain labels, no bold: the header is the first thing every speaker reads,
+    and it is held to the rules it states. ``rules`` follow the roster after a
+    blank line, one per line, so every later speaker has them in the thread.
+    """
     lines = [
         f"# Committee — {run_id}",
         "",
-        f"**Charge:** {charge}",
+        f"Charge: {charge}",
         "",
         f"{_ARTIFACT_LINE}{artifact}",
         "",
-        "**Committee:**",
+        "Committee:",
         "",
     ]
     lines.extend(f"- {member}" for member in roster)
+    if rules:
+        lines.extend(["", "Ground rules for every speaker:", *rules])
     _append(run_id, "\n".join(lines) + "\n")
 
 
@@ -80,13 +93,20 @@ def header_artifact(run_id: str) -> str:
 
     For the view, before the first turn settles: until then no reduction names
     the file, and the header -- written by ``open`` -- is all thread.md holds.
-    A symlinked thread.md is not followed (``read_regular``).
+    A symlinked thread.md is not followed (``read_regular``). Both label forms
+    are read: plain since voice, bold before it.
     """
     data = read_regular(run_file(run_id, "thread.md")) or b""
     for line in data.decode("utf-8", "replace").splitlines():
-        if line.startswith(_ARTIFACT_LINE):
-            return line[len(_ARTIFACT_LINE):].strip()
+        for label in _ARTIFACT_LINES:
+            if line.startswith(label):
+                return line[len(label):].strip()
     return ""
+
+
+def images_dir(run_id: str) -> Path:
+    """``runs/<run_id>/images/``: the one folder an owner or reviewer may write an image into (0700)."""
+    return _config.state_dir("runs", run_id, "images")
 
 
 def append_turn(run_id: str, *, turn: int, role: str, body: str) -> None:

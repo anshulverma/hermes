@@ -3567,7 +3567,6 @@ def test_voice_summary_measures_pre_voice_rows_on_copies_and_keeps_null_out():
     assert E.voice_summary([("turn", silent)], entries) is None  # a present null stays out
 
 
-@pytest.mark.xfail(reason="write_header gains rules= in Task 5", strict=True)
 def test_a_voice_era_header_seats_the_same_roster_under_eval_d3(tmp_path, monkeypatch):
     """Plain labels and the ground rules after the roster seat exactly the roster,
     including a seat that never spoke, the same as run-9's bold labels (eval D3)."""

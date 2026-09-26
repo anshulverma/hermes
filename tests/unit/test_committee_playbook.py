@@ -793,9 +793,11 @@ def test_the_tpm_and_tl_styles_ask_one_question_at_a_time():
 
 # --- thread.md: the transcript ---
 
-def test_thread_header_carries_the_charge_the_artifact_and_the_roster(tmp_path):
-    """write_header lands under HERMES_HOME and names the charge, the artifact and everyone."""
-    from playbooks.committee import thread
+def test_thread_header_carries_the_charge_the_artifact_the_roster_and_the_rules(tmp_path):
+    """write_header lands under HERMES_HOME: charge, artifact, everyone, then the ground rules."""
+    import re
+
+    from playbooks.committee import thread, voice
 
     run_id = "committee-20260918-000000"
     artifact = str(tmp_path / "proposal.md")
@@ -807,16 +809,40 @@ def test_thread_header_carries_the_charge_the_artifact_and_the_roster(tmp_path):
             "Dana Okoye, Senior Director (senior_director)",
             "Priya Raman, Staff Engineer (staff_ic)",
         ],
+        rules=voice.RULES,
     )
 
     written = thread.path(run_id)
     assert written == tmp_path / "runs" / run_id / "thread.md"
     text = written.read_text(encoding="utf-8")
     assert text.startswith(f"# Committee — {run_id}")
-    assert "**Charge:** Decide whether to approve the queue rewrite." in text
-    assert f"**Artifact:** {artifact}" in text
+    # Plain labels: the header is held to the rules it states.
+    assert "\nCharge: Decide whether to approve the queue rewrite.\n" in text
+    assert f"\nArtifact: {artifact}\n" in text
+    assert "\nCommittee:\n" in text
+    assert "**" not in text
     assert "- Dana Okoye, Senior Director (senior_director)" in text
     assert "- Priya Raman, Staff Engineer (staff_ic)" in text
+    rules = "\n\nGround rules for every speaker:\n" + "\n".join(voice.RULES) + "\n"
+    assert text.endswith(rules)
+    assert text.index("- Priya Raman") < text.index("Ground rules for every speaker:")
+    # eval's roster pattern (eval D3) can never seat a rules line
+    assert not any(re.match(r"^- (\w+) — (.+)$", line) for line in voice.RULES)
+    # doc-diff's reader names the document from the plain label ...
+    assert thread.header_artifact(run_id) == artifact
+    # ... and from a pre-voice run's bold one, still on disk and possibly still open
+    legacy = "committee-20260918-000001"
+    thread._append(legacy, f"# Committee — {legacy}\n\n**Artifact:** /x/p.md\n")
+    assert thread.header_artifact(legacy) == "/x/p.md"
+
+
+def test_images_dir_is_the_runs_private_images_folder(tmp_path):
+    from playbooks.committee import thread
+
+    folder = thread.images_dir("committee-x")
+
+    assert folder == tmp_path / "runs" / "committee-x" / "images"
+    assert folder.is_dir() and (folder.stat().st_mode & 0o777) == 0o700
 
 
 def test_thread_appends_turns_in_order_and_never_truncates(tmp_path):
@@ -1819,6 +1845,17 @@ def test_seed_open_is_a_zero_ticket_bootstrap(artifact):
     assert s["artifact_digest"] == thread.digest(artifact)
     assert s["revised"] == str(thread.revised_path(run.id, str(artifact)))
     assert s["max_turns"] == 30
+
+
+def test_open_writes_the_ground_rules_and_makes_the_images_folder(artifact, tmp_path):
+    from playbooks.committee import thread, voice
+
+    pb = _committee()
+    run = _run(phase="open")
+    pb.seed(run, _NamedSite("local"))
+
+    assert "\n".join(voice.RULES) in thread.path(run.id).read_text(encoding="utf-8")
+    assert (tmp_path / "runs" / run.id / "images").is_dir()
 
 
 def test_open_snapshots_the_bytes_it_hashed_before_the_header(artifact, tmp_path):

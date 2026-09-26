@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 
 from engine import playbook as _playbook
 from engine.models import Driver, Finding, Reduction, Result, Run, Ticket
-from playbooks.committee import cast, thread, turnblock, view
+from playbooks.committee import cast, thread, turnblock, view, voice
 
 if TYPE_CHECKING:  # avoid import cycle
     from engine.site import Site
@@ -352,11 +352,13 @@ class CommitteePlaybook:
             # the command exactly the way the two ValueErrors above do, and a
             # failed snapshot leaves no header claiming the meeting opened.
             thread.write_snapshot(run.id, thread.snapshot_key(artifact, None), data)
+            thread.images_dir(run.id)
             thread.write_header(
                 run.id,
                 charge=s["charge"],
                 artifact=s["artifact"],
                 roster=[f"{role} — {who}" for role, who in s["roster"].items()],
+                rules=voice.RULES,
             )
             return []
 
