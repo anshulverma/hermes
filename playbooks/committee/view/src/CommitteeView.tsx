@@ -78,7 +78,7 @@ export type Progress = {
   cap: number;
   holder: string | null;
   queue: string[];
-  /** owner closed · queue empty · turn cap · chair turn failed */
+  /** owner closed · queue empty · turn cap · chair turn failed · chair retake failed */
   ended: string | null;
 };
 
@@ -233,6 +233,8 @@ const ENDED_NOTE: Record<string, string> = {
   'queue empty': 'Everyone who asked for the floor got it.',
   'turn cap': 'The meeting ran out of turns before anyone closed it.',
   'chair turn failed': 'The chair produced no decision, so the run ended failed.',
+  'chair retake failed':
+    "The chair's retake failed, so its earlier take is recorded unruled and the run ended failed.",
 };
 
 const mono = { fontFamily: 'var(--font-mono)' } as const;
@@ -318,7 +320,7 @@ function ProgressBar({ progress, legacy }: { progress: Progress; legacy: boolean
             background: 'var(--wash-subtle)',
             border: '1px solid var(--border-hairline)',
             color:
-              ended === 'turn cap' || ended === 'chair turn failed'
+              ended === 'turn cap' || ended === 'chair turn failed' || ended === 'chair retake failed'
                 ? 'var(--status-attention, #e3b341)'
                 : 'var(--text-secondary)',
           }}
@@ -637,10 +639,43 @@ function Bar({ value, max }: { value: number; max: number }) {
 const quiet = { fontSize: 12, color: 'var(--text-secondary)' } as const;
 const row = { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 } as const;
 
+/** Every voice.summary key, in C11 order, as a reader would say it. */
+const VOICE_LABEL: Array<[string, string]> = [
+  ['owner_reviewer_median_words', 'median words, owner and reviewers'],
+  ['owner_reviewer_pct_within_cap', '% owner and reviewer turns within the cap'],
+  ['median_words_by_role', 'median words by role'],
+  ['chair_words', 'chair words'],
+  ['chair_headers', 'chair headers'],
+  ['chair_tables', 'chair tables'],
+  ['junior_turns', 'junior IC reports'],
+  ['junior_pct_compliant', '% junior IC reports in one sentence of 40 words or fewer'],
+  ['pct_clean_format', '% turns with no bold, headers, tables or nesting'],
+  ['pct_first_line_le_25', '% owner and reviewer first lines of 25 words or fewer'],
+  ['unquoted_dashes', 'dashes outside quotes'],
+  ['reviewer_pct_with_pointer', '% reviewer turns with a pointer'],
+  ['max_turn_refs', 'most turn-number references in one turn'],
+  ['unchanged_mentions_junior_chair', 'mentions of the original being unchanged, junior IC and chair'],
+  ['total_takes', 'takes dispatched'],
+  ['retakes_by_role', 'retakes by role'],
+  ['kept_flagged', 'turns kept with broken rules'],
+];
+
+/** A number as itself, a missing one as a dash, a per-role map as `role n, role n`. */
+function voiceValue(value: VoiceSummary[string] | undefined): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'object') {
+    return Object.entries(value)
+      .map(([role, n]) => `${role} ${n ?? '—'}`)
+      .join(', ');
+  }
+  return String(value);
+}
+
 function MeetingMetrics({ data }: { data: CommitteeData }) {
   const turns = [...data.timeline].sort((a, b) => a.n - b.n);
   const delivered = (e: Entry) => !e.badges.includes('no_turn');
   const over = data.verdict !== null;
+  const voice = data.voice ?? null;
 
   // Turns per seat, every seat included; a turn nobody can be named for gets
   // its own row rather than vanishing from the total.
@@ -737,6 +772,24 @@ function MeetingMetrics({ data }: { data: CommitteeData }) {
         <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
           Counted in turns: the record keeps no clock.
         </div>
+      </Section>
+
+      {/* Never hidden: a run reduced before voice says so instead. */}
+      <Section title="Voice">
+        {voice ? (
+          <div data-testid="voice-metrics" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {VOICE_LABEL.map(([key, label]) => (
+              <div key={key} data-testid={`voice-metric-${key}`} style={row}>
+                <span style={{ flex: 1, color: 'var(--text-secondary)' }}>{label}</span>
+                <span style={{ ...mono, flex: 'none' }}>{voiceValue(voice[key])}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div data-testid="voice-not-measured" style={quiet}>
+            not measured for this run
+          </div>
+        )}
       </Section>
 
       <Section title="Thread growth">

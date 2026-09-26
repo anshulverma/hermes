@@ -135,13 +135,17 @@ export function MermaidFigure({ seg }: { seg: MermaidSegment }) {
   );
   return (
     <figure data-testid="figure-mermaid" style={figure}>
-      {drawing.state === 'pending' && <div style={muted}>rendering diagram…</div>}
+      {drawing.state === 'pending' && (
+        <div role="status" style={muted}>
+          rendering diagram…
+        </div>
+      )}
       {drawing.state === 'drawn' && <img src={drawing.url} alt={seg.caption} style={{ maxWidth: '100%' }} />}
       {drawing.state === 'absent' && source}
       {drawing.state === 'failed' && (
         <>
           {source}
-          <div data-testid="mermaid-error" style={muted}>
+          <div data-testid="mermaid-error" role="status" style={muted}>
             diagram failed to render: {drawing.error}
           </div>
         </>

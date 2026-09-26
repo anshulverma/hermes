@@ -511,14 +511,18 @@ describe('diffLines', () => {
 });
 
 /** Trimmed from the real run-2 decision reduction. */
+const VERDICT_TEXT = [
+  '# Decision — Hermes federation layer',
+  '',
+  '## Verdict: do not approve. Drop.',
+  '',
+  'I am ruling against my own turn-01 position, and I will say why in the record.',
+].join('\n');
+
 const VERDICT = {
-  text: [
-    '# Decision — Hermes federation layer',
-    '',
-    '## Verdict: do not approve. Drop.',
-    '',
-    'I am ruling against my own turn-01 position, and I will say why in the record.',
-  ].join('\n'),
+  text: VERDICT_TEXT,
+  // What `view._verdict` sends beside it; the card renders the prose from this.
+  segments: [{ kind: 'text' as const, text: VERDICT_TEXT }],
   checks: [
     { turn: 3, action: 'Rewrite §2 "When to reach for it"', verified: true },
     { turn: 6, action: 'Rewrite §14.1 — delete the batch-submit claim', verified: true },
@@ -655,12 +659,12 @@ describe('Verdict accept/reject', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    // `/reductions?` with the question mark, not `/reductions`. The accept POST
-    // goes to /api/reductions/21/accept, which CONTAINS "/reductions" — matched
-    // loosely, the mock answers the POST with the lookup array and the
-    // accept test can never pass.
+    // The lookup is `/api/runs/<run>/reductions`; the accept POST goes to
+    // /api/reductions/21/accept, which also contains "/reductions" — matched
+    // loosely, the mock answers the POST with the lookup array and the accept
+    // test can never pass. So match the lookup by its `/api/runs/` prefix.
     fetchMock = vi.fn((url: string) =>
-      String(url).includes('/reductions?') ? ok([DECISION_ROW]) : ok({ review_state: 'accepted' }),
+      String(url).startsWith('/api/runs/') ? ok([DECISION_ROW]) : ok({ review_state: 'accepted' }),
     );
     vi.stubGlobal('fetch', fetchMock);
   });
@@ -673,7 +677,7 @@ describe('Verdict accept/reject', () => {
     render(<Verdict runId="run-2" verdict={VERDICT} />);
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
-        '/api/runs/run-2/reductions?phase=decision',
+        '/api/runs/run-2/reductions',
         expect.anything(),
       ),
     );
@@ -701,7 +705,7 @@ describe('Verdict accept/reject', () => {
 
   it('rejects without a confirm prompt, because it fails nothing', async () => {
     fetchMock.mockImplementation((url: string) =>
-      String(url).includes('/reductions?') ? ok([DECISION_ROW]) : ok({ review_state: 'rejected' }),
+      String(url).startsWith('/api/runs/') ? ok([DECISION_ROW]) : ok({ review_state: 'rejected' }),
     );
     render(<Verdict runId="run-2" verdict={VERDICT} />);
     fireEvent.click(await screen.findByRole('button', { name: /reject/i }));
@@ -736,7 +740,7 @@ describe('Verdict accept/reject', () => {
           }),
         ),
       );
-      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-2/reductions?phase=decision', {
+      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-2/reductions', {
         headers: { Authorization: 'Bearer remote-typed-token' },
       });
     } finally {
@@ -749,7 +753,7 @@ describe('Verdict accept/reject', () => {
     render(<Verdict runId="run-2" verdict={VERDICT} />);
 
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-2/reductions?phase=decision', {
+      expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-2/reductions', {
         headers: {},
       }),
     );
@@ -764,7 +768,7 @@ describe('Verdict accept/reject', () => {
       release = resolve;
     });
     fetchMock.mockImplementation((url: string) =>
-      String(url).includes('/reductions?')
+      String(url).startsWith('/api/runs/')
         ? ok([DECISION_ROW])
         : held.then(() => ({
             ok: true,
@@ -788,7 +792,7 @@ describe('Verdict accept/reject', () => {
     // 9.3. Both existing stamp tests stub the server to echo the request, so an
     // optimistic card is indistinguishable from an honest one. Make them differ.
     fetchMock.mockImplementation((url: string) =>
-      String(url).includes('/reductions?') ? ok([DECISION_ROW]) : ok({ review_state: 'rejected' }),
+      String(url).startsWith('/api/runs/') ? ok([DECISION_ROW]) : ok({ review_state: 'rejected' }),
     );
     render(<Verdict runId="run-2" verdict={VERDICT} />);
     fireEvent.click(await screen.findByRole('button', { name: /accept/i }));
@@ -801,7 +805,7 @@ describe('Verdict accept/reject', () => {
     // takes the LAST; `rows.find` took the first. Given two, the operator reads
     // one ruling and stamps another.
     fetchMock.mockImplementation((url: string) =>
-      String(url).includes('/reductions?')
+      String(url).startsWith('/api/runs/')
         ? ok([{ ...DECISION_ROW, id: 7 }, { ...DECISION_ROW, id: 21 }])
         : ok({ review_state: 'accepted' }),
     );
@@ -820,7 +824,7 @@ describe('Verdict accept/reject', () => {
     // button that could only ever 409 again until the page was reloaded.
     let stamped = false;
     fetchMock.mockImplementation((url: string) => {
-      if (String(url).includes('/reductions?')) {
+      if (String(url).startsWith('/api/runs/')) {
         return ok([{ ...DECISION_ROW, review_state: stamped ? 'accepted' : 'pending' }]);
       }
       stamped = true;
@@ -843,7 +847,7 @@ describe('Verdict accept/reject', () => {
   it('offers the buttons rather than "Recorded as ." on a stateless reply', async () => {
     // 9.8
     fetchMock.mockImplementation((url: string) =>
-      String(url).includes('/reductions?') ? ok([DECISION_ROW]) : ok({}),
+      String(url).startsWith('/api/runs/') ? ok([DECISION_ROW]) : ok({}),
     );
     render(<Verdict runId="run-2" verdict={VERDICT} />);
     fireEvent.click(await screen.findByRole('button', { name: /accept/i }));
@@ -2302,8 +2306,11 @@ describe('CommitteeView voice', () => {
       };
       const refused = { kind: 'image' as const, name: 'x', ref: 'http://evil.example/v.png',
         caption: 'v ![c](http://evil.example/c.png)', description: 'd ![e](http://evil.example/e.png)', ok: false };
+      // `text` carries an image too: the card renders `segments` only, so a
+      // fallback to the raw text through Markdown would draw this one.
       const verdict = {
         ...run2.verdict!,
+        text: 'Approve. ![x](http://evil.example/verdict.png)',
         segments: [{ kind: 'text' as const, text: 'Approve with changes.' }, leaky, refused],
       };
       const { container } = show({
@@ -2332,7 +2339,8 @@ describe('CommitteeView voice', () => {
       show(withVoice());
       const entry = expand(2);
 
-      expect(within(entry).getByText('rendering diagram…')).toBeInTheDocument();
+      // a live region, so a screen reader hears the drawing arrive or fail
+      expect(within(entry).getByText('rendering diagram…')).toHaveAttribute('role', 'status');
       expect(within(entry).getByText('the pipeline')).toBeInTheDocument();
     } finally {
       restore();
@@ -2371,6 +2379,27 @@ describe('CommitteeView voice', () => {
     }
   });
 
+  it('makes no blob URL for a diagram that finishes drawing after it is gone', async () => {
+    // Created after the cleanup ran, the URL would never be revoked: a leak per
+    // diagram the reader scrolled past or collapsed while mermaid was drawing.
+    const create = vi.fn(() => 'blob:hermes-late');
+    (URL as any).createObjectURL = create;
+    (URL as any).revokeObjectURL = vi.fn();
+    let finish!: (svg: string) => void;
+    const restore = shelf(() => new Promise<string>((resolve) => { finish = resolve; }));
+    try {
+      const { unmount } = show(withVoice());
+      expand(2);
+      unmount();
+
+      finish('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(create).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
   it('shows the source and the reason when a diagram fails to render, rejected or thrown', async () => {
     // The host's renderer rejects; one that throws instead must not escape the
     // effect into PlaybookView's error boundary, which never clears.
@@ -2386,9 +2415,9 @@ describe('CommitteeView voice', () => {
         const { unmount } = show(withVoice());
         const entry = expand(2);
 
-        expect(await within(entry).findByTestId('mermaid-error')).toHaveTextContent(
-          'diagram failed to render: Parse error on line 1',
-        );
+        const error = await within(entry).findByTestId('mermaid-error');
+        expect(error).toHaveTextContent('diagram failed to render: Parse error on line 1');
+        expect(error).toHaveAttribute('role', 'status');
         expect(within(entry).getByTestId('mermaid-source')).toHaveTextContent('graph TD; A-->B');
         unmount();
       } finally {
@@ -2417,5 +2446,83 @@ describe('CommitteeView voice', () => {
     expect(within(entry).queryByText('broke the ground rules')).toBeNull();
     expect(within(entry).queryByText('retaken')).toBeNull();
     expect(screen.queryByTestId('kept-take-2')).toBeNull();
+  });
+});
+
+const SUMMARY = {
+  owner_reviewer_median_words: 120.0, owner_reviewer_pct_within_cap: 93.8,
+  median_words_by_role: { owner: 118.0, tl: 131.0, chair: 280.0 },
+  chair_words: 280, chair_headers: 0, chair_tables: 0,
+  junior_turns: 0, junior_pct_compliant: null,
+  pct_clean_format: 96.0, pct_first_line_le_25: 100.0, unquoted_dashes: 0,
+  reviewer_pct_with_pointer: 87.5, max_turn_refs: 1, unchanged_mentions_junior_chair: 0,
+  total_takes: 27, retakes_by_role: { owner: 2, tl: 0, chair: 0 }, kept_flagged: 1,
+};
+
+describe('CommitteeView voice metrics and verdict', () => {
+  const metrics = (data: typeof run2) =>
+    render(<CommitteeView runId="run-2" data={data} refetch={noop} variant="metrics" />);
+
+  it('lists every voice figure, a dash for an empty population, a map as role and count', () => {
+    metrics({ ...run2, voice: SUMMARY });
+    const section = screen.getByTestId('voice-metrics');
+
+    expect(within(section).getAllByTestId(/^voice-metric-/)).toHaveLength(Object.keys(SUMMARY).length);
+    expect(screen.getByTestId('voice-metric-owner_reviewer_median_words')).toHaveTextContent('120');
+    expect(screen.getByTestId('voice-metric-junior_pct_compliant')).toHaveTextContent('—');
+    expect(screen.getByTestId('voice-metric-retakes_by_role')).toHaveTextContent('owner 2, tl 0, chair 0');
+  });
+
+  it('says a run from before voice was not measured, and hides nothing', () => {
+    metrics({ ...run2, voice: null });
+
+    expect(screen.getByTestId('voice-not-measured')).toHaveTextContent('not measured for this run');
+    expect(screen.queryByTestId('voice-metrics')).toBeNull();
+  });
+
+  it('flags a verdict kept after retakes with the rules it broke', () => {
+    render(<Verdict runId="run-2" verdict={{ ...VERDICT, takes: 3, violations: ['over_cap', 'headers'] }} />);
+
+    expect(screen.getByTestId('verdict-voice')).toHaveTextContent(
+      'The chair took 3 takes. The kept verdict broke the ground rules: over the word cap; headers.',
+    );
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+    expect(screen.getAllByTestId('verdict-voice')).toHaveLength(1);
+  });
+
+  it('explains a failed chair retake in the attention tone', () => {
+    show({ ...run2, progress: { ...run2.progress, ended: 'chair retake failed' } });
+    const ended = screen.getByTestId('ended-reason');
+
+    expect(ended).toHaveTextContent(
+      "Ended: chair retake failed. The chair's retake failed, so its earlier take is recorded unruled and the run ended failed.",
+    );
+    expect(ended.style.color).toBe('var(--status-attention, #e3b341)');
+  });
+
+  it('stamps a verdict banked under decision-take2 through that reduction', async () => {
+    // The mock filters on `?phase=` the way the server does, so the old
+    // `?phase=decision` lookup finds nothing here and renders stamp-error.
+    const rows = [
+      { id: 30, kind: 'take', phase: 't02-owner-take2', review_state: 'pending' },
+      { id: 31, kind: 'decision', phase: 'decision-take2', review_state: 'pending' },
+    ];
+    const fetchMock = vi.fn((url: string) => {
+      if (!String(url).startsWith('/api/runs/')) return ok({ review_state: 'accepted' });
+      const phase = new URL(String(url), 'http://x').searchParams.get('phase');
+      return ok(phase ? rows.filter((r) => r.phase === phase) : rows);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Verdict runId="run-2" verdict={VERDICT} />);
+
+    expect(await screen.findByRole('button', { name: /reject/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /accept/i }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        '/api/reductions/31/accept',
+        expect.objectContaining({ method: 'POST' }),
+      ),
+    );
   });
 });

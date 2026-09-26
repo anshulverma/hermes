@@ -51,284 +51,6 @@
 		return typeof render === "function" ? new Promise((resolve) => resolve(render(source))) : null;
 	}
 	//#endregion
-	//#region ../playbooks/committee/view/src/Verdict.tsx
-	/**
-	* The chair's ruling, read in the order a person needs it.
-	*
-	* The ruling itself is 8 KB of structured markdown, so the two things a reader
-	* must not scroll past go above it: that this is a simulation, and what the
-	* independent re-checks actually found. The prose follows, expanded, in a
-	* <details> so it can be collapsed to reach the diff below.
-	*
-	* `text` is the assembled decision text the playbook banks — the chair's prose
-	* with the re-check lines and the disclaimer appended (playbook.py:_reduce_decision).
-	* The re-checks are rendered from `checks` as well, because a list of six
-	* outcomes is a table, not a paragraph.
-	*/
-	var card = {
-		background: "var(--surface-card)",
-		border: "1px solid var(--border-hairline)",
-		borderRadius: "var(--radius-md)",
-		padding: 16,
-		display: "flex",
-		flexDirection: "column",
-		gap: 12
-	};
-	var note$1 = (tone) => ({
-		padding: "8px 12px",
-		borderRadius: "var(--radius-sm)",
-		fontSize: 12.5,
-		lineHeight: 1.5,
-		color: "var(--text-primary)",
-		background: tone === "muted" ? "var(--wash-subtle)" : `var(--status-${tone}-tint)`,
-		border: `1px solid ${tone === "muted" ? "var(--border-hairline)" : `var(--status-${tone}-edge)`}`
-	});
-	function Rechecks({ checks }) {
-		if (checks.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-			"data-testid": "rechecks-none",
-			style: note$1("muted"),
-			children: "No edit was delegated, so there was nothing to re-check."
-		});
-		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-			style: {
-				display: "flex",
-				flexDirection: "column",
-				gap: 6
-			},
-			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				style: {
-					fontSize: 12,
-					color: "var(--text-muted)"
-				},
-				children: [
-					checks.length,
-					" delegated ",
-					checks.length === 1 ? "edit" : "edits",
-					", each re-checked master-side by comparing the revised copy’s digest before and after the turn. The worker’s own claim is not what is reported here."
-				]
-			}), checks.map((check) => {
-				const applied = check.verified === true;
-				const outcome = check.verified === null ? "NOT CHECKED" : applied ? "APPLIED" : "DID NOT APPLY";
-				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					"data-testid": `verdict-recheck-${check.turn}`,
-					style: {
-						...note$1(check.verified === null ? "muted" : applied ? "ok" : "danger"),
-						display: "flex",
-						gap: 10,
-						alignItems: "baseline"
-					},
-					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
-							style: {
-								fontFamily: "var(--font-mono)",
-								fontSize: 11.5,
-								whiteSpace: "nowrap"
-							},
-							children: [
-								"turn ",
-								String(check.turn).padStart(2, "0"),
-								" · junior_ic"
-							]
-						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", {
-							style: {
-								fontSize: 11.5,
-								whiteSpace: "nowrap"
-							},
-							children: outcome
-						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-							style: { color: "var(--text-secondary)" },
-							children: check.action
-						})
-					]
-				}, check.turn);
-			})]
-		});
-	}
-	function Stamp({ runId }) {
-		const [stamp, setStamp] = (0, react.useState)(null);
-		const [lookupError, setLookupError] = (0, react.useState)(null);
-		const [actionError, setActionError] = (0, react.useState)(null);
-		const [busy, setBusy] = (0, react.useState)(false);
-		const [reloads, setReloads] = (0, react.useState)(0);
-		(0, react.useEffect)(() => {
-			let live = true;
-			apiGet(`/api/runs/${runId}/reductions?phase=decision`).then((rows) => {
-				const row = [...rows].reverse().find((r) => r.kind === "decision");
-				if (!live) return;
-				if (row) setStamp({
-					id: row.id,
-					review_state: row.review_state
-				});
-				else setLookupError("no decision reduction is banked for this run");
-			}).catch((err) => {
-				if (live) setLookupError(err instanceof Error ? err.message : String(err));
-			});
-			return () => {
-				live = false;
-			};
-		}, [runId, reloads]);
-		const decide = async (accept) => {
-			if (!stamp || busy) return;
-			setBusy(true);
-			setActionError(null);
-			try {
-				const res = await apiPost(`/api/reductions/${stamp.id}/${accept ? "accept" : "reject"}`);
-				setStamp({
-					id: stamp.id,
-					review_state: res.review_state
-				});
-			} catch (err) {
-				setActionError(err instanceof Error ? err.message : "Could not record the decision");
-				setReloads((n) => n + 1);
-			} finally {
-				setBusy(false);
-			}
-		};
-		if (lookupError) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-			"data-testid": "stamp-error",
-			style: note$1("muted"),
-			children: ["Could not read this verdict’s review state: ", lookupError]
-		});
-		if (!stamp) return null;
-		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-			style: {
-				display: "flex",
-				flexDirection: "column",
-				gap: 8
-			},
-			children: [
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-					"data-testid": "stamp-note",
-					style: {
-						fontSize: 12,
-						color: "var(--text-muted)",
-						lineHeight: 1.5
-					},
-					children: "Accepting or rejecting stamps this reduction in the audit trail and emits an event. It settles no tickets and changes no run state — the committee’s decision holds no needs_human ticket — and it lands nothing and reverts nothing. It records that a person read the verdict."
-				}),
-				stamp.review_state && stamp.review_state !== "pending" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					"data-testid": "stamp-state",
-					style: note$1(stamp.review_state === "accepted" ? "ok" : "attention"),
-					children: [
-						"Recorded as ",
-						stamp.review_state,
-						"."
-					]
-				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					style: {
-						display: "flex",
-						gap: 8
-					},
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
-						disabled: busy,
-						onClick: () => decide(true),
-						style: {
-							padding: "6px 14px",
-							fontSize: 12.5,
-							borderRadius: "var(--radius-sm)",
-							border: "1px solid var(--status-ok-edge)",
-							background: "var(--status-ok-tint)",
-							color: "var(--text-primary)",
-							cursor: busy ? "default" : "pointer"
-						},
-						children: "Accept"
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-						type: "button",
-						disabled: busy,
-						onClick: () => decide(false),
-						style: {
-							padding: "6px 14px",
-							fontSize: 12.5,
-							borderRadius: "var(--radius-sm)",
-							border: "1px solid var(--status-danger-edge)",
-							background: "var(--status-danger-tint)",
-							color: "var(--text-primary)",
-							cursor: busy ? "default" : "pointer"
-						},
-						children: "Reject"
-					})]
-				}),
-				actionError && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-					"data-testid": "stamp-action-error",
-					style: note$1("danger"),
-					children: actionError
-				})
-			]
-		});
-	}
-	function Verdict({ runId, verdict }) {
-		if (!verdict) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-			style: card,
-			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-				"data-testid": "verdict-pending",
-				style: note$1("muted"),
-				children: "The chair has not ruled yet. A verdict appears here once the meeting ends — when the owner closes it, the queue empties, or the turn cap is reached."
-			})
-		});
-		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-			style: card,
-			children: [
-				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					"data-testid": "verdict-simulation",
-					style: note$1("attention"),
-					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Simulation — not an approval." }),
-						" This verdict is a simulation produced by AI personas reading one file. It is not an approval, not a sign-off, and carries no authority: a human decides.",
-						" ",
-						verdict.artifact_intact === false ? "A repository file DID change during this review — see below. Nothing was landed," : "No repository was written to, nothing was landed,",
-						" ",
-						"and nothing here binds any person, team or budget."
-					]
-				}),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Rechecks, { checks: verdict.checks }),
-				verdict.artifact_intact !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-					"data-testid": "artifact-intact",
-					style: note$1(verdict.artifact_intact ? "ok" : "danger"),
-					children: verdict.artifact_intact ? "Original artifact unchanged — re-checked by digest at the decision, against the digest taken before the meeting opened." : "Original artifact CHANGED DURING THE REVIEW — it was promised untouched. Treat every re-check above as unreliable and read the diff."
-				}),
-				verdict.dropped_delegation && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					"data-testid": "dropped-delegation",
-					style: note$1("attention"),
-					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Dropped delegation" }),
-						" — the turn cap cut it off and no edit was made:",
-						" ",
-						verdict.dropped_delegation
-					]
-				}),
-				verdict.dropped_floor_requests.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					"data-testid": "dropped-floor-requests",
-					style: note$1("attention"),
-					children: [
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Dropped floor requests" }),
-						" — the review ended before their turn came:",
-						" ",
-						verdict.dropped_floor_requests.join(", ")
-					]
-				}),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("details", {
-					open: true,
-					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("summary", {
-						style: {
-							cursor: "pointer",
-							fontSize: 12,
-							color: "var(--text-muted)"
-						},
-						children: "The chair’s ruling in full"
-					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						"data-testid": "verdict-prose",
-						style: { marginTop: 8 },
-						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Markdown, { children: verdict.text })
-					})]
-				}),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Stamp, { runId })
-			]
-		});
-	}
-	//#endregion
 	//#region ../playbooks/committee/view/src/Voice.tsx
 	/**
 	* A turn as the room reads it: its prose, at most one figure, and what the
@@ -459,6 +181,7 @@
 			style: figure,
 			children: [
 				drawing.state === "pending" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					role: "status",
 					style: muted$1,
 					children: "rendering diagram…"
 				}),
@@ -470,6 +193,7 @@
 				drawing.state === "absent" && source,
 				drawing.state === "failed" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [source, /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "mermaid-error",
+					role: "status",
 					style: muted$1,
 					children: ["diagram failed to render: ", drawing.error]
 				})] }),
@@ -494,6 +218,297 @@
 				runId,
 				seg
 			}, i) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MermaidFigure, { seg }, i))
+		});
+	}
+	//#endregion
+	//#region ../playbooks/committee/view/src/Verdict.tsx
+	/**
+	* The chair's ruling, read in the order a person needs it.
+	*
+	* The ruling itself is 8 KB of structured markdown, so the two things a reader
+	* must not scroll past go above it: that this is a simulation, and what the
+	* independent re-checks actually found. The prose follows, expanded, in a
+	* <details> so it can be collapsed to reach the diff below.
+	*
+	* `text` is the assembled decision text the playbook banks — the chair's prose
+	* with the re-check lines and the disclaimer appended (playbook.py:_reduce_decision).
+	* The card never renders it: the prose comes from `segments`, that text split
+	* the way a turn body is (view._verdict), so no image reference the chair wrote
+	* ever reaches Markdown. The re-checks are rendered from `checks` as well,
+	* because a list of six outcomes is a table, not a paragraph.
+	*/
+	var card = {
+		background: "var(--surface-card)",
+		border: "1px solid var(--border-hairline)",
+		borderRadius: "var(--radius-md)",
+		padding: 16,
+		display: "flex",
+		flexDirection: "column",
+		gap: 12
+	};
+	var note$1 = (tone) => ({
+		padding: "8px 12px",
+		borderRadius: "var(--radius-sm)",
+		fontSize: 12.5,
+		lineHeight: 1.5,
+		color: "var(--text-primary)",
+		background: tone === "muted" ? "var(--wash-subtle)" : `var(--status-${tone}-tint)`,
+		border: `1px solid ${tone === "muted" ? "var(--border-hairline)" : `var(--status-${tone}-edge)`}`
+	});
+	function Rechecks({ checks }) {
+		if (checks.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "rechecks-none",
+			style: note$1("muted"),
+			children: "No edit was delegated, so there was nothing to re-check."
+		});
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 6
+			},
+			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				style: {
+					fontSize: 12,
+					color: "var(--text-muted)"
+				},
+				children: [
+					checks.length,
+					" delegated ",
+					checks.length === 1 ? "edit" : "edits",
+					", each re-checked master-side by comparing the revised copy’s digest before and after the turn. The worker’s own claim is not what is reported here."
+				]
+			}), checks.map((check) => {
+				const applied = check.verified === true;
+				const outcome = check.verified === null ? "NOT CHECKED" : applied ? "APPLIED" : "DID NOT APPLY";
+				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": `verdict-recheck-${check.turn}`,
+					style: {
+						...note$1(check.verified === null ? "muted" : applied ? "ok" : "danger"),
+						display: "flex",
+						gap: 10,
+						alignItems: "baseline"
+					},
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+							style: {
+								fontFamily: "var(--font-mono)",
+								fontSize: 11.5,
+								whiteSpace: "nowrap"
+							},
+							children: [
+								"turn ",
+								String(check.turn).padStart(2, "0"),
+								" · junior_ic"
+							]
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", {
+							style: {
+								fontSize: 11.5,
+								whiteSpace: "nowrap"
+							},
+							children: outcome
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							style: { color: "var(--text-secondary)" },
+							children: check.action
+						})
+					]
+				}, check.turn);
+			})]
+		});
+	}
+	function Stamp({ runId }) {
+		const [stamp, setStamp] = (0, react.useState)(null);
+		const [lookupError, setLookupError] = (0, react.useState)(null);
+		const [actionError, setActionError] = (0, react.useState)(null);
+		const [busy, setBusy] = (0, react.useState)(false);
+		const [reloads, setReloads] = (0, react.useState)(0);
+		(0, react.useEffect)(() => {
+			let live = true;
+			apiGet(`/api/runs/${runId}/reductions`).then((rows) => {
+				const row = [...rows].reverse().find((r) => r.kind === "decision");
+				if (!live) return;
+				if (row) setStamp({
+					id: row.id,
+					review_state: row.review_state
+				});
+				else setLookupError("no decision reduction is banked for this run");
+			}).catch((err) => {
+				if (live) setLookupError(err instanceof Error ? err.message : String(err));
+			});
+			return () => {
+				live = false;
+			};
+		}, [runId, reloads]);
+		const decide = async (accept) => {
+			if (!stamp || busy) return;
+			setBusy(true);
+			setActionError(null);
+			try {
+				const res = await apiPost(`/api/reductions/${stamp.id}/${accept ? "accept" : "reject"}`);
+				setStamp({
+					id: stamp.id,
+					review_state: res.review_state
+				});
+			} catch (err) {
+				setActionError(err instanceof Error ? err.message : "Could not record the decision");
+				setReloads((n) => n + 1);
+			} finally {
+				setBusy(false);
+			}
+		};
+		if (lookupError) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": "stamp-error",
+			style: note$1("muted"),
+			children: ["Could not read this verdict’s review state: ", lookupError]
+		});
+		if (!stamp) return null;
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 8
+			},
+			children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": "stamp-note",
+					style: {
+						fontSize: 12,
+						color: "var(--text-muted)",
+						lineHeight: 1.5
+					},
+					children: "Accepting or rejecting stamps this reduction in the audit trail and emits an event. It settles no tickets and changes no run state — the committee’s decision holds no needs_human ticket — and it lands nothing and reverts nothing. It records that a person read the verdict."
+				}),
+				stamp.review_state && stamp.review_state !== "pending" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "stamp-state",
+					style: note$1(stamp.review_state === "accepted" ? "ok" : "attention"),
+					children: [
+						"Recorded as ",
+						stamp.review_state,
+						"."
+					]
+				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					style: {
+						display: "flex",
+						gap: 8
+					},
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						disabled: busy,
+						onClick: () => decide(true),
+						style: {
+							padding: "6px 14px",
+							fontSize: 12.5,
+							borderRadius: "var(--radius-sm)",
+							border: "1px solid var(--status-ok-edge)",
+							background: "var(--status-ok-tint)",
+							color: "var(--text-primary)",
+							cursor: busy ? "default" : "pointer"
+						},
+						children: "Accept"
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						disabled: busy,
+						onClick: () => decide(false),
+						style: {
+							padding: "6px 14px",
+							fontSize: 12.5,
+							borderRadius: "var(--radius-sm)",
+							border: "1px solid var(--status-danger-edge)",
+							background: "var(--status-danger-tint)",
+							color: "var(--text-primary)",
+							cursor: busy ? "default" : "pointer"
+						},
+						children: "Reject"
+					})]
+				}),
+				actionError && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": "stamp-action-error",
+					style: note$1("danger"),
+					children: actionError
+				})
+			]
+		});
+	}
+	function Verdict({ runId, verdict }) {
+		if (!verdict) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			style: card,
+			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				"data-testid": "verdict-pending",
+				style: note$1("muted"),
+				children: "The chair has not ruled yet. A verdict appears here once the meeting ends — when the owner closes it, the queue empties, or the turn cap is reached."
+			})
+		});
+		const takes = verdict.takes ?? 1;
+		const broke = verdict.violations ?? [];
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			style: card,
+			children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "verdict-simulation",
+					style: note$1("attention"),
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Simulation — not an approval." }),
+						" This verdict is a simulation produced by AI personas reading one file. It is not an approval, not a sign-off, and carries no authority: a human decides.",
+						" ",
+						verdict.artifact_intact === false ? "A repository file DID change during this review — see below. Nothing was landed," : "No repository was written to, nothing was landed,",
+						" ",
+						"and nothing here binds any person, team or budget."
+					]
+				}),
+				(takes > 1 || broke.length > 0) && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "verdict-voice",
+					style: note$1(broke.length > 0 ? "attention" : "muted"),
+					children: [takes > 1 && `The chair took ${takes} takes. `, broke.length > 0 && `The kept verdict broke the ground rules: ${violationText(broke)}.`]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Rechecks, { checks: verdict.checks }),
+				verdict.artifact_intact !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": "artifact-intact",
+					style: note$1(verdict.artifact_intact ? "ok" : "danger"),
+					children: verdict.artifact_intact ? "Original artifact unchanged — re-checked by digest at the decision, against the digest taken before the meeting opened." : "Original artifact CHANGED DURING THE REVIEW — it was promised untouched. Treat every re-check above as unreliable and read the diff."
+				}),
+				verdict.dropped_delegation && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "dropped-delegation",
+					style: note$1("attention"),
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Dropped delegation" }),
+						" — the turn cap cut it off and no edit was made:",
+						" ",
+						verdict.dropped_delegation
+					]
+				}),
+				verdict.dropped_floor_requests.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "dropped-floor-requests",
+					style: note$1("attention"),
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Dropped floor requests" }),
+						" — the review ended before their turn came:",
+						" ",
+						verdict.dropped_floor_requests.join(", ")
+					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("details", {
+					open: true,
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("summary", {
+						style: {
+							cursor: "pointer",
+							fontSize: 12,
+							color: "var(--text-muted)"
+						},
+						children: "The chair’s ruling in full"
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						"data-testid": "verdict-prose",
+						style: { marginTop: 8 },
+						children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Segments, {
+							segments: verdict.segments ?? [],
+							runId,
+							fontSize: 13
+						})
+					})]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Stamp, { runId })
+			]
 		});
 	}
 	//#endregion
@@ -1392,7 +1407,8 @@
 		"owner closed": "The owner moved to close and the chair ruled.",
 		"queue empty": "Everyone who asked for the floor got it.",
 		"turn cap": "The meeting ran out of turns before anyone closed it.",
-		"chair turn failed": "The chair produced no decision, so the run ended failed."
+		"chair turn failed": "The chair produced no decision, so the run ended failed.",
+		"chair retake failed": "The chair's retake failed, so its earlier take is recorded unruled and the run ended failed."
 	};
 	var mono = { fontFamily: "var(--font-mono)" };
 	function Section({ title, children }) {
@@ -1494,7 +1510,7 @@
 						borderRadius: "var(--radius-md)",
 						background: "var(--wash-subtle)",
 						border: "1px solid var(--border-hairline)",
-						color: ended === "turn cap" || ended === "chair turn failed" ? "var(--status-attention, #e3b341)" : "var(--text-secondary)"
+						color: ended === "turn cap" || ended === "chair turn failed" || ended === "chair retake failed" ? "var(--status-attention, #e3b341)" : "var(--text-secondary)"
 					},
 					children: [
 						"Ended: ",
@@ -1801,10 +1817,37 @@
 		gap: 8,
 		fontSize: 12
 	};
+	/** Every voice.summary key, in C11 order, as a reader would say it. */
+	var VOICE_LABEL = [
+		["owner_reviewer_median_words", "median words, owner and reviewers"],
+		["owner_reviewer_pct_within_cap", "% owner and reviewer turns within the cap"],
+		["median_words_by_role", "median words by role"],
+		["chair_words", "chair words"],
+		["chair_headers", "chair headers"],
+		["chair_tables", "chair tables"],
+		["junior_turns", "junior IC reports"],
+		["junior_pct_compliant", "% junior IC reports in one sentence of 40 words or fewer"],
+		["pct_clean_format", "% turns with no bold, headers, tables or nesting"],
+		["pct_first_line_le_25", "% owner and reviewer first lines of 25 words or fewer"],
+		["unquoted_dashes", "dashes outside quotes"],
+		["reviewer_pct_with_pointer", "% reviewer turns with a pointer"],
+		["max_turn_refs", "most turn-number references in one turn"],
+		["unchanged_mentions_junior_chair", "mentions of the original being unchanged, junior IC and chair"],
+		["total_takes", "takes dispatched"],
+		["retakes_by_role", "retakes by role"],
+		["kept_flagged", "turns kept with broken rules"]
+	];
+	/** A number as itself, a missing one as a dash, a per-role map as `role n, role n`. */
+	function voiceValue(value) {
+		if (value === null || value === void 0) return "—";
+		if (typeof value === "object") return Object.entries(value).map(([role, n]) => `${role} ${n ?? "—"}`).join(", ");
+		return String(value);
+	}
 	function MeetingMetrics({ data }) {
 		const turns = [...data.timeline].sort((a, b) => a.n - b.n);
 		const delivered = (e) => !e.badges.includes("no_turn");
 		const over = data.verdict !== null;
+		const voice = data.voice ?? null;
 		const seats = [...data.roster.map((p) => ({
 			key: p.role,
 			name: p.name,
@@ -1941,6 +1984,38 @@
 						},
 						children: "Counted in turns: the record keeps no clock."
 					})]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
+					title: "Voice",
+					children: voice ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						"data-testid": "voice-metrics",
+						style: {
+							display: "flex",
+							flexDirection: "column",
+							gap: 4
+						},
+						children: VOICE_LABEL.map(([key, label]) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							"data-testid": `voice-metric-${key}`,
+							style: row,
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								style: {
+									flex: 1,
+									color: "var(--text-secondary)"
+								},
+								children: label
+							}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								style: {
+									...mono,
+									flex: "none"
+								},
+								children: voiceValue(voice[key])
+							})]
+						}, key))
+					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						"data-testid": "voice-not-measured",
+						style: quiet,
+						children: "not measured for this run"
+					})
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
 					title: "Thread growth",

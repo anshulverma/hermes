@@ -161,14 +161,11 @@ function seed(): void {
        VALUES (?, 'committee', 'local', 'main', '{}', 'done', 'decision', ?, ?)`,
     ).run(RUN, now, now);
 
-    // `phase` is NOT optional here, though the column allows NULL. The verdict
-    // card looks its reduction up through
-    // GET /api/runs/{id}/reductions?phase=decision, and that route appends
-    // `AND phase=?` (server/app.py:978) — a decision row with phase NULL matches
-    // nothing, the card renders its error state instead of accept/reject, and
-    // the spec below would pass with the surface broken. The values are the ones
-    // `record_reduction` writes: the run's phase at the time, so `t{NN}-{role}`
-    // for a turn and `decision` for the decision.
+    // `phase` is the one `record_reduction` writes: the run's phase at the
+    // time, so `t{NN}-{role}` for a turn and `decision` for the decision. The
+    // verdict card no longer filters on it (it reads every reduction and takes
+    // the last `decision`, so a verdict kept under `decision-take2` is found),
+    // but seeding the real value keeps the fixture honest.
     const insert = db.prepare(
       `INSERT INTO reductions (run_id, phase, kind, json, review_state, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
@@ -285,10 +282,8 @@ test('the committee tab renders the meeting oldest-first', async ({ page }) => {
   await expect(page.locator('[data-testid="timeline-recheck-3"]')).toContainText('APPLIED');
   await expect(page.locator('[data-testid="timeline-recheck-7"]')).toContainText('DID NOT APPLY');
 
-  // The verdict card found ITS reduction. This is the assertion that catches a
-  // seeded `phase` of NULL: the card looks the row up through
-  // ?phase=decision, and without it renders `stamp-error` instead. Nothing else
-  // in this file would notice.
+  // The verdict card found ITS reduction: it reads the run's reductions and
+  // stamps the last `decision` one, and without one renders `stamp-error`.
   await expect(page.locator('[data-testid="stamp-note"]')).toBeVisible();
   await expect(page.locator('[data-testid="stamp-error"]')).toHaveCount(0);
   await expect(page.getByRole('button', { name: /accept/i })).toBeVisible();

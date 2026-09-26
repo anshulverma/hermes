@@ -8,12 +8,15 @@
  *
  * `text` is the assembled decision text the playbook banks — the chair's prose
  * with the re-check lines and the disclaimer appended (playbook.py:_reduce_decision).
- * The re-checks are rendered from `checks` as well, because a list of six
- * outcomes is a table, not a paragraph.
+ * The card never renders it: the prose comes from `segments`, that text split
+ * the way a turn body is (view._verdict), so no image reference the chair wrote
+ * ever reaches Markdown. The re-checks are rendered from `checks` as well,
+ * because a list of six outcomes is a table, not a paragraph.
  */
 
 import { useEffect, useState } from 'react';
-import { Markdown, apiGet, apiPost } from './host';
+import { apiGet, apiPost } from './host';
+import { Segments, violationText, type Segment } from './Voice';
 
 export type VerdictData = {
   text: string;
@@ -21,6 +24,12 @@ export type VerdictData = {
   artifact_intact: boolean | null;
   dropped_delegation: string | null;
   dropped_floor_requests: string[];
+  /** voice: how many takes the chair needed, and the rules its kept take broke. */
+  takes?: number | null;
+  violations?: string[];
+  voice?: Record<string, unknown> | null;
+  /** `text` split like a turn body, every file image refused. */
+  segments?: Segment[];
   // `view_data` also sends `simulation`, and this card deliberately does not
   // read it. `_verdict` hardcodes it True, so gating the banner on it would
   // move the most important safety sentence on the page behind a value that
@@ -101,8 +110,11 @@ function Stamp({ runId }: { runId: string }) {
 
   useEffect(() => {
     let live = true;
+    // Every reduction, not `?phase=decision`: a verdict kept after a retake is
+    // banked under `decision-take2`, and the reverse find below still lands on
+    // the last decision reduction whatever phase it carries.
     apiGet<Array<{ id: number; kind: string; review_state: string }>>(
-      `/api/runs/${runId}/reductions?phase=decision`,
+      `/api/runs/${runId}/reductions`,
     )
       .then((rows) => {
         // The LAST decision reduction, matching `view_data`, which takes
@@ -234,6 +246,9 @@ export default function Verdict({
     );
   }
 
+  const takes = verdict.takes ?? 1;
+  const broke = verdict.violations ?? [];
+
   return (
     <div style={card}>
       <div data-testid="verdict-simulation" style={note('attention')}>
@@ -248,6 +263,13 @@ export default function Verdict({
           : 'No repository was written to, nothing was landed,'}{' '}
         and nothing here binds any person, team or budget.
       </div>
+
+      {(takes > 1 || broke.length > 0) && (
+        <div data-testid="verdict-voice" style={note(broke.length > 0 ? 'attention' : 'muted')}>
+          {takes > 1 && `The chair took ${takes} takes. `}
+          {broke.length > 0 && `The kept verdict broke the ground rules: ${violationText(broke)}.`}
+        </div>
+      )}
 
       <Rechecks checks={verdict.checks} />
 
@@ -281,7 +303,9 @@ export default function Verdict({
           The chair&rsquo;s ruling in full
         </summary>
         <div data-testid="verdict-prose" style={{ marginTop: 8 }}>
-          <Markdown>{verdict.text}</Markdown>
+          {/* `segments` only, never `text`: a payload without them shows no
+              prose rather than the chair's raw markdown. */}
+          <Segments segments={verdict.segments ?? []} runId={runId} fontSize={13} />
         </div>
       </details>
 
