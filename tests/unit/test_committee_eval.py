@@ -1265,9 +1265,12 @@ def test_deterministic_scores_pinned(tmp_path):
     assert nine["concision"]["evidence"][0]["quote"] == "words.median_reviewer_owner=825.0"
     assert nine["verdict_consistency"]["rationale"] == (
         "start 5; verdict_count_mismatch x1: -2; delegation_truncated_but_applied x4: -2")
+    # The contradicting sentence first (what headline, show and the view quote), then the
+    # truncations; the rechecks_verified metric only stands in when no flag counts.
     assert [(e["where"], e["turn"], e["line"]) for e in nine["verdict_consistency"]["evidence"]] == [
-        ("metric", None, None), ("turn", 6, 130), ("turn", 9, 244), ("turn", 15, 424),
-        ("turn", 18, 519), ("decision", None, 820)]
+        ("decision", None, 820), ("turn", 6, 130), ("turn", 9, 244), ("turn", 15, 424),
+        ("turn", 18, 519)]
+    assert "Seven edits landed" in nine["verdict_consistency"]["evidence"][0]["quote"]
     # run-2 has no cost-state line, so its cost is unknown: a failed check, not a pass
     assert two["efficiency"]["rationale"] == (
         "start 5; cost_usd unknown: -1; summed_attempt_s 3279.4 > 3000: -1")
@@ -1403,7 +1406,11 @@ def test_deterministic_rules():
         "start 3 (median_reviewer_owner 301 <= 500)")
     assert _det(words__median_reviewer_owner=801)["concision"]["rationale"] == (
         "start 1 (median_reviewer_owner 801 > 800)")
-    assert score("concision", words__median_reviewer_owner=None) == 5
+    # no measured reviewer/owner prose is unknown, never the best band
+    blank = _det(words__median_reviewer_owner=None)["concision"]
+    assert (blank["score"], blank["error"], blank["rationale"]) == (
+        None, "no measured reviewer/owner prose", "")
+    assert blank["evidence"][0]["quote"] == "words.median_reviewer_owner=null"
 
     # efficiency: each penalty alone, then all four together
     assert score("efficiency", cost_usd=20) == 5
@@ -1418,15 +1425,19 @@ def test_deterministic_rules():
     assert _det(turns=30)["efficiency"]["rationale"] == "start 5; turns 30 >= cap 30: -1"
     assert score("efficiency", turns=29) == 5
     assert score("efficiency", turns=99, cap=None) == 5
+    # the rationale names which dropped input fired; either or both is one -1
     assert _det(dropped__delegation="edit §3")["efficiency"]["rationale"] == (
-        "start 5; dropped delegation or floor request: -1")
-    assert score("efficiency", dropped__floor_requests=["tpm"]) == 4
-    assert score("efficiency", dropped__delegation="edit §3", dropped__floor_requests=["tpm"]) == 4
+        "start 5; dropped delegation: -1")
+    assert _det(dropped__floor_requests=["tpm"])["efficiency"]["rationale"] == (
+        "start 5; dropped floor requests: -1")
+    both = _det(dropped__delegation="edit §3", dropped__floor_requests=["tpm"])["efficiency"]
+    assert (both["score"], both["rationale"]) == (
+        4, "start 5; dropped delegation and floor requests: -1")
     worst = _det(cost_usd=21, time__summed_attempt_s=3001, turns=30,
                  dropped__floor_requests=["pm"])["efficiency"]
     assert (worst["score"], worst["rationale"]) == (1, (
         "start 5; cost_usd 21 > 20: -1; summed_attempt_s 3001 > 3000: -1; "
-        "turns 30 >= cap 30: -1; dropped delegation or floor request: -1"))
+        "turns 30 >= cap 30: -1; dropped floor requests: -1"))
     blind = _det(cost_usd=None, time__summed_attempt_s=None, turns=30)["efficiency"]
     assert (blind["score"], blind["rationale"]) == (2, (
         "start 5; cost_usd unknown: -1; summed_attempt_s unknown: -1; turns 30 >= cap 30: -1"))
@@ -1454,16 +1465,21 @@ def test_deterministic_rules():
     noise = [{"id": "action_clipped", "turn": 3, "line": 861, "quote": "x"},
              {"id": "thread_missing", "turn": None, "line": None, "quote": ""}]
     assert score("verdict_consistency", noise) == 5
+    assert [e["quote"] for e in _det(noise)["verdict_consistency"]["evidence"]] == ["rechecks_verified=3"]
     one = _det([mismatch])["verdict_consistency"]
     assert (one["score"], one["rationale"]) == (3, "start 5; verdict_count_mismatch x1: -2")
-    assert one["evidence"][1] == {"turn": None, "where": "decision", "line": 820,
-                                  "quote": "Seven edits landed:", "verified": True}
+    # a counted flag replaces the rechecks_verified metric as the evidence
+    assert one["evidence"] == [{"turn": None, "where": "decision", "line": 820,
+                                "quote": "Seven edits landed:", "verified": True}]
     assert score("verdict_consistency", [truncated]) == 4
     three = _det([truncated] * 3)["verdict_consistency"]
     assert (three["score"], three["rationale"]) == (
         3, "start 5; delegation_truncated_but_applied x3: -2")
-    assert three["evidence"][1] == {"turn": 6, "where": "turn", "line": 130,
-                                    "quote": "your message was cut off", "verified": True}
+    assert three["evidence"] == [{"turn": 6, "where": "turn", "line": 130,
+                                  "quote": "your message was cut off", "verified": True}] * 3
+    # the chair's contradicting sentence leads, whatever order the flags came in
+    mixed = _det([truncated, mismatch])["verdict_consistency"]
+    assert [e["where"] for e in mixed["evidence"]] == ["decision", "turn"]
     low = _det([mismatch] * 3)["verdict_consistency"]
     assert (low["score"], low["rationale"]) == (1, "start 5; verdict_count_mismatch x3: -6; floor 1")
 
@@ -1527,6 +1543,59 @@ def test_verdict_count_words_and_every_match(tmp_path):
     assert claims(both, 8) == [(7, 8, both), (6, 8, both)]
     assert claims("Seven edits landed.\n\nEight edits landed.", 8) == [(7, 8, "Seven edits landed.")]
     assert claims("The edits landed. Several edits were made.", 8) == []
+    # "N of the M edits ...": the claim is N, the number before "of", never M
+    assert claims("Seven of the eight edits landed.", 7) == []
+    assert claims("Seven of the eight edits landed.", 8) == [(7, 8, "Seven of the eight edits landed.")]
+    assert claims("6 of 8 edits applied", 6) == []
+    assert claims("6 of 8 edits applied", 8) == [(6, 8, "6 of 8 edits applied")]
+    assert claims("Twenty-one of all thirty edits were made", 30) == [
+        (21, 30, "Twenty-one of all thirty edits were made")]
+    assert claims("Most of these eight edits landed.", 5) == []  # no number before "of": no claim
+    # edits that landed only in part are not a count of edits that landed
+    assert claims("Eight edits landed. Two edits applied only partially.", 8) == []
+    assert claims("Two edits applied partly; three edits landed in part.", 8) == []
+
+
+def test_flag_rules(tmp_path):
+    """D4 rules no baseline pins: the truncation phrase and verified, action_chars at 200, delegated_by_turn, claim lines."""
+    home, run_id = build_home(tmp_path, "run-9")
+    base = E.load_target(str(home), run_id)
+
+    def flags(turns, decision, text=None):
+        target = dataclasses.replace(base, turns=turns, decision=decision, thread_text=text,
+                                     thread=None if text is None else E.parse_thread(text))
+        return [(f["id"], f["turn"], f["line"], f.get("claimed"))
+                for f in E.compute_flags(target, {"rechecks_verified": 8})
+                if f["id"] != "thread_missing"]
+
+    def junior(n, text, verified=True, **extra):
+        return {"turn": n, "role": "junior_ic", "delivered": True, "verified": verified,
+                "body": text, **extra}
+
+    # Only a cut-off message (delegation, action, ...) that the re-check still verified.
+    turns = {5: junior(5, "The root is cut off from the zone, so it cannot probe."),
+             6: junior(6, "Your message was cut off.", verified=False),
+             7: junior(7, "Your delegation was truncated at item 2."),
+             8: junior(8, "Your message was cut off.", verified=None)}
+    assert flags(turns, {}) == [("delegation_truncated_but_applied", 7, None, None)]
+
+    # action_chars must exceed ACTION_MAX (200); delegated_by_turn outranks the nearest owner turn.
+    def owner(n, chars):
+        return {"turn": n, "role": "owner", "delivered": True, "delegate": True,
+                "voice": {"action_chars": chars}}
+
+    turns = {1: owner(1, 200), 2: owner(2, 201),
+             3: junior(3, "Done.", delegated_by_turn=1), 4: junior(4, "Done.")}
+    checks = {"rechecks": [{"turn": 3, "action": "a" * 10}, {"turn": 4, "action": "b" * 10}]}
+    assert flags(turns, checks) == [("action_clipped", 4, None, None)]
+
+    # Two identical wrong sentences get their own lines; one thread.md lacks sorts last.
+    text = "\n".join(("# Committee — run-x", "", "## decision — Dana Whitfield", "",
+                      "Seven edits landed.", "", "Seven edits landed.", ""))
+    prose = {"body": "Six edits landed.\n\nSeven edits landed.\n\nSeven edits landed."}
+    assert flags({}, prose, text) == [
+        ("verdict_count_mismatch", None, 5, 7), ("verdict_count_mismatch", None, 7, 7),
+        ("verdict_count_mismatch", None, None, 6)]
 
 
 # --- D6: the judge's snapshot, goal, answer and evidence ---------------------

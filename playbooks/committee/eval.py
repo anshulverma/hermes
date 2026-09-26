@@ -818,7 +818,9 @@ def _prose_metrics(target: Target) -> dict:
 
 # --- D4 flags: the record's own contradictions (measure only, G1, G2) --------
 
-TRUNCATION = re.compile(r"(?i)\b(cut off|truncated|stopped at)\b")
+# A message the junior IC got cut off, never a domain phrase ("cut off from the root").
+TRUNCATION = re.compile(
+    r"(?i)\b(message|delegation|action|request|instruction)s?\b.{0,40}\b(cut off|truncated|stopped at)\b")
 
 _ONES = ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine")
 _TENS = ("ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
@@ -831,20 +833,41 @@ NUMBER_WORDS: dict[str, int] = {
     "thirty": 30,
 }
 # Longest first, so the alternation never settles for "twenty" in "twenty-one".
-EDIT_CLAIM = re.compile(
-    r"(?i)\b(\d+|" + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True))
-    + r") edits? (landed|applied|were made)\b"
-)
+_NUMBER = r"(\d+|" + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True)) + r")"
+EDIT_CLAIM = re.compile(r"(?i)\b" + _NUMBER + r" edits? (landed|applied|were made)\b")
+# "Seven of the eight edits landed": the claim is the number before "of" (none: no claim).
+_OF_BEFORE = re.compile(r"(?i)(?:\b" + _NUMBER + r"\s+)?\bof( the| these| all)?\s+$")
+# "Two edits applied only partially" counts no landed edits.
+_IN_PART_AFTER = re.compile(r"(?i)\s+(only\s+)?(partially|partly|in part)\b")
 FLAG_ORDER = (
     "delegation_truncated_but_applied", "action_clipped",
     "verdict_count_mismatch", "thread_missing",
 )
 
 
-def _claimed(match: re.Match) -> int:
-    """The number an EDIT_CLAIM match states, digits or words."""
-    said = match.group(1).lower()
+def _number(said: str) -> int:
+    """A claimed number, digits or words."""
+    said = said.lower()
     return int(said) if said.isdigit() else NUMBER_WORDS[said]
+
+
+def edit_claims(text: str) -> list[int]:
+    """Every count of edits ``text`` claims landed, in order (G2).
+
+    A match right after "N of (the|these|all)" claims N, the number before
+    "of"; with no number there it claims nothing. A match followed by
+    "(only) partially|partly|in part" claims nothing.
+    """
+    claims = []
+    for m in EDIT_CLAIM.finditer(text):
+        if _IN_PART_AFTER.match(text, m.end()):
+            continue
+        of = _OF_BEFORE.search(text, 0, m.start())
+        if of is None:
+            claims.append(_number(m.group(1)))
+        elif of.group(1):
+            claims.append(_number(of.group(1)))
+    return claims
 
 
 def _span(target: Target, n: int | None) -> tuple[int, int] | None:
@@ -919,7 +942,7 @@ def compute_flags(target: Target, metrics: dict) -> list[dict]:
     after = 0
     for raw in _lines(chair_prose(decision)):
         text = raw.strip()
-        wrong = [m for m in EDIT_CLAIM.finditer(text) if _claimed(m) != recorded]
+        wrong = [n for n in edit_claims(text) if n != recorded]
         if not wrong:
             continue
         line = _find_line(lines, _span(target, None), lambda ln: text in ln, after)
@@ -927,8 +950,8 @@ def compute_flags(target: Target, metrics: dict) -> list[dict]:
         quote = (lines[line - 1].strip() if line else text)[:QUOTE_MAX]
         flags.extend({
             "id": "verdict_count_mismatch", "turn": None, "line": line, "quote": quote,
-            "claimed": _claimed(m), "recorded": recorded,
-        } for m in wrong)
+            "claimed": n, "recorded": recorded,
+        } for n in wrong)
     if not target.legacy and target.thread_text is None:
         flags.append({"id": "thread_missing", "turn": None, "line": None, "quote": ""})
     return sorted(flags, key=lambda f: (
@@ -979,7 +1002,9 @@ def score_deterministic(metrics: dict, flags: list[dict]) -> dict[str, dict]:
     """efficiency, concision and verdict_consistency, each with its rationale (D5)."""
     cost, secs = _metric(metrics, "cost_usd"), _metric(metrics, "time.summed_attempt_s")
     turns, cap = _metric(metrics, "turns"), _metric(metrics, "cap")
-    dropped = _metric(metrics, "dropped.delegation") or _metric(metrics, "dropped.floor_requests")
+    dropped = [name for key, name in (("dropped.delegation", "delegation"),
+                                      ("dropped.floor_requests", "floor requests"))
+               if _metric(metrics, key)]
     # An unknown cost or time fails its check: a run that hides its bill never scores better.
     efficiency = _scored(5, "start 5", [
         (cost is None, "cost_usd unknown: -1"),
@@ -987,37 +1012,42 @@ def score_deterministic(metrics: dict, flags: list[dict]) -> dict[str, dict]:
         (secs is None, "summed_attempt_s unknown: -1"),
         (secs is not None and secs > 3000, f"summed_attempt_s {secs} > 3000: -1"),
         (cap is not None and turns is not None and turns >= cap, f"turns {turns} >= cap {cap}: -1"),
-        (bool(dropped), "dropped delegation or floor request: -1"),
+        (bool(dropped), f"dropped {' and '.join(dropped)}: -1"),
     ], _metric_evidence(metrics, _EFFICIENCY_KEYS))
 
     median = _metric(metrics, "words.median_reviewer_owner")
-    start, first = 5, "start 5 (median_reviewer_owner null)"  # a null never subtracts
-    if median is not None:
+    if median is None:  # nothing measured is unknown, never the best band
+        concision = {"scorer": "deterministic", "score": None, "rationale": "",
+                     "evidence": _metric_evidence(metrics, _CONCISION_KEYS),
+                     "error": "no measured reviewer/owner prose"}
+    else:
         start, first = next(
             ((band, f"start {band} (median_reviewer_owner {median} <= {edge})")
              for edge, band in _BANDS if median <= edge),
             (1, f"start 1 (median_reviewer_owner {median} > 800)"),
         )
-    walls, pointer, example, filler = (_metric(metrics, key) for key in _CONCISION_KEYS[1:])
-    concision = _scored(start, first, [
-        (walls is not None and walls > 0.25, f"walls_share {walls} > 0.25: -1"),
-        (pointer is not None and pointer < 0.5, f"pointer_share {pointer} < 0.5: -1"),
-        (example is not None and example < 0.5, f"example_share {example} < 0.5: -1"),
-        (filler is not None and filler > 1, f"filler_per_turn {filler} > 1: -1"),
-    ], _metric_evidence(metrics, _CONCISION_KEYS))
+        walls, pointer, example, filler = (_metric(metrics, key) for key in _CONCISION_KEYS[1:])
+        concision = _scored(start, first, [
+            (walls is not None and walls > 0.25, f"walls_share {walls} > 0.25: -1"),
+            (pointer is not None and pointer < 0.5, f"pointer_share {pointer} < 0.5: -1"),
+            (example is not None and example < 0.5, f"example_share {example} < 0.5: -1"),
+            (filler is not None and filler > 1, f"filler_per_turn {filler} > 1: -1"),
+        ], _metric_evidence(metrics, _CONCISION_KEYS))
 
-    counted = [f for f in flags if isinstance(f, dict) and f.get("id") in _COUNTED]
+    # The chair's contradicting sentences lead, so headline, show and the view quote one.
+    counted = sorted((f for f in flags if isinstance(f, dict) and f.get("id") in _COUNTED),
+                     key=lambda f: f["id"] != "verdict_count_mismatch")
     mismatch = sum(f["id"] == "verdict_count_mismatch" for f in counted)
     truncated = len(counted) - mismatch
     consistency = _scored(5, "start 5", [
         (2 * mismatch, f"verdict_count_mismatch x{mismatch}: -{2 * mismatch}"),
         (min(2, truncated), f"delegation_truncated_but_applied x{truncated}: -{min(2, truncated)}"),
-    ], _metric_evidence(metrics, ("rechecks_verified",)) + [
+    ], [
         {"turn": f.get("turn"), "line": f.get("line"), "quote": f.get("quote", ""),
          "where": "decision" if f["id"] == "verdict_count_mismatch" else "turn",
          "verified": True}
         for f in counted
-    ])
+    ] or _metric_evidence(metrics, ("rechecks_verified",)))
     return {"efficiency": efficiency, "concision": concision, "verdict_consistency": consistency}
 
 
