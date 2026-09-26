@@ -573,14 +573,25 @@ def trace_totals(traces: list[bytes | str | None]) -> dict:
 
 
 def _time(attempts: list[dict]) -> dict:
-    """Summed and wall-clock seconds over every attempt with both timestamps, to 0.1 s."""
-    spans = [(a["started_at"], a["ended_at"]) for a in attempts
-             if _is_number(a.get("started_at")) and _is_number(a.get("ended_at"))]
-    if not spans:
-        return {"summed_attempt_s": 0.0, "wall_clock_s": 0.0}
+    """Summed and wall-clock seconds over the attempts, to 0.1 s, or null when unknown.
+
+    An attempt is unmeasured when it lacks a numeric timestamp, or failed with
+    ``ended_at == started_at``: a timeout or contract failure is recorded that
+    way (engine/transport.py, queue.record_contract_fail) after running for an
+    unknown time. ``unmeasured`` counts them. Any unmeasured attempt, or no
+    attempt at all, makes both times null, never a partial sum that would let a
+    failing run look cheaper (the null rule cost follows).
+    """
+    spans = [(a.get("started_at"), a.get("ended_at")) for a in attempts]
+    unmeasured = sum(1 for (start, end), a in zip(spans, attempts)
+                     if not (_is_number(start) and _is_number(end))
+                     or (a.get("outcome") != "ok" and end == start))
+    if unmeasured or not spans:
+        return {"summed_attempt_s": None, "wall_clock_s": None, "unmeasured": unmeasured}
     return {
         "summed_attempt_s": round(sum(end - start for start, end in spans), 1),
         "wall_clock_s": round(max(e for _, e in spans) - min(s for s, _ in spans), 1),
+        "unmeasured": 0,
     }
 
 
@@ -679,9 +690,11 @@ def compute_metrics(target: Target) -> dict:
 def changed(before: bytes, after: bytes) -> tuple[int, int]:
     """``(lines_added, lines_removed)`` from ``before`` to ``after``.
 
-    ``difflib.unified_diff(n=0)`` over the utf-8 lines (undecodable bytes
-    replaced), skipping its two file-header lines, then the lines that start
-    ``+`` and ``-``. doc-diff's backfill counts the same way (D3).
+    ``difflib.unified_diff(n=0)`` over the utf-8 lines with their endings kept
+    (undecodable bytes replaced), skipping its two file-header lines, then the
+    lines that start ``+`` and ``-`` (D3). Kept endings make a change to a line
+    ending alone count: adding a missing final newline is ``(1, 1)``.
+    doc-diff's backfill strips them (``lineterm=""``) and counts that ``(0, 0)``.
     """
     a = before.decode("utf-8", "replace").splitlines(keepends=True)
     b = after.decode("utf-8", "replace").splitlines(keepends=True)
@@ -695,9 +708,15 @@ def changed(before: bytes, after: bytes) -> tuple[int, int]:
 
 
 def _prose_population(target: Target) -> list[int]:
-    """The delivered reviewer and owner turns, ascending: voice's population P (C8)."""
+    """Voice's population P (C8), ascending: the delivered reviewer and owner turns.
+
+    A turn whose reduction says ``voice: null`` (voice's undelivered or
+    signals-only take) is unmeasured and left out, so the voice shares and the
+    reviewer/owner median always read the same turns.
+    """
     return [n for n in sorted(target.turns)
-            if target.turns[n].get("delivered") and target.turns[n].get("role") != cast.JUNIOR]
+            if target.turns[n].get("delivered") and target.turns[n].get("role") != cast.JUNIOR
+            and not ("voice" in target.turns[n] and target.turns[n]["voice"] is None)]
 
 
 def _chair_entry(target: Target) -> str:
@@ -726,15 +745,12 @@ def _prose_words(target: Target) -> dict:
 def _prose_voice(target: Target) -> dict:
     """``voice``: C8's shares over P (D11).
 
-    A reduction's ``voice`` dict is used verbatim. ``voice: null`` (voice's
-    undelivered or signals-only take) is unmeasured and left out of every
-    share. Any other turn is measured from its body.
+    A reduction's ``voice`` dict is used verbatim; any other turn in P is
+    measured from its body (``voice: null`` turns are not in P).
     """
     rows = []
     for n in _prose_population(target):
         rec = target.turns[n]
-        if "voice" in rec and rec["voice"] is None:
-            continue
         recorded = rec.get("voice")
         rows.append(recorded if isinstance(recorded, dict)
                     else measure(body(target, n), rec.get("role") or "reviewer"))
@@ -945,8 +961,11 @@ def score_deterministic(metrics: dict, flags: list[dict]) -> dict[str, dict]:
     cost, secs = _metric(metrics, "cost_usd"), _metric(metrics, "time.summed_attempt_s")
     turns, cap = _metric(metrics, "turns"), _metric(metrics, "cap")
     dropped = _metric(metrics, "dropped.delegation") or _metric(metrics, "dropped.floor_requests")
+    # An unknown cost or time fails its check: a run that hides its bill never scores better.
     efficiency = _scored(5, "start 5", [
+        (cost is None, "cost_usd unknown: -1"),
         (cost is not None and cost > 20, f"cost_usd {cost} > 20: -1"),
+        (secs is None, "summed_attempt_s unknown: -1"),
         (secs is not None and secs > 3000, f"summed_attempt_s {secs} > 3000: -1"),
         (cap is not None and turns is not None and turns >= cap, f"turns {turns} >= cap {cap}: -1"),
         (bool(dropped), "dropped delegation or floor request: -1"),

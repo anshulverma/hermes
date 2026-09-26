@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import sqlite3
+import statistics
 import time
 import urllib.parse
 from contextlib import closing
@@ -720,7 +721,7 @@ def test_tokens_dedupe_and_cost_rules(tmp_path):
     # run-9's pins (C5): 25 attempts, 25 traces, each with a cost-state line and modelUsage
     home, run_id = build_home(tmp_path, "run-9")
     m = compute_metrics(load_target(str(home), run_id))
-    assert m["time"] == {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0}
+    assert m["time"] == {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0, "unmeasured": 0}
     assert m["cost_usd"] == 30.3875
     assert (m["tokens"], m["tokens_source"]) == (RUN9_TOKENS, "modelUsage")
     assert m["traces"] == {"expected": 25, "found": 25, "with_cost": 25}
@@ -734,13 +735,41 @@ def test_tokens_dedupe_and_cost_rules(tmp_path):
     assert m["traces"] == {"expected": 25, "found": 24, "with_cost": 24}
     assert m["tokens"] == {k: RUN9_TOKENS[k] - lost[k] for k in RUN9_TOKENS}
     # time comes from the attempts rows, never from the traces
-    assert m["time"] == {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0}
+    assert m["time"] == {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0, "unmeasured": 0}
+
+    # A timed-out or contract-failed attempt is recorded with started_at == ended_at
+    # (engine/transport.py, queue.record_contract_fail): it ran, but for an unknown
+    # time, so the run's time is unknown, never a partial sum that flatters a failure.
+    with closing(sqlite3.connect(str(home / "queue.db"))) as conn:
+        ticket, end = conn.execute("SELECT ticket_id, MAX(ended_at) FROM attempts").fetchone()
+        conn.execute(
+            "INSERT INTO attempts (ticket_id, phase, host, attempt, started_at, ended_at,"
+            " outcome, termination_reason) VALUES (?, 'x', 'localhost', 2, ?, ?,"
+            " 'driver_failed', 'timeout')", (ticket, end + 5, end + 5))
+        conn.commit()
+    target = load_target(str(home), run_id)
+    m = compute_metrics(target)
+    assert m["time"] == {"summed_attempt_s": None, "wall_clock_s": None, "unmeasured": 1}
+    assert (m["cost_usd"], m["traces"]["expected"]) == (None, 26)
+
+    def timed(*rows):
+        attempts = [{"id": i, "started_at": s, "ended_at": e, "outcome": o}
+                    for i, (s, e, o) in enumerate(rows, 1)]
+        return compute_metrics(dataclasses.replace(target, attempts=attempts))["time"]
+
+    unknown = {"summed_attempt_s": None, "wall_clock_s": None}
+    # an ok attempt of zero length did run; a failed one with a real span is measured
+    assert timed((0.0, 10.0, "ok"), (10.0, 10.0, "ok"), (20.0, 25.5, "driver_failed")) == {
+        "summed_attempt_s": 15.5, "wall_clock_s": 25.5, "unmeasured": 0}
+    assert timed((0.0, 10.0, "ok"), (12.0, 12.0, "infra_failed")) == {**unknown, "unmeasured": 1}
+    assert timed((0.0, 10.0, "ok"), (None, 12.0, "ok")) == {**unknown, "unmeasured": 1}
+    assert timed() == {**unknown, "unmeasured": 0}  # no attempt at all: unknown, not 0.0
 
     # run-2 (legacy): its traces carry usage but no cost-state line, so no modelUsage (C5, spec A4)
     (tmp_path / "two").mkdir()
     home2, run2 = build_home(tmp_path / "two", "run-2")
     m = compute_metrics(load_target(str(home2), run2))
-    assert m["time"] == {"summed_attempt_s": 3279.4, "wall_clock_s": 3516.0}
+    assert m["time"] == {"summed_attempt_s": 3279.4, "wall_clock_s": 3516.0, "unmeasured": 0}
     assert m["cost_usd"] is None
     assert (m["tokens"], m["tokens_source"]) == (RUN2_TOKENS, "transcript")
     assert m["traces"] == {"expected": 21, "found": 21, "with_cost": 0}
@@ -827,13 +856,45 @@ def test_unknown_kinds_retakes_new_seats(tmp_path):
     }
     assert m["unanswered_reviewer_turns"] == [25]  # nobody answered the new seat
     # one attempt per new phase counts in time and in the expected traces
-    assert m["time"] == {"summed_attempt_s": 3314.0, "wall_clock_s": 3619.0}
+    assert m["time"] == {"summed_attempt_s": 3314.0, "wall_clock_s": 3619.0, "unmeasured": 0}
     assert m["traces"] == {"expected": 28, "found": 25, "with_cost": 25}
     assert m["cost_usd"] is None  # three attempts have no trace
     assert m["tokens"] == RUN9_TOKENS
     for key in ("owner_turns_delivered", "delegations", "rechecks", "rechecks_verified",
                 "floor_requests", "ended", "cap", "outside_room_mentions"):
         assert m[key] == before[key], key
+
+    # The record rules neither baseline exercises (C5), on a fresh run-9 home: an
+    # undelivered turn that asked for the floor and errored, a later cap, an error on
+    # the decision, and a decision body naming someone outside the room.
+    home, run_id = _home(tmp_path, "rules", "run-9")
+    outside = "Nobody outside this room signed off."
+
+    def patch(kind, doc):
+        if kind == "decision":
+            return {**doc, "error": "reduce: boom", "body": outside}
+        if kind == "turn" and doc["turn"] in (7, 24):
+            return ({**doc, "delivered": False, "request_floor": True, "error": "no answer"}
+                    if doc["turn"] == 7 else {**doc, "cap": 40})
+        return None
+
+    _patch_reductions(home, run_id, patch)
+    m = compute_metrics(load_target(str(home), run_id))
+    assert m["undelivered_turns"] == 1
+    assert m["cap"] == 40  # the latest turn's cap, never the first's 30
+    assert m["errors"] == 2  # t07's and the decision's
+    # an undelivered turn's floor request still counts: the request was made
+    assert m["floor_requests"] == [{"turn": 1, "role": "senior_director"}, {"turn": 7, "role": "tpm"}]
+    assert m["seats"]["unheard"] == ["tpm"]  # t07 was tpm's only turn
+    # with thread.md, only its entries are scanned, so the decision body adds nothing
+    assert m["outside_room_mentions"] == before["outside_room_mentions"]
+    # without it (a non-legacy run stays evaluable), the bodies and the chair prose are
+    # scanned instead, with line null
+    (home / "runs" / run_id / "thread.md").unlink()
+    m = compute_metrics(load_target(str(home), run_id))
+    assert m["outside_room_mentions"] == [
+        {"line": None, "quote": x["quote"]} for x in before["outside_room_mentions"]
+    ] + [{"line": None, "quote": outside}]
 
 
 # --- the prose and the document, both baselines pinned whole (T1, T2, T18) ----
@@ -890,7 +951,7 @@ def test_run9_metrics_pinned(tmp_path):
         "voice": RUN9_VOICE,
         "bytes": {"original": 11397, "revised": 14931},
         "edits": {"per_edit": "snapshot", "steps": RUN9_STEPS, "total": RUN9_TOTAL},
-        "time": {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0},
+        "time": {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0, "unmeasured": 0},
         "cost_usd": 30.3875,
         "tokens": RUN9_TOKENS,
         "tokens_source": "modelUsage",
@@ -931,7 +992,7 @@ def test_run2_legacy_metrics_pinned(tmp_path):
         "bytes": {"original": 11397, "revised": 19100},
         "edits": {"per_edit": "unavailable", "steps": [],
                   "total": {"lines_added": 208, "lines_removed": 88}},
-        "time": {"summed_attempt_s": 3279.4, "wall_clock_s": 3516.0},
+        "time": {"summed_attempt_s": 3279.4, "wall_clock_s": 3516.0, "unmeasured": 0},
         "cost_usd": None,
         "tokens": RUN2_TOKENS,
         "tokens_source": "transcript",
@@ -960,6 +1021,9 @@ def test_per_edit_from_snapshots(tmp_path):
     assert E.changed(b"a\nb\n", b"a\nc\nd\n") == (2, 1)
     assert E.changed(b"same\n", b"same\n") == (0, 0)
     assert E.changed(b"", b"x\ny\n") == (2, 0)
+    # line endings are kept (D3), so adding a missing final newline is a change;
+    # doc-diff's backfill strips them (lineterm="") and would count (0, 0)
+    assert E.changed(b"a", b"a\n") == (1, 1)
     full = {"per_edit": "snapshot", "steps": RUN9_STEPS, "total": RUN9_TOTAL}
 
     # a suffixed artifact: doc/00-original.md and doc/tNN.md
@@ -1075,12 +1139,12 @@ def test_run9_flags_pinned(tmp_path):
 
 
 def test_deterministic_scores_pinned(tmp_path):
-    """T4: efficiency/concision/verdict_consistency are 3/1/1 (run-9) and 4/1/5 (run-2)."""
+    """T4: efficiency/concision/verdict_consistency are 3/1/1 (run-9) and 3/1/5 (run-2)."""
     got = {}
     for sub, name in (("nine", "run-9"), ("two", "run-2")):
         home, run_id = _home(tmp_path, sub, name)
         got[name] = E.measure_target(str(home), run_id)["deterministic"]
-    for name, want in (("run-9", (3, 1, 1)), ("run-2", (4, 1, 5))):
+    for name, want in (("run-9", (3, 1, 1)), ("run-2", (3, 1, 5))):
         det = got[name]
         assert list(det) == list(E.DETERMINISTIC_DIMS)
         assert tuple(det[k]["score"] for k in E.DETERMINISTIC_DIMS) == want, name
@@ -1102,7 +1166,9 @@ def test_deterministic_scores_pinned(tmp_path):
     assert [(e["where"], e["turn"], e["line"]) for e in nine["verdict_consistency"]["evidence"]] == [
         ("metric", None, None), ("turn", 6, 130), ("turn", 9, 244), ("turn", 15, 424),
         ("turn", 18, 519), ("decision", None, 820)]
-    assert two["efficiency"]["rationale"] == "start 5; summed_attempt_s 3279.4 > 3000: -1"
+    # run-2 has no cost-state line, so its cost is unknown: a failed check, not a pass
+    assert two["efficiency"]["rationale"] == (
+        "start 5; cost_usd unknown: -1; summed_attempt_s 3279.4 > 3000: -1")
     assert two["efficiency"]["evidence"][0]["quote"] == "cost_usd=null"
     assert two["concision"]["rationale"] == (
         "start 1 (median_reviewer_owner 1393.5 > 800); "
@@ -1145,6 +1211,7 @@ def _patch_reductions(home, run_id, patch):
 def test_voice_metrics_from_reduction(tmp_path):
     """T16: a voice dict is used verbatim, voice: null is unmeasured, action_chars rules clipping."""
     home, run_id = build_home(tmp_path, "run-9")
+    baseline = E.compute_metrics(E.load_target(str(home), run_id))
     loud = {"words": 7, "pointers": 3, "examples": 2, "longest_paragraph_words": 500,
             "filler_hits": 9, "action_chars": 230}
     quiet = {"words": 1, "pointers": 0, "examples": 0, "longest_paragraph_words": 1,
@@ -1160,7 +1227,8 @@ def test_voice_metrics_from_reduction(tmp_path):
             return None
         return {2: {**doc, "voice": loud, "action": short},  # delegated t03
                 4: {**doc, "voice": None},                   # manager: unmeasured
-                5: {**doc, "voice": quiet}}.get(doc["turn"])  # delegated t06, 200-char action
+                5: {**doc, "voice": quiet},                  # delegated t06, 200-char action
+                7: {**doc, "delivered": False}}.get(doc["turn"])  # tpm, its body kept
 
     _patch_reductions(home, run_id, patch)
     measured = E.measure_target(str(home), run_id)
@@ -1168,8 +1236,18 @@ def test_voice_metrics_from_reduction(tmp_path):
     rows = [loud if n == 2 else quiet if n == 5 else voice.measure(E.body(target, n))
             for n, doc in target.turns.items()
             if doc["role"] != "junior_ic" and doc.get("delivered") and n != 4]
-    assert len(rows) == 15 and metrics["voice"]["n"] == 15  # 16 at baseline, minus t04
+    assert len(rows) == 14 and metrics["voice"]["n"] == 14  # 16 at baseline, minus t04 and t07
     assert metrics["voice"] == E.voice_shares(rows)
+    # the median reads the same population: delivered, not the junior IC's, voice not null
+    population = [n for n, doc in target.turns.items()
+                  if doc["role"] != "junior_ic" and doc.get("delivered") and n != 4]
+    assert len(population) == 14
+    assert metrics["words"]["median_reviewer_owner"] == float(
+        statistics.median(E.words(E.body(target, n)) for n in population))
+    # only delivered prose is in the total, so the undelivered t07's body drops out
+    assert E.words(E.body(target, 7)) > 0
+    assert metrics["words"]["prose_total"] == (
+        baseline["words"]["prose_total"] - E.words(E.body(target, 7)))
 
     clipped = [(f["turn"], f["quote"]) for f in measured["flags"] if f["id"] == "action_clipped"]
     # t03 fires on voice.action_chars 230 > 200 with a 199-char action; t06 does not,
@@ -1228,7 +1306,10 @@ def test_deterministic_rules():
     # efficiency: each penalty alone, then all four together
     assert score("efficiency", cost_usd=20) == 5
     assert _det(cost_usd=20.0001)["efficiency"]["rationale"] == "start 5; cost_usd 20.0001 > 20: -1"
-    assert score("efficiency", cost_usd=None) == 5
+    # an unknown cost or time is a failed check, never a pass
+    assert _det(cost_usd=None)["efficiency"]["rationale"] == "start 5; cost_usd unknown: -1"
+    assert _det(time__summed_attempt_s=None)["efficiency"]["rationale"] == (
+        "start 5; summed_attempt_s unknown: -1")
     assert score("efficiency", time__summed_attempt_s=3000) == 5
     assert _det(time__summed_attempt_s=3000.1)["efficiency"]["rationale"] == (
         "start 5; summed_attempt_s 3000.1 > 3000: -1")
@@ -1244,6 +1325,9 @@ def test_deterministic_rules():
     assert (worst["score"], worst["rationale"]) == (1, (
         "start 5; cost_usd 21 > 20: -1; summed_attempt_s 3001 > 3000: -1; "
         "turns 30 >= cap 30: -1; dropped delegation or floor request: -1"))
+    blind = _det(cost_usd=None, time__summed_attempt_s=None, turns=30)["efficiency"]
+    assert (blind["score"], blind["rationale"]) == (2, (
+        "start 5; cost_usd unknown: -1; summed_attempt_s unknown: -1; turns 30 >= cap 30: -1"))
 
     # concision: each share threshold alone; a null share never subtracts
     for key, fine, bad, step in (
