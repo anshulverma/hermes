@@ -48,7 +48,7 @@ from playbooks.committee.voice import RULES, measure, summary
 DIMENSIONS: dict[str, str] = {
     "verdict_grounded": "verdict_grounded@1",
     "edits_address_concerns": "edits_address_concerns@2",  # @2: anchors 3 and 1 no longer overlap
-    "concern_coverage": "concern_coverage@2",  # @2: seats.considered, and a represented stakeholder is not missing
+    "concern_coverage": "concern_coverage@3",  # @3: represented only if the representative's turns raise it
     "efficiency": "efficiency@1",
     "concision": "concision@2",  # @2: voice words skip fences and image lines; filler_hits sums every tell
     "verdict_consistency": "verdict_consistency@2",  # @2: only the chair's own claims count
@@ -93,10 +93,10 @@ RUBRIC = "\n".join((
     "1: major concerns went unanswered, or a missing function is named repeatedly.",
     "Concerns come from each member's own turns, never from persona config. The judge "
     "also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`. "
-    "A stakeholder in seats.considered with a non-null represented_by counts as "
-    "represented, not missing; a stakeholder in seats.considered with no "
-    "represented_by, or one the thread names who is in neither seats.roster nor "
-    "seats.considered, counts as missing.",
+    "A stakeholder in seats.considered counts as represented only when the turns of "
+    "its represented_by member raise that stakeholder's concern; otherwise it counts "
+    "as missing, as does one with no represented_by, or one the thread names who is "
+    "in neither seats.roster nor seats.considered.",
     "",
     f"Evidence: {VERBATIM}.",
 ))

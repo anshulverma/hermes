@@ -135,7 +135,7 @@ def test_voice_measure_and_version():
     assert E.DIMENSIONS == {
         "verdict_grounded": "verdict_grounded@1",
         "edits_address_concerns": "edits_address_concerns@2",
-        "concern_coverage": "concern_coverage@2",
+        "concern_coverage": "concern_coverage@3",
         "efficiency": "efficiency@1",
         "concision": "concision@2",
         "verdict_consistency": "verdict_consistency@2",
@@ -148,7 +148,7 @@ def test_voice_measure_and_version():
     assert "3: some edits resolve their concern, others only partly." in E.RUBRIC
     assert "1: cosmetic or unrelated edits, or edits that leave the concern unresolved." in E.RUBRIC
     assert "partial." not in E.RUBRIC
-    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "36bad27d", (
+    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "f4a1cd8f", (
         "RUBRIC text changed: bump the affected judge dimension's version in DIMENSIONS, "
         "re-pin this hash, and update the verbatim block and hash in docs/specs/committee-eval.md"
     )
@@ -3622,10 +3622,10 @@ SEL_RUN = "run-sel"
 
 # The sentence selection adds to RUBRIC's concern_coverage anchor (selection D8).
 REPRESENTED_RULE = (
-    "A stakeholder in seats.considered with a non-null represented_by counts as "
-    "represented, not missing; a stakeholder in seats.considered with no "
-    "represented_by, or one the thread names who is in neither seats.roster nor "
-    "seats.considered, counts as missing."
+    "A stakeholder in seats.considered counts as represented only when the turns of "
+    "its represented_by member raise that stakeholder's concern; otherwise it counts "
+    "as missing, as does one with no represented_by, or one the thread names who is "
+    "in neither seats.roster nor seats.considered."
 )
 
 # The one line inside a turn entry that says it: the scanner's positive control.
@@ -3906,9 +3906,10 @@ def test_a_turn_heading_never_counts_as_outside_room():
         {"line": 9, "quote": "On-call is not in this room either."}]
 
 
-def test_concern_coverage_is_at_version_two_with_the_represented_rule(tmp_path, monkeypatch):
-    assert "concern_coverage@2" in repr(E.DIMENSIONS)
-    assert "concern_coverage@1" not in repr(E.DIMENSIONS)
+def test_concern_coverage_is_at_version_three_with_the_represented_rule(tmp_path, monkeypatch):
+    # @3 (committee-selection FIX_WB): a representative counts only if its turns raise it
+    assert "concern_coverage@3" in repr(E.DIMENSIONS)
+    assert "concern_coverage@2" not in repr(E.DIMENSIONS)
     assert REPRESENTED_RULE in " ".join(E.RUBRIC.split())
 
     home = _sel_home(tmp_path / "chosen", _sel_artifact(tmp_path), selected=True)

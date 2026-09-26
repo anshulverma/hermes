@@ -126,25 +126,45 @@ def test_committee_spec_documents_voice_and_retakes():
 
 def test_committee_spec_documents_selection():
     """docs/specs/committee-playbook.md states how a run seats its committee and the contract later loops use."""
-    from playbooks.committee import selection
+    import re
 
-    spec_path = Path(__file__).parent.parent.parent / "docs" / "specs" / "committee-playbook.md"
-    content = spec_path.read_text()
+    from playbooks.committee import cast, selection, thread
+    from playbooks.committee import eval as committee_eval
+
+    root = Path(__file__).parent.parent.parent
+    content = (root / "docs" / "specs" / "committee-playbook.md").read_text()
+    # every number the spec gives a module constant is the module's, wherever it is repeated
+    assert set(re.findall(r"`selection\.FIELD_MAX` = (\d+)", content)) == {str(selection.FIELD_MAX)}
+    assert len(re.findall(r"`selection\.FIELD_MAX` = \d+", content)) >= 2
+    # the SPA's empty-state gate, read from the view itself rather than restated
+    view = (root / "playbooks" / "committee" / "view" / "src" / "CommitteeView.tsx").read_text()
+    [gate] = re.findall(r"if \((data\.timeline\.length === 0 && \(data\.selection[^{]*?)\) \{", view)
 
     for needle in (
         "## Selection", "s1-owner", "s2-manager-take2", "s3-senior_director",
         "cast.LIBRARY", "partner_owner", "cast.DERIVED_STYLE",
         f"`selection.FIELD_MAX` = {selection.FIELD_MAX}",
-        "```hermes-selection", "chair_failed", "over the 12-seat bound", "invalid: name taken",
+        f"`selection.NAME_MAX` = {selection.NAME_MAX}",
+        f"`selection.TITLE_MAX` = {selection.TITLE_MAX}",
+        f"`selection.RATIONALE_MAX` = {selection.RATIONALE_MAX}",
+        f"`selection.CONSIDERED_MAX` ({selection.CONSIDERED_MAX})",
+        f"`selection.INVALID_MAX` ({selection.INVALID_MAX})",
+        f"`thread.LIST_MAX` ({thread.LIST_MAX})",
+        f"`cast.SPEAKS_FOR_MAX` ({cast.SPEAKS_FOR_MAX})",
+        f"over the {selection.MAX_REVIEWERS}-seat bound", gate,
+        "```hermes-selection", "chair_failed", "invalid: name taken",
         "_apply_selection(s, resolved)", "2 × reviewers + 16",
         "- Reviewer seats: chosen below", "Seat library:",
         "## selection N: Name, Title (role) proposes|amends|ratifies",
         "_(no usable seat list:", "## committee seated",
-        "Put forward by <Name | fixed seat | default>.", "Everyone considered was seated.",
+        "Put forward by <Name>. | A fixed seat. | In the default committee.",
+        "Everyone considered was seated.", "Not represented.", "Represented by <Name> (<slug>).",
         "{seated, reviewers, considered, considered_dropped, invalid_dropped, fallback}",
-        "concern_coverage@2", "SELECTION_PHASES", "<slug> · derived seat",
+        "not_seated_dropped, invalid_count", "{state, current, stages, fallback, considered",
+        "_(the seat list was the whole answer)_", "The chair's retake.", "You also speak for:",
+        "Why you hold this seat", 's["considered"]', "selection.fallback_words(code)",
+        cast.DERIVED_STYLE, committee_eval.DIMENSIONS["concern_coverage"], "SELECTION_PHASES", "<slug> · derived seat",
         "lower `selection.FIELD_MAX`, never raise `GOAL_MAX`",
-        "data.timeline.length === 0 && (data.selection == null || variant === 'metrics')",
         's["roster"]', 's["reviewers"]', 's["cap_explicit"]', 's["current_kind"]',
         's["base"]', 's["selection_next"]',
         '`None`, `"select"`, `"turn"` or `"decision"`', 'Junior turns are `"turn"`',

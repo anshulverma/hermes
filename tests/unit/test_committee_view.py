@@ -1495,9 +1495,10 @@ def test_a_seated_run_before_t01_carries_the_roster_and_the_selection_block():
 
     block = data["selection"]
     assert set(block) == {
-        "state", "stages", "fallback", "considered", "considered_dropped", "invalid_dropped",
+        "state", "current", "stages", "fallback", "considered", "considered_dropped",
+        "invalid_dropped",
     }
-    assert (block["state"], block["fallback"]) == ("seated", None)
+    assert (block["state"], block["fallback"], block["current"]) == ("seated", None, None)
     assert (block["considered_dropped"], block["invalid_dropped"]) == (3, 2)
     assert [(s["stage"], s["role"], s["name"]) for s in block["stages"]] == [
         (1, "owner", "Maya Okonkwo"), (2, "manager", "Ruth Delgado"),
@@ -1525,7 +1526,7 @@ def test_a_fallback_selection_is_reported():
     assert "no_turn" in block["stages"][2]["badges"]
     rows = {row["role"]: row for row in data["roster"]}
     assert list(rows) == list(cast.CAST)  # today's nine, in today's order
-    assert rows["tpm"]["rationale"] == "default committee (selection fell back: chair_failed)"
+    assert rows["tpm"]["rationale"] == "in the default committee (the chair gave no usable list)"
     assert (rows["tpm"]["nominated_by"], rows["tpm"]["nominated_by_name"],
             rows["tpm"]["source"]) == ("default", None, "library")
 
@@ -1556,14 +1557,23 @@ def test_a_stage_carries_voice_fields_badges_and_segments():
 
     assert set(stage) == {
         "stage", "role", "name", "delivered", "body", "proposed", "proposed_dropped",
+        "not_seated", "not_seated_dropped", "invalid_count",
         "code", "segments", "badges", "take", "takes", "violations", "flags",
     }
+    # a reduction from before the notes were carried reads as none (payload contract 2)
+    assert (stage["not_seated"], stage["not_seated_dropped"], stage["invalid_count"]) == (
+        [], 0, 0)
     assert (stage["take"], stage["takes"]) == (3, 3)
     assert (stage["violations"], stage["flags"]) == (["over_cap"], soft)
     # decision 11: a selector is asked for no pointer or example, so voice's
     # soft flags ride on `flags` and are never badged; the hard rules still are.
     assert stage["badges"] == ["voice_flag", "retaken"]
     assert stage["body"] == body
+    # for a selector the list is the answer, so no stage says "signals only" (I2),
+    # not even one reduced before the seat-list stub existed
+    from playbooks.committee.playbook import _SIGNALS_ONLY
+    listed = view_data(_run("s2-manager"), [_sel(1, body=_SIGNALS_ONLY)])["selection"]
+    assert "signals_only" not in listed["stages"][0]["badges"]
     mermaid = [seg for seg in stage["segments"] if seg["kind"] == "mermaid"]
     assert [seg["source"] for seg in mermaid] == ["graph TD; A-->B"]
 
@@ -1611,6 +1621,84 @@ def test_a_stage_carries_why_its_list_could_seat_nobody():
 
     assert [s["code"] for s in stages] == ["too_few", None, None]
     assert legacy["code"] is None
+
+
+def test_the_selector_at_work_is_named_while_a_stage_runs():
+    """Payload contract 1: `current` names who is seating the committee, from a
+    static map over SELECTION_PHASES (compared, never parsed), and is null
+    unless the run is selecting."""
+    verbs = {"owner": "proposing", "manager": "amending", "senior_director": "ratifying"}
+    for phase in SELECTION_PHASES:
+        role = phase.split("-take")[0].split("-", 1)[1]
+        current = view_data(_run(phase), [])["selection"]["current"]
+        assert current == {"role": role, "name": cast.CAST[role]["name"],
+                           "verb": verbs[role]}, phase
+    assert len(SELECTION_PHASES) == 3 * voice.MAX_TAKES
+
+    lost = Reduction(kind="lost", json={"error": "the meeting was lost"})
+    assert view_data(_run("s2-manager"), [_sel(1), lost])["selection"]["current"] is None
+    seated = [_sel(1), _sel(2), _ratified(_seat("security", "owner"))]
+    assert view_data(_run("t01-senior_director"), seated)["selection"]["current"] is None
+    # a phase that only looks like a stage is not one
+    assert view_data(_run("s4-owner"), [_sel(1)])["selection"]["current"] is None
+
+
+def test_a_stage_says_who_it_left_out_and_who_speaks_for_them():
+    """Payload contract 2: a stage's not_seated notes, the first thread.LIST_MAX,
+    each represented only as its thread entry says (a seat on that stage's
+    list or a fixed seat, never the owner), with its two counts."""
+    sec = cast.LIBRARY["security"]
+    proposed = [{"role": "security", "name": sec["name"], "title": sec["title"],
+                 "rationale": "owns the zones"}]
+    notes = [
+        {"stakeholder": "Legal", "reason": "no contract changes", "represented_by": "security"},
+        {"stakeholder": "Finance", "reason": "already budgeted", "represented_by": "manager"},
+        {"stakeholder": "Support", "reason": "later", "represented_by": "sre"},  # not listed
+        {"stakeholder": "Board", "reason": "not asked", "represented_by": "owner"},
+        {"stakeholder": "Growth", "reason": "no users move", "represented_by": None},
+    ] + [{"stakeholder": f"Team {k}", "reason": "no change", "represented_by": None}
+         for k in range(thread.LIST_MAX)]
+    stage = view_data(_run("s2-manager"), [_sel(
+        1, proposed=proposed, not_seated=notes, not_seated_dropped=4, invalid_count=2,
+    )])["selection"]["stages"][0]
+
+    assert len(stage["not_seated"]) == thread.LIST_MAX
+    assert stage["not_seated"][:5] == [
+        {"stakeholder": "Legal", "reason": "no contract changes",
+         "represented_by": "security", "represented_by_name": sec["name"]},
+        {"stakeholder": "Finance", "reason": "already budgeted",
+         "represented_by": "manager", "represented_by_name": cast.CAST["manager"]["name"]},
+        {"stakeholder": "Support", "reason": "later",
+         "represented_by": None, "represented_by_name": None},
+        {"stakeholder": "Board", "reason": "not asked",
+         "represented_by": None, "represented_by_name": None},
+        {"stakeholder": "Growth", "reason": "no users move",
+         "represented_by": None, "represented_by_name": None},
+    ]
+    assert (stage["not_seated_dropped"], stage["invalid_count"]) == (4, 2)
+    junk = view_data(_run("s2-manager"), [_sel(1, not_seated="x", invalid_count=-3)])
+    assert (junk["selection"]["stages"][0]["not_seated"],
+            junk["selection"]["stages"][0]["invalid_count"]) == ([], 0)
+
+
+def test_the_latest_selection_marked_final_true_seats_the_view():
+    """Two final reductions: the later one's committee is the view's. A `final`
+    that is not exactly true (a hand-edited "true" or 1) never counts (V04, V05)."""
+    first = _ratified(_seat("security", "owner"))
+    later = _ratified(_seat("sre", "manager"))
+    fake = Reduction(kind="selection", json={
+        **later.json, "seated": _seated(_seat("privacy", "owner")),
+        "reviewers": ["senior_director", "manager", "privacy"], "final": "true"})
+    ones = Reduction(kind="selection", json={**fake.json, "final": 1})
+
+    def reviewers(reductions):
+        return [row["role"] for row in view_data(_run("t01-senior_director"), reductions)[
+            "roster"]][3:-1]
+
+    assert reviewers([_sel(1), first, _sel(2), later, fake, ones]) == ["sre"]
+    assert reviewers([_sel(1), first, fake, ones]) == ["security"]
+    assert view_data(_run("s3-senior_director"), [_sel(1), fake, ones])["selection"][
+        "state"] == "selecting"
 
 
 def test_a_legacy_run_lost_mid_meeting_has_no_selection(run2):

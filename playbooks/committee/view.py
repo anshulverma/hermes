@@ -397,16 +397,21 @@ def _verdict(decision: dict | None) -> dict | None:
 
 # The three selectors, whose nominations the roster names by person, in stage order.
 _SELECTORS = (cast.OWNER, "manager", cast.CHAIR_ROLE)
-# The selection phases, beside playbook's DECISION_PHASES: stage k is
-# `s{k}-{selector}` (playbook `_select`) and take k of it `{base}-take{k}`.
-SELECTION_PHASES: tuple[str, ...] = tuple(
-    f"s{stage}-{role}{take}"
-    for stage, role in enumerate(_SELECTORS, 1)
+_VERBS = ("proposing", "amending", "ratifying")
+# Every selection phase -> (its selector, what she is doing), beside playbook's
+# DECISION_PHASES: stage k is `s{k}-{selector}` (playbook `_select`) and take k
+# of it `{base}-take{k}`. A phase is looked up here, never parsed.
+_AT_WORK: dict[str, tuple[str, str]] = {
+    f"s{stage}-{role}{take}": (role, verb)
+    for stage, (role, verb) in enumerate(zip(_SELECTORS, _VERBS), 1)
     for take in ("", *(f"-take{k}" for k in range(2, voice.MAX_TAKES + 1)))
-)
-# voice's soft flags. A selector is asked for no pointer or example, so on a
-# stage they ride on `flags` and are never badged (orchestrator decision 11).
+}
+SELECTION_PHASES: tuple[str, ...] = tuple(_AT_WORK)
+# Badges a stage never shows. voice's soft flags: a selector is asked for no
+# pointer or example, so they ride on `flags` (orchestrator decision 11). And
+# signals_only: for a selector the list is the answer (I2).
 _SOFT_BADGES = ("no_pointer", "no_example", "tells")
+_STAGE_HIDDEN = (*_SOFT_BADGES, "signals_only")
 
 
 def _final(reductions: list[Reduction]) -> dict | None:
@@ -472,8 +477,12 @@ def _selection(
     if state is None:
         return None
     final = _final(reductions) or {}
+    at_work = _AT_WORK.get(run.phase) if state == "selecting" else None
+    who = seats.get(at_work[0]) if at_work else None
     return {
         "state": state,
+        # who is seating the committee right now, while a stage is in progress
+        "current": {"role": at_work[0], "name": who["name"], "verb": at_work[1]} if who else None,
         # Only a kept take is a `selection` reduction (a discarded one is a
         # voice `take`), so this is one entry per kept stage, in stage order.
         "stages": [_stage(r.json, seats) for r in reductions
@@ -490,6 +499,11 @@ def _stage(doc: dict, seats: dict[str, dict]) -> dict:
     """One kept stage, with voice's fields as a timeline entry has them."""
     who = seats.get(_role(doc))
     body = doc.get("body")
+    proposed = [
+        {**{key: _str(p.get(key)) or "" for key in ("role", "name", "title", "rationale")},
+         "source": "library" if _role(p) in cast.LIBRARY else "derived"}
+        for p in _as_list(doc.get("proposed")) if isinstance(p, dict)
+    ]
     return {
         "stage": _int(doc.get("stage")),
         "role": _role(doc),
@@ -498,20 +512,36 @@ def _stage(doc: dict, seats: dict[str, dict]) -> dict:
         "body": body if isinstance(body, str) else "",
         # validate skips reserved slugs and calls every other valid slug outside
         # the library derived, so a seat the chair dropped is still marked.
-        "proposed": [
-            {**{key: _str(p.get(key)) or "" for key in ("role", "name", "title", "rationale")},
-             "source": "library" if _role(p) in cast.LIBRARY else "derived"}
-            for p in _as_list(doc.get("proposed")) if isinstance(p, dict)
-        ],
+        "proposed": proposed,
         "proposed_dropped": _count(doc.get("proposed_dropped")),
+        # who this stage left out and why; absent on a reduction from before them
+        "not_seated": [_left_out(n, proposed) for n in
+                       _as_list(doc.get("not_seated"))[:thread.LIST_MAX] if isinstance(n, dict)],
+        "not_seated_dropped": _count(doc.get("not_seated_dropped")),
+        "invalid_count": _count(doc.get("invalid_count")),
         # selection.stage_code's reason this stage's list could seat nobody, or None.
         "code": _str(doc.get("code")) or None,
         "segments": _segments(doc),
-        "badges": [b for b in _badges(doc, attributed=True) if b not in _SOFT_BADGES],
+        "badges": [b for b in _badges(doc, attributed=True) if b not in _STAGE_HIDDEN],
         "take": _int(doc.get("take")),
         "takes": _int(doc.get("takes")),
         "violations": _strings(doc.get("violations")),
         "flags": _strings(doc.get("flags")),
+    }
+
+
+def _left_out(entry: dict, proposed: list[dict]) -> dict:
+    """One of a stage's not_seated notes, represented as its thread entry shows it:
+    only by a seat on that stage's list or a fixed seat other than the owner."""
+    rep = _str(entry.get("represented_by"))
+    fixed = selection.fixed_seats()
+    who = next((p for p in proposed if p["role"] == rep), None) or fixed.get(rep)
+    who = who if rep != cast.OWNER else None
+    return {
+        "stakeholder": _str(entry.get("stakeholder")) or "",
+        "reason": _str(entry.get("reason")) or "",
+        "represented_by": rep if who else None,
+        "represented_by_name": who["name"] if who else None,
     }
 
 

@@ -66,7 +66,7 @@ RESERVED = frozenset(
 # receives, and a goal has a hard GOAL_MAX budget.
 NAME_MAX = 60
 TITLE_MAX = 80
-FIELD_MAX = 120
+FIELD_MAX = 94
 RATIONALE_MAX = 200
 STAKEHOLDER_MAX = 80
 REASON_MAX = 200
@@ -98,6 +98,19 @@ def _name_key(name: str) -> str:
     """A name reduced to its casefolded letters and digits: "Maya Okonkwo." and
     "maya-okonkwo" are the same person to a reader, "Maya Okonkwo-Reyes" is not."""
     return "".join(ch for ch in name.casefold() if ch.isalnum())
+
+
+def _keys(text: str) -> set[str]:
+    """``_name_key(text)`` and its words in any order, for matching a stakeholder
+    to a seat: "Staff Engineer" is staff_ic's title, and "Partner team
+    engineering lead" is partner_owner's "Engineering Lead, partner team"."""
+    words = "".join(ch if ch.isalnum() else " " for ch in text.casefold()).split()
+    return {_name_key(text), " ".join(sorted(words))} - {""}
+
+
+def _seat_keys(seat: dict) -> set[str]:
+    """Every key a stakeholder note may name ``seat`` by: its slug, title or name."""
+    return set().union(*(_keys(str(seat.get(k) or "")) for k in ("role", "title", "name")))
 
 
 # Every cast and library persona's name as a `_name_key`: a derived seat by one of
@@ -170,7 +183,9 @@ def not_seated(doc: dict | None) -> list[dict]:
 
     An entry without both a stakeholder and a reason (non-blank strings) is
     dropped. ``represented_by`` is kept as the worker wrote it (stripped);
-    whether it names a seated member is ``resolve``'s question.
+    whether it names a seated member is ``resolve``'s question. It is
+    lowercased, and "owner" is no representative: the proposal's owner is not
+    the voice of someone reviewing her proposal.
     """
     out = []
     for entry in _entries(doc, "not_seated"):
@@ -179,10 +194,11 @@ def not_seated(doc: dict | None) -> list[dict]:
         if not (stakeholder and reason):
             continue
         rep = entry.get("represented_by")
+        rep = rep.strip().lower() if isinstance(rep, str) else ""
         out.append({
             "stakeholder": stakeholder,
             "reason": reason,
-            "represented_by": rep.strip() if isinstance(rep, str) else None,
+            "represented_by": rep if rep and rep != cast.OWNER else None,
         })
     return out
 
@@ -194,8 +210,10 @@ def validate(doc: dict | None, library: dict) -> tuple[list[dict], list[dict]]:
     are always seated. A repeated slug is ignored: the first entry carrying it
     decides it, even an invalid one. A library slug takes ``{**library[slug]}``
     and the worker's fields are ignored. Any other slug is derived and needs a
-    title and a name no cast or library persona has (any case), and every seat
-    needs a rationale. Each seat is a new dict;
+    title and a name no cast or library persona has (any case); a name with no
+    letter or digit is blank, a nameless seat is named from its title, and a
+    blank stake is the rationale. Every seat needs a rationale.
+    Each seat is a new dict;
     ``nominated_by`` is added later by ``resolve``. Never raises.
     """
     seats: list[dict] = []
@@ -211,24 +229,24 @@ def validate(doc: dict | None, library: dict) -> tuple[list[dict], list[dict]]:
         if role in RESERVED or role in seen:
             continue
         seen.add(role)
+        rationale = _clip(entry.get("rationale"), RATIONALE_MAX)
         if role in library:
             persona, source = library[role], "library"
         elif title := _clip(entry.get("title"), TITLE_MAX):
-            name = _clip(entry.get("name"), NAME_MAX) or _clip(entry["title"], NAME_MAX)
+            name = _clip(entry.get("name"), NAME_MAX)
+            # combining marks alone render as nothing: blank, so named from the title
+            name = name if _name_key(name) else cast.clip(title, NAME_MAX)
             if _name_key(name) in _TAKEN:
                 invalid.append(_invalid(role, role, "name taken"))
                 continue
-            persona = {
-                "name": name,
-                "title": title,
-                **{k: _clip(entry.get(k), FIELD_MAX) for k in _FIELDS},
-                "style": cast.DERIVED_STYLE,
-            }
+            fields = {k: _clip(entry.get(k), FIELD_MAX) for k in _FIELDS}
+            # never an empty persona: an unsaid stake is why the seat was put forward
+            fields["stake"] = fields["stake"] or cast.clip(rationale, FIELD_MAX)
+            persona = {"name": name, "title": title, **fields, "style": cast.DERIVED_STYLE}
             source = "derived"
         else:
             invalid.append(_invalid(role, role, "no title"))
             continue
-        rationale = _clip(entry.get("rationale"), RATIONALE_MAX)
         if not rationale:
             invalid.append(_invalid(role, role, "no rationale"))
             continue
@@ -250,15 +268,18 @@ def _clip(value: object, limit: int) -> str:
     """Worker text as one clean line of at most ``limit`` characters.
 
     A non-string is "" (unsaid, never its repr). Every character that is not
-    printable (a control, NUL, a lone surrogate, a bidi override) or renders
-    as nothing (``_INVISIBLE``) becomes a space, so the text is safe in a
-    goal's argv, a UTF-8 file and the view, and invisible text is blank;
+    printable (a control, NUL, a lone surrogate, a bidi override), renders as
+    nothing (``_INVISIBLE``) or lies above U+FFFF (two UTF-16 units each, and
+    a goal's budget holds in those too) becomes a space, so the text is safe
+    in a goal's argv, a UTF-8 file and the view, and invisible text is blank;
     en/em dashes become "-"; then ``cast.clip`` collapses whitespace and cuts.
     "" means blank.
     """
     if not isinstance(value, str):
         return ""
-    clean = "".join(c if c.isprintable() and c not in _INVISIBLE else " " for c in value)
+    clean = "".join(
+        c if c.isprintable() and c not in _INVISIBLE and c <= "\uffff" else " " for c in value
+    )
     return cast.clip(clean.translate(_DASHES), limit)
 
 
@@ -275,6 +296,22 @@ def _invalid(raw: object, role: str | None, why: str) -> dict:
 
 # The seats no selection can empty (Q5), in roster order.
 _FIXED = ("owner", "senior_director", "manager", "junior_ic")
+
+# A stage or fallback code as the thread, a retake note and a seat's reason say it.
+_WORDS = {
+    "chair_failed": "the chair gave no usable list",
+    "no_answer": "no answer was delivered",
+    "no_block": "no hermes-selection block",
+    "unparseable": "a hermes-selection block that did not parse",
+    "too_few": "no valid seats",
+    "lost": "the selection was lost with the process that held it",
+}
+
+
+def fallback_words(code: object) -> str:
+    """``code`` in words (D8); a code this module does not know is itself, cleaned."""
+    said = _WORDS.get(code) if isinstance(code, str) else None
+    return said or _clip(code, STAKEHOLDER_MAX) or "no reason given"
 
 
 def fixed_seats() -> dict[str, dict]:
@@ -373,7 +410,7 @@ def fallback(code: str) -> dict:
     data, so it cannot fail the way the list did.
     """
     fixed = fixed_seats()
-    why = f"default committee (selection fell back: {code})"
+    why = f"in the default committee ({fallback_words(code)})"
     reviewers = [
         fixed.get(role) or {
             **cast.CAST[role],
@@ -414,11 +451,14 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
     """Everyone named and not seated, one entry per key (D2 rules 4 and 6).
 
     A seat's key is its slug (a bad slug's, its raw role lowercased) and a
-    note's is its stakeholder lowercased. Stages are read in order, so the
-    latest stage wins a key. A stage 1-2 seat that did not make the roster is
+    note's is its stakeholder lowercased, or the slug of the listed seat it
+    names by slug, title or persona name, words in any order (``_keys``), so
+    a seat and a note about it are one entry. Stages are read in order, so the
+    latest stage wins a key. A note naming a seated seat is dropped: that
+    stakeholder is seated. A stage 1-2 seat that did not make the roster is
     dropped by the first later usable list that leaves it out, whose note on
-    the same key gives the reason. No entry whose key is a seated slug
-    survives, and a representative must be seated, except that an overflow
+    it gives the reason. No entry whose key is a seated slug survives, and a
+    representative must be seated (never the owner), except that an overflow
     seat always names one.
 
     Returns ``{considered, considered_dropped, invalid_dropped}``: the first
@@ -426,18 +466,34 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
     many invalid entries ``_read`` cut, summed over the stages read.
     """
     seated = {seat["role"] for seat in resolved["seated"]}
+    taken = set().union(*map(_seat_keys, resolved["seated"]))
+    # every key of every listed seat that is not seated -> its slug, the first
+    # listing winning: one pass, so a note is matched in constant time
+    listed: dict[str, dict] = {}
+    for st in read:
+        for seat in st["seats"]:
+            if seat["role"] not in seated:
+                listed.setdefault(seat["role"], seat)
+    names = {key: slug for slug, seat in reversed(listed.items()) for key in _seat_keys(seat)}
     found: dict[str, dict] = {}
+    notes_by_stage = []
     for i, st in enumerate(read):
         for entry in st["invalid"]:
             found[entry["role"] or entry["stakeholder"].lower()] = dict(entry)
-        notes = {}
+        notes = {}  # key -> note: a named seat's slug, else the stakeholder lowercased
         for note in st["notes"]:
-            key = note["stakeholder"].strip().lower()
+            keys = _keys(note["stakeholder"])
+            if keys & taken:
+                continue
+            slug = next((names[key] for key in sorted(keys) if key in names), None)
+            key = slug or note["stakeholder"].strip().lower()
             notes[key] = note
+            seat = listed.get(slug) if slug else None
             found[key] = _entry(
-                note["stakeholder"], None, note["reason"],
+                seat["title"] if seat else note["stakeholder"], slug, note["reason"],
                 _rep(note["represented_by"], seated),
             )
+        notes_by_stage.append(notes)
         for k, earlier in enumerate(read[:i]):
             for seat in earlier["seats"]:
                 slug = seat["role"]
@@ -456,13 +512,10 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
                 if slug not in seated and _dropper(read, k, slug) is None:
                     found[slug] = _entry(
                         seat["title"], slug,
-                        f"not in the default committee (fallback: {resolved['fallback']})",
+                        f"not in the default committee ({fallback_words(resolved['fallback'])})",
                         None,
                     )
-    chair_notes = {
-        note["stakeholder"].strip().lower(): note
-        for st in read if st["stage"] == 3 for note in st["notes"]
-    }
+    chair_notes = next((n for st, n in zip(read, notes_by_stage) if st["stage"] == 3), {})
     for seat in overflow:
         note = chair_notes.get(seat["role"]) or {}
         found[seat["role"]] = _entry(
@@ -486,7 +539,8 @@ def _dropper(read: list[dict], k: int, slug: str) -> dict | None:
 
 
 def _rep(slug: str | None, seated: set[str]) -> str | None:
-    return slug if slug in seated else None
+    """``slug`` when it is a seated seat other than the owner (D1), else None."""
+    return slug if slug in seated and slug != cast.OWNER else None
 
 
 def _entry(stakeholder: str, role: str | None, reason: str, rep: str | None) -> dict:

@@ -1588,7 +1588,8 @@ def test_a_failed_chair_selection_runs_the_default_committee(
     entries = dict(_entries(run_id))
     ratified = f"## selection 3: {chair['name']}, {chair['title']} (senior_director) ratifies"
     assert entries[ratified] == thread.NO_TURN
-    assert "Fallback: chair_failed" in entries["## committee seated"].splitlines()
+    assert ("Fallback: the default committee (the chair gave no usable list)."
+            in entries["## committee seated"].splitlines())
     assert [h for h, _ in _turns(run_id)] == [
         _heading(i + 1, p.split("-", 1)[1]) for i, p in enumerate(OPENING_ROUND)
     ]

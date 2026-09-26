@@ -48,6 +48,11 @@ DEFAULT_CHARGE = "Decide whether to approve this proposal."
 
 # A turn that was delivered but carried only its hermes-turn block.
 _SIGNALS_ONLY = "_(the speaker sent signals only, no prose)_"
+# A selector's answer that was its hermes-selection block and nothing else (I2).
+_SEAT_LIST_ONLY = "_(the seat list was the whole answer)_"
+
+# A chair's list that cannot seat anyone, which she retakes before any fallback (D3).
+_UNUSABLE = ("no_block", "unparseable", "too_few")
 
 # The chair's phase and its retakes (C8: take k of a phase is `{base}-take{k}`).
 # Everything that used to compare against the literal "decision" checks
@@ -108,7 +113,7 @@ def _apply_selection(s: dict, resolved: dict) -> None:
     """Install the ratified committee on the run's state (selection D1, D2).
 
     After ``open`` seats the fixed four, this is the only writer of
-    ``roster``, ``reviewers`` and ``opening``, and only ``_reduce_select``
+    ``roster``, ``reviewers``, ``opening`` and ``considered``, and only ``_reduce_select``
     calls it, on the chair's kept take. It also sets ``max_turns`` to
     2 x reviewers + 16 unless ``cap_explicit`` (D5). ``resolved`` is the dict
     ``selection.resolve`` or ``selection.fallback`` returns. Everything is
@@ -126,8 +131,11 @@ def _apply_selection(s: dict, resolved: dict) -> None:
     cap = s["max_turns"]
     if not s["cap_explicit"]:
         cap = 2 * len(reviewers) + 16
+    # who each seat speaks for, read into its goal by seed (D1)
+    considered = [dict(entry) for entry in resolved["considered"]]
     # `opening` a copy: the opening round is popped as it runs, `reviewers` never is
-    s.update(roster=roster, reviewers=reviewers, opening=list(reviewers), max_turns=cap)
+    s.update(roster=roster, reviewers=reviewers, opening=list(reviewers), max_turns=cap,
+             considered=considered)
 
 
 def _latest_answer(findings: list[Finding] | None) -> str:
@@ -305,6 +313,9 @@ class CommitteePlaybook:
                 # the run's reviewers in opening order: the default seven until
                 # the chair's list is installed
                 "reviewers": list(cast.SENIORITY),
+                # the ratified committee's considered stakeholders; a seat's goal
+                # names the ones it represents (selection D1)
+                "considered": [],
             }
             self._state_by_run[run.id] = s
         return s
@@ -591,6 +602,9 @@ class CommitteePlaybook:
         else:
             # Named through the run's own committee: a library or derived seat
             # is not in cast.CAST, and {} (a state that never ran `open`) is CAST.
+            # A seat's goal names the considered stakeholders it speaks for (D1).
+            speaks_for = [entry["stakeholder"] for entry in s["considered"]
+                          if entry.get("represented_by") == role]
             title = cast.title(
                 role, kind, turn=s["current_turn"], action=action, take=s["take"],
                 roster=s["roster"] or None,
@@ -606,6 +620,7 @@ class CommitteePlaybook:
                 retake=s["note"],
                 last_take=s["last_take"],
                 roster=s["roster"] or None,
+                speaks_for=speaks_for,
             )
 
         return [Ticket(
@@ -857,6 +872,21 @@ class CommitteePlaybook:
         s["held"] = s["retake"] = None
         return answer, take, takes, metrics, violations, flags
 
+    @staticmethod
+    def _unusable(stage: int, take: int, answer: str) -> str | None:
+        """The code of a chair's delivered take whose list cannot seat anyone
+        (``no_block``, ``unparseable``, ``too_few``) while she has a take left,
+        else None. Stages 1-2 never fall back, so they are never asked again for
+        a list (D3). Never raises."""
+        if stage != 3 or take >= voice.MAX_TAKES or not answer:
+            return None
+        try:
+            doc, code = selection.parse(answer)
+            code = selection.stage_code(True, code, selection.validate(doc, cast.LIBRARY)[0])
+        except Exception:  # never raise out of reduce; the kept path records it
+            return None
+        return code if code in _UNUSABLE else None
+
     def _reduce_select(
         self, run: Run, s: dict, findings: list[Finding]
     ) -> list[Reduction]:
@@ -865,8 +895,10 @@ class CommitteePlaybook:
         Voice grades the RAW answer, fences intact (its measure skips fenced
         blocks); fences are stripped only for the thread and the reduction
         ``body``. A take that breaks voice's hard rules is discarded and retaken
-        under the stage's base (s1-owner-take2); a retake that delivers nothing
-        keeps the held take, flagged retake_failed. Only the kept take is parsed.
+        under the stage's base (s1-owner-take2); so is a chair's take whose list
+        cannot seat anyone, with a note of the playbook's own, until her last
+        take (D3). A retake that delivers nothing keeps the held take, flagged
+        retake_failed. Only the kept take's list is the stage's.
         No ``_apply_block``: a selector's request_floor, delegate and close are
         ignored. Never raises: every parse and file touch is wrapped, and
         exactly one ``selection`` reduction comes back per kept take (C5). It routes
@@ -889,6 +921,22 @@ class CommitteePlaybook:
                 run, s, role, answer, metrics, violations, flags, None,
                 extra={"stage": stage},
             )
+        unusable = self._unusable(stage, s["take"], answer)
+        if unusable:
+            # D3: the chair's list is final, so one that cannot seat anyone is
+            # asked for again before the run falls back; only her last take
+            # falls back. The note is the playbook's, not voice's.
+            out = self._discard(
+                run, s, role, answer, metrics, violations, flags, None,
+                extra={"stage": stage, "code": unusable},
+            )
+            s["retake"] = (
+                f"Retake {s['take'] + 1} of {voice.MAX_TAKES}. No usable seat list: "
+                f"{selection.fallback_words(unusable)}. End your answer with the "
+                f"```hermes-selection block at column 0, {selection.MIN_REVIEWERS} to "
+                f"{selection.MAX_REVIEWERS} seats."
+            )
+            return out
         answer, take, takes, metrics, violations, flags = self._keep(
             run, s, role, answer, metrics, violations, flags
         )
@@ -899,15 +947,17 @@ class CommitteePlaybook:
         delivered = bool(answer)
         try:
             doc, code = selection.parse(answer)
-            seats, _invalid = selection.validate(doc, cast.LIBRARY)
+            seats, invalid = selection.validate(doc, cast.LIBRARY)
             not_seated = selection.not_seated(doc)
             code = selection.stage_code(delivered, code, seats)
         except Exception as exc:  # never raise out of reduce (gap 3)
-            doc, code, seats, not_seated = None, "unparseable", [], []
+            doc, code, seats, invalid, not_seated = None, "unparseable", [], [], []
             errors.append(f"selection: {exc}")
         body = selection.strip(turnblock.strip(answer)).strip()
         if delivered and not body:
-            body = _SIGNALS_ONLY  # a block with no prose is delivered (gap 4)
+            # A block with no prose is delivered (gap 4); for a selector the
+            # list IS the answer, so only a hermes-turn block alone is signals (I2).
+            body = _SIGNALS_ONLY if code == "no_block" else _SEAT_LIST_ONLY
         # The whole lists: the entry shows the first thread.LIST_MAX of each
         # and counts the rest. An empty body writes the NO_TURN stub.
         try:
@@ -964,6 +1014,11 @@ class CommitteePlaybook:
                 for seat in seats[:thread.LIST_MAX]
             ],
             "proposed_dropped": max(0, len(seats) - thread.LIST_MAX),
+            # the stage's notes, cleaned as the thread shows them, and how many
+            # entries were invalid, so the card can say who was left out and why
+            "not_seated": not_seated[:thread.LIST_MAX],
+            "not_seated_dropped": max(0, len(not_seated) - thread.LIST_MAX),
+            "invalid_count": len(invalid),
             "error": "; ".join(errors) or None,
             # the master's cap, so the view never guesses it before t01 (D5)
             "cap": s["max_turns"],

@@ -379,13 +379,13 @@ only.
   concern_coverage
   5: every seated member's main concerns were answered by the owner or by an edit, and the thread names no needed stakeholder missing from the room.
   1: major concerns went unanswered, or a missing function is named repeatedly.
-  Concerns come from each member's own turns, never from persona config. The judge also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`. A stakeholder in seats.considered with a non-null represented_by counts as represented, not missing; a stakeholder in seats.considered with no represented_by, or one the thread names who is in neither seats.roster nor seats.considered, counts as missing.
+  Concerns come from each member's own turns, never from persona config. The judge also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`. A stakeholder in seats.considered counts as represented only when the turns of its represented_by member raise that stakeholder's concern; otherwise it counts as missing, as does one with no represented_by, or one the thread names who is in neither seats.roster nor seats.considered.
 
   Evidence: every quote is verbatim and contiguous from the place it cites (no ellipses, no paraphrase).
   ```
 
   - The text is pinned: `test_voice_measure_and_version` asserts the first 8 hex of its sha256
-    (`36bad27d`). An edit fails that test until the affected judge dimension's `@n` is bumped and
+    (`f4a1cd8f`). An edit fails that test until the affected judge dimension's `@n` is bumped and
     the hash re-pinned. The same change updates the block above and this hash.
   - The planning spec's closing sentence ("The run-9 baseline for absent stakeholders includes at
     least Security and on-call/SRE.") is left out of `RUBRIC` on purpose (G13): it is an
@@ -409,10 +409,15 @@ only.
     `"start 1 (median_reviewer_owner 825.0 > 800)"`. It ends `"; floor 1"` when the floor bit.
 - **Versions.**
   - `DIMENSIONS` maps each id to an explicit `"<id>@<n>"`. Today `edits_address_concerns@2`,
-    `concern_coverage@2`, `concision@2` and `verdict_consistency@2`, the rest `@1`.
+    `concern_coverage@3`, `concision@2` and `verdict_consistency@2`, the rest `@1`.
     edits_address_concerns@2 rewrote anchors 3 and 1, which both said "partial" at @1.
-    concern_coverage@2 (committee-selection) gives the judge `seats.considered` and the anchor
-    sentence that a considered stakeholder with a represented_by is represented, not missing, and one without is missing. concision@2 reads voice's new counts (see
+    concern_coverage@2 (committee-selection) gave the judge `seats.considered` and counted a
+    considered stakeholder with a represented_by as represented. concern_coverage@3
+    (committee-selection's whole-branch fixes) counts one as represented only when the turns of
+    its represented_by member raise that stakeholder's concern, and as missing otherwise, as it
+    does one without a represented_by: a selector's word alone no longer covers anyone, and each
+    seated member's goal now names the stakeholders it speaks for. Evals scored at @2 compare as
+    stale. concision@2 reads voice's new counts (see
     voice.py below). verdict_consistency@2 counts only the chair's claims; @1 also took up to 2
     points for `delegation_truncated_but_applied` flags (run-9 scored 1).
   - `dimension_versions(rules=RULES)` returns `DIMENSIONS` with concision suffixed
@@ -883,8 +888,8 @@ spec, and compares it against run-9 and run-2.
     is already out of P.
 - **committee-selection** (as built) takes `seats.roster` and `seats.reviewers` from its final
   `selection` reduction when present, adds `seats.considered`, and bumped concern_coverage to @2
-  with its `RUBRIC` sentence and hash re-pin in the same change. The header parser already
-  ignores its pre-t01 lines. `outside_room_mentions` counts only body lines of turn and decision
+  and then @3 with its `RUBRIC` sentence and hash re-pin in the same change each time (so
+  committee-one-on-ones bumps it to @4). The header parser already ignores its pre-t01 lines. `outside_room_mentions` counts only body lines of turn and decision
   entries: selection amendment, because a turn heading now carries the run's roster name and
   title, which a selector may write for a derived seat.
 - **committee-one-on-ones.**

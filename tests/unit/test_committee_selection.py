@@ -389,7 +389,8 @@ def test_validate_clips_every_field_and_maps_long_dashes_to_hyphens():
 
 def test_validate_gives_a_derived_seat_the_derived_style_and_drops_worker_extras():
     """A derived seat gets a persona the brief can always render: every field
-    present (blank when unsaid), the fixed style, and nothing the worker added."""
+    present (blank when unsaid, but an unsaid stake is the rationale, so the
+    persona is never empty), the fixed style, and nothing the worker added."""
     worker = {
         "role": "crew_owner", "title": "Crew lead", "rationale": "runs the crews",
         "style": "shouts in capitals", "nominated_by": "senior_director",
@@ -397,7 +398,7 @@ def test_validate_gives_a_derived_seat_the_derived_style_and_drops_worker_extras
     }
     expected = [{
         "role": "crew_owner", "name": "Crew lead", "title": "Crew lead",
-        "altitude": "", "goal": "", "ambition": "", "stake": "", "lens": "",
+        "altitude": "", "goal": "", "ambition": "", "stake": "runs the crews", "lens": "",
         "style": cast.DERIVED_STYLE, "rationale": "runs the crews", "source": "derived",
     }]
 
@@ -411,7 +412,38 @@ def test_validate_gives_a_derived_seat_the_derived_style_and_drops_worker_extras
     assert S.validate({"seats": [odd]}, cast.LIBRARY) == (expected, [])
 
 
-# --- not_seated ----------------------------------------------------------
+def test_a_nameless_or_invisibly_named_derived_seat_is_named_from_its_title_once():
+    """D4: a name with no letter or digit (combining marks, a variation selector)
+    is blank, so the seat is named from its title, and every place that says
+    "Name, Title" says that title once, never "Crew lead, Crew lead"."""
+    from playbooks.committee import thread
+
+    title = cast.clip("Crew fleet owner for the federated scheduling layer " + "x" * 40, S.TITLE_MAX)
+    seats, invalid = S.validate({"seats": [
+        _seat("crew_owner", title="Crew lead", name="\u0301\u0301\ufe0f"),
+        _seat("long_ops", title=title),
+        _seat("kai_ops", title="Crew lead", name="Kai Brandt"),
+    ]}, cast.LIBRARY)
+
+    assert invalid == [] and title.endswith("…")
+    assert [s["name"] for s in seats] == ["Crew lead", cast.clip(title, S.NAME_MAX), "Kai Brandt"]
+    roster = {**S.fixed_seats(), **{s["role"]: s for s in seats}}
+    heads = [cast.brief(s["role"], roster).splitlines()[0] for s in seats]
+    assert heads == ["You are Crew lead.", f"You are {title}.", "You are Kai Brandt, Crew lead."]
+    assert thread._seat(seats[0]) == "- crew_owner: Crew lead. Why: crew_owner carries a risk in this proposal."
+    assert cast.label(cast.CAST["owner"]) == "Maya Okonkwo, Staff Engineer & proposal owner"
+
+
+def test_clip_blanks_characters_above_the_basic_plane():
+    """S3: an emoji is two UTF-16 units, so worker text keeps none, and a derived
+    persona's length in characters is its length in UTF-16 units."""
+    assert S._clip("ship \U0001F680 it \U0001F600", 40) == "ship it"
+    [seat], _ = S.validate({"seats": [_seat(
+        "crew_owner", title="Crew \U0001F525" * 30, name="Kai \U0001F600", lens="\U0001F4A5" * 200,
+    )]}, cast.LIBRARY)
+    for field in ("name", "title", "lens", "rationale"):
+        assert len(seat[field].encode("utf-16-le")) // 2 == len(seat[field]), field
+    assert seat["name"] == "Kai" and seat["lens"] == ""
 
 def test_not_seated_drops_entries_without_a_stakeholder_and_a_reason():
     doc = {"not_seated": [
@@ -752,7 +784,7 @@ def test_resolve_collects_considered_from_every_source():
     assert _by_stakeholder(out["considered"]) == {
         "Security Engineer": _considered(
             "Security Engineer", "security",
-            "not in the default committee (fallback: unparseable)"),
+            f"not in the default committee ({S.fallback_words('unparseable')})"),
         "Legal": _considered("Legal", None, "no filing", "tpm"),
     }
 
@@ -774,7 +806,7 @@ def test_resolve_collects_considered_from_every_source():
             "Security Engineer", "security", f"dropped by {MANAGER}"),
         "Site Reliability Engineer, on-call": _considered(
             "Site Reliability Engineer, on-call", "sre",
-            "not in the default committee (fallback: too_few)"),
+            f"not in the default committee ({S.fallback_words('too_few')})"),
     }
 
 
@@ -872,8 +904,8 @@ def test_resolve_caps_the_invalid_and_considered_lists():
 
 
 def test_resolve_nulls_a_representative_who_is_not_seated():
-    """Outside the overflow rule a representative must be a seated slug; an
-    unseated one, a sentinel or a non-string becomes null."""
+    """Outside the overflow rule a representative must be a seated slug, in any
+    case (D5); an unseated one, a sentinel or a non-string becomes null."""
     notes = [
         {"stakeholder": "Legal", "reason": "a", "represented_by": "privacy"},
         {"stakeholder": "Finance", "reason": "b", "represented_by": "manager"},
@@ -892,10 +924,94 @@ def test_resolve_nulls_a_representative_who_is_not_seated():
     reps = {c["stakeholder"]: c["represented_by"] for c in out["considered"]}
     assert reps == {
         "Legal": None, "Finance": "manager", "Support": "security", "Board": None,
-        "Ops": "security", "Growth": None, "Sales": None,
+        "Ops": "security", "Growth": None, "Sales": "security",
         # the chair dropped tpm, so the owner's note has no one to point at
         "Billing": None, "Technical Program Manager": None,
     }
+
+
+def test_a_representative_is_named_in_any_case_and_is_never_the_owner():
+    """D5: represented_by is read case-insensitively. D1: the proposal's owner
+    speaks for nobody reviewing it, in a stage's notes and in resolve, and an
+    overflow seat she was named for is represented by the chair instead."""
+    doc = {"not_seated": [
+        {"stakeholder": "Legal", "reason": "a", "represented_by": " Security "},
+        {"stakeholder": "Board", "reason": "b", "represented_by": "OWNER"},
+        {"stakeholder": "Ops", "reason": "c", "represented_by": ""},
+    ]}
+    assert [n["represented_by"] for n in S.not_seated(doc)] == ["security", None, None]
+
+    notes = [{"stakeholder": "Board", "reason": "b", "represented_by": "owner"},
+             {"stakeholder": "Legal", "reason": "a", "represented_by": "Security"}]
+    chair = {"seats": [_seat("security")], "not_seated": notes}
+    reps = {c["stakeholder"]: c["represented_by"]
+            for c in S.resolve(_stages(None, None, chair), cast.LIBRARY)["considered"]}
+    assert reps == {"Board": None, "Legal": "security"}
+    assert S._rep("owner", {"owner", "security"}) is None
+
+    pool = [*cast.LIBRARY, *(f"derived_{k}" for k in range(6))]
+    seats = [_seat(r) if r in cast.LIBRARY else _seat(r, title=f"Team {r}") for r in pool]
+    over = {"seats": seats, "not_seated": [
+        {"stakeholder": seats[-1]["role"], "reason": "x", "represented_by": "owner"}]}
+    bound = {c["role"]: c for c in S.resolve(_stages(None, None, over), cast.LIBRARY)["considered"]
+             if c["reason"] == f"over the {S.MAX_REVIEWERS}-seat bound"}
+    assert len(bound) == len(seats) - (S.MAX_REVIEWERS - 2)
+    assert bound[seats[-1]["role"]]["represented_by"] == "senior_director"
+
+
+def test_a_note_naming_a_seat_by_title_or_name_attaches_to_it_or_drops_when_seated():
+    """Run-16's shapes (addendum): a drop note naming staff_ic by its library
+    title attaches to the dropped seat, so the committee lists it once, with the
+    note's reason and representative; a note naming a seated seat by its title,
+    words in any order, or by its persona's name is dropped (it is seated)."""
+    lib = cast.LIBRARY
+    lead, team = lib["partner_owner"]["title"].split(", ")
+    reordered = f"{team.capitalize()} {lead.lower()}"  # "Partner team engineering lead"
+    owner = {"seats": [_seat(r) for r in ("security", "sre", "staff_ic", "tl", "pm")],
+             "not_seated": [
+                 {"stakeholder": reordered, "reason": "no crew owner asked", "represented_by": "pm"},
+                 {"stakeholder": lib["tpm"]["title"], "reason": "staffing", "represented_by": "manager"},
+             ]}
+    manager = {"seats": [_seat(r) for r in ("security", "sre", "staff_ic", "tl", "pm",
+                                             "partner_owner")]}
+    chair = {"seats": [_seat(r) for r in ("security", "sre", "tl", "pm", "partner_owner")],
+             "not_seated": [
+                 {"stakeholder": lib["staff_ic"]["title"], "reason": "fencing is build cost",
+                  "represented_by": "tl"},
+                 {"stakeholder": lib["security"]["name"], "reason": "seated", "represented_by": "tl"},
+             ]}
+
+    out = S.resolve(_stages(owner, manager, chair), cast.LIBRARY)
+
+    assert out["fallback"] is None and "partner_owner" in out["reviewers"]
+    assert out["considered"] == [
+        _considered(lib["tpm"]["title"], None, "staffing", "manager"),
+        _considered(lib["staff_ic"]["title"], "staff_ic", "fencing is build cost", "tl"),
+    ]
+    # the manager drops staff_ic, naming it by its persona's name: one entry
+    manager["not_seated"] = [{"stakeholder": lib["staff_ic"]["name"], "reason": "tl covers it",
+                              "represented_by": "tl"}]
+    manager["seats"].remove(_seat("staff_ic"))
+    staff_note, chair["not_seated"] = chair["not_seated"][0], chair["not_seated"][1:]
+    out = S.resolve(_stages(owner, manager, chair), cast.LIBRARY)
+    assert out["considered"][1:] == [
+        _considered(lib["staff_ic"]["title"], "staff_ic", "tl covers it", "tl")]
+    # and the chair's later note on that seat is still the same entry, hers winning
+    chair["not_seated"].append(staff_note)
+    out = S.resolve(_stages(owner, manager, chair), cast.LIBRARY)
+    assert out["considered"][1:] == [
+        _considered(lib["staff_ic"]["title"], "staff_ic", "fencing is build cost", "tl")]
+
+
+def test_fallback_words_say_every_code_in_words():
+    """D8: the thread, a seat's reason and a retake note say a code in words."""
+    said = {code: S.fallback_words(code) for code in (
+        "chair_failed", "no_answer", "no_block", "unparseable", "too_few", "lost")}
+    assert said["chair_failed"] == "the chair gave no usable list"
+    assert said["too_few"] == "no valid seats"
+    assert all("_" not in words.replace("hermes-selection", "") for words in said.values()), said
+    assert len(set(said.values())) == len(said)
+    assert S.fallback_words("brand\nnew") == "brand new" and S.fallback_words(["x"]) == "no reason given"
 
 
 def test_fallback_never_raises_and_is_the_default_committee(monkeypatch):
@@ -918,7 +1034,7 @@ def test_fallback_never_raises_and_is_the_default_committee(monkeypatch):
             else:
                 assert seat == {
                     **cast.CAST[role],
-                    "rationale": f"default committee (selection fell back: {code})",
+                    "rationale": f"in the default committee ({S.fallback_words(code)})",
                     "nominated_by": "default", "source": "library",
                 }
 
