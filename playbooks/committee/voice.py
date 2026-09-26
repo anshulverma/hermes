@@ -73,6 +73,7 @@ _EXAMPLE_PHRASES = ("for example", "e.g.", "for instance", "such as")
 _ABBREVIATIONS = frozenset({"e.g.", "i.e.", "vs.", "etc.", "cf."})
 
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+_CLOSER = re.compile(r"^\s{0,3}(`{3,}|~{3,})\s*$")
 # C3's grammar. The reference-style alternative is optional so CommonMark's
 # shortcut form `![label]` is split out too: Markdown would otherwise resolve
 # it against a `[label]: <url>` line and fetch that url.
@@ -80,19 +81,23 @@ _IMAGE = re.compile(r"!\[([^\]\n]*)\](\(([^)\n]*)\)|\[[^\]\n]*\])?")
 _IMAGE_LABEL = re.compile(r"!\[[^\]\n]*\]")
 # measure runs master-side on every take, so no pattern here may rescan a long
 # line from each of many starts. The caption lines are stripped in Python (a
-# lazy group before \s*$ is quadratic in inner spaces); a curly quote ends at
-# the next opening one; the __bold__ body is one run to the next "_", crossing
-# at most the one newline the original \s could match.
+# lazy group before \s*$ is quadratic in inner spaces); quoted spans are found
+# by a scanner (``_unquoted``); the __bold__ body is one run to the next "_",
+# crossing at most the one newline the original \s could match.
 _FIGURE = re.compile(r"^\s*Figure:(.*)$")
 _DESCRIPTION = re.compile(r"^\s*Description:(.*)$")
 _INLINE_CODE = re.compile(r"`[^`\n]+`")
-_QUOTED = re.compile(r'"[^"\n]*"|“[^“”\n]*”')
+# What ``_images_in`` masks: a one-backtick code span whose backticks are
+# neither escaped nor part of a longer run. Anything else Markdown may draw as
+# an image, so it is measured as one.
+_CODE_SPAN = re.compile(r"(?<![`\\])`[^`\n]+`(?!`)")
+_QUOTE_OPEN = re.compile(r'["“]')
 _BOLD = re.compile(
     r"\*\*(?!\s)[^*\n]+?(?<!\s)\*\*"
     r"|(?<![\w/.])__(?![\s_])(?:[^_\n]*\n[^_\n]*|(?=[^_\s]*[^\S\n])[^_\n]*)(?<![\s_])__(?![\w.])"
 )
 _HEADER = re.compile(r"^\s{0,3}#{1,6}\s")
-_TABLE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+_TABLE = re.compile(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?")  # fullmatch a stripped line
 _BULLET = re.compile(r"^\s*([-*+]|\d+[.)])\s+")
 _NESTED = re.compile(r"^( {2,}|\t)")
 _PATH_LINE = re.compile(r"(?<![\w./-])[\w./-]+\.\w+:\d+(-\d+)?")  # lookbehind: linear on one long token
@@ -127,29 +132,29 @@ def cap_text(role: str) -> str:
 # --- the image grammar -----------------------------------------------------
 
 def _fences(lines: list[str]) -> list[tuple[int, int, str]]:
-    """(open, close, info) for every CLOSED fence. An unclosed fence is prose."""
+    """(open, close, info) for every CLOSED fence. An unclosed fence is prose.
+
+    A fence closes on the next line of its own marker char, at least as long,
+    and nothing else. ``longest[ch][k]`` is the longest such line at or below
+    line k, so an opener with no closer is skipped without a scan and every
+    scan ends on a closer: each line is looked at a bounded number of times.
+    """
+    closers = [(c.group(1)[0], len(c.group(1))) if (c := _CLOSER.match(line)) else ("", 0)
+               for line in lines]
+    longest = {ch: [0] * (len(lines) + 1) for ch in "`~"}
+    for k in range(len(lines) - 1, -1, -1):
+        for ch, below in longest.items():
+            below[k] = max(below[k + 1], closers[k][1] if closers[k][0] == ch else 0)
     out: list[tuple[int, int, str]] = []
-    # Marker char -> the shortest marker already known to have no closer below
-    # it. A later opener as long or longer cannot close either, so a stuck,
-    # repeated opener line scans the rest once, not once per line.
-    # ponytail: openers of strictly shrinking length still rescan (at most
-    # ~sqrt(2 * size) of them); precompute closers per char if that ever matters.
-    unclosed: dict[str, int] = {}
     i = 0
     while i < len(lines):
         m = _FENCE.match(lines[i])
-        if m and len(m.group(1)) < unclosed.get(m.group(1)[0], len(m.group(1)) + 1):
-            marker = m.group(1)
-            close = re.compile(
-                r"^\s{0,3}" + re.escape(marker[0]) + "{" + str(len(marker)) + r",}\s*$"
-            )
-            for j in range(i + 1, len(lines)):
-                if close.match(lines[j]):
-                    out.append((i, j, m.group(2).strip().lower()))
-                    i = j
-                    break
-            else:
-                unclosed[marker[0]] = len(marker)
+        ch, size = (m.group(1)[0], len(m.group(1))) if m else ("", 0)
+        if m and longest[ch][i + 1] >= size:
+            j = next(j for j in range(i + 1, len(lines))
+                     if closers[j][0] == ch and closers[j][1] >= size)
+            out.append((i, j, m.group(2).strip().lower()))
+            i = j
         i += 1
     return out
 
@@ -167,7 +172,7 @@ def _image(m: re.Match, description: str) -> dict:
 
 
 def _images_in(line: str) -> list[re.Match]:
-    """The image references on one line, outside inline code.
+    """The image references on one line, outside a code span (``_CODE_SPAN``).
 
     Markdown draws no image inside a code span, and the rules ask for
     identifiers in backticks, so `vec![0]` there is text, not an image.
@@ -177,7 +182,7 @@ def _images_in(line: str) -> list[re.Match]:
     rescan to the line's end from every ``![`` with no ``]`` after it, and
     from every ``](`` with no ``)`` after it.
     """
-    masked = _INLINE_CODE.sub(lambda m: " " * len(m.group()), line)
+    masked = _CODE_SPAN.sub(lambda m: " " * len(m.group()), line)
     last_bracket, last_paren = masked.rfind("]"), masked.rfind(")")
     out, pos = [], 0
     while (start := masked.find("![", pos)) != -1 and start < last_bracket:
@@ -294,12 +299,39 @@ def segments(body: str) -> list[dict]:
 
 # --- measurement -------------------------------------------------------------
 
+def _unquoted(text: str) -> str:
+    """``text`` with each quoted span on a line replaced by a space (C2).
+
+    A span opens at a straight or a curly opening quote and runs to the next
+    matching close on the same line, whatever opens inside it: ``“a — “b” c”``
+    hides its dash. An opener with no close on its line is plain text. Linear:
+    a straight quote with no close has no later straight quote on the line
+    either, and after one curly opener misses, no later one is tried.
+    """
+    out = []
+    for line in text.split("\n"):
+        kept, pos, curly = [], 0, True
+        for m in _QUOTE_OPEN.finditer(line):
+            start, straight = m.start(), m.group() == '"'
+            if start < pos or not (straight or curly):
+                continue
+            end = line.find('"' if straight else "”", start + 1)
+            if end == -1:
+                curly = curly and straight
+                continue
+            kept.append(line[pos:start])
+            pos = end + 1
+        kept.append(line[pos:])
+        out.append(" ".join(kept))
+    return "\n".join(out)
+
+
 def measure(body: str, role: str = "reviewer") -> dict:
     """The metrics of one turn's prose (C2). Pure and never raises on any str."""
     body = body if isinstance(body, str) else ""
     segs, prose, fences, fenced_lines = _parse(body)
     plain = _INLINE_CODE.sub(" ", prose)  # prose outside inline code
-    unquoted = _QUOTED.sub(" ", plain)
+    unquoted = _unquoted(plain)
     lines = [line for line in prose.splitlines() if line.strip()]
     low = prose.lower()
     words = len(prose.split())
@@ -333,7 +365,7 @@ def measure(body: str, role: str = "reviewer") -> dict:
         "dashes": em + en,
         "bold": len(_BOLD.findall(plain)),
         "headers": sum(1 for line in lines if _HEADER.match(line)),
-        "tables": sum(1 for line in lines if _TABLE.match(line)),
+        "tables": sum(1 for line in lines if _TABLE.fullmatch(line.strip())),
         "bullets": sum(1 for line in lines if _BULLET.match(line)),
         "nested_bullets": sum(1 for line in lines if _BULLET.match(line) and _NESTED.match(line)),
         "fenced_lines": fenced_lines,
@@ -454,18 +486,21 @@ def _said(slug: str, m: dict) -> str:
         "too_many_bullets": f"{m.get('bullets', 0)} bullets (max {MAX_BULLETS.get(k, _BULLETS)})",
         "too_many_images": f"{len(m.get('images') or [])} images (max {_IMAGES.get(k, 1)})",
         "image_uncaptioned": "an image without its caption or description",
-        "image_missing": "an image that is missing or not your own file",
+        "image_missing": "an image missing or not your own file",
         "action_too_long": f"action {m.get('action_chars', 0)} characters (max {turnblock.ACTION_MAX})",
     }.get(slug, slug)
 
 
 def note(metrics: dict, violations: list[str], take: int) -> str:
-    """The retake paragraph a speaker is handed. cast.goal clips it to RETAKE_NOTE_MAX."""
-    said = "; ".join(_said(v, metrics) for v in violations)
-    return (
-        f"Retake {take} of {MAX_TAKES}. Your last take broke the ground rules: {said}. "
-        "Say it again within them."
-    )
+    """The retake paragraph a speaker is handed. cast.goal clips it to RETAKE_NOTE_MAX.
+
+    Six rules at once fit whole. The image rules come first: a speaker cannot
+    reread their way to what the master found wrong with a file, so a longer
+    list that the clip cuts loses a count the speaker can see for themselves.
+    """
+    ordered = sorted(violations, key=lambda v: "image" not in v)
+    said = "; ".join(_said(v, metrics) for v in ordered)
+    return f"Retake {take} of {MAX_TAKES}. Rules broken: {said}. Say it again within them."
 
 
 # --- the run -----------------------------------------------------------------

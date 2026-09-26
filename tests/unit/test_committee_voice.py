@@ -36,15 +36,31 @@ def test_an_unclosed_fence_is_prose():
     assert m["fenced_lines"] == 0
 
 
+def test_fences_close_on_a_long_enough_line_of_their_own_marker_and_can_follow_each_other():
+    two = voice.measure("```\na\n```\n```\nb\n```")
+    assert (two["fenced_lines"], two["words"]) == (2, 0)
+    tilde = voice.measure("~~~\n# x\n~~~")
+    assert (tilde["fenced_lines"], tilde["headers"]) == (1, 0)
+    # a closer shorter than its opener is a fenced line, not the end of the fence
+    short = voice.measure("````\n# x\n```\ny\n````")
+    assert (short["fenced_lines"], short["words"], short["headers"]) == (3, 0, 0)
+    assert voice.measure("Fine.\n```\n§2 and section 3\n```")["pointers_section"] == 0
+
+
 def test_dashes_count_unless_quoted_or_in_code():
     m = voice.measure('Ship it — now. Pages 3–5. "a — b" and `x – y`.')
     assert (m["em_dashes"], m["en_dashes"], m["dashes"]) == (1, 1, 2)
     assert voice.measure("“quoted — dash” here.")["dashes"] == 0
+    # C2: a curly quote runs to the next closing one on its line, whatever opens inside it
+    assert voice.measure("Ship “a — “b” c” now.")["dashes"] == 0
+    assert voice.measure("Ship “a — then “b” now.")["dashes"] == 0
+    assert voice.measure("Ship “a — b\nthen “c — d” now.")["dashes"] == 1
 
 
 @pytest.mark.parametrize("text, bold", [
     ("This is **really** bad.", 1),
     ("__really important__ says so.", 1),
+    ("__a\nb__ c.", 1),
     ("Call `f(**kwargs)` or foo(**kwargs, **extra) today.", 0),
     ("Run __main__ now.", 0),
     ("call __init__, then stop.", 0),
@@ -75,6 +91,7 @@ def test_headers_tables_and_bullets_numbered_and_nested():
     assert m["tables"] == 1
     assert m["bullets"] == 5
     assert m["nested_bullets"] == 2
+    assert voice.measure("  |---|---|  ")["tables"] == 1
 
 
 def test_pointers_and_sentences():
@@ -131,8 +148,13 @@ def test_measure_never_raises():
     # measure runs master-side on every take, so a stuck or crafted body must not
     # go quadratic: each of these took seconds to minutes when a pattern rescanned
     # the line from every opener.
+    shrinking_openers = "\n".join("`" * n for n in range(300, 2, -1)) + "\n" + "a\n" * 50_000
+    # U+1D1D shares its low byte with the closing curly quote, so str.find
+    # cannot skip ahead: a scan from every unclosed opener would show here.
+    unclosed_curly = "\u201c\u1d1d" * 100_000
     for body in ("![" * 30_000, "![a](" * 12_000, " __" + "a " * 30_000, "```x\n" * 12_000,
-                 "“a" * 30_000, "![c](images/x.svg)\nDescription: a" + " " * 60_000 + "b"):
+                 "“a" * 30_000, "![c](images/x.svg)\nDescription: a" + " " * 60_000 + "b",
+                 " " * 60_000 + "x", "\t" * 60_000 + "x", shrinking_openers, unclosed_curly):
         start = time.perf_counter()
         voice.measure(body)
         voice.segments(body)
@@ -208,12 +230,23 @@ def test_every_rules_line_is_one_plain_line():
     assert "Bad:" in joined and "Good:" in joined
 
 
-def test_note_phrases_each_slug_in_order():
+def test_note_phrases_each_slug_image_rules_first():
     m = _m(words=212, bold=3, cap=150)
     assert voice.note(m, ["over_cap", "bold"], take=2) == (
-        "Retake 2 of 3. Your last take broke the ground rules: 212 words (cap 150); "
-        "3 bold. Say it again within them."
+        "Retake 2 of 3. Rules broken: 212 words (cap 150); 3 bold. Say it again within them."
     )
+    # Six rules at once still fit the clip whole, every one named and the
+    # instruction last; the image rules lead, so a longer list loses a count
+    # the speaker can see by rereading, never an image check made master-side.
+    six = voice.note(_m(words=212, headers=2, bold=3, nested_bullets=2, cap=150), [
+        "over_cap", "headers", "bold", "nested", "image_uncaptioned", "image_missing"], take=3)
+    assert six == (
+        "Retake 3 of 3. Rules broken: an image without its caption or description; "
+        "an image missing or not your own file; 212 words (cap 150); 2 headers; 3 bold; "
+        "2 nested bullets. Say it again within them."
+    )
+    from playbooks.committee import cast
+    assert cast.clip(six, voice.RETAKE_NOTE_MAX) == six
     every = _m(words=400, lines=3, sentences=4, headers=1, bold=2, tables=1,
                nested_bullets=2, bullets=9, images=[{}, {}], action_chars=250, kind="chair")
     said = voice.note(every, [
@@ -223,10 +256,9 @@ def test_note_phrases_each_slug_in_order():
     for phrase in ("400 words (cap", "3 lines (one allowed)", "4 sentences (one allowed)",
                    "1 headers", "2 bold", "1 tables", "2 nested bullets", "9 bullets (max 8)",
                    "2 images (max 0)", "an image without its caption or description",
-                   "an image that is missing or not your own file",
+                   "an image missing or not your own file",
                    "action 250 characters (max 200)"):
         assert phrase in said, phrase
-    from playbooks.committee import cast
     assert len(cast.clip(said, voice.RETAKE_NOTE_MAX)) <= voice.RETAKE_NOTE_MAX
 
 
@@ -363,6 +395,19 @@ def test_http_and_reference_style_images_are_split_out_and_never_ok(tmp_path):
     code = voice.measure("Use `vec![0]` here, and `rows![0]` too.")
     assert code["images"] == [] and voice.violations(code, "tl") == []
     assert voice.segments("Use `vec![0]` here.") == [{"kind": "text", "text": "Use `vec![0]` here."}]
+    # An escaped backtick, or one in a longer run, opens no code span: Markdown
+    # draws the image, so it is one.
+    for body in ("See \\`![x](http://evil.example/y.png)` here.",
+                 "See ``![x](http://evil.example/y.png)` here.",
+                 "See `![x](http://evil.example/y.png)`` here."):
+        assert [s["kind"] for s in voice.segments(body)] == ["text", "image", "text"], body
+    # A "(" with no ")" after it on the line leaves the bare label as the image.
+    assert voice.segments("See ![x](oops here.") == [
+        {"kind": "text", "text": "See"},
+        {"kind": "image", "name": "![x]", "ref": "", "caption": "x", "description": "",
+         "ok": None},
+        {"kind": "text", "text": "(oops here."},
+    ]
 
 
 def test_captions_and_descriptions_are_consumed_into_their_segment():
@@ -383,6 +428,11 @@ def test_captions_and_descriptions_are_consumed_into_their_segment():
         {"kind": "mermaid", "source": "graph TD; A-->B", "caption": "the pipeline",
          "description": "two stages."},
         {"kind": "text", "text": "```python\nx = 1\n```\nClosing line."},
+    ]
+    # a Description: line just above the image is its description too
+    assert voice.segments("Description: engineers per week.\n![c](images/t02-owner.svg)") == [
+        {"kind": "image", "name": "t02-owner.svg", "ref": "images/t02-owner.svg",
+         "caption": "c", "description": "engineers per week.", "ok": None},
     ]
 
 
