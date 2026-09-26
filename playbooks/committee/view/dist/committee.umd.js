@@ -63,7 +63,7 @@
 		flexDirection: "column",
 		gap: 12
 	};
-	var note = (tone) => ({
+	var note$1 = (tone) => ({
 		padding: "8px 12px",
 		borderRadius: "var(--radius-sm)",
 		fontSize: 12.5,
@@ -75,7 +75,7 @@
 	function Rechecks({ checks }) {
 		if (checks.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 			"data-testid": "rechecks-none",
-			style: note("muted"),
+			style: note$1("muted"),
 			children: "No edit was delegated, so there was nothing to re-check."
 		});
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -101,7 +101,7 @@
 				return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": `verdict-recheck-${check.turn}`,
 					style: {
-						...note(check.verified === null ? "muted" : applied ? "ok" : "danger"),
+						...note$1(check.verified === null ? "muted" : applied ? "ok" : "danger"),
 						display: "flex",
 						gap: 10,
 						alignItems: "baseline"
@@ -177,7 +177,7 @@
 		};
 		if (lookupError) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "stamp-error",
-			style: note("muted"),
+			style: note$1("muted"),
 			children: ["Could not read this verdict’s review state: ", lookupError]
 		});
 		if (!stamp) return null;
@@ -199,7 +199,7 @@
 				}),
 				stamp.review_state && stamp.review_state !== "pending" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "stamp-state",
-					style: note(stamp.review_state === "accepted" ? "ok" : "attention"),
+					style: note$1(stamp.review_state === "accepted" ? "ok" : "attention"),
 					children: [
 						"Recorded as ",
 						stamp.review_state,
@@ -242,7 +242,7 @@
 				}),
 				actionError && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					"data-testid": "stamp-action-error",
-					style: note("danger"),
+					style: note$1("danger"),
 					children: actionError
 				})
 			]
@@ -253,7 +253,7 @@
 			style: card,
 			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 				"data-testid": "verdict-pending",
-				style: note("muted"),
+				style: note$1("muted"),
 				children: "The chair has not ruled yet. A verdict appears here once the meeting ends — when the owner closes it, the queue empties, or the turn cap is reached."
 			})
 		});
@@ -262,7 +262,7 @@
 			children: [
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "verdict-simulation",
-					style: note("attention"),
+					style: note$1("attention"),
 					children: [
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Simulation — not an approval." }),
 						" This verdict is a simulation produced by AI personas reading one file. It is not an approval, not a sign-off, and carries no authority: a human decides.",
@@ -275,12 +275,12 @@
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Rechecks, { checks: verdict.checks }),
 				verdict.artifact_intact !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					"data-testid": "artifact-intact",
-					style: note(verdict.artifact_intact ? "ok" : "danger"),
+					style: note$1(verdict.artifact_intact ? "ok" : "danger"),
 					children: verdict.artifact_intact ? "Original artifact unchanged — re-checked by digest at the decision, against the digest taken before the meeting opened." : "Original artifact CHANGED DURING THE REVIEW — it was promised untouched. Treat every re-check above as unreliable and read the diff."
 				}),
 				verdict.dropped_delegation && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "dropped-delegation",
-					style: note("attention"),
+					style: note$1("attention"),
 					children: [
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Dropped delegation" }),
 						" — the turn cap cut it off and no edit was made:",
@@ -290,7 +290,7 @@
 				}),
 				verdict.dropped_floor_requests.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "dropped-floor-requests",
-					style: note("attention"),
+					style: note$1("attention"),
 					children: [
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "Dropped floor requests" }),
 						" — the review ended before their turn came:",
@@ -320,18 +320,18 @@
 	//#endregion
 	//#region ../playbooks/committee/view/src/Diff.tsx
 	/**
-	* The revised copy against the original — the surface the first live run got
-	* wrong, and the reason this exists.
+	* The document as the committee changed it: the original, each junior-IC edit
+	* as its own diff with who asked for it and why, then the final version.
 	*
-	* The chair opened the repository file, found it unchanged, wrote "six
-	* delegations, zero bytes" and partly ruled on that basis. All six had landed:
-	* the revised copy went 11,397 → 19,100 bytes and every re-check reports
-	* APPLIED. The original is unchanged because that is the playbook's central
-	* safety guarantee, not because the edits failed. So this leads with the
-	* invariant and puts the diff second.
+	* The first live run's chair read the unchanged repository file as proof the
+	* edits had failed, so this card still leads with the invariant: the original
+	* is never modified. A later run showed nothing at all, because the control
+	* plane opened the master's host paths inside a container that mounts only the
+	* home. So every version here is a snapshot under the run's own directory,
+	* named by `view_data` and read through the run-file route.
 	*
-	* Fetched on demand, never with the view data: the pair is ~30 KB for the
-	* measured run and the view refetches on every reduction.
+	* Text is fetched on demand, one selected step at a time, never with the view
+	* data: the view refetches on every reduction.
 	*/
 	/**
 	* Past this the LCS table is not worth allocating.
@@ -415,7 +415,13 @@
 	* footer beats virtualization until a real artifact trips it.
 	*/
 	var MAX_ROWS = 5e3;
-	var kb = (bytes) => `${(bytes / 1024).toFixed(1)} KB`;
+	var FINAL_LABEL = {
+		in_session: "Latest so far — the meeting is still in session",
+		awaiting_ruling: "Proposed — awaiting your ruling",
+		accepted: "Accepted",
+		rejected: "Rejected",
+		no_ruling: "The meeting ended without a ruling"
+	};
 	var ROW_STYLE = {
 		same: {
 			sign: " ",
@@ -433,23 +439,287 @@
 			color: "var(--text-primary)"
 		}
 	};
-	function ArtifactDiff({ runId, artifacts, intact, legacy }) {
-		const [rows, setRows] = (0, react.useState)(null);
-		const [cut, setCut] = (0, react.useState)(false);
-		const [loading, setLoading] = (0, react.useState)(false);
-		const [error, setError] = (0, react.useState)(null);
-		const { original, revised } = artifacts;
-		const load = () => {
-			if (!revised) return;
-			setLoading(true);
-			setError(null);
-			Promise.all([apiGet(`/api/runs/${runId}/view/artifact?which=original`), apiGet(`/api/runs/${runId}/view/artifact?which=revised`)]).then(([a, b]) => {
-				setCut(Boolean(a.truncated || b.truncated));
-				setRows(diffLines(a.text, b.text));
-			}).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setLoading(false));
+	var tNN = (n) => `t${String(n).padStart(2, "0")}`;
+	var cacheKey = (v) => `${v.path}:${v.bytes}`;
+	var mono$1 = { fontFamily: "var(--font-mono)" };
+	var pane = {
+		...mono$1,
+		fontSize: 11.5,
+		lineHeight: 1.5,
+		maxHeight: 420,
+		overflow: "auto",
+		border: "1px solid var(--border-hairline)",
+		borderRadius: "var(--radius-sm)"
+	};
+	var muted = {
+		fontSize: 12.5,
+		color: "var(--text-muted)",
+		lineHeight: 1.5
+	};
+	var note = (tone) => ({
+		padding: "8px 12px",
+		borderRadius: "var(--radius-sm)",
+		background: `var(--status-${tone}-tint)`,
+		border: `1px solid var(--status-${tone}-edge)`,
+		fontSize: 12.5,
+		lineHeight: 1.55,
+		color: "var(--text-primary)"
+	});
+	var chip = (active) => ({
+		padding: "3px 10px",
+		fontSize: 12,
+		borderRadius: "var(--radius-sm)",
+		border: "1px solid var(--border-hairline)",
+		background: active ? "var(--wash-subtle)" : "transparent",
+		color: "var(--text-primary)",
+		fontWeight: active ? 600 : 400,
+		cursor: "pointer"
+	});
+	/**
+	* Fetch each version through the run-file route, once, cached by path and size.
+	*
+	* ponytail: a re-settled turn whose snapshot keeps the same size is served
+	* stale until reload; key on a digest in `view_data` if that ever matters.
+	*/
+	function useCopies(runId, versions) {
+		const [copies, setCopies] = (0, react.useState)({});
+		const [failures, setFailures] = (0, react.useState)({});
+		const asked = (0, react.useRef)(/* @__PURE__ */ new Set());
+		const wanted = versions.map(cacheKey).join("\n");
+		(0, react.useEffect)(() => {
+			for (const key of wanted ? wanted.split("\n") : []) {
+				if (asked.current.has(key)) continue;
+				asked.current.add(key);
+				apiGet(`/api/runs/${runId}/view/artifact?path=${key.slice(0, key.lastIndexOf(":"))}`).then((copy) => setCopies((prev) => ({
+					...prev,
+					[key]: copy
+				}))).catch((err) => setFailures((prev) => ({
+					...prev,
+					[key]: err instanceof Error ? err.message : String(err)
+				})));
+			}
+		}, [runId, wanted]);
+		return {
+			copies,
+			failures
 		};
-		const adds = rows ? rows.filter((r) => r.kind === "add").length : 0;
-		const dels = rows ? rows.filter((r) => r.kind === "del").length : 0;
+	}
+	function Goto({ n, onOpenTurn }) {
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+			type: "button",
+			"data-testid": `goto-${tNN(n)}`,
+			onClick: () => onOpenTurn(n),
+			style: {
+				...mono$1,
+				...chip(false),
+				padding: "0 6px",
+				fontSize: 11
+			},
+			children: tNN(n)
+		});
+	}
+	/** Who raised it, who delegated it, what the junior said, what the re-check found. */
+	function StepContext({ step, timeline, onOpenTurn }) {
+		const at = (n) => n === null ? void 0 : timeline.find((e) => e.n === n);
+		const reviewer = at(step.reviewer_turn);
+		const owner = at(step.owner_turn);
+		const confirmation = at(step.turn)?.body.split("\n").find((l) => l.trim()) ?? "";
+		const line = {
+			fontSize: 12.5,
+			color: "var(--text-secondary)",
+			lineHeight: 1.5
+		};
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": "step-context",
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 4
+			},
+			children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "step-verdict",
+					style: {
+						fontSize: 12,
+						fontWeight: 600,
+						color: step.verified === true ? "var(--status-ok, #7ee787)" : step.verified === false ? "var(--status-danger, #f85149)" : "var(--text-muted)"
+					},
+					children: [
+						"re-check:",
+						" ",
+						step.verified === true ? "APPLIED" : step.verified === false ? "DID NOT APPLY" : "re-check not recorded"
+					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": "step-raised",
+					style: line,
+					children: step.reviewer_turn !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+						"raised by ",
+						reviewer?.name ?? "a seat the transcript does not name",
+						reviewer?.stance ? ` — ${reviewer.stance}` : "",
+						" ",
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Goto, {
+							n: step.reviewer_turn,
+							onOpenTurn
+						})
+					] }) : "who raised this was not recorded"
+				}),
+				step.owner_turn !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "step-delegated",
+					style: line,
+					children: [
+						"delegated: ",
+						owner?.action ?? "no action recorded",
+						" ",
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Goto, {
+							n: step.owner_turn,
+							onOpenTurn
+						})
+					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "step-confirmed",
+					style: line,
+					children: [
+						step.delivered ? confirmation || "no prose recorded for this turn" : "no turn delivered",
+						" ",
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Goto, {
+							n: step.turn,
+							onOpenTurn
+						})
+					]
+				}),
+				step.provenance === "inferred" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": "step-provenance",
+					style: {
+						...muted,
+						fontSize: 11.5
+					},
+					children: "(inferred from turn order)"
+				})
+			]
+		});
+	}
+	function UnifiedRow({ row }) {
+		const style = ROW_STYLE[row.kind];
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			style: {
+				background: style.background,
+				color: style.color,
+				padding: "0 8px",
+				whiteSpace: "pre-wrap",
+				wordBreak: "break-word"
+			},
+			children: [
+				style.sign,
+				" ",
+				row.text
+			]
+		});
+	}
+	function DiffView({ before, after }) {
+		const rows = diffLines(before, after);
+		const adds = rows.filter((r) => r.kind === "add").length;
+		const dels = rows.filter((r) => r.kind === "del").length;
+		if (adds === 0 && dels === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "diff-none",
+			style: muted,
+			children: "No changes between these two versions."
+		});
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 8
+			},
+			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				"data-testid": "diff-counts",
+				style: {
+					fontSize: 12,
+					color: "var(--text-muted)"
+				},
+				children: [
+					adds,
+					" ",
+					adds === 1 ? "line" : "lines",
+					" added, ",
+					dels,
+					" removed.",
+					" ",
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						style: mono$1,
+						children: "-"
+					}),
+					" is a line only the earlier version has,",
+					" ",
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						style: mono$1,
+						children: "+"
+					}),
+					" a line only the later one has."
+				]
+			}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				"data-testid": "diff-rows",
+				style: pane,
+				children: [rows.slice(0, MAX_ROWS).map((row, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(UnifiedRow, { row }, i)), rows.length > MAX_ROWS && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "diff-rows-capped",
+					style: {
+						padding: "4px 8px",
+						color: "var(--text-muted)"
+					},
+					children: [
+						"… ",
+						rows.length - MAX_ROWS,
+						" more rows are in the diff and not on screen. The counts above are the whole diff; this pane stops at ",
+						MAX_ROWS,
+						"."
+					]
+				})]
+			})]
+		});
+	}
+	/** A whole version: rendered markdown for a markdown file, preformatted otherwise. */
+	function WholeDocument({ name, text }) {
+		const frame = {
+			maxHeight: 480,
+			overflow: "auto",
+			border: "1px solid var(--border-hairline)",
+			borderRadius: "var(--radius-sm)",
+			padding: "8px 12px"
+		};
+		return /\.(md|markdown)$/i.test(name) ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "doc-markdown",
+			style: frame,
+			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Markdown, {
+				fontSize: 12.5,
+				children: text
+			})
+		}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+			"data-testid": "doc-plain",
+			style: {
+				...frame,
+				...mono$1,
+				fontSize: 11.5,
+				whiteSpace: "pre-wrap",
+				margin: 0
+			},
+			children: text
+		});
+	}
+	function DocumentHistory({ runId, document: doc, timeline, intact, legacy, selected, onSelect, onOpenTurn }) {
+		const { name, captured, original, steps, final } = doc;
+		const ids = original ? [
+			"original",
+			...steps.map((s) => s.turn),
+			...final ? ["final"] : []
+		] : [];
+		const current = ids.includes(selected) ? selected : "original";
+		const index = ids.indexOf(current);
+		const step = typeof current === "number" ? steps.find((s) => s.turn === current) ?? null : null;
+		const previous = step ? index > 1 ? steps[index - 2] : original : null;
+		const versions = !name || !captured || !original ? [] : step && previous ? [previous, step] : current === "final" && final ? [final] : [original];
+		const unreadable = versions.find((v) => v.bytes === null);
+		const { copies, failures } = useCopies(runId, unreadable ? [] : versions);
 		const shell = {
 			background: "var(--surface-card)",
 			border: "1px solid var(--border-hairline)",
@@ -459,196 +729,190 @@
 			flexDirection: "column",
 			gap: 12
 		};
-		if (!original) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+		if (!name || !original) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 			style: shell,
 			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 				"data-testid": "diff-no-artifacts",
-				style: {
-					fontSize: 12.5,
-					color: "var(--text-muted)",
-					lineHeight: 1.5
-				},
+				style: muted,
 				children: legacy ? "This run predates the committee view: its reductions never recorded which file the committee was handed, so there is nothing to show either side of. The record does not say the file is gone — it says nothing about it." : "No artifact has been recorded for this run yet. The committee names the file it is reviewing on its first reduction; until then there is nothing to show either side of."
 			})
 		});
-		const name = (a) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
+		const fileName = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
 			style: {
-				fontFamily: "var(--font-mono)",
+				...mono$1,
 				fontSize: 11.5
 			},
-			children: a.name
+			children: name
+		});
+		const label = (id) => id === "original" ? "Original" : id === "final" ? "Final" : `Edit ${steps.findIndex((s) => s.turn === id) + 1} (${tNN(id)})`;
+		const go = (delta) => {
+			const next = ids[index + delta];
+			if (next !== void 0) onSelect(next);
+		};
+		const pending = versions.find((v) => !copies[cacheKey(v)] && failures[cacheKey(v)] === void 0);
+		const failed = versions.find((v) => failures[cacheKey(v)] !== void 0);
+		const texts = versions.map((v) => copies[cacheKey(v)]);
+		let body = null;
+		if (versions.length === 0) body = null;
+		else if (unreadable) body = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": "doc-unreadable",
+			style: note("danger"),
+			children: [
+				"Could not read ",
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
+					style: mono$1,
+					children: unreadable.path
+				}),
+				" on the server."
+			]
+		});
+		else if (pending) body = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "doc-loading",
+			style: muted,
+			children: "Loading…"
+		});
+		else if (failed) body = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": "doc-error",
+			style: note("danger"),
+			children: [
+				"Could not load ",
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
+					style: mono$1,
+					children: failed.path
+				}),
+				": ",
+				failures[cacheKey(failed)]
+			]
+		});
+		else body = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 8
+			},
+			children: [texts.some((t) => t.truncated) && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				"data-testid": "diff-truncated",
+				style: note("attention"),
+				children: "The server cut at least one version short at its read cap, so what follows is a prefix and any counts below are not the whole file."
+			}), texts.length === 2 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(DiffView, {
+				before: texts[0].text,
+				after: texts[1].text
+			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(WholeDocument, {
+				name,
+				text: texts[0].text
+			})]
 		});
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			style: shell,
 			children: [intact === false ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				"data-testid": "diff-original-changed",
-				style: {
-					padding: "8px 12px",
-					borderRadius: "var(--radius-sm)",
-					background: "var(--status-danger-tint)",
-					border: "1px solid var(--status-danger-edge)",
-					fontSize: 12.5,
-					lineHeight: 1.55,
-					color: "var(--text-primary)"
-				},
+				style: note("danger"),
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "The original CHANGED during this review." }),
 					" ",
-					name(original),
-					" is not byte-for-byte what the committee was handed: the playbook re-checked its digest at the decision and it did not match. The safety guarantee this card normally states did not hold on this run, so read the diff below against a file that moved under it, and treat every re-check in the verdict as unreliable."
+					fileName,
+					" is not byte-for-byte what the committee was handed: the playbook re-checked its digest at the decision and it did not match. The safety guarantee this card normally states did not hold on this run, so read every version below against a file that moved under it, and treat every re-check in the verdict as unreliable."
 				]
 			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				"data-testid": "diff-original-untouched",
-				style: {
-					padding: "8px 12px",
-					borderRadius: "var(--radius-sm)",
-					background: "var(--status-live-tint)",
-					border: "1px solid var(--status-live-edge)",
-					fontSize: 12.5,
-					lineHeight: 1.55,
-					color: "var(--text-primary)"
-				},
+				style: note("live"),
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "The original is never modified." }),
 					" ",
-					name(original),
+					fileName,
 					" ",
 					intact === true ? "is" : "is meant to be",
-					" byte-for-byte what the committee was handed; the playbook re-checks its digest at the decision and says so in the verdict. Every delegated edit lands in the revised copy,",
-					" ",
-					revised ? name(revised) : "which does not exist yet",
-					", which the committee offers as a recommendation, not a landed change. Reading the repository file and finding it unchanged does not mean the edits failed."
+					" byte-for-byte what the committee was handed; the playbook re-checks its digest at the decision and says so in the verdict. Every delegated edit lands in the revised copy, which the committee offers as a recommendation, not a landed change. Reading the repository file and finding it unchanged does not mean the edits failed."
 				]
-			}), !revised ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-				"data-testid": "diff-no-revised",
-				style: {
-					fontSize: 12.5,
-					color: "var(--text-muted)",
-					lineHeight: 1.5
-				},
-				children: "No edit has been delegated yet, so there is no revised copy to compare. The original stands as it was."
-			}) : rows === null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				style: {
-					display: "flex",
-					flexDirection: "column",
-					gap: 8,
-					alignItems: "flex-start"
-				},
-				children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-					type: "button",
-					disabled: loading,
-					onClick: load,
-					style: {
-						padding: "6px 14px",
-						fontSize: 12.5,
-						borderRadius: "var(--radius-sm)",
-						border: "1px solid var(--border-hairline)",
-						background: "var(--wash-subtle)",
-						color: "var(--text-primary)",
-						cursor: loading ? "default" : "pointer"
+			}), !captured ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				"data-testid": "doc-not-captured",
+				style: muted,
+				children: "Document snapshots were not captured for this run. It was reduced before the playbook kept a copy of each version, so there is nothing to step through."
+			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					role: "group",
+					"aria-label": "Versions of the document",
+					"data-testid": "doc-stepper",
+					tabIndex: 0,
+					onKeyDown: (e) => {
+						if (e.key === "ArrowLeft") {
+							e.preventDefault();
+							go(-1);
+						} else if (e.key === "ArrowRight") {
+							e.preventDefault();
+							go(1);
+						}
 					},
-					children: loading ? "Loading both copies…" : `Show the diff (${kb(original.bytes)} → ${kb(revised.bytes)})`
-				}), error && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					"data-testid": "diff-error",
 					style: {
-						padding: "8px 12px",
-						borderRadius: "var(--radius-sm)",
-						background: "var(--status-danger-tint)",
-						border: "1px solid var(--status-danger-edge)",
-						fontSize: 12.5,
+						display: "flex",
+						gap: 6,
+						alignItems: "center",
+						flexWrap: "wrap"
+					},
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							"data-testid": "step-prev",
+							disabled: index <= 0,
+							onClick: () => go(-1),
+							style: chip(false),
+							children: "‹ Prev"
+						}),
+						ids.map((id) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							"data-testid": `step-${id}`,
+							"aria-current": id === current ? "step" : void 0,
+							onClick: () => onSelect(id),
+							style: chip(id === current),
+							children: label(id)
+						}, String(id))),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							"data-testid": "step-next",
+							disabled: index >= ids.length - 1,
+							onClick: () => go(1),
+							style: chip(false),
+							children: "Next ›"
+						})
+					]
+				}),
+				steps.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": "doc-no-edits",
+					style: muted,
+					children: "No edit has been delegated yet. The original stands as it was."
+				}),
+				doc.dropped_delegation && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "doc-dropped",
+					style: note("attention"),
+					children: [
+						"The turn cap dropped a delegation",
+						doc.dropped_delegation.owner_turn !== null ? ` from ${tNN(doc.dropped_delegation.owner_turn)}` : "",
+						": ",
+						doc.dropped_delegation.action
+					]
+				}),
+				step && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StepContext, {
+					step,
+					timeline,
+					onOpenTurn
+				}),
+				current === "final" && final && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "final-label",
+					style: {
+						fontSize: 13,
+						fontWeight: 600,
 						color: "var(--text-primary)"
 					},
-					children: ["Could not load the two copies: ", error]
-				})]
-			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-				style: {
-					display: "flex",
-					flexDirection: "column",
-					gap: 8
-				},
-				children: [
-					cut && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-						"data-testid": "diff-truncated",
+					children: [FINAL_LABEL[final.ruling], /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 						style: {
-							padding: "8px 12px",
-							borderRadius: "var(--radius-sm)",
-							background: "var(--status-attention-tint)",
-							border: "1px solid var(--status-attention-edge)",
-							fontSize: 12.5,
-							color: "var(--text-primary)"
-						},
-						children: "The server cut at least one of the two copies short at its read cap, so this is a diff of two prefixes and the counts below are not the whole file."
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						"data-testid": "diff-counts",
-						style: {
-							fontSize: 12,
+							fontWeight: 400,
 							color: "var(--text-muted)"
 						},
-						children: [
-							adds,
-							" ",
-							adds === 1 ? "line" : "lines",
-							" added, ",
-							dels,
-							" removed — all of it in the revised copy.",
-							" ",
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-								style: { fontFamily: "var(--font-mono)" },
-								children: "-"
-							}),
-							" is a line only the original has, ",
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-								style: { fontFamily: "var(--font-mono)" },
-								children: "+"
-							}),
-							" a line only the revised copy has."
-						]
-					}),
-					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						"data-testid": "diff-rows",
-						style: {
-							fontFamily: "var(--font-mono)",
-							fontSize: 11.5,
-							lineHeight: 1.5,
-							maxHeight: 420,
-							overflow: "auto",
-							border: "1px solid var(--border-hairline)",
-							borderRadius: "var(--radius-sm)"
-						},
-						children: [rows.slice(0, MAX_ROWS).map((row, i) => {
-							const style = ROW_STYLE[row.kind];
-							return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-								style: {
-									background: style.background,
-									color: style.color,
-									padding: "0 8px",
-									whiteSpace: "pre-wrap",
-									wordBreak: "break-word"
-								},
-								children: [
-									style.sign,
-									" ",
-									row.text
-								]
-							}, i);
-						}), rows.length > MAX_ROWS && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-							"data-testid": "diff-rows-capped",
-							style: {
-								padding: "4px 8px",
-								color: "var(--text-muted)"
-							},
-							children: [
-								"… ",
-								rows.length - MAX_ROWS,
-								" more rows are in the diff and not on screen. The counts above are the whole diff; this pane stops at ",
-								MAX_ROWS,
-								"."
-							]
-						})]
-					})
-				]
-			})]
+						children: final.turn === null ? " — no edit applied, so this is the original" : ` — as the last applied edit (${tNN(final.turn)}) left it`
+					})]
+				}),
+				body
+			] })]
 		});
 	}
 	//#endregion
@@ -1044,8 +1308,7 @@
 			]
 		});
 	}
-	function Timeline({ timeline }) {
-		const [open, setOpen] = (0, react.useState)(/* @__PURE__ */ new Set());
+	function Timeline({ timeline, open, setOpen }) {
 		const allOpen = timeline.length > 0 && open.size === timeline.length;
 		const ordered = [...timeline].sort((a, b) => a.n - b.n);
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
@@ -1290,13 +1553,19 @@
 	}
 	function CommitteeView({ runId, data, variant }) {
 		const { EmptyState } = ds();
+		const [selected, setSelected] = (0, react.useState)("original");
+		const [open, setOpen] = (0, react.useState)(/* @__PURE__ */ new Set());
 		if (data.timeline.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
 			title: "Nothing said yet",
 			description: "The committee view fills in as each member takes the floor.",
 			icon: "inbox"
 		});
 		if (variant === "metrics") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, { data });
-		const legacy = data.timeline.length > 0 && data.artifacts.original === null || data.verdict !== null && data.progress.ended === null;
+		const legacy = data.timeline.length > 0 && data.document.name === null || data.verdict !== null && data.progress.ended === null;
+		const openTurn = (n) => {
+			setOpen((prev) => new Set(prev).add(n));
+			window.document.querySelector(`[data-testid="entry-${n}"]`)?.scrollIntoView?.({ block: "center" });
+		};
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "committee-view",
 			style: {
@@ -1313,16 +1582,24 @@
 					roster: data.roster,
 					legacy
 				}),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Timeline, { timeline: data.timeline }),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Timeline, {
+					timeline: data.timeline,
+					open,
+					setOpen
+				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Verdict, {
 					runId,
 					verdict: data.verdict
 				}),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ArtifactDiff, {
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(DocumentHistory, {
 					runId,
-					artifacts: data.artifacts,
+					document: data.document,
+					timeline: data.timeline,
 					intact: data.verdict?.artifact_intact ?? null,
-					legacy
+					legacy,
+					selected,
+					onSelect: setSelected,
+					onOpenTurn: openTurn
 				})
 			]
 		});

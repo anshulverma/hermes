@@ -26,7 +26,7 @@
 import { useState } from 'react';
 import { Markdown } from './host';
 import Verdict from './Verdict';
-import ArtifactDiff from './Diff';
+import DocumentHistory, { type DocumentBlock, type StepId } from './Diff';
 
 // --- the data, exactly as `CommitteePlaybook.view_data` returns it -----------
 
@@ -55,6 +55,8 @@ export type Entry = {
   badges: string[];
   /** The master-side re-check of a junior-IC edit; null on every other turn. */
   verified: boolean | null;
+  /** What the speaker said they stand for on this turn; null when they said nothing. */
+  stance: string | null;
 };
 
 export type Progress = {
@@ -78,17 +80,12 @@ export type CommitteeData = {
     dropped_delegation: string | null;
     dropped_floor_requests: string[];
   } | null;
-  artifacts: {
-    /**
-     * Null until some reduction names a path, which in phase `open` is never —
-     * `view_data`'s `_artifacts` returns `{"original": None, "revised": None}`
-     * for a run with no reductions, and that is exactly when the tab first
-     * appears. Typed honestly here so `tsc` forces the branch downstream
-     * instead of letting `original.name` throw into the error boundary.
-     */
-    original: { name: string; bytes: number } | null;
-    revised: { name: string; bytes: number } | null;
-  };
+  /**
+   * Every version of the document, by run-relative path. `name` is null until
+   * some reduction names the file, which in phase `open` is never -- exactly
+   * when the tab first appears -- so `tsc` forces that branch downstream.
+   */
+  document: DocumentBlock;
 };
 
 export type CommitteeViewProps = {
@@ -463,8 +460,16 @@ function TimelineEntry({
   );
 }
 
-function Timeline({ timeline }: { timeline: Entry[] }) {
-  const [open, setOpen] = useState<Set<number>>(new Set());
+function Timeline({
+  timeline,
+  open,
+  setOpen,
+}: {
+  timeline: Entry[];
+  /** Held by the view, so a step's `tNN` link can open an entry from outside. */
+  open: Set<number>;
+  setOpen: React.Dispatch<React.SetStateAction<Set<number>>>;
+}) {
   const allOpen = timeline.length > 0 && open.size === timeline.length;
 
   // Oldest first — see the module docstring.
@@ -669,6 +674,12 @@ function MeetingMetrics({ data }: { data: CommitteeData }) {
 
 export default function CommitteeView({ runId, data, variant }: CommitteeViewProps) {
   const { EmptyState } = ds();
+  // Above the empty-state return, as the rules of hooks require. Held here and
+  // not in the cards so a data tick keeps the selected step and the open turns.
+  // Verdict's Stamp never calls `refetch` for the same reason: that remounts
+  // the view (PlaybookView keys it on `reloads`) and would throw all of it away.
+  const [selected, setSelected] = useState<StepId>('original');
+  const [open, setOpen] = useState<Set<number>>(new Set());
 
   // The timeline alone, NOT `&& roster.length === 0`. `view_data`'s `_roster`
   // walks `cast.CAST`, so it returns all nine rows from the first poll onward
@@ -699,8 +710,14 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   // recorded" for a run that reviewed an 11,397-byte file. Neither signal is a
   // flag the master sets; both are shapes `reduce` can no longer produce.
   const legacy =
-    (data.timeline.length > 0 && data.artifacts.original === null) ||
+    (data.timeline.length > 0 && data.document.name === null) ||
     (data.verdict !== null && data.progress.ended === null);
+
+  // A step's `tNN` link: open that turn in the transcript and bring it on screen.
+  const openTurn = (n: number) => {
+    setOpen((prev) => new Set(prev).add(n));
+    window.document.querySelector(`[data-testid="entry-${n}"]`)?.scrollIntoView?.({ block: 'center' });
+  };
 
   return (
     // No `flex: 1; overflow: auto; padding: 20` here: PlaybookView.tsx already
@@ -712,15 +729,19 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     >
       <ProgressBar progress={data.progress} legacy={legacy} />
       <Roster roster={data.roster} legacy={legacy} />
-      <Timeline timeline={data.timeline} />
+      <Timeline timeline={data.timeline} open={open} setOpen={setOpen} />
       <Verdict runId={runId} verdict={data.verdict} />
-      {/* `intact` and not just `artifacts`: the diff card guarantees the
-          original was untouched, and only the verdict knows whether it was. */}
-      <ArtifactDiff
+      {/* `intact` as well as the document: the card guarantees the original
+          was untouched, and only the verdict knows whether it was. */}
+      <DocumentHistory
         runId={runId}
-        artifacts={data.artifacts}
+        document={data.document}
+        timeline={data.timeline}
         intact={data.verdict?.artifact_intact ?? null}
         legacy={legacy}
+        selected={selected}
+        onSelect={setSelected}
+        onOpenTurn={openTurn}
       />
     </div>
   );

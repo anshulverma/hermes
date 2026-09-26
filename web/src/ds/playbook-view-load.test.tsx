@@ -1,7 +1,7 @@
 // Side effect: publishes the design-system namespace on window, which is how
 // the view reads Card, Badge and EmptyState in the browser too.
 import '../ds';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 // The BUILT artifact, not the source. This test is only worth anything if it
 // exercises the same bytes the server hands the browser.
@@ -49,11 +49,21 @@ describe('playbook view UMD boundary', () => {
           action: null,
           badges: [],
           verified: null,
+          stance: null,
         },
       ],
       verdict: null,
-      artifacts: { original: null, revised: null },
+      document: {
+        name: 'proposal.md',
+        captured: true,
+        original: { path: 'doc/00-original.md', bytes: 12 },
+        steps: [],
+        final: null,
+        dropped_delegation: null,
+      },
     };
+    // The stepper fetches the original on mount; nothing here needs it to land.
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {})));
 
     render(<CommitteeView runId="run-2" data={data} refetch={() => {}} />);
 
@@ -65,5 +75,8 @@ describe('playbook view UMD boundary', () => {
     // ever runs.
     fireEvent.click(expandAll);
     expect(expandAll).toHaveTextContent('Collapse all');
+    // The document stepper rendered off the same host React.
+    expect(screen.getByTestId('step-original')).toHaveAttribute('aria-current', 'step');
+    vi.unstubAllGlobals();
   });
 });

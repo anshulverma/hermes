@@ -10,12 +10,17 @@
  * browser too.
  */
 import '../ds';
+import { useState } from 'react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setToken, clearToken } from '../api/auth';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
-import ArtifactDiff, { diffLines } from '../../../playbooks/committee/view/src/Diff';
+import DocumentHistory, {
+  diffLines,
+  type DocumentBlock,
+  type StepId,
+} from '../../../playbooks/committee/view/src/Diff';
 import Verdict from '../../../playbooks/committee/view/src/Verdict';
 
 const noop = () => {};
@@ -37,6 +42,16 @@ afterEach(() => {
 function show(data = run2) {
   return render(<CommitteeView runId="run-2" data={data} refetch={noop} />);
 }
+
+/** What `view_data` returns before any reduction names a file. */
+const EMPTY_DOC: DocumentBlock = {
+  name: null,
+  captured: false,
+  original: null,
+  steps: [],
+  final: null,
+  dropped_delegation: null,
+};
 
 describe('CommitteeView timeline', () => {
   it('reads oldest-first, which is the opposite of Outputs', () => {
@@ -295,7 +310,7 @@ describe('CommitteeView on a run that predates it', () => {
     progress: { ...run2.progress, ended: null },
     roster: run2.roster.map((p) => ({ ...p, stance: null })),
     timeline: run2.timeline.map((e) => ({ ...e, body: '' })),
-    artifacts: { original: null, revised: null },
+    document: EMPTY_DOC,
   };
 
   it('does not call a run that already ruled "still in session"', () => {
@@ -400,7 +415,7 @@ describe('CommitteeView with nothing yet', () => {
       ...run2,
       timeline: [],
       verdict: null,
-      artifacts: { original: null, revised: null },
+      document: EMPTY_DOC,
     });
 
     expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
@@ -787,20 +802,68 @@ describe('Verdict accept/reject', () => {
   });
 });
 
-const ARTIFACTS = {
-  original: { name: 'docs/specs/federation-future.md', bytes: 11397 },
-  revised: { name: 'runs/run-2/revised-federation-future.md', bytes: 19100 },
+/**
+ * A captured document with one edit of each provenance: t03 recorded and
+ * applied, t06 inferred and did not apply, t09 unknown, undelivered and never
+ * re-checked. Names, stances and prose come from run-2's timeline by turn.
+ */
+const DOC: DocumentBlock = {
+  name: 'federation-future.md',
+  captured: true,
+  original: { path: 'doc/00-original.md', bytes: 30 },
+  steps: [
+    { turn: 3, path: 'doc/t03.md', bytes: 31, delivered: true, verified: true,
+      owner_turn: 2, reviewer_turn: 1, provenance: 'recorded' },
+    { turn: 6, path: 'doc/t06.md', bytes: 45, delivered: true, verified: false,
+      owner_turn: 5, reviewer_turn: 4, provenance: 'inferred' },
+    { turn: 9, path: 'doc/t09.md', bytes: 45, delivered: false, verified: null,
+      owner_turn: null, reviewer_turn: null, provenance: 'unknown' },
+  ],
+  final: { path: 'doc/t03.md', turn: 3, bytes: 31, ruling: 'awaiting_ruling' },
+  dropped_delegation: null,
 };
 
-describe('ArtifactDiff', () => {
+const TEXT: Record<string, string> = {
+  'doc/00-original.md': '# Proposal\n\nold clause\ntail',
+  'doc/t03.md': '# Proposal\n\nnew clause\ntail',
+  'doc/t06.md': '# Proposal\n\nnew clause\nextra clause\ntail',
+  'doc/t09.md': '# Proposal\n\nnew clause\nextra clause\ntail',
+};
+
+const url = (path: string) => `/api/runs/run-2/view/artifact?path=${path}`;
+const pathOf = (u: string) => String(u).split('path=')[1];
+
+/** The view's own wiring, minus the rest of the view: it holds the selection. */
+function History({
+  doc = DOC,
+  start = 'original',
+  intact = true,
+  onOpenTurn = noop,
+}: {
+  doc?: DocumentBlock;
+  start?: StepId;
+  intact?: boolean | null;
+  onOpenTurn?: (n: number) => void;
+}) {
+  const [selected, setSelected] = useState<StepId>(start);
+  return (
+    <DocumentHistory
+      runId="run-2"
+      document={doc}
+      timeline={run2.timeline}
+      intact={intact}
+      selected={selected}
+      onSelect={setSelected}
+      onOpenTurn={onOpenTurn}
+    />
+  );
+}
+
+describe('DocumentHistory', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
-    fetchMock = vi.fn((url: string) =>
-      String(url).includes('which=original')
-        ? ok({ text: 'intro\nold clause\ntail' })
-        : ok({ text: 'intro\nnew clause\nextra clause\ntail' }),
-    );
+    fetchMock = vi.fn((u: string) => ok({ text: TEXT[pathOf(u)] }));
     vi.stubGlobal('fetch', fetchMock);
   });
 
@@ -808,145 +871,321 @@ describe('ArtifactDiff', () => {
     vi.unstubAllGlobals();
   });
 
-  it('states that the original is never modified, before any diff is loaded', () => {
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
+  // --- the seven card states, first match wins ---
+
+  it('says no artifact was recorded while the document names none', () => {
+    render(<History doc={EMPTY_DOC} intact={null} />);
+    expect(screen.getByTestId('diff-no-artifacts')).toHaveTextContent(
+      'No artifact has been recorded for this run yet',
+    );
+    expect(screen.queryByTestId('diff-original-untouched')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('says snapshots were not captured, and fetches nothing', () => {
+    render(<History doc={{ ...DOC, captured: false }} />);
+    expect(screen.getByTestId('doc-not-captured')).toHaveTextContent(
+      'Document snapshots were not captured for this run.',
+    );
+    expect(screen.queryByTestId('doc-stepper')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('shows the original and says no edit was delegated when there are no steps', async () => {
+    render(<History doc={{ ...DOC, steps: [], final: null }} />);
+    expect(screen.getByTestId('doc-no-edits')).toHaveTextContent(
+      'No edit has been delegated yet. The original stands as it was.',
+    );
+    expect(await screen.findByTestId('doc-markdown')).toHaveTextContent('old clause');
+    expect(fetchMock).toHaveBeenCalledWith(url('doc/00-original.md'), expect.anything());
+  });
+
+  it('an unreadable step says Could not read, never No edit has been delegated yet', () => {
+    const doc = { ...DOC, steps: DOC.steps.map((s) => (s.turn === 3 ? { ...s, bytes: null } : s)) };
+    render(<History doc={doc} start={3} />);
+    expect(screen.getByTestId('doc-unreadable')).toHaveTextContent(
+      'Could not read doc/t03.md on the server.',
+    );
+    expect(screen.queryByText(/No edit has been delegated yet/)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('says so about an unreadable baseline, rather than diffing against an older version', () => {
+    const doc = { ...DOC, steps: DOC.steps.map((s) => (s.turn === 3 ? { ...s, bytes: null } : s)) };
+    render(<History doc={doc} start={6} />);
+    expect(screen.getByTestId('doc-unreadable')).toHaveTextContent(
+      'Could not read doc/t03.md on the server.',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('says Loading… while a version is on its way', () => {
+    fetchMock.mockImplementation(() => new Promise(() => {}));
+    render(<History start={3} />);
+    expect(screen.getByTestId('doc-loading')).toHaveTextContent('Loading…');
+  });
+
+  it('reports a failed fetch with its path and the server detail', async () => {
+    fetchMock.mockImplementation((u: string) =>
+      pathOf(u) === 'doc/t03.md'
+        ? Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ detail: 'gone' }) })
+        : ok({ text: TEXT[pathOf(u)] }),
+    );
+    render(<History start={3} />);
+    expect(await screen.findByTestId('doc-error')).toHaveTextContent('Could not load doc/t03.md: gone');
+  });
+
+  it('warns when the server cut a version short at its read cap', async () => {
+    fetchMock.mockImplementation((u: string) =>
+      ok({ text: TEXT[pathOf(u)], truncated: pathOf(u) === 'doc/t03.md' }),
+    );
+    render(<History start={3} />);
+    expect(await screen.findByTestId('diff-truncated')).toHaveTextContent('read cap');
+  });
+
+  // --- the invariant it leads with ---
+
+  it('states that the original is never modified, in the past tense once checked', () => {
+    render(<History intact={true} />);
     const banner = screen.getByTestId('diff-original-untouched');
     expect(banner).toHaveTextContent('The original is never modified');
-    expect(banner).toHaveTextContent('docs/specs/federation-future.md');
-    expect(banner).toHaveTextContent('runs/run-2/revised-federation-future.md');
+    expect(banner).toHaveTextContent('federation-future.md is byte-for-byte');
+    expect(banner).toHaveTextContent('Every delegated edit lands in the revised copy');
     expect(banner).toHaveTextContent('a recommendation, not a landed change');
   });
 
-  it('says a delegated edit lands in the revised copy, not that it landed', () => {
-    // WB-I2, and finding 3.2's defect reprinted in the UI: the past tense is a
-    // claim about THIS run's outcome, and the e2e screenshot printed it
-    // directly under `turn 07 · junior_ic DID NOT APPLY`.
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
-    const banner = screen.getByTestId('diff-original-untouched');
-    expect(banner).toHaveTextContent('Every delegated edit lands in the revised copy');
-    expect(banner).not.toHaveTextContent('landed in the revised copy');
-  });
-
   it('does not promise byte-for-byte before a decision has re-checked it', () => {
-    // null is "nothing has checked", which is not "yes". The design rule is
-    // still true and still worth saying; the measurement is not in yet.
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={null} />);
+    render(<History intact={null} />);
     const banner = screen.getByTestId('diff-original-untouched');
     expect(banner).toHaveTextContent('is meant to be byte-for-byte');
     expect(banner).not.toHaveTextContent('federation-future.md is byte-for-byte');
   });
 
-  it('does not fetch either artifact until asked', () => {
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: /show the diff/i })).toHaveTextContent(
-      '11.1 KB → 18.7 KB',
-    );
+  // --- the stepper ---
+
+  it('lists Original, one Edit per step and Final, and opens on Original', () => {
+    render(<History />);
+    expect(screen.getByTestId('step-original')).toHaveTextContent('Original');
+    expect(screen.getByTestId('step-3')).toHaveTextContent('Edit 1 (t03)');
+    expect(screen.getByTestId('step-6')).toHaveTextContent('Edit 2 (t06)');
+    expect(screen.getByTestId('step-9')).toHaveTextContent('Edit 3 (t09)');
+    expect(screen.getByTestId('step-final')).toHaveTextContent('Final');
+    expect(screen.getByTestId('step-original')).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByTestId('step-3')).not.toHaveAttribute('aria-current');
   });
 
-  it('fetches both sides and renders the changed lines', async () => {
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
-    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
+  it('moves with Prev, Next and the arrow keys on the focused stepper', () => {
+    render(<History />);
+    expect(screen.getByTestId('step-prev')).toBeDisabled();
+    fireEvent.click(screen.getByTestId('step-next'));
+    expect(screen.getByTestId('step-3')).toHaveAttribute('aria-current', 'step');
+    fireEvent.keyDown(screen.getByTestId('doc-stepper'), { key: 'ArrowRight' });
+    expect(screen.getByTestId('step-6')).toHaveAttribute('aria-current', 'step');
+    fireEvent.keyDown(screen.getByTestId('doc-stepper'), { key: 'ArrowLeft' });
+    expect(screen.getByTestId('step-3')).toHaveAttribute('aria-current', 'step');
+    fireEvent.click(screen.getByTestId('step-prev'));
+    expect(screen.getByTestId('step-original')).toHaveAttribute('aria-current', 'step');
+  });
 
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        '/api/runs/run-2/view/artifact?which=original',
-        expect.anything(),
-      ),
-    );
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/runs/run-2/view/artifact?which=revised',
-      expect.anything(),
-    );
+  it('keeps the selected step by id when a data tick appends a step', () => {
+    const { rerender } = render(<History />);
+    fireEvent.click(screen.getByTestId('step-6'));
+    const more = {
+      ...DOC,
+      steps: [...DOC.steps, { ...DOC.steps[0], turn: 12, path: 'doc/t12.md' }],
+    };
+    rerender(<History doc={more} />);
+    expect(screen.getByTestId('step-6')).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByTestId('step-12')).toHaveTextContent('Edit 4 (t12)');
+  });
 
+  // --- what is fetched, and when ---
+
+  it('fetches only what the selected step shows: the previous version and its own', async () => {
+    render(<History />);
+    await screen.findByTestId('doc-markdown');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(url('doc/00-original.md'), expect.anything());
+
+    fireEvent.click(screen.getByTestId('step-6'));
+    await screen.findByTestId('diff-rows');
+    expect(fetchMock).toHaveBeenCalledWith(url('doc/t03.md'), expect.anything());
+    expect(fetchMock).toHaveBeenCalledWith(url('doc/t06.md'), expect.anything());
+    expect(fetchMock).not.toHaveBeenCalledWith(url('doc/t09.md'), expect.anything());
+  });
+
+  it('caches by path and size, and fetches a version again when its size changes', async () => {
+    const { rerender } = render(<History start={3} />);
+    await screen.findByTestId('diff-rows');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    fireEvent.click(screen.getByTestId('step-original'));
+    fireEvent.click(screen.getByTestId('step-3'));
+    await screen.findByTestId('diff-rows');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const retaken = { ...DOC, steps: DOC.steps.map((s) => (s.turn === 3 ? { ...s, bytes: 99 } : s)) };
+    rerender(<History doc={retaken} start={3} />);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(fetchMock).toHaveBeenLastCalledWith(url('doc/t03.md'), expect.anything());
+  });
+
+  // --- an edit step ---
+
+  it('shows an edit as the diff from the previous version to this one, with APPLIED', async () => {
+    render(<History start={3} />);
     const rows = await screen.findByTestId('diff-rows');
     expect(rows).toHaveTextContent('- old clause');
     expect(rows).toHaveTextContent('+ new clause');
-    expect(rows).toHaveTextContent('+ extra clause');
-    expect(screen.getByTestId('diff-counts')).toHaveTextContent(
-      '2 lines added, 1 removed — all of it in the revised copy',
+    expect(screen.getByTestId('diff-counts')).toHaveTextContent('1 line added, 1 removed');
+    expect(screen.getByTestId('step-verdict')).toHaveTextContent('re-check: APPLIED');
+  });
+
+  it('takes the verdict from verified alone and shows the diff whatever it says', async () => {
+    render(<History start={6} />);
+    expect(await screen.findByTestId('diff-rows')).toHaveTextContent('+ extra clause');
+    expect(screen.getByTestId('step-verdict')).toHaveTextContent('DID NOT APPLY');
+
+    fireEvent.click(screen.getByTestId('step-9'));
+    expect(screen.getByTestId('step-verdict')).toHaveTextContent('re-check not recorded');
+  });
+
+  it('says No changes between these two versions for identical text', async () => {
+    render(<History start={9} />);
+    expect(await screen.findByTestId('diff-none')).toHaveTextContent(
+      'No changes between these two versions.',
     );
   });
 
-  it('says "1 line added", not "1 lines added"', async () => {
-    // 9.10 / WB-m7, visible in the e2e screenshot.
-    fetchMock.mockImplementation((url: string) =>
-      String(url).includes('which=original') ? ok({ text: 'a\nc' }) : ok({ text: 'a\nb\nc' }),
+  it('names who raised it and their stance, the delegation and the confirmation, each linked', () => {
+    const onOpenTurn = vi.fn();
+    render(<History start={3} onOpenTurn={onOpenTurn} />);
+    expect(screen.getByTestId('step-raised')).toHaveTextContent(
+      'raised by Dana Whitfield — Position: defer.',
     );
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
-    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
+    expect(screen.getByTestId('step-delegated')).toHaveTextContent(
+      'delegated: Rewrite §2 "When to reach for it"',
+    );
+    expect(screen.getByTestId('step-confirmed')).toHaveTextContent('Rewrote §2 into two triggers');
+    expect(screen.queryByTestId('step-provenance')).toBeNull();
 
-    expect(await screen.findByTestId('diff-counts')).toHaveTextContent('1 line added, 0 removed');
+    fireEvent.click(screen.getByTestId('goto-t01'));
+    fireEvent.click(screen.getByTestId('goto-t02'));
+    fireEvent.click(screen.getByTestId('goto-t03'));
+    expect(onOpenTurn.mock.calls).toEqual([[1], [2], [3]]);
+  });
+
+  it('says a link was inferred from turn order, and when who raised it was not recorded', () => {
+    render(<History start={6} />);
+    expect(screen.getByTestId('step-provenance')).toHaveTextContent('(inferred from turn order)');
+    expect(screen.getByTestId('step-raised')).toHaveTextContent('raised by Ruth Delgado');
+
+    fireEvent.click(screen.getByTestId('step-9'));
+    expect(screen.getByTestId('step-raised')).toHaveTextContent('who raised this was not recorded');
+    expect(screen.queryByTestId('step-delegated')).toBeNull();
+    expect(screen.getByTestId('step-confirmed')).toHaveTextContent('no turn delivered');
+  });
+
+  // --- Original and Final ---
+
+  it('renders a whole version as markdown for a markdown file, preformatted otherwise', async () => {
+    const { unmount } = render(<History />);
+    // The host Markdown renders a heading as a styled block, so the `#` is gone.
+    const md = await screen.findByTestId('doc-markdown');
+    expect(md).toHaveTextContent('Proposal');
+    expect(md).not.toHaveTextContent('# Proposal');
+    unmount();
+
+    render(<History doc={{ ...DOC, name: 'Makefile' }} />);
+    expect(await screen.findByTestId('doc-plain')).toHaveTextContent('# Proposal');
+  });
+
+  it.each([
+    ['in_session', 'Latest so far — the meeting is still in session'],
+    ['awaiting_ruling', 'Proposed — awaiting your ruling'],
+    ['accepted', 'Accepted'],
+    ['rejected', 'Rejected'],
+    ['no_ruling', 'The meeting ended without a ruling'],
+  ] as const)('labels Final by the ruling: %s', (ruling, label) => {
+    render(<History doc={{ ...DOC, final: { ...DOC.final!, ruling } }} start="final" />);
+    expect(screen.getByTestId('final-label')).toHaveTextContent(label);
+  });
+
+  it('shows Final as the last applied edit left it, or as the original when none applied', async () => {
+    const { unmount } = render(<History start="final" />);
+    expect(screen.getByTestId('final-label')).toHaveTextContent('as the last applied edit (t03) left it');
+    expect(await screen.findByTestId('doc-markdown')).toHaveTextContent('new clause');
+    unmount();
+
+    const none = { ...DOC, final: { path: 'doc/00-original.md', turn: null, bytes: 30, ruling: 'accepted' as const } };
+    render(<History doc={none} start="final" />);
+    expect(screen.getByTestId('final-label')).toHaveTextContent('no edit applied, so this is the original');
+    expect(await screen.findByTestId('doc-markdown')).toHaveTextContent('old clause');
+  });
+
+  it('notes a dropped delegation under the stepper, naming its owner turn when known', () => {
+    const { unmount } = render(
+      <History doc={{ ...DOC, dropped_delegation: { owner_turn: 20, action: 'Fold §9 into §8' } }} />,
+    );
+    expect(screen.getByTestId('doc-dropped')).toHaveTextContent(
+      'The turn cap dropped a delegation from t20: Fold §9 into §8',
+    );
+    expect(screen.queryByTestId('step-21')).toBeNull();
+    unmount();
+
+    render(<History doc={{ ...DOC, dropped_delegation: { owner_turn: null, action: 'Fold §9 into §8' } }} />);
+    expect(screen.getByTestId('doc-dropped')).toHaveTextContent(
+      'The turn cap dropped a delegation: Fold §9 into §8',
+    );
   });
 
   it('caps how many rows reach the DOM, and says it did', async () => {
-    // 9.6: `diffLines` is hard-bounded and fast; the RENDER is what does not
-    // scale — one <div> per line, measured at 20,001 nodes and 3.4 s to mount.
+    // `diffLines` is hard-bounded and fast; the RENDER is what does not scale.
     const big = Array.from({ length: 6000 }, (_, i) => `line ${i}`).join('\n');
-    fetchMock.mockImplementation((url: string) =>
-      String(url).includes('which=original') ? ok({ text: big }) : ok({ text: `${big}\nextra` }),
+    fetchMock.mockImplementation((u: string) =>
+      ok({ text: pathOf(u) === 'doc/00-original.md' ? big : `${big}\nextra` }),
     );
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
-    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
-
+    render(<History start={3} />);
     const rows = await screen.findByTestId('diff-rows');
     expect(rows.children).toHaveLength(5001); // 5000 rows plus the footer
     expect(screen.getByTestId('diff-rows-capped')).toHaveTextContent('1001 more rows');
     expect(screen.getByTestId('diff-counts')).toHaveTextContent('1 line added');
   });
+});
 
-  it('says so when the server cut one of the copies short', async () => {
-    // The `truncated` key the artifact route grew: a diff of two prefixes
-    // presented as a diff of two files is the same confident partial claim
-    // this card exists to stop.
-    fetchMock.mockImplementation((url: string) =>
-      String(url).includes('which=original')
-        ? ok({ text: 'intro\nold clause', truncated: true })
-        : ok({ text: 'intro\nnew clause', truncated: false }),
-    );
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
-    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
+describe('CommitteeView document stepper', () => {
+  const captured = { ...run2, document: DOC };
 
-    expect(await screen.findByTestId('diff-truncated')).toHaveTextContent('diff of two prefixes');
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn((u: string) =>
+      String(u).includes('/view/artifact') ? ok({ text: TEXT[pathOf(u)] }) : new Promise(() => {}),
+    ));
   });
 
-  it('claims nothing about truncation when neither copy was cut', async () => {
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
-    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
+  it("opens a step's linked turn in the transcript and brings it on screen", () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    show(captured);
+    fireEvent.click(screen.getByTestId('step-3'));
+    fireEvent.click(screen.getByTestId('goto-t02'));
 
-    await screen.findByTestId('diff-rows');
-    expect(screen.queryByTestId('diff-truncated')).toBeNull();
+    expect(
+      within(screen.getByTestId('entry-2')).getByRole('button', { expanded: true }),
+    ).toBeInTheDocument();
+    expect(scrolled).toHaveBeenCalled();
   });
 
-  it('reports a failed fetch instead of an empty diff', async () => {
-    fetchMock.mockImplementation(() =>
-      Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ detail: 'bad which' }) }),
+  it('keeps the selected step across a data tick', () => {
+    const { rerender } = show(captured);
+    fireEvent.click(screen.getByTestId('step-6'));
+    rerender(
+      <CommitteeView
+        runId="run-2"
+        data={{ ...captured, progress: { ...captured.progress, turn: 21 } }}
+        refetch={noop}
+      />,
     );
-    render(<ArtifactDiff runId="run-2" artifacts={ARTIFACTS} intact={true} />);
-    fireEvent.click(screen.getByRole('button', { name: /show the diff/i }));
-
-    expect(await screen.findByTestId('diff-error')).toHaveTextContent('bad which');
-  });
-
-  it('says there is no revised copy rather than showing an empty one', () => {
-    render(<ArtifactDiff runId="run-2" artifacts={{ original: ARTIFACTS.original, revised: null }} intact={null} />);
-    expect(screen.getByTestId('diff-no-revised')).toHaveTextContent(
-      'No edit has been delegated yet',
-    );
-    expect(screen.queryByRole('button', { name: /show the diff/i })).toBeNull();
-  });
-
-  it('survives an original nothing has named yet', () => {
-    // `_artifacts` returns {"original": None, "revised": None} when no reduction
-    // carries a path — which is every run in phase `open`, and `original.name`
-    // would throw straight into the error boundary. The whole view's empty state
-    // normally catches this, but the type says null, so the branch must exist.
-    render(<ArtifactDiff runId="run-2" artifacts={{ original: null, revised: null }} intact={null} />);
-    expect(screen.getByTestId('diff-no-artifacts')).toHaveTextContent(
-      'No artifact has been recorded for this run yet',
-    );
-    expect(screen.queryByTestId('diff-original-untouched')).toBeNull();
-    expect(screen.queryByRole('button', { name: /show the diff/i })).toBeNull();
+    expect(screen.getByTestId('step-6')).toHaveAttribute('aria-current', 'step');
   });
 });
 

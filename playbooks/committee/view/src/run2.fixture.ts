@@ -19,6 +19,7 @@
  * he is the only honest place to prove it.
  */
 import type { CommitteeData, Entry, Persona } from './CommitteeView';
+import type { DocumentBlock } from './Diff';
 
 /** role → [name, title], from `playbooks/committee/cast.py`. */
 const CAST: Record<string, [string, string]> = {
@@ -152,7 +153,32 @@ const timeline: Entry[] = TURNS.map(([n, role, badges, verified, body]) => ({
   action: ACTIONS[n] ?? null,
   badges,
   verified,
+  stance: STANCES[role]?.find((s) => s.turn === n)?.text ?? null,
 }));
+
+/**
+ * What `view_data` returns for run-2 today. It predates doc/ snapshots and was
+ * never backfilled, so no size is known and `captured` is false; its steps are
+ * placed by turn order (reviewer N-2, owner N-1), as `_provenance` does for
+ * reductions without the recorded keys.
+ */
+const runDocument: DocumentBlock = {
+  name: 'federation-future.md',
+  captured: false,
+  original: { path: 'doc/00-original.md', bytes: null },
+  steps: CHECKS.map((c) => ({
+    turn: c.turn,
+    path: `doc/t${String(c.turn).padStart(2, '0')}.md`,
+    bytes: null,
+    delivered: true,
+    verified: c.verified,
+    owner_turn: c.turn - 1,
+    reviewer_turn: c.turn - 2,
+    provenance: 'inferred' as const,
+  })),
+  final: { path: 'doc/t18.md', turn: 18, bytes: null, ruling: 'awaiting_ruling' },
+  dropped_delegation: null,
+};
 
 const roster: Persona[] = Object.keys(CAST).map((role) => ({
   role,
@@ -174,10 +200,7 @@ export const run2: CommitteeData = {
     dropped_delegation: null,
     dropped_floor_requests: [],
   },
-  artifacts: {
-    original: { name: 'federation-future.md', bytes: 11397 },
-    revised: { name: 'federation-future.revised.md', bytes: 19100 },
-  },
+  document: runDocument,
 };
 
 /**
@@ -236,6 +259,7 @@ export const edgeTurns: Entry[] = [
     action: null,
     badges: ['request_floor'],
     verified: null,
+    stance: null,
   },
   {
     n: 22,
@@ -246,6 +270,7 @@ export const edgeTurns: Entry[] = [
     action: null,
     badges: ['signals_only'],
     verified: null,
+    stance: null,
   },
   {
     n: 23,
@@ -258,6 +283,7 @@ export const edgeTurns: Entry[] = [
     action: null,
     badges: ['no_turn'],
     verified: null,
+    stance: null,
   },
   {
     n: 24,
@@ -268,5 +294,6 @@ export const edgeTurns: Entry[] = [
     action: null,
     badges: [],
     verified: false,
+    stance: null,
   },
 ];
