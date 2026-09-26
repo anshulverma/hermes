@@ -2334,14 +2334,117 @@ _BLOCK_VOCABULARY = [
     {"_ok": False},
 ]
 
-# The model ran 4000 fuzz iterations; 500 is what ships. Measured on this machine:
-# 4000 runs cost 0.081 s and 500 cost 0.008 s, against a 16 s suite. 500 still draws
-# each of the eight caps ~60 times, and the seed is fixed so the sample is the same
-# sample on every run -- the delegate/close defect showed up at max_turns=2 within
-# the first handful of iterations, as a dropped_delegation with turns to spare.
+# The model ran 4000 fuzz iterations; 500 is what ships. 500 still draws each cap
+# ~55 times, and the seed is fixed so the sample is the same sample on every run --
+# the delegate/close defect showed up at max_turns=2 within the first handful of
+# iterations, as a dropped_delegation with turns to spare.
 _FUZZ_RUNS = 500
 _FUZZ_SEED = 20260918
-_FUZZ_CAPS = [1, 2, 3, 5, 8, 13, 30, 31]
+# None is HERMES_COMMITTEE_MAX_TURNS unset: the chair's reduce resolves it to 2R+16.
+_FUZZ_CAPS = [None, 1, 2, 3, 5, 8, 13, 30, 31]
+_FUZZ_REPLAY = 25  # runs driven a second time from the seed, which must come out equal
+
+# Selection: every fuzz run opens with a random answer from each selector, reduced
+# through the real playbook (grade, retake, parse, resolve, _apply_selection), so a
+# run costs far more than the bare machine did: about 2 s for the 500 here, against
+# 0.02 s before. The seed and the count stay.
+_FUZZ_SELECTORS = ("owner", "manager", "senior_director")
+_FUZZ_KINDS = (
+    "valid", "junk", "overflow", "reserved", "missing", "violating",
+    "violating_undelivered", "flood",
+)
+# Eleven derived seats: slugs the library lacks, each with the title and the
+# rationale validate requires. With the nine library slugs that makes twenty, so an
+# overflow list of 13-20 valid seats can always be drawn. The last is as long as a
+# clipped seat gets: a 24-char slug and every field past its clip limit (dashes
+# included), so the seats the fuzz installs test the goal budget for real. Just
+# past the longest limit (RATIONALE_MAX), and only one such seat: validate cleans
+# every character before it clips, and the fuzz validates each list many times.
+_FUZZ_LONG = "stake — " * 26  # 208 characters
+_FUZZ_DERIVED = [
+    {"role": f"derived_{k}", "title": f"Derived stakeholder {k}",
+     "rationale": f"derived_{k} runs a system this plan changes"}
+    for k in range(1, 11)
+] + [{"role": "derived_" + "x" * 16, "rationale": _FUZZ_LONG, **dict.fromkeys(
+    ("name", "title", "altitude", "goal", "ambition", "stake", "lens"), _FUZZ_LONG)}]
+# 330 words of plain prose: over every speaker's cap, so voice retakes the take.
+# The fence is never measured, so the seat list itself costs no words.
+_FUZZ_WALL = ("We should seat the people who carry this plan from here. " * 30).strip()
+
+
+def _fuzz_answer(r):
+    """One selector's (kind, answer) for the fuzz, the answer in `_drive`'s shape.
+
+    A str answers every take, None is undelivered, and a list answers take k
+    with item k-1 (a take past its end is undelivered).
+    """
+    from playbooks.committee import selection
+
+    kind = r.choice(_FUZZ_KINDS)
+    pool = list(cast.LIBRARY) + _FUZZ_DERIVED
+    tag = selection.FENCE_TAG
+    if kind == "missing":
+        return kind, None
+    if kind == "junk":
+        malformed = {"seats": [1, None, "tl", {"role": 7}, {"role": "security", "rationale": 7}],
+                     "not_seated": [{"stakeholder": "Legal"}, "x"]}
+        return kind, r.choice((
+            "I have no list to give yet.",  # no fence: no_block
+            f'Here is my list.\n\n```{tag}\n["security"]\n```\n',  # not an object: unparseable
+            f'Here is my list.\n\n```{tag}\n{{"seats": "x"}}\n```\n',  # not a list: too_few
+            # an object of junk entries: no valid seat, too_few
+            f"Here is my list.\n\n```{tag}\n{json.dumps(malformed)}\n```\n",
+        ))
+    if kind == "reserved":  # fixed or reserved slugs only: validate ignores every one
+        reserved = sorted(selection.RESERVED)
+        return kind, _selection_answer(r.sample(reserved, r.randint(1, len(reserved))))
+    if kind == "overflow":  # 13-20 valid seats: the chair's list is cut to 12 reviewers
+        return kind, _selection_answer(
+            r.sample(pool, r.randint(selection.MAX_REVIEWERS + 1, len(pool))))
+    seats = r.sample(pool, r.randint(1, 10))  # 3-12 reviewers with the two fixed ones
+    if kind == "valid":
+        return kind, _selection_answer(seats)
+    if kind == "flood":  # past INVALID_MAX bad slugs and CONSIDERED_MAX notes
+        bad = [{"role": f"Bad Slug {k}", "rationale": "x"}
+               for k in range(r.randint(selection.INVALID_MAX + 1, 30))]
+        notes = [{"stakeholder": f"Stakeholder – {k}", "reason": "named in the plan",
+                  "represented_by": r.choice(("security", "tl", "senior_director", "nobody"))}
+                 for k in range(r.randint(selection.CONSIDERED_MAX + 1, 50))]
+        return kind, _selection_answer(seats + bad, not_seated=notes)
+    wall = _selection_answer(seats, prose=_FUZZ_WALL)
+    return kind, [wall, _selection_answer(seats) if kind == "violating" else None]
+
+
+def _fuzz_drive(r, max_turns, drawn):
+    """Drive one fuzz run: the drawn selector answers, then random meeting blocks from `r`.
+
+    Returns (state, seen, speakers, delivered, log, at_t01). `log` holds every
+    s-phase reduction. `at_t01` is snapshotted at t01, where next_phase has
+    popped exactly one reviewer, so `[current_role, *opening]` is the opening
+    round as the chair's reduce installed it; `_drive` returns only after the
+    meeting has drained `opening`.
+    """
+    at_t01, log = [], []
+
+    def script(phase, s):
+        if phase.startswith("t01-"):
+            at_t01.extend([s["current_role"], *s["opening"]])
+        block = {}
+        if r.random() < 0.35:
+            block["request_floor"] = True
+        if r.random() < 0.15:
+            block["delegate"] = True
+            block["action"] = "do the thing"
+        if r.random() < 0.06:
+            block["close"] = True
+        if r.random() < 0.10:
+            block["_ok"] = False
+        return block
+
+    _, _, s, seen, sp, ok = _drive(
+        script, max_turns=max_turns,
+        selection={role: answer for role, (_, answer) in drawn.items()}, reductions=log)
+    return s, seen, sp, ok, log, at_t01
 
 
 def test_every_three_turn_prefix_of_the_block_vocabulary_holds():
@@ -2362,32 +2465,132 @@ def test_every_three_turn_prefix_of_the_block_vocabulary_holds():
     assert checked == 125
 
 
-def test_seeded_fuzz_over_random_blocks_and_random_caps():
-    """500 seeded random runs, caps 1..31, every invariant on every run."""
+def test_seeded_fuzz_over_random_blocks_and_random_caps(monkeypatch):
+    """500 seeded random runs, every invariant on every run.
+
+    Each run opens with a random answer from each selector (valid, junk,
+    overflow, reserved-only, missing, violating, violating then undelivered,
+    a flood past the record caps) and a random cap (1..31, or unset), all
+    through the real reduce. On every run the fixed four are seated (AC2), the
+    committee has 3-12 reviewers (AC3), the opening round is exactly the
+    ratified reviewers, the cap holds, each stage retakes under its own name,
+    and no phase repeats, retakes included (AC7). A ticket id is
+    `<run>/<phase>`, so no ticket id repeats either. The final selection
+    reduction carries the committee the state runs, with no error (resolve
+    never raised); its considered list is capped and counted, never names a
+    seated role, and names only seated representatives; and every seat's
+    worst-case goal fits GOAL_MAX. The first runs replay identically, and
+    CAST and LIBRARY come out unchanged.
+    """
+    from playbooks.committee import selection
+
+    # the budget test's worst case: over-long charge, action and note, deep paths
+    deep = "/home/anshulverma/.hermes/runs/committee-20260918-000000/" + "d" * 100
+    paths = dict(artifact=f"{deep}/proposal-under-review.md", thread=f"{deep}/thread.md",
+                 revised=f"{deep}/revised/proposal-under-review.md")
+    bound = f"over the {selection.MAX_REVIEWERS}-seat bound"
+    pristine = json.dumps([cast.CAST, cast.LIBRARY], sort_keys=True)
     rng = random.Random(_FUZZ_SEED)
+    fixed = {"owner", "senior_director", "manager", "junior_ic"}
+    hit, runs = set(), []
     for iteration in range(_FUZZ_RUNS):
         max_turns = rng.choice(_FUZZ_CAPS)
-
-        def script(phase, s, r=rng):
-            block = {}
-            if r.random() < 0.35:
-                block["request_floor"] = True
-            if r.random() < 0.15:
-                block["delegate"] = True
-                block["action"] = "do the thing"
-            if r.random() < 0.06:
-                block["close"] = True
-            if r.random() < 0.10:
-                block["_ok"] = False
-            return block
-
+        drawn = {role: _fuzz_answer(rng) for role in _FUZZ_SELECTORS}
+        kinds = {role: kind for role, (kind, _) in drawn.items()}
         try:
-            _, _, s, seen, sp, ok = _drive(script, max_turns=max_turns)
-            check_invariants(s, seen, sp, max_turns=max_turns, delivered=ok)
+            s, seen, sp, ok, log, at_t01 = _fuzz_drive(rng, max_turns, drawn)
+            assert len(seen) == len(set(seen)), f"a phase repeated: {seen}"
+            for stage, role in enumerate(_FUZZ_SELECTORS, 1):
+                base = f"s{stage}-{role}"
+                takes = [p for p in seen if p == base or p.startswith(f"{base}-take")]
+                # a violating take 1 is retaken once, under its own stage's name
+                want = [base, f"{base}-take2"] if kinds[role].startswith("violating") else [base]
+                assert takes == want, f"stage {stage} took {takes}, want {want}"
+            assert [p for p in seen if p.startswith("decision")] == ["decision"]
+            assert fixed <= set(s["roster"]), f"a fixed seat is missing: {list(s['roster'])}"
+            assert 3 <= len(s["reviewers"]) <= 12, f"{len(s['reviewers'])} reviewers"
+            assert at_t01 == s["reviewers"], f"opening at t01 {at_t01} != {s['reviewers']}"
+            assert set(at_t01) <= set(s["roster"]), f"an unseated opener in {at_t01}"
+            cap = 2 * len(s["reviewers"]) + 16 if max_turns is None else max_turns
+            assert s["max_turns"] == cap, f"cap {s['max_turns']}, want {cap}"
+            check_invariants(s, seen, sp, max_turns=cap, delivered=ok,
+                             reviewers=s["reviewers"])
+
+            # One final selection reduction, carrying the committee the state
+            # runs, with no error: resolve never raised.
+            finals = [doc for _, doc in _logged(log, "selection") if doc["final"]]
+            assert len(finals) == 1, f"{len(finals)} final selection reductions"
+            final = finals[0]
+            assert final["error"] is None, final["error"]
+            assert [seat["role"] for seat in final["seated"]] == list(s["roster"])
+            assert final["reviewers"] == s["reviewers"]
+            # The caps (FIX_SA). A considered list at the cap is the first
+            # CONSIDERED_MAX of what an uncapped resolve over the same stages
+            # gives, the rest counted; a shorter one was cut by nothing.
+            considered = final["considered"]
+            if len(considered) < selection.CONSIDERED_MAX:
+                assert final["considered_dropped"] == 0
+            else:
+                with monkeypatch.context() as m:
+                    m.setattr(selection, "CONSIDERED_MAX", 10**6)
+                    whole = selection.resolve(s["stages"], cast.LIBRARY)["considered"]
+                assert considered == whole[:selection.CONSIDERED_MAX]
+                assert final["considered_dropped"] == len(whole) - selection.CONSIDERED_MAX
+            # Each stage read keeps its first INVALID_MAX invalid entries (a
+            # fallback reads stages 1-2 only); a list that short cuts none.
+            read = [st for st in s["stages"] if final["fallback"] is None or st["stage"] != 3]
+            assert final["invalid_dropped"] == sum(
+                max(0, len(selection.validate(st["doc"], cast.LIBRARY)[1]) - selection.INVALID_MAX)
+                for st in read if st["doc"] and len(st["doc"]["seats"]) > selection.INVALID_MAX)
+            for entry in considered:
+                key = entry["role"] or entry["stakeholder"].strip().lower()
+                assert key not in s["roster"], f"seated {key!r} is also considered"
+                assert entry["represented_by"] in (None, *s["roster"]), entry
+                assert entry["reason"] != bound or entry["represented_by"], entry  # Q4
+            record = json.dumps([final["seated"], considered], ensure_ascii=False)
+            assert "–" not in record and "—" not in record, "a dash was kept"
+            # every seat's goal, at its worst case, fits: take 1 and a retake
+            # that names its last take, with the seat's real image stem
+            for role in [*s["roster"], cast.CHAIR]:
+                for retake in (None, "r" * 5000):
+                    g = cast.goal(role, charge="c" * 5000, action="a" * 5000,
+                                  image=f"t99-{role}", retake=retake,
+                                  last_take=f"takes/t99-{role}-take2.md",
+                                  roster=s["roster"], **paths)
+                    assert len(g) < cast.GOAL_MAX, f"{role} retake={bool(retake)}: {len(g)}"
         except AssertionError as exc:
             raise AssertionError(
-                f"seed-iter {iteration} max_turns={max_turns}: {exc}"
+                f"seed-iter {iteration} max_turns={max_turns} selectors={kinds}: {exc}"
             ) from exc
+        runs.append((seen, [red.json for _, red in log]))
+        hit.add("unset cap" if max_turns is None else "explicit cap")
+        hit.add(f"{len(s['reviewers'])} reviewers")
+        hit.add(f"fallback {final['fallback']}")
+        for seat in s["roster"].values():
+            hit.update((seat["source"], seat["nominated_by"]))
+        if any(p.startswith("s") and "-take" in p for p in seen):
+            hit.add("select retake")
+        if final["considered_dropped"]:
+            hit.add("considered capped")
+        if final["invalid_dropped"]:
+            hit.add("invalid capped")
+
+    # Not vacuous: every path this fuzz exists for was driven at least once. A
+    # fallback seats five "default" nominees, and "derived" is a derived seat.
+    assert {"unset cap", "explicit cap", "derived", "default", "3 reviewers",
+            "12 reviewers", "select retake", "considered capped", "invalid capped",
+            "fallback None", "fallback chair_failed", "fallback no_block",
+            "fallback unparseable", "fallback too_few"} <= hit, sorted(hit)
+    # Deterministic: the first runs, drawn again from the seed, are the same
+    # runs, and no run left a mark on the cast's shared personas.
+    replay = random.Random(_FUZZ_SEED)
+    for iteration in range(_FUZZ_REPLAY):
+        max_turns = replay.choice(_FUZZ_CAPS)
+        drawn = {role: _fuzz_answer(replay) for role in _FUZZ_SELECTORS}
+        _, seen, _, _, log, _ = _fuzz_drive(replay, max_turns, drawn)
+        assert (seen, [red.json for _, red in log]) == runs[iteration], \
+            f"seed-iter {iteration} ran differently when replayed from the seed"
+    assert json.dumps([cast.CAST, cast.LIBRARY], sort_keys=True) == pristine
 
 
 # --- the four transport-path methods (spec §5.6) ---------------------------
