@@ -55,6 +55,11 @@ def _score(value: object) -> str:
     return NULL if value is None else str(value)
 
 
+def _printable(text: object) -> str:
+    """``text`` with every control character (ESC, CR, BEL...) as a space: worker text never drives the terminal."""
+    return "".join(c if c.isprintable() else " " for c in str(text))
+
+
 def _quote(dim: dict) -> str:
     """The dimension's first verified evidence quote, or ""."""
     return next((e.get("quote") or "" for e in dim.get("evidence") or []
@@ -161,17 +166,18 @@ def _render(body: dict, home: str, run: str) -> str:
             score, stale = score + "*", True
         rows.append([d, score, "judge" if judged else "deterministic",
                      labels.get(rubric.get(d), unlabelled) if judged else "",
-                     _quote(dim)[:QUOTE_COLS]])
-    flags = [f"{f.get('id')}@t{f['turn']:02d}" if isinstance(f.get("turn"), int) else str(f.get("id"))
+                     _printable(_quote(dim)[:QUOTE_COLS])])
+    flags = [_printable(f"{f.get('id')}@t{f['turn']:02d}" if isinstance(f.get("turn"), int)
+                        else f.get("id"))
              for f in body.get("flags") or [] if isinstance(f, dict)]
     judge = body.get("judge", {})
-    error = f" ({judge['error']})" if judge.get("error") else ""
+    error = f" ({_printable(judge['error'])})" if judge.get("error") else ""
     return "\n".join([
         f"target: {_label(home, run)}  eval run: {body.get('eval_run')}  rubric: {body.get('rubric_version')}",
         _table(rows),
         *([STALE_NOTE] if stale else []),
         "flags: " + (", ".join(flags) or "none"),
-        f"headline: {body.get('headline', '')}",
+        f"headline: {_printable(body.get('headline', ''))}",
         f"judge: {judge.get('status')}{error}",
     ])
 

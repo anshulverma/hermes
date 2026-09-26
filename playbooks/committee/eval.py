@@ -17,13 +17,16 @@ Stdlib-only.
 """
 from __future__ import annotations
 
+import bisect
 import difflib
 import errno
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
+import stat
 import statistics
 import sys
 import tempfile
@@ -533,6 +536,11 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _amount(value: object) -> bool:
+    """A cost or a token count: a finite number >= 0. json.loads reads NaN and -Infinity."""
+    return _is_number(value) and math.isfinite(value) and value >= 0
+
+
 def trace_totals(traces: list[bytes | str | None]) -> dict:
     """Cost and tokens over trace files' contents, one entry per expected trace (G4).
 
@@ -546,7 +554,9 @@ def trace_totals(traces: list[bytes | str | None]) -> dict:
     ``None`` is a trace that does not exist; a str (``engine.trace.read``) is
     read as its utf-8 bytes, so only ``\\n``/``\\r`` end a line. ``cost_usd`` is
     null unless there is at least one trace and every one has a cost; ``tokens``
-    is null when no trace was found. Malformed lines are skipped. Never raises.
+    is null when no trace was found. A total that is NaN, infinite or negative
+    is no cost, and such a token count counts 0, so no NaN is ever stored.
+    Malformed lines are skipped. Never raises.
     judge.reduce reuses this for the judge's own trace (Task 9).
     """
     tokens = dict.fromkeys(TOKEN_KEYS, 0)
@@ -572,7 +582,8 @@ def trace_totals(traces: list[bytes | str | None]) -> dict:
                 if line.get("hasUnknownModelCost") is True:
                     last_cost = None
                 elif _is_number(line.get("totalCostUSD")):
-                    last_cost = line["totalCostUSD"]
+                    # NaN, infinite or negative is no cost: never a smaller bill
+                    last_cost = line["totalCostUSD"] if _amount(line["totalCostUSD"]) else None
                 if isinstance(line.get("modelUsage"), dict):
                     model_usage = line["modelUsage"]
             elif line.get("type") == "assistant":
@@ -591,7 +602,7 @@ def trace_totals(traces: list[bytes | str | None]) -> dict:
                 continue
             for key, names in TOKEN_KEYS.items():
                 value = counts.get(names[pick])
-                tokens[key] += value if _is_number(value) else 0
+                tokens[key] += value if _amount(value) else 0
     return {
         "cost_usd": round(cost, 4) if traces and with_cost == len(traces) else None,
         "tokens": tokens if found else None,
@@ -847,6 +858,7 @@ _NUMBER = r"(\d+|" + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True)) + r")
 EDIT_CLAIM = re.compile(r"(?i)\b" + _NUMBER + r" edits? (landed|applied|were made)\b")
 # "Seven of the eight edits landed": the claim is the number before "of" (none: no claim).
 _OF_BEFORE = re.compile(r"(?i)(?:\b" + _NUMBER + r"\s+)?\bof( the| these| all)?\s+$")
+_OF_WINDOW = 64  # chars before a claim that _OF_BEFORE reads ("twenty-seven of these " is 22)
 # "Two edits applied only partially" counts no landed edits.
 _IN_PART_AFTER = re.compile(r"(?i)\s+(only\s+)?(partially|partly|in part)\b")
 FLAG_ORDER = (
@@ -872,7 +884,10 @@ def edit_claims(text: str) -> list[int]:
     for m in EDIT_CLAIM.finditer(text):
         if _IN_PART_AFTER.match(text, m.end()):
             continue
-        of = _OF_BEFORE.search(text, 0, m.start())
+        # A short window, not the whole prefix, so a line of repeated claims stays
+        # linear. ponytail: "twenty-seven of the" padded past 64 chars of spaces
+        # is misread; widen the window if a chair ever writes that.
+        of = _OF_BEFORE.search(text, max(0, m.start() - _OF_WINDOW), m.start())
         if of is None:
             claims.append(_number(m.group(1)))
         elif of.group(1):
@@ -1243,25 +1258,45 @@ def judge_goal(inputs: dict) -> str:
 
 # --- D6: parse the judge's answer, and verify every quote against inputs/ ------
 
-# Both fence lines stand alone: a ``` inside a JSON string can never close a
-# fence early and hand the win to a block echoed from the transcript.
-_FENCE_RE = re.compile(
-    r"^[ \t]*```[ \t]*" + re.escape(FENCE_TAG) + r"[ \t]*\n(.*?)\n[ \t]*```[ \t]*$",
-    re.DOTALL | re.IGNORECASE | re.MULTILINE)
 _WHERE = ("turn", "decision", "header", "original", "revised")
 _ENTRY_TEXT = {"turn": "body", "decision": "chair_prose", "header": "text"}
+
+
+def _fences(answer: str) -> list[str]:
+    """Every ``hermes-eval`` fence body in ``answer``, in order, in one pass over its lines.
+
+    Both fence lines stand alone: an opener is a line holding only ```hermes-eval
+    (spaces, tabs and the tag's case aside), and a fence closes at the next line
+    holding only ```. So a ``` inside a JSON string can never close a fence early
+    and hand the win to a block echoed from the transcript. An unclosed fence
+    yields nothing.
+    """
+    bodies: list[str] = []
+    body: list[str] | None = None
+    for line in answer.split("\n"):
+        mark = line.strip(" \t")
+        if body is None:
+            if mark.startswith("```") and mark[3:].lstrip(" \t").lower() == FENCE_TAG:
+                body = []
+        elif mark == "```":
+            bodies.append("\n".join(body))
+            body = None
+        else:
+            body.append(line)
+    return bodies
 
 
 def parse_answer(answer: str | None) -> dict | None:
     """The last ``hermes-eval`` fence whose body parses as a JSON object, or None.
 
     A fence opens on a line holding only ```hermes-eval and closes on a line
-    holding only ```. Walked in reverse, as research's verdict.parse does: a
-    restated answer wins, and a broken last fence falls back to the one before it.
+    holding only ``` (``_fences``). Walked in reverse, as research's
+    verdict.parse does: a restated answer wins, and a broken last fence falls
+    back to the one before it.
     """
     if not isinstance(answer, str):
         return None
-    for raw in reversed(_FENCE_RE.findall(answer)):
+    for raw in reversed(_fences(answer)):
         try:
             doc = json.loads(raw)
         except (ValueError, RecursionError):
@@ -1317,12 +1352,36 @@ def _entry_for(entries: object, where: str, turn: int | None) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
-def _entry_line(text: str | None, entry: dict, key: str) -> int | None:
-    """The first line of thread.md ``text`` in the entry's range holding ``key``, else its first line."""
+def _quote_line(lines: list[str], span: tuple[int, int], quote: str) -> int | None:
+    """The 1-based line in ``span`` where collapsed ``quote`` starts, or None.
+
+    The span's lines are collapsed and joined with single spaces, which is
+    ``_collapse`` of the span, and the match's offset is mapped back to the line
+    it falls in. So a quote that crosses a hard wrap still gets its line. When
+    the whole quote is not there (the thread renders a body a little
+    differently), its first 40 characters are looked for instead.
+    """
+    starts, parts, at = [], [], 0
+    for n in range(max(span[0], 1), min(span[1], len(lines)) + 1):
+        part = _collapse(lines[n - 1])
+        if part:
+            starts.append(at)
+            parts.append((n, part))
+            at += len(part) + 1
+    joined = " ".join(part for _, part in parts)
+    for probe in (quote, quote[:40]):
+        pos = joined.find(probe)
+        if pos >= 0:
+            return parts[bisect.bisect_right(starts, pos) - 1][0]
+    return None
+
+
+def _entry_line(text: str | None, entry: dict, quote: str) -> int | None:
+    """The thread.md line in the entry's range where ``quote`` starts, else its first line."""
     start, end = entry.get("line_start"), entry.get("line_end")
     if text is None or not isinstance(start, int) or not isinstance(end, int):
         return None
-    found = _find_line(_lines(text), (start, end), lambda line: key in _collapse(line))
+    found = _quote_line(_lines(text), (start, end), quote)
     return start if found is None else found
 
 
@@ -1333,10 +1392,10 @@ def verify_evidence(item: object, snap: dict) -> dict | None:
     least QUOTE_MIN_WORDS words and QUOTE_MIN_CHARS characters) is a substring
     of the place it cites: a turn's body, the chair prose or the header text
     from inputs/entries.json, or the whole inputs/ copy for "original"/"revised".
-    ``line`` is the first line holding the quote's first 40 characters
-    (thread.md within the entry's range, falling back to its first line; or the
-    copy), null when unverified or when inputs/ has no thread.md. None for a
-    malformed item, which the caller counts as rejected.
+    ``line`` is the line the quote starts on (``_quote_line``: thread.md within
+    the entry's range, falling back to its first line; or the copy), null when
+    unverified or when inputs/ has no thread.md. None for a malformed item,
+    which the caller counts as rejected.
     """
     if not isinstance(item, dict):
         return None
@@ -1349,19 +1408,18 @@ def verify_evidence(item: object, snap: dict) -> dict | None:
     out = {"turn": turn, "where": where, "quote": quote, "line": None, "verified": False}
     if len(quote) < QUOTE_MIN_CHARS or words(quote) < QUOTE_MIN_WORDS:
         return out
-    key = quote[:40]
     if where in ("original", "revised"):
         text = snap.get(where)
         if text is not None and quote in _collapse(text):
             lines = _lines(text)
             out["verified"] = True
-            out["line"] = _find_line(lines, (1, len(lines)), lambda line: key in _collapse(line))
+            out["line"] = _quote_line(lines, (1, len(lines)), quote)
         return out
     entry = _entry_for(snap.get("entries"), where, turn)
     text = entry.get(_ENTRY_TEXT[where]) if entry else None
     if isinstance(text, str) and quote in _collapse(text):
         out["verified"] = True
-        out["line"] = _entry_line(snap.get("thread"), entry, key)
+        out["line"] = _entry_line(snap.get("thread"), entry, quote)
     return out
 
 
@@ -1764,17 +1822,60 @@ def _eval_target(run: Run) -> dict | None:
 def _changed(digests: dict, base: str | None = None) -> list[str]:
     """Every recorded file that no longer hashes to its sha256, as a path string.
 
-    ``thread.digest`` is "" for a file that has gone, so a deleted copy counts as
-    changed. A relative key resolves against ``base`` (the inputs directory).
+    Read through ``thread.read_regular`` (O_NOFOLLOW, O_NONBLOCK), so a FIFO
+    swapped in never blocks judge.reduce. Anything it refuses (gone, a symlink,
+    a FIFO, a directory) counts as changed. A relative key resolves against
+    ``base`` (the inputs directory).
     """
     out = []
     for key, want in sorted(digests.items()):
         p = Path(key)
         if base and not p.is_absolute():
             p = Path(base) / p
-        if thread.digest(p) != want:
+        data = thread.read_regular(p)
+        if data is None or hashlib.sha256(data).hexdigest() != want:
             out.append(str(p))
     return out
+
+
+def target_state(home: str, run_id: str) -> dict:
+    """What judge.reduce re-checks beyond the copied files: ``{"rows", "files"}``, sha256 each.
+
+    ``rows`` covers the target's rows read over mode=ro: runs.created_at, each
+    reduction's (id, kind, json) and its attempts, or is None when queue.db
+    cannot be read. review_state is left out, so a ruling during the eval is
+    no change. ``files`` covers a listing of runs/<run>/ (relative name, file
+    type, size; a directory's size is left out), minus eval.json and its temp
+    files, which are the eval's own write. Never raises.
+    """
+    rows = None
+    try:
+        conn = connect_ro(home)
+        if conn is not None:
+            with closing(conn):
+                rows = [[tuple(r) for r in conn.execute(sql, (run_id,))] for sql in (
+                    "SELECT created_at FROM runs WHERE id = ?",
+                    "SELECT id, kind, json FROM reductions WHERE run_id = ? ORDER BY id",
+                    "SELECT a.* FROM attempts a JOIN tickets t ON a.ticket_id=t.id"
+                    " WHERE t.run_id=? ORDER BY a.id",
+                )]
+    except sqlite3.Error:
+        rows = None
+    run_dir = Path(home) / "runs" / run_id
+    listing = []
+    for root, dirs, files in os.walk(run_dir):  # a symlinked directory is listed, never entered
+        for name in dirs + files:
+            rel = os.path.relpath(os.path.join(root, name), run_dir)
+            if rel == "eval.json" or rel.startswith(".eval.json."):
+                continue
+            try:
+                info = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            kind = stat.S_IFMT(info.st_mode)
+            listing.append((rel, kind, None if stat.S_ISDIR(info.st_mode) else info.st_size))
+    return {"rows": None if rows is None else hashlib.sha256(repr(rows).encode()).hexdigest(),
+            "files": hashlib.sha256(repr(sorted(listing)).encode()).hexdigest()}
 
 
 def _target_json(t: Target) -> dict:
@@ -1933,6 +2034,7 @@ class CommitteeEvalPlaybook:
             reason = validate_target(home, run_id)
             if reason:
                 return {"target": partial, "error": reason}
+            state = target_state(home, run_id)  # before the read: a change during it shows too
             measured = measure_target(home, run_id)
             t = measured["target"]
             versions = dimension_versions()
@@ -1947,6 +2049,7 @@ class CommitteeEvalPlaybook:
             "legacy": t.legacy,
             "digests": written["digests"],
             "inputs_digests": written["inputs_digests"],
+            "target_state": state,
             "inputs": written["inputs"],
             "rubric": versions,
             "rubric_version": version,
@@ -1960,8 +2063,9 @@ class CommitteeEvalPlaybook:
     def _judge(self, run: Run, findings: list[Finding]) -> list[Reduction]:
         """Re-hash, score and pick a status, then write eval.json and one ledger line (D6, D7).
 
-        It reads only the eval_target reduction, inputs/ and this run's own traces,
-        so a fresh process can re-reduce it. A second reduce appends a second
+        It reads only the eval_target reduction, inputs/, this run's own traces,
+        and (read-only, for the re-hash) the target's sources, rows and run
+        directory listing, so a fresh process can re-reduce it. A second reduce appends a second
         ledger line with the same eval_run, which readers dedupe. Once measure has
         succeeded, every status writes, so a failed judge keeps the deterministic half.
         """
@@ -1973,6 +2077,13 @@ class CommitteeEvalPlaybook:
         # a quote planted in an inputs/ copy is never even read.
         changed = (_changed(et.get("digests") or {})
                    + _changed(et.get("inputs_digests") or {}, inputs.get("dir")))
+        pinned = et.get("target_state")
+        if isinstance(pinned, dict):  # an eval_target measured before this key had none
+            home, run_id = et["target"]["home"], et["target"]["run"]
+            now = target_state(home, run_id)
+            changed += [where for key, where in (("rows", f"{home}/queue.db"),
+                                                 ("files", f"{home}/runs/{run_id}"))
+                        if now[key] != pinned.get(key)]
         answers = [f.json.get("answer") for f in findings or () if isinstance(f.json, dict)]
         answer = next((a for a in reversed(answers) if isinstance(a, str) and a.strip()), None)
         parsed = None if changed else parse_answer(answer)

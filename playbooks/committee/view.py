@@ -22,6 +22,7 @@ Stdlib-only.
 from __future__ import annotations
 
 import json
+import math
 import os
 import stat
 from pathlib import Path
@@ -479,8 +480,10 @@ def _evaluation(run_id: str) -> dict | None:
         return {
             "state": "ok",
             "rubric_version": _str(body.get("rubric_version")),
+            # Finite only: json.loads reads NaN and 1e999, and the route's
+            # allow_nan=False serialiser would turn them into a 500 on every poll.
             "evaluated_at": evaluated_at if isinstance(evaluated_at, (int, float))
-            and not isinstance(evaluated_at, bool) else None,
+            and not isinstance(evaluated_at, bool) and math.isfinite(evaluated_at) else None,
             "headline": _str(body.get("headline")),
             "judge_status": _str(judge.get("status")),
             # Not in C7's key list, but its UI table shows "the judge status and

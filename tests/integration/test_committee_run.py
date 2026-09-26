@@ -945,6 +945,9 @@ def test_eval_failed_judge(eval_home, source_repo, artifact, local_site, monkeyp
     assert body["judge"]["status"] == "failed"
     dims = body["dimensions"]
     assert all(dims[dim]["score"] is None for dim in committee_eval.JUDGE_DIMS)
+    # Each judge dimension says why it is null: the failure, not a parse error.
+    assert body["judge"]["error"] == "the judge returned no result (driver_failed or timeout)"
+    assert all(dims[dim]["error"] == body["judge"]["error"] for dim in committee_eval.JUDGE_DIMS)
     assert all(isinstance(dims[dim]["score"], int) for dim in committee_eval.DETERMINISTIC_DIMS)
     lines = committee_eval.ledger_path(home).read_text().splitlines()
     assert [json.loads(line)["judge_status"] for line in lines] == ["failed"]
@@ -956,41 +959,64 @@ def test_eval_failed_judge(eval_home, source_repo, artifact, local_site, monkeyp
     assert after == files
 
 
-def test_eval_detects_source_write(eval_home, source_repo, artifact, local_site, monkeypatch):
+def test_eval_detects_source_write(
+    eval_home, source_repo, artifact, local_site, monkeypatch, tmp_path
+):
     """T24: a judge that writes what it was told only to read is caught.
 
-    It writes once into the SOURCE (the target's thread.md), and once into its
-    own inputs/ copy (entries.json, the file its quotes are verified against):
-    tampering with the copy is detected too. Either way, judge.reduce's re-hash
-    flags target_changed_during_eval, nulls the judge scores and fails the eval
-    run, whatever the judge's answer said.
+    It writes into the SOURCE (the target's thread.md) and into its own inputs/
+    copy (entries.json, the file its quotes are verified against). It deletes a
+    source (the revised copy) and a copy (metrics.json). It swaps a copy for a
+    symlink to identical bytes, and it adds a file under the target's run
+    directory, which measure never copied. Each time judge.reduce's re-hash
+    flags target_changed_during_eval, nulls the judge scores with the failure
+    as their error, never reads the answer, and fails the eval run.
     """
     conn = eval_home
     target = _committee_target(conn, local_site, "committee-20260925-000024", monkeypatch)
     home = committee_eval.eval_home()
-    source = Path(home) / "runs" / target / "thread.md"
-    # _eval names its runs <target>-eval-<n>, so the second run's inputs/
-    # can be aimed at before that run exists.
-    copy = Path(home) / "runs" / f"{target}-eval-2" / "inputs" / "entries.json"
+    run_dir = Path(home) / "runs" / target
 
-    for written in (source, copy):
-        eval_run = _eval(conn, local_site, ScriptedJudgeAgent(write_to=str(written)), target)
-        assert written.read_text().endswith(PLANTED + "\n")  # the double really wrote
+    def copy(n, name):
+        # _eval names its runs <target>-eval-<n>, so a run's inputs/ can be aimed at
+        # before that run exists.
+        return Path(home) / "runs" / f"{target}-eval-{n}" / "inputs" / name
+
+    outside = tmp_path / "identical-entries.json"
+    cases = [  # (the judge's shell script and its args, the path the flag must name)
+        (None, run_dir / "thread.md"),
+        (None, copy(2, "entries.json")),
+        (('rm -f "$1"', run_dir / "revised" / "proposal.md"), run_dir / "revised" / "proposal.md"),
+        (('rm -f "$1"', copy(4, "metrics.json")), copy(4, "metrics.json")),
+        (('cp "$1" "$2" && rm -f "$1" && ln -s "$2" "$1"', copy(5, "entries.json"), outside),
+         copy(5, "entries.json")),
+        (('printf x > "$1"', run_dir / "doc" / "t99.md"), run_dir),
+    ]
+    for n, (script, flagged) in enumerate(cases, 1):
+        agent = (ScriptedJudgeAgent(write_to=str(flagged)) if script is None
+                 else ScriptedJudgeAgent(script=(script[0], *map(str, script[1:]))))
+        eval_run = _eval(conn, local_site, agent, target)
+        assert eval_run == f"{target}-eval-{n}"
+        if script is None:
+            assert flagged.read_text().endswith(PLANTED + "\n")  # the double really wrote
         assert _run_state(conn, eval_run) == "failed"
         (_, _, measured), (_, _, body) = _reductions(conn, eval_run)
         changed = [f for f in body["flags"] if f["id"] == "target_changed_during_eval"]
         assert len(changed) == 1, body["flags"]
         assert (changed[0]["turn"], changed[0]["line"], changed[0]["quote"]) == (None, None, "")
-        assert os.path.realpath(written) in {os.path.realpath(p) for p in changed[0]["paths"]}
+        assert os.path.realpath(flagged) in {os.path.realpath(p) for p in changed[0]["paths"]}, n
         assert body["judge"]["status"] == "failed"
-        assert all(body["dimensions"][dim]["score"] is None for dim in committee_eval.JUDGE_DIMS)
+        assert body["judge"]["evidence_rejected"] == 0
+        for dim in committee_eval.JUDGE_DIMS:  # never parsed, so never a planted quote read
+            doc = body["dimensions"][dim]
+            assert (doc["score"], doc["evidence"], doc["error"]) == (
+                None, [], body["judge"]["error"]), (n, dim)
         # Not a measure flag (D7): the deterministic block never carries it.
         assert all(f["id"] != "target_changed_during_eval" for f in measured["flags"])
 
-    assert eval_run == f"{target}-eval-2"
     assert json.loads(committee_eval.eval_json_path(home, home, target).read_text()) == body
     lines = committee_eval.ledger_path(home).read_text().splitlines()
-    assert [json.loads(line)["judge_status"] for line in lines] == ["failed", "failed"]
+    assert [json.loads(line)["judge_status"] for line in lines] == ["failed"] * len(cases)
 
 
 def test_eval_foreign_home_read_only(
@@ -1082,17 +1108,22 @@ class ScriptedJudgeAgent:
     ``write_to`` makes the worker append PLANTED to that path through ``sh -c``
     with positional args. This is the edit double's trick: the path and the
     text are never interpolated into the script. It stands in for a judge
-    writing what it was told only to read. Integrity is honoured as in
+    writing what it was told only to read. ``script`` runs any other such
+    ``sh -c`` script (a delete, a symlink swap) the same way. Integrity is honoured as in
     ScriptedCommitteeAgent: a ``payload_sha256`` mismatch is a contract_fail.
     """
 
     name = "scripted_judge"
 
-    def __init__(self, *, fail: bool = False, write_to: str | None = None):
+    def __init__(self, *, fail: bool = False, write_to: str | None = None,
+                 script: tuple[str, ...] | None = None):
         self.fail = fail
         self.write_to = write_to
+        self.script = script  # (sh script, *positional args): a delete or a swap
 
     def build_invocation(self, envelope: dict, driver) -> list[str]:
+        if self.script is not None:
+            return ["sh", "-c", self.script[0], "sh", *self.script[1:]]
         if self.write_to is None:
             return ["true"]
         return ["sh", "-c", 'printf "%s\\n" "$2" >> "$1"', "sh", self.write_to, PLANTED]

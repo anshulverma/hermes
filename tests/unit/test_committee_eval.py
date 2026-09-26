@@ -175,6 +175,20 @@ def test_voice_measure_is_linear_on_one_long_token():
         assert time.perf_counter() - start < 2.0
 
 
+def test_answer_and_claim_scans_are_linear():
+    """The master parses the judge's answer and scans the chair's prose: neither may go quadratic.
+
+    A judge stuck repeating an opener line, or a chair line repeating a claim,
+    must cost milliseconds, not the tens of seconds a rescan per match would.
+    """
+    start = time.perf_counter()
+    assert E.parse_answer("```hermes-eval\n" * 10_000) is None
+    assert time.perf_counter() - start < 2.0
+    start = time.perf_counter()
+    assert E.edit_claims("Seven edits landed. " * 3_000) == [7] * 3_000
+    assert time.perf_counter() - start < 2.0
+
+
 # --- the two real baselines, frozen (tests/data/committee-eval/) -------------
 # run-9 (~/.hermes) and run-2 (committee-spin/home), extracted once, read-only.
 # Tests build a throwaway home from them and never read ~/.hermes, /data or docs/.
@@ -830,6 +844,15 @@ def test_tokens_dedupe_and_cost_rules(tmp_path):
     free = trace_totals([jl(state(0))])
     assert (free["cost_usd"], free["with_cost"]) == (0.0, 1) and type(free["cost_usd"]) is float
     assert free["tokens"] == dict.fromkeys(a_tokens, 0) and free["tokens_source"] == "modelUsage"
+    # A NaN, infinite or negative total is no cost (fail closed: it never makes the bill
+    # look smaller), and such a token count counts 0, so no NaN reaches a reduction.
+    for bad in (float("nan"), float("inf"), float("-inf"), -10.0, -1):
+        got = trace_totals([jl(state(25.0)),
+                            jl(state(bad, opus={"outputTokens": bad, "inputTokens": 4})),
+                            jl(asst("m1", output_tokens=bad, input_tokens=3))])
+        assert (got["cost_usd"], got["with_cost"]) == (None, 1), bad
+        assert (got["tokens"]["output"], got["tokens"]["input"]) == (0, 7), bad
+        json.dumps(got, allow_nan=False)
     # a str trace (engine.trace.read returns str) reads as its utf-8 bytes, where only
     # \n and \r end a line: a U+2028 inside a JSON string never splits one
     line = json.dumps({**state(1.25, opus={"outputTokens": 2}), "note": "a\u2028b"},
@@ -1792,6 +1815,10 @@ def test_fence_injection_cannot_win(tmp_path):
     assert E.parse_answer("say ```hermes-eval\n" + body + "\n```") is None
     assert E.parse_answer("```hermes-eval\n" + body + "```") is None
     assert E.parse_answer("  ```hermes-eval \n" + body + "\n  ``` \nafter") == fake
+    assert E.parse_answer("``` Hermes-Eval\n" + body + "\n```") == fake
+    # Only a bare ``` closes: "```json" is body, so the fence runs on to the next bare one.
+    assert E.parse_answer("```hermes-eval\n" + body + "\n```trailing") is None
+    assert E.parse_answer("```hermes-eval\n" + body + "\n```json\n```") is None
 
 
 def test_quote_minimum_length(tmp_path):
@@ -1969,9 +1996,9 @@ def test_evidence_verification(tmp_path, monkeypatch):
 
     t1 = "A good design and a fundable one are different bars"
     assert ev(turn=1, where="turn", quote=t1) == ok("turn", t1, 21, turn=1)
-    # Whitespace collapses. These first 40 characters span two lines, so line is the heading.
+    # Whitespace collapses, and a quote that runs across lines gets the line it starts on.
     assert ev(turn=1, where="turn", quote="why we paid for this.\n\n  Here") == ok(
-        "turn", "why we paid for this. Here", 19, turn=1)
+        "turn", "why we paid for this. Here", 21, turn=1)
     seven = "and flagged every gap. Seven edits landed"
     assert ev(turn=None, where="decision", quote=seven) == ok("decision", seven, 820)
     charge = "Decide whether Hermes should fund the federation layer now"
@@ -1980,6 +2007,12 @@ def test_evidence_verification(tmp_path, monkeypatch):
     gate = "A trigger alone does not fund federation."
     assert ev(turn=None, where="original", quote=crews) == ok("original", crews, 46)
     assert ev(turn=None, where="revised", quote=gate) == ok("revised", gate, 50)
+    # A hard-wrapped copy: the quote's first 40 characters cross a line break, and it
+    # still gets the line it starts on ("Any" ends line 184; "Processes" ends line 250).
+    grace = "Any grace window shorter than the worker budget plus the lease margin"
+    shared = "Processes on the same host share it"
+    assert ev(turn=None, where="revised", quote=grace) == ok("revised", grace, 184)
+    assert ev(turn=None, where="revised", quote=shared) == ok("revised", shared, 250)
 
     def rejected(**item):
         got = ev(**item)
@@ -2067,6 +2100,76 @@ def test_evidence_verification(tmp_path, monkeypatch):
     assert E.verify_evidence({"turn": None, "where": "original", "quote": crews},
                              snap2)["verified"] is False
     assert E.judge_goal(inputs2).count("unavailable") == 2
+
+
+def test_rehash_never_blocks_or_follows(tmp_path):
+    """judge.reduce's re-hash reads through thread.read_regular: a FIFO swapped in for a
+    pinned file is a change and never blocks, a symlink to an identical copy is a
+    change, and so is a file that has gone."""
+    import threading
+
+    same = tmp_path / "same.md"
+    same.write_bytes(b"pinned\n")
+    want = hashlib.sha256(b"pinned\n").hexdigest()
+    fifo, link, gone = tmp_path / "fifo.md", tmp_path / "link.md", tmp_path / "gone.md"
+    os.mkfifo(fifo)
+    link.symlink_to(same)
+    out = []
+    worker = threading.Thread(daemon=True, target=lambda: out.append(
+        E._changed({str(p): want for p in (same, fifo, link, gone)})))
+    worker.start()
+    worker.join(10)
+    if worker.is_alive():  # a writer unblocks the stuck reader, so the process can exit
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(10)
+        pytest.fail("the re-hash blocked opening a FIFO")
+    assert out == [sorted(str(p) for p in (fifo, gone, link))]
+
+
+def test_target_state_sees_rows_and_files_not_rulings(tmp_path):
+    """judge.reduce also re-checks what measure never copies: the target's rows
+    (created_at; reductions' id, kind and json; attempts) and a listing of
+    runs/<run>/. A ruling or the eval's own eval.json is no change."""
+    home, run_id = build_home(tmp_path, "run-9")
+    h, run_dir = str(home), home / "runs" / run_id
+    base = E.target_state(h, run_id)
+    assert set(base) == {"rows", "files"} and all(re.fullmatch(r"[0-9a-f]{64}", v) for v in base.values())
+
+    def edit(sql, *args):
+        with closing(sqlite3.connect(str(home / "queue.db"))) as conn:
+            conn.execute(sql, args)
+            conn.commit()
+
+    edit("UPDATE reductions SET review_state = 'accepted', updated_at = updated_at + 1"
+         " WHERE run_id = ?", run_id)
+    edit("UPDATE runs SET state = 'done', updated_at = updated_at + 1 WHERE id = ?", run_id)
+    (run_dir / "eval.json").write_text("{}")
+    (run_dir / ".eval.json.x1y2").write_text("{}")  # write_eval_json's temp file
+    assert E.target_state(h, run_id) == base
+
+    edit("UPDATE reductions SET json = json || ' ' WHERE run_id = ? AND kind = 'decision'", run_id)
+    rows = E.target_state(h, run_id)
+    assert rows["rows"] != base["rows"] and rows["files"] == base["files"]
+    edit("INSERT INTO attempts (ticket_id, phase, host, attempt) SELECT a.ticket_id, a.phase,"
+         " a.host, 9 FROM attempts a JOIN tickets t ON a.ticket_id = t.id WHERE t.run_id = ? LIMIT 1",
+         run_id)
+    assert E.target_state(h, run_id)["rows"] not in (base["rows"], rows["rows"])
+
+    thread_md, t03 = run_dir / "thread.md", run_dir / "doc" / "t03.md"
+    seen = {base["files"]}
+    for change in (lambda: (run_dir / "doc" / "t99.md").write_text(""),          # a new file
+                   lambda: (run_dir / "new").mkdir(),                              # a new directory
+                   lambda: thread_md.write_bytes(thread_md.read_bytes() + b"x"),  # a new size
+                   lambda: (run_dir / "doc" / "t99.md").unlink(),                 # a file gone
+                   lambda: (shutil.copyfile(t03, tmp_path / "t03.md"), t03.unlink(),
+                            t03.symlink_to(tmp_path / "t03.md"))):                # now a symlink
+        change()
+        files = E.target_state(h, run_id)["files"]
+        assert files not in seen
+        seen.add(files)
+
+    (home / "queue.db").unlink()
+    assert E.target_state(h, run_id)["rows"] is None
 
 
 def test_inputs_thread_is_the_bytes_measured(tmp_path, monkeypatch):
@@ -2653,6 +2756,28 @@ def test_judge_reduce_statuses_and_fallbacks(tmp_path, monkeypatch):
     assert body["judge"]["status"] == "failed" and body["judge"]["error"].startswith("judge reduce: ")
 
 
+def test_judge_reduce_sees_a_changed_target_row(tmp_path, monkeypatch):
+    """A judge that edits the target's reductions in its queue.db is caught, though no
+    file measure copied has moved: target_changed_during_eval names the queue.db."""
+    from engine.models import Finding
+
+    (tmp_path / "r9").mkdir()
+    home, run_id = build_home(tmp_path / "r9", "run-9")
+    measured = _eval_measure(monkeypatch, tmp_path / "eval-home", home, run_id)
+    source = os.path.realpath(home)
+    assert measured.json["target_state"] == E.target_state(source, run_id)
+    with closing(sqlite3.connect(str(home / "queue.db"))) as conn:
+        conn.execute("UPDATE reductions SET json = json || ' ' WHERE run_id = ? AND kind = 'decision'",
+                     (run_id,))
+        conn.commit()
+    found = [Finding(run_id="run-100", ticket_id="run-100/judge", kind="result", json={"answer": "x"})]
+    (red,) = E.CommitteeEvalPlaybook().reduce(
+        _eval_run("judge", [measured]), "judge", found, SimpleNamespace(name="local"))
+    [flag] = [f for f in red.json["flags"] if f["id"] == "target_changed_during_eval"]
+    assert flag["paths"] == [f"{source}/queue.db"]
+    assert red.json["judge"]["status"] == "failed"
+
+
 def test_eval_playbook_has_no_view(tmp_path):
     """T21: committee-eval registers from the package, conforms, and has no view seam.
 
@@ -3104,3 +3229,19 @@ def test_show_cli(tmp_path, monkeypatch, capsys):
 
     assert eval_cli.main(["show", "run-8"]) == 1
     assert f"no eval.json for run-8: {E.eval_json_path(here, here, 'run-8')}" in capsys.readouterr().err
+
+    # Worker text never drives the terminal: every control character in a quote, the
+    # headline, the judge error or a flag id prints as a space.
+    spoof = "cut off\x1b[1A\r\x1b[2Kconcision 5\x07"
+    dims["concern_coverage"]["evidence"] = cite((spoof, True))
+    shown = dict(body, headline=spoof, flags=[{"id": "x\x1b[2Ky", "turn": None}],
+                 judge=dict(body["judge"], error=spoof))
+    same.write_text(json.dumps(shown), encoding="utf-8")
+    assert eval_cli.main(["show", "run-9"]) == 0
+    out = capsys.readouterr().out
+    assert not any(ch in out for ch in "\x1b\r\x07"), repr(out)
+    clean = "cut off [1A  [2Kconcision 5 "
+    assert [row[4] for row in _cli_rows(out) if row[0] == "concern_coverage"] == [clean.strip()]
+    lines = out.splitlines()
+    assert f"headline: {clean}" in lines and "flags: x [2Ky" in lines
+    assert f"judge: partial ({clean})" in lines

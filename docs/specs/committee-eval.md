@@ -284,6 +284,10 @@ entry per expected trace (None for a trace that does not exist).
   the fallback. `tokens_source` says which one each run used.
 - A missing key counts 0, a non-JSON line is skipped, and `tokens` is null when no trace was
   found.
+- Costs and token counts fail closed. A `totalCostUSD` that is NaN, infinite or negative (JSON
+  `NaN` and `-Infinity` parse in Python) means that trace has no cost, so it can never make the
+  bill look smaller. Such a token count counts 0, so no NaN reaches a reduction or eval.json.
+  judge.reduce's own cost goes through the same rule.
 
 **Flags** (`compute_flags(target, metrics)`) are computed by measure only, so the judge can
 neither add nor remove one. Each flag is `{id, turn, line, quote}`. They are ordered by this list,
@@ -312,7 +316,9 @@ then by turn, then by line (nulls last), and every `line` is null when thread.md
   record adds nothing.
   - A claim is a match of `EDIT_CLAIM`, `(?i)\b(<number>) edits? (landed|applied|were made)\b`.
   - Right after "N of (the|these|all)" the claim is N, the number before "of", so "Seven of the
-    eight edits landed" claims seven. "of …" with no number before it claims nothing.
+    eight edits landed" claims seven. "of …" with no number before it claims nothing. Only the
+    64 characters before the claim are searched for that "of", so a line of repeated claims stays
+    linear.
   - A match followed by "(only) partially", "partly" or "in part" claims nothing.
   - A number is digits or a `NUMBER_WORDS` entry: one through twenty, twenty-one through
     twenty-nine (hyphen or space), and thirty. The longest alternative is tried first.
@@ -453,13 +459,25 @@ only.
     concern_coverage may add `concerns` and `absent_stakeholders`, which go under its `detail`.
   - `where` is one of turn, decision, header, original or revised. Unknown keys are ignored.
   - `parse_answer` takes the last fence whose body parses as a JSON object, so a restated answer
-    wins and a broken last fence falls back to the one before it.
-- **judge.reduce** reads only the eval_target reduction, `inputs/` and the eval run's own traces.
-  In order:
-  1. **Re-hash** every path in `digests` and `inputs_digests`; a file that has gone counts as
-     changed. Any change appends
-     `{id: "target_changed_during_eval", turn: null, line: null, quote: "", paths: [...]}`, and
-     the answer is never even parsed, so a quote planted in an `inputs/` copy is never read.
+    wins and a broken last fence falls back to the one before it. The fences are found in one
+    pass over the answer's lines (an opener line, then the next bare ```` ``` ```` line), so an
+    answer that repeats an opener line thousands of times stays linear.
+- **judge.reduce** reads only the eval_target reduction, `inputs/` and the eval run's own traces,
+  plus, read-only for the re-hash, the target's sources, rows and run-directory listing. In order:
+  1. **Re-hash.**
+     - Every path in `digests` and `inputs_digests` is read through `thread.read_regular`
+       (`O_NOFOLLOW|O_NONBLOCK`). A file that has gone, or is now a symlink (even to identical
+       bytes), a FIFO or a directory, counts as changed, and a FIFO never blocks the reduce.
+     - `target_state(home, run)` is recomputed and compared with the eval_target's. Its `rows` is
+       a sha256 over the target's rows read over `mode=ro`: `runs.created_at`, each reduction's
+       `(id, kind, json)` and its attempts. `review_state` is left out, so a ruling during the
+       eval is no change. Its `files` is a sha256 over a listing of `runs/<run>/` (relative name,
+       file type, and size for anything but a directory), minus `eval.json` and its `.eval.json.*`
+       temp files. A changed `rows` names `<home>/queue.db`, and a changed `files` names
+       `<home>/runs/<run>`.
+     - Any change appends
+       `{id: "target_changed_during_eval", turn: null, line: null, quote: "", paths: [...]}`, and
+       the answer is never even parsed, so a quote planted in an `inputs/` copy is never read.
   2. **Parse** the last non-empty `answer` among the findings with `parse_answer`.
   3. **Score** (`score_judge`). It reads each `inputs/` file a quote may cite (entries.json,
      thread.md, the original and revised copies) once, and a file whose sha256 is not the one
@@ -475,9 +493,12 @@ only.
        turn's body (matched by `turn`), `chair_prose`, or `header.text`. For original and revised
        it must be a substring of the whole inputs copy. A shorter quote such as "." or "e" would
        match anything, so it never verifies.
-     - `line` is the first line of inputs/thread.md within the entry's range that contains the
-       quote's first 40 normalised chars, else `line_start`. It is null without thread.md or when
-       unverified. For original and revised it is the first matching line of that copy.
+     - `line` is the line the quote starts on, in inputs/thread.md within the entry's range, or
+       in the original or revised copy. The range's lines are collapsed and joined with single
+       spaces, and the quote's offset in that text maps back to its line, so a quote that crosses
+       a hard wrap still gets one. When the whole quote is not in thread.md (it verified against
+       entries.json), its first 40 characters are looked for, and failing that it is
+       `line_start`. It is null without thread.md or when unverified.
      - Unverified items stay, with `verified: false`, and count in `judge.evidence_rejected`.
      - The score counts only when it is an int 1-5 (`isinstance(v, int) and not
        isinstance(v, bool) and 1 <= v <= 5`; 4.0, "4" and true are not scores) AND at least one of
@@ -547,7 +568,9 @@ only.
     (home, run, created_at).
 - **Reductions.** They land on the eval run only; the target gets none.
   - `eval_target` is
-    `{target, legacy, digests, inputs_digests, inputs: {dir, thread, entries, original, revised, doc, metrics, rubric}, rubric, rubric_version, metrics, flags, deterministic, original_source, error: null}`.
+    `{target, legacy, digests, inputs_digests, target_state: {rows, files}, inputs: {dir, thread, entries, original, revised, doc, metrics, rubric}, rubric, rubric_version, metrics, flags, deterministic, original_source, error: null}`.
+    measure takes `target_state` before it reads the target, so a change during the read shows
+    too.
     Its `inputs` names are relative to `dir`, and None when absent.
   - `eval` is the eval.json body.
 
@@ -593,7 +616,9 @@ whatever state the run ends in. `playbooks/committee/__init__.py` does not impor
   in table order, with its score (`—` when null), its scorer, its calibration label (judge rows
   only; `unknown` when the ledger cannot be read) and its first verified quote clipped to 80
   chars. Then come the flags (`<id>@tNN`, or none), the headline and the judge status with its
-  error. It exits 1 when the target has no readable eval.json.
+  error. Every control character (ESC, CR, BEL…) in a quote, a flag id, the headline or the judge
+  error prints as a space, so worker text in a transcript never drives the terminal. It exits 1
+  when the target has no readable eval.json.
 - **`compare [--rubric R …]`** prints one row per target, from the latest eval lines in the eval
   home's ledger, sorted by label, and exits 1 when the ledger cannot be read.
   - The label is `<run>` for the eval home, and `<parent>/<basename>:<run>` otherwise, for
@@ -632,7 +657,9 @@ regular file) as `_size` does, and the ledger through
 - Otherwise `{"state": "ok", rubric_version, evaluated_at, headline, judge_status, judge_error,
   dimensions: {<id>: {score, scorer, quote, calibration}}, flags: [<id>, …]}`, where:
   - each field reaches the UI as the type it renders, or null when the file holds anything
-    else: `score` an int (eval's `_score`), `evaluated_at` a number, the text fields a str, and
+    else: `score` an int (eval's `_score`), `evaluated_at` a finite number (json.loads reads
+    `NaN` and `1e999`, which the route's `allow_nan=False` serialiser would turn into a 500 on
+    every poll), the text fields a str, and
     `flags` only the string ids.
   - `scorer` comes from `JUDGE_DIMS`, never from the file.
   - `quote` is the first quote whose `verified` is exactly `true`, or null.
@@ -733,7 +760,8 @@ a same-home eval.json:
 | no fence, bad JSON, or a score of 0, 6, 4.5 or true | unparseable, or that dimension null with status partial |
 | an invented quote, or one under 3 words or 12 characters | `verified: false`; the dimension is null if nothing verifies |
 | the judge's answer quotes a `hermes-eval` block from the transcript | the fence must stand on its own lines, and the last parseable fence wins, so an echoed block inside a JSON string never outvotes the answer |
-| the judge writes a source file or an inputs/ copy | `target_changed_during_eval`; the answer is not parsed; status failed |
+| the judge writes, deletes or swaps (a symlink, a FIFO) a source file or an inputs/ copy; edits the target's reductions or attempts; adds or resizes a file under `runs/<run>/` | `target_changed_during_eval`; the answer is not parsed; status failed; a FIFO never blocks the reduce |
+| a trace's `totalCostUSD` is NaN, infinite or negative | that trace has no cost, so `cost_usd` is null and efficiency loses the cost point |
 | judge.reduce hits an internal error | a failed eval rebuilt from the eval_target is written to eval.json and the ledger, each tried on its own; the run ends failed |
 | a malformed eval_target | judge seeds nothing and reduces nothing; the run ends failed |
 | two evals of one target at once | eval.json: the last `os.replace` wins; both ledger lines are kept |

@@ -988,3 +988,12 @@ def test_evaluation_payload_carries_only_what_the_ui_renders(tmp_path):
     doc["evaluated_at"] = 1790000000  # an int is a number too
     (tmp_path / "runs" / RUN_ID / "eval.json").write_text(json.dumps(doc), encoding="utf-8")
     assert view_data(_run("decision"), [])["evaluation"]["evaluated_at"] == 1790000000
+
+    # json.loads reads NaN, Infinity and 1e999 as floats, but the route serialises
+    # with allow_nan=False: only a finite number is forwarded, or every poll 500s.
+    for raw in ("NaN", "Infinity", "-Infinity", "1e999"):
+        text = json.dumps(dict(doc, evaluated_at=0)).replace('"evaluated_at": 0', f'"evaluated_at": {raw}')
+        (tmp_path / "runs" / RUN_ID / "eval.json").write_text(text, encoding="utf-8")
+        out = view_data(_run("decision"), [])["evaluation"]
+        assert (out["state"], out["evaluated_at"]) == ("ok", None), raw
+        json.dumps(out, allow_nan=False)
