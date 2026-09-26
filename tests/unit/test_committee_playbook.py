@@ -846,6 +846,90 @@ def test_thread_digest_is_empty_for_a_missing_file_and_tracks_content(tmp_path):
     assert thread.digest(tmp_path) == ""  # a directory is not a file
 
 
+# --- the document's versions: doc/ snapshots (doc-diff D1) ---
+
+
+def test_snapshot_key_names_each_version_by_turn_with_a_safe_suffix():
+    """Names come from (artifact, turn) alone, so no path rides on a reduction."""
+    from playbooks.committee import thread
+
+    assert thread.snapshot_key("/a/b/proposal.md", None) == "doc/00-original.md"
+    assert thread.snapshot_key("/a/b/proposal.md", 3) == "doc/t03.md"
+    assert thread.snapshot_key("/a/b/Makefile", 3) == "doc/t03"
+    assert thread.snapshot_key("/a/b/a.b c", 3) == "doc/t03"
+    assert thread.snapshot_key("/a/b/x.tar.gz", 3) == "doc/t03.gz"
+    assert thread.snapshot_key("/a/b/notes." + "x" * 17, 3) == "doc/t03"
+    # The cap has no upper bound; order comes from `turn`, never the name.
+    assert thread.snapshot_key("/a/b/proposal.md", 100) == "doc/t100.md"
+    assert thread.snapshot_key("", None) == "doc/00-original"
+
+
+def test_run_file_and_snapshot_key_create_nothing(tmp_path):
+    """The view calls these from a GET, and a GET must create nothing."""
+    from playbooks.committee import thread
+
+    key = thread.snapshot_key("/a/proposal.md", 3)
+    assert thread.run_file("run-1", key) == tmp_path / "runs" / "run-1" / "doc" / "t03.md"
+    assert not (tmp_path / "runs").exists()
+
+
+def test_read_regular_reads_a_regular_file_and_nothing_else(tmp_path):
+    """A symlink, a FIFO, a directory or nothing at all reads as None, at once."""
+    import os
+
+    from playbooks.committee import thread
+
+    real = tmp_path / "real.md"
+    real.write_bytes(b"bytes\n")
+    link = tmp_path / "link.md"
+    link.symlink_to(real)
+    fifo = tmp_path / "pipe.md"
+    os.mkfifo(fifo)
+
+    assert thread.read_regular(real) == b"bytes\n"
+    assert thread.read_regular(str(real)) == b"bytes\n"
+    assert thread.read_regular(link) is None       # O_NOFOLLOW
+    assert thread.read_regular(fifo) is None       # and it returned: O_NONBLOCK
+    open_fds = len(os.listdir("/proc/self/fd"))
+    assert thread.read_regular(tmp_path) is None   # a directory
+    assert len(os.listdir("/proc/self/fd")) == open_fds  # and its fd was closed
+    assert thread.read_regular(tmp_path / "missing.md") is None
+    assert thread.read_regular(None) is None       # reduce must never raise
+
+
+def test_write_snapshot_is_private_and_the_last_write_wins(tmp_path):
+    from playbooks.committee import thread
+
+    thread.write_snapshot("run-1", "doc/t03.md", b"first\n")
+    thread.write_snapshot("run-1", "doc/t03.md", b"second\n")
+
+    doc = tmp_path / "runs" / "run-1" / "doc"
+    assert (doc / "t03.md").read_bytes() == b"second\n"
+    assert (doc / "t03.md").stat().st_mode & 0o777 == 0o600
+    assert doc.stat().st_mode & 0o777 == 0o700
+    assert sorted(p.name for p in doc.iterdir()) == ["t03.md"]  # no temp left behind
+
+
+def test_a_failed_snapshot_write_leaves_no_file_and_no_temp(tmp_path, monkeypatch):
+    """The temp is dot-prefixed, so even a crash mid-write is never served."""
+    import os
+
+    from playbooks.committee import thread
+
+    temps = []
+
+    def boom(src, dst):
+        temps.append(os.path.basename(src))
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        thread.write_snapshot("run-1", "doc/t03.md", b"x")
+
+    assert temps and temps[0].startswith(".t03.md.")
+    assert list((tmp_path / "runs" / "run-1" / "doc").iterdir()) == []
+
+
 # --- part 1: the class skeleton and its per-run state -----------------------
 
 

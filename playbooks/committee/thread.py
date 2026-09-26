@@ -17,7 +17,11 @@ Stdlib-only.
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 import shutil
+import stat
+import tempfile
 from pathlib import Path
 
 from engine import config as _config
@@ -132,3 +136,79 @@ def digest(path) -> str:
     except (OSError, TypeError, ValueError):
         return ""
     return hashlib.sha256(data).hexdigest()
+
+
+# --- the document's versions (doc/) ------------------------------------------
+
+# A suffix worth keeping on a snapshot's name: a dot and 1-16 alphanumerics.
+# Anything else (none, "a.b c") is dropped, so every name the view emits is one
+# the server's name pattern accepts.
+_EXT = re.compile(r"\.[A-Za-z0-9]{1,16}")
+
+
+def snapshot_key(artifact: str, turn: int | None) -> str:
+    """The run-relative name of one version of the document.
+
+    ``doc/00-original<ext>`` is the bytes ``open`` hashed; ``doc/tNN<ext>`` is
+    the revised copy as junior-IC turn NN left it (``t100`` past 99: the cap has
+    no upper bound, and steps are ordered by turn, never by file name). Pure, so
+    the view and the backfill derive every name from (run, turn) and no path has
+    to ride on a reduction.
+    """
+    suffix = Path(artifact).suffix
+    ext = suffix if _EXT.fullmatch(suffix) else ""
+    return f"doc/00-original{ext}" if turn is None else f"doc/t{turn:02d}{ext}"
+
+
+def run_file(run_id: str, key: str) -> Path:
+    """``runs/<run_id>/<key>`` under THIS process's HERMES_HOME. Creates nothing.
+
+    Unlike ``path`` and ``revised_path``, which go through ``state_dir`` and so
+    mkdir: the view calls this from a GET, and a GET must create nothing.
+    """
+    return _config.resolve_home() / "runs" / run_id / key
+
+
+def read_regular(path) -> bytes | None:
+    """The bytes of the regular file at ``path``, or None for anything else.
+
+    ``O_NOFOLLOW``: a symlink is not the copy the worker was told to edit.
+    ``O_NONBLOCK``: opening a FIFO must not hang ``reduce``. Never raises --
+    ``reduce`` must not -- and ``os.open(None)`` is a TypeError, not an OSError.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except (OSError, TypeError, ValueError):
+        return None
+    # Check the raw fd before wrapping it, and always close it ourselves:
+    # `open(fd)` on a directory raises without closing a caller-supplied fd,
+    # and this runs in the long-lived master process.
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with open(fd, "rb", closefd=False) as handle:
+            return handle.read()
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def write_snapshot(run_id: str, key: str, data: bytes) -> None:
+    """Write ``data`` to ``runs/<run_id>/<key>``: atomic, private, overwriting.
+
+    A 0600 temp file in the key's own 0700 directory, then ``os.replace``. The
+    temp name is dot-prefixed, which the server's name pattern never matches, so
+    a crashed write can never be served as a snapshot. It overwrites on purpose:
+    a turn settled again keeps its last settle.
+    """
+    target = Path(key)
+    directory = _config.state_dir("runs", run_id, *target.parent.parts)
+    fd, temp = tempfile.mkstemp(dir=directory, prefix=f".{target.name}.")
+    try:
+        with open(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(temp, directory / target.name)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
