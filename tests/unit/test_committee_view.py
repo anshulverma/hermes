@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from engine.models import Reduction, Run
-from playbooks.committee import cast
+from playbooks.committee import cast, thread
 from playbooks.committee.view import view_data
 
 FIXTURE = Path(__file__).parent.parent / "data" / "committee-run-2-reductions.json"
@@ -475,10 +475,12 @@ def _steps(reductions):
 
 
 def test_the_document_sizes_every_version_under_this_process_home(run2, tmp_path):
-    """Never at a path a reduction recorded: those are the master's host paths."""
-    from playbooks.committee import thread
+    """Never at a path a reduction recorded: those are the master's host paths.
 
-    thread.write_snapshot(RUN_ID, "doc/00-original.md", b"o" * 11397)
+    The snapshot is 11000 bytes and the host original 11397, so a size read off
+    the recorded path -- a 404 inside a container -- cannot pass for this one.
+    """
+    thread.write_snapshot(RUN_ID, "doc/00-original.md", b"o" * 11000)
     for turn in (3, 6, 9, 12):
         thread.write_snapshot(RUN_ID, f"doc/t{turn:02d}.md", b"e" * (11397 + turn))
     doc = tmp_path / "runs" / RUN_ID / "doc"
@@ -489,7 +491,7 @@ def test_the_document_sizes_every_version_under_this_process_home(run2, tmp_path
 
     assert document["name"] == "federation-future.md"
     assert document["captured"] is True
-    assert document["original"] == {"path": "doc/00-original.md", "bytes": 11397}
+    assert document["original"] == {"path": "doc/00-original.md", "bytes": 11000}
     assert [step["turn"] for step in document["steps"]] == [3, 6, 9, 12, 15, 18]
     assert document["steps"][0] == {
         "turn": 3, "path": "doc/t03.md", "bytes": 11400, "delivered": True,
@@ -501,6 +503,30 @@ def test_the_document_sizes_every_version_under_this_process_home(run2, tmp_path
         "path": "doc/t18.md", "turn": 18, "bytes": None, "ruling": "awaiting_ruling",
     }
     assert document["dropped_delegation"] is None
+
+
+def test_a_run_whose_versions_were_never_captured_says_so(run2, artifacts):
+    """Run-9 before its backfill: a document name, the host files still at the
+    recorded paths, and nothing under ``runs/<id>/doc/``. The view branches on
+    ``captured``; the host copies must not make it True."""
+    assert all(path.is_file() for path in artifacts)
+
+    document = view_data(_run("decision"), run2)["document"]
+
+    assert document["name"] == "federation-future.md"
+    assert document["captured"] is False
+    assert document["original"] == {"path": "doc/00-original.md", "bytes": None}
+    assert [step["bytes"] for step in document["steps"]] == [None] * 6
+    assert document["final"]["bytes"] is None
+
+
+def test_a_zero_byte_version_is_sized_zero_not_missing(run2):
+    thread.write_snapshot(RUN_ID, "doc/00-original.md", b"")
+
+    document = view_data(_run("decision"), run2)["document"]
+
+    assert document["original"]["bytes"] == 0
+    assert document["captured"] is True
 
 
 def test_steps_ascend_by_turn_and_a_turn_settled_twice_keeps_its_last_reduction(run2):
@@ -544,12 +570,14 @@ def test_a_dropped_delegation_is_a_note_naming_its_owner_turn_never_a_step(run2)
 
 def test_every_timeline_entry_carries_its_stance(run2):
     run2[5].json["stance"] = "   "  # t06: blank is no stance
+    run2[6].json["stance"] = "  padded  "  # t07: stated, and trimmed
     timeline = view_data(_run("decision"), run2)["timeline"]
 
     assert timeline[1]["stance"] == _STANCES[2]
     assert timeline[3]["stance"] == _STANCES[4]
     assert timeline[0]["stance"] is None  # no key at all
     assert timeline[5]["stance"] is None
+    assert timeline[6]["stance"] == "padded"
 
 
 def test_reductions_without_the_keys_are_placed_by_turn_order(run2):
@@ -570,6 +598,22 @@ def test_a_broken_turn_order_is_unknown_rather_than_guessed(run2):
     assert steps[3] == (None, None, "unknown")
     assert steps[6] == (5, None, "inferred")
     assert steps[9] == (None, None, "unknown")
+
+
+@pytest.mark.parametrize("seat", [cast.OWNER, cast.JUNIOR])
+def test_turn_order_names_a_reviewer_only_from_a_reviewer_seat(run2, seat):
+    """N-2 answered nothing unless a reviewer spoke it: the owner and the junior
+    IC hold no reviewer seat."""
+    run2[0].json["role"] = seat  # t01, two turns before t03
+
+    assert _steps(run2)[3] == (2, None, "inferred")
+
+
+def test_only_a_delegate_of_true_is_a_delegation_to_infer_from(run2):
+    """``is not True``, so 1 -- equal to True, and truthy -- is not one."""
+    run2[1].json["delegate"] = 1  # t02
+
+    assert _steps(run2)[3] == (None, None, "unknown")
 
 
 def test_a_recorded_link_wins_over_turn_order(run2):
