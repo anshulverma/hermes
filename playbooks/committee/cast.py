@@ -662,17 +662,18 @@ _SELECT_DUTY = {
         "holds no usable list above yours, propose one."
     ),
     3: (
-        "You ratify: your list is final and the meeting runs with it. If the "
-        "thread holds no usable list above yours, propose one."
+        "You ratify: your list is final and the meeting runs with it. In this "
+        "seat you decide; you do not question. If the thread holds no usable "
+        "list above yours, propose one."
     ),
 }
 
 _SEAT_RULE = (
     "Pick each seat from the seat library in the thread header, or name a "
     "stakeholder the document justifies. The owner, the senior director, the "
-    "manager and the junior IC are always seated, so list the 1-10 others, "
-    "each with a one-line reason. Name every other stakeholder under "
-    "not_seated, with the seated role that represents them."
+    "manager and the junior IC are always seated, so list the 1-10 others in "
+    "the block below, each with a one-line rationale. Name every other "
+    "stakeholder under not_seated, with the seated role that represents them."
 )
 
 # Placeholders, not a worked example: a copied "<slug>" fails SLUG_RE and is
@@ -688,9 +689,11 @@ _SELECT_BLOCK = (
     ' "not_seated": [{"stakeholder": "<who>", "reason": "<why not>", '
     '"represented_by": "<seated role>"}]}\n'
     "```\n\n"
-    "A role is a lowercase slug of letters, digits and underscores. A seat "
-    'from outside the library also needs a "title", and may add "name", '
-    '"altitude", "goal", "ambition", "stake" and "lens", one line each.'
+    # selection.SLUG_RE's rule, pinned against it by the unit test
+    "A role is a lowercase slug of 2 to 24 letters, digits and underscores, "
+    'starting with a letter. A seat from outside the library also needs a '
+    '"title", and may add "name", "altitude", "goal", "ambition", "stake" and '
+    '"lens", one line each.'
 )
 
 _DONE_SELECT = "Done when: your answer ends with one hermes-selection block."

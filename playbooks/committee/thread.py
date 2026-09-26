@@ -54,9 +54,14 @@ def _append(run_id: str, text: str) -> None:
         handle.flush()
 
 
+# A heading in a body (0-3 spaces, then "#") is escaped, so it reads as text and
+# never as an entry: eval reads `## turn` and `## decision` anywhere.
+_HEADING = re.compile(r"^ {0,3}(?=#)", re.MULTILINE)
+
+
 def _entry(run_id: str, heading: str, body: str) -> None:
-    """Append one ``## ...`` entry, substituting NO_TURN for an empty body."""
-    text = body.strip() if isinstance(body, str) else ""
+    """Append one ``## ...`` entry, its body's headings escaped, NO_TURN for an empty body."""
+    text = _HEADING.sub(r"\\", body.strip()) if isinstance(body, str) else ""
     _append(run_id, f"\n{heading}\n\n{text or NO_TURN}\n")
 
 
@@ -225,9 +230,6 @@ _PUT_FORWARD = {"fixed": "fixed seat", "default": "default"}
 # Lines per list in one stage's entry. validate keeps no cap, so a 200 KB block
 # can name thousands of seats: the rest are counted in one line, never lost silently.
 LIST_MAX = 20
-# A heading in a selector's prose (0-3 spaces, then "#") is escaped, so it reads
-# as text and never as an entry: eval reads `## turn` and `## decision` anywhere.
-_HEADING = re.compile(r"^ {0,3}(?=#)", re.MULTILINE)
 
 
 def _name_of(slug, seats, roster) -> str | None:
@@ -276,8 +278,8 @@ def append_selection(
     it is in ``seats`` or ``roster``.
     """
     who = cast.persona(role, roster)
-    text = _HEADING.sub(r"\\", body.strip()) if isinstance(body, str) else ""
-    text = text or NO_TURN
+    # `_entry` escapes a heading in it; every line added below opens "- ", a label or "_(".
+    text = (body.strip() if isinstance(body, str) else "") or NO_TURN
     if code is None:
         shown = map(_seat, seats[:LIST_MAX])
         text += "\n\n" + _listed("Seats:", shown, len(seats) - LIST_MAX)
