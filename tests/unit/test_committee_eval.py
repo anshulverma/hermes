@@ -1096,6 +1096,44 @@ RUN9_VOICE = {"n": 16, "pointer_share": 0.9375, "walls_share": 0.625,
               "example_share": 0.875, "filler_per_turn": 2.75}
 RUN2_VOICE = {"n": 14, "pointer_share": 0.9286, "walls_share": 0.7143,
               "example_share": 1.0, "filler_per_turn": 6.1429}
+# voice C11 over the fixtures: pre-voice runs, so every turn is measured from its
+# D3 body and nothing was retaken.
+RUN9_VOICE_SUMMARY = {
+    "owner_reviewer_median_words": 825.0, "owner_reviewer_pct_within_cap": 0.0,
+    "median_words_by_role": {
+        "senior_director": 433.5, "owner": 825.0, "manager": 630.0, "tpm": 874.0,
+        "pm": 718.0, "tl": 837.0, "staff_ic": 1002.0, "data_scientist": 1238.0,
+        "junior_ic": 140.0, "chair": 1518.0,
+    },
+    "chair_words": 1518, "chair_headers": 7, "chair_tables": 1,
+    "junior_turns": 8, "junior_pct_compliant": 0.0,
+    "pct_clean_format": 4.0, "pct_first_line_le_25": 18.8, "unquoted_dashes": 13,
+    "reviewer_pct_with_pointer": 87.5, "max_turn_refs": 4, "unchanged_mentions_junior_chair": 9,
+    "total_takes": 25,
+    "retakes_by_role": {
+        "senior_director": 0, "owner": 0, "manager": 0, "tpm": 0, "pm": 0, "tl": 0,
+        "staff_ic": 0, "data_scientist": 0, "junior_ic": 0, "chair": 0,
+    },
+    "kept_flagged": 0,
+}
+RUN2_VOICE_SUMMARY = {
+    "owner_reviewer_median_words": 1393.5, "owner_reviewer_pct_within_cap": 0.0,
+    "median_words_by_role": {
+        "senior_director": 527.0, "owner": 1364.0, "manager": 1067.0, "tpm": 1232.0,
+        "pm": 1423.0, "tl": 1727.0, "staff_ic": 2104.0, "data_scientist": 1661.0,
+        "junior_ic": 92.5, "chair": 1934.0,
+    },
+    "chair_words": 1934, "chair_headers": 9, "chair_tables": 1,
+    "junior_turns": 6, "junior_pct_compliant": 0.0,
+    "pct_clean_format": 28.6, "pct_first_line_le_25": 50.0, "unquoted_dashes": 298,
+    "reviewer_pct_with_pointer": 85.7, "max_turn_refs": 10, "unchanged_mentions_junior_chair": 0,
+    "total_takes": 21,
+    "retakes_by_role": {
+        "senior_director": 0, "owner": 0, "manager": 0, "tpm": 0, "pm": 0, "tl": 0,
+        "staff_ic": 0, "data_scientist": 0, "junior_ic": 0, "chair": 0,
+    },
+    "kept_flagged": 0,
+}
 
 
 def _mentions(home: Path, run_id: str, *numbers: int) -> list[dict]:
@@ -1131,6 +1169,7 @@ def test_run9_metrics_pinned(tmp_path):
         "words": {"prose_total": 15498, "median_reviewer_owner": 825.0,
                   "chair_entry": 1862, "chair_prose": 1518},
         "voice": RUN9_VOICE,
+        "voice_summary": RUN9_VOICE_SUMMARY,
         "bytes": {"original": 11397, "revised": 14931},
         "edits": {"per_edit": "snapshot", "steps": RUN9_STEPS, "total": RUN9_TOTAL},
         "time": {"summed_attempt_s": 3284.0, "wall_clock_s": 3619.0, "unmeasured": 0},
@@ -1171,6 +1210,7 @@ def test_run2_legacy_metrics_pinned(tmp_path):
         "words": {"prose_total": 21728, "median_reviewer_owner": 1393.5,
                   "chair_entry": 2202, "chair_prose": 1934},
         "voice": RUN2_VOICE,
+        "voice_summary": RUN2_VOICE_SUMMARY,
         "bytes": {"original": 11397, "revised": 19100},
         "edits": {"per_edit": "unavailable", "steps": [],
                   "total": {"lines_added": 208, "lines_removed": 88}},
@@ -3503,3 +3543,46 @@ def test_every_fixture_turn_counts_words_through_voice(tmp_path, run, median):
 def test_concision_is_bumped_because_voice_changed_its_inputs():
     assert "concision@2" in repr(E.DIMENSIONS)
     assert "concision@1" not in repr(E.DIMENSIONS)
+
+
+def test_voice_summary_measures_pre_voice_rows_on_copies_and_keeps_null_out():
+    stale = {"role": "tl", "turn": 1, "delivered": True, "voice": {"words": 99, "cap": 150}}
+    legacy = {"role": "tl", "turn": 1, "delivered": True}  # the later t01 wins (eval D3)
+    silent = {"role": "pm", "turn": 2, "delivered": False, "voice": None}
+    decision = {"delivered": True, "verdict": "Approve with changes."}
+    entries = {"turns": {"1": {"role": "tl", "body": "Defer it."}, "2": {"role": "pm", "body": ""}},
+               "decision": {"chair_prose": "Approve with changes."}}
+    rows = [("turn", stale), ("turn", legacy), ("take", {"role": "pm", "voice": {"words": 900}}),
+            ("turn", silent), ("decision", decision)]
+
+    summary = E.voice_summary(rows, entries)
+
+    # measured on copies: the shared docs keep no voice dict, so action_clipped's
+    # legacy fallback still applies to them
+    assert "voice" not in legacy and "voice" not in decision
+    assert summary["median_words_by_role"] == {"tl": 2.0, "chair": 3.0}
+    assert summary["owner_reviewer_median_words"] == 2.0
+    assert summary["chair_words"] == 3
+    assert summary["reviewer_pct_with_pointer"] == 0.0
+    assert E.voice_summary([("turn", silent)], entries) is None  # a present null stays out
+
+
+@pytest.mark.xfail(reason="write_header gains rules= in Task 5", strict=True)
+def test_a_voice_era_header_seats_the_same_roster_under_eval_d3(tmp_path, monkeypatch):
+    """Plain labels and the ground rules after the roster seat exactly the roster,
+    including a seat that never spoke, the same as run-9's bold labels (eval D3)."""
+    from playbooks.committee import thread
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    roster = ["owner — Maya Okonkwo, Staff Engineer & proposal owner",
+              "tl — Marcus Feld, Tech Lead",
+              "staff_ic — Priya Raman, Staff Engineer"]  # staff_ic never speaks
+    thread.write_header("run-v", charge="Decide.", artifact="/a/p.md", roster=roster,
+                        rules=voice.RULES)
+    plain = thread.path("run-v").read_text(encoding="utf-8")
+    bold = (plain.replace("\nCharge:", "\n**Charge:**").replace("\nArtifact:", "\n**Artifact:**")
+            .replace("\nCommittee:", "\n**Committee:**"))
+
+    assert "**Committee:**" in bold
+    assert (E.parse_thread(plain)["roster"] == E.parse_thread(bold)["roster"]
+            == ["owner", "tl", "staff_ic"])

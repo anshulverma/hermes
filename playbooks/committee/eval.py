@@ -42,7 +42,7 @@ from engine import playbook as _playbook
 from engine.models import Driver, Finding, Reduction, Run, Ticket
 from playbooks.committee import cast, thread, turnblock
 from playbooks.committee.playbook import _SIMULATION
-from playbooks.committee.voice import RULES, measure
+from playbooks.committee.voice import RULES, measure, summary
 
 # D5 order. A loop that changes a dimension's definition, bands or inputs bumps its n.
 DIMENSIONS: dict[str, str] = {
@@ -97,12 +97,49 @@ RUBRIC = "\n".join((
     f"Evidence: {VERBATIM}.",
 ))
 
-_WALL_WORDS = 120  # C8: a wall is a paragraph over 120 words; the one threshold (D11 imports only RULES and measure)
+_WALL_WORDS = 120  # C8: a wall is a paragraph over 120 words; the one threshold (D11 imports only RULES, measure and summary)
 
 
 def words(text: str) -> int:
     """Words in ``text`` as voice counts them: fenced blocks and image lines add none."""
     return measure(text)["words"]
+
+
+def voice_summary(rows: list[tuple[str, dict]], entries: dict) -> dict | None:
+    """voice.summary over the target's kept rows (voice C11).
+
+    ``rows`` are the target run's (kind, json) reductions in id order (D3), and
+    ``entries`` is the inputs/entries.json dict (D6), which carries every turn's
+    D3 body and the chair prose. The last turn reduction per number wins, as in
+    D3, and only the latest decision is read. A pre-voice row has no ``voice``
+    key and is measured here on a COPY: the shared docs are never touched,
+    because action_clipped reads ``voice`` off them and a filled-in dict without
+    ``action_chars`` would silence its legacy fallback. A present null (an
+    undelivered voice-era take) stays null and so stays out.
+    """
+    turns: dict[int, dict] = {}
+    decision = None
+    for kind, doc in rows:
+        if kind == "turn" and isinstance(doc, dict) and isinstance(doc.get("turn"), int):
+            turns[doc["turn"]] = doc
+        elif kind == "decision" and isinstance(doc, dict):
+            decision = doc
+    bodies = entries.get("turns") or {}
+    out = []
+    for n, doc in turns.items():
+        row = dict(doc)
+        if "voice" not in row and row.get("delivered"):
+            # str keys on disk (json.dump), int keys if measure built it in memory
+            body = (bodies.get(str(n)) or bodies.get(n) or {}).get("body") or ""
+            row["voice"] = measure(body, str(row.get("role") or ""))
+        out.append(("turn", row))
+    if decision is not None:
+        row = dict(decision)
+        if "voice" not in row and row.get("delivered"):
+            prose = (entries.get("decision") or {}).get("chair_prose") or ""
+            row["voice"] = measure(prose, "chair")
+        out.append(("decision", row))
+    return summary(out)
 
 
 def clip(text: str, limit: int) -> str:
@@ -829,6 +866,9 @@ def _prose_metrics(target: Target) -> dict:
     return {
         "words": _prose_words(target),
         "voice": _prose_voice(target),
+        "voice_summary": voice_summary(
+            [("turn", target.turns[n]) for n in sorted(target.turns)] + [("decision", target.decision)],
+            build_entries(target)),
         "bytes": {
             "original": None if target.original is None else len(target.original),
             "revised": None if target.revised is None else len(target.revised),
