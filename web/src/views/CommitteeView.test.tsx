@@ -3073,4 +3073,156 @@ describe('CommitteeView selection card', () => {
     expect(card.querySelector('img, script, iframe')).toBeNull();
     for (const a of card.querySelectorAll('a')) expect(a.getAttribute('href') ?? '').not.toMatch(/^javascript:/i);
   });
+
+  it('a derived proposal is marked while selecting and after the chair dropped it', () => {
+    // The roster marks only a seated derived seat, so each listed seat carries its own source.
+    const listed = (n: number) =>
+      within(screen.getByTestId(`selection-proposed-${n}`))
+        .getAllByRole('listitem')
+        .map((li) => li.textContent?.split(':')[0]);
+    const two = seatedData.selection!.stages.slice(0, 2);
+
+    // On s3: the fixed four are in the room and nobody else is seated yet.
+    const { unmount } = show({ ...selectingData, selection: { ...selectingData.selection!, stages: two } });
+    expect(listed(2)).toEqual(['tpm', 'crew_owner · derived seat']);
+    unmount();
+
+    // The chair's worker failed, so the default committee sits without the manager's seat.
+    const fell = show(fallbackData);
+    expect(listed(2)).toEqual(['tpm', 'crew_owner · derived seat']);
+    fell.unmount();
+
+    // Seated, but the chair dropped a stage-1 seat, so it never reached the roster.
+    const sel = cardData.selection!;
+    const ops = {
+      role: 'ops_owner', name: 'Ines Park', title: 'Owner, ops tooling',
+      rationale: 'runs the tooling', source: 'derived' as const,
+    };
+    show({
+      ...cardData,
+      selection: {
+        ...sel,
+        stages: sel.stages.map((st) => (st.stage === 1 ? { ...st, proposed: [...st.proposed, ops] } : st)),
+      },
+    });
+    expect(listed(1)).toEqual(['tpm', 'pm', 'zone_owner · derived seat', 'ops_owner · derived seat']);
+  });
+
+  it("a derived representative is marked beside its name, even one spelled like the owner's", () => {
+    // A Cyrillic "а": the name passes an exact check, so only the slug tells it from the owner.
+    const lookalike = 'Mаya Okonkwo';
+    const sel = cardData.selection!;
+    show({
+      ...cardData,
+      roster: cardData.roster.map((p) => (p.role === 'zone_owner' ? { ...p, name: lookalike } : p)),
+      selection: {
+        ...sel,
+        considered: sel.considered.map((c) =>
+          c.role === null ? { ...c, represented_by: 'zone_owner', represented_by_name: lookalike } : c,
+        ),
+      },
+    });
+
+    expect(
+      within(screen.getByTestId('selection-considered')).getAllByRole('listitem').map((li) => li.textContent),
+    ).toEqual([
+      "Product Manager: the roadmap slot is Sam's call this half. Represented by Sam Iyer",
+      `Legal: no contract or licence question in this proposal. Represented by ${lookalike} (zone_owner · derived seat)`,
+    ]);
+  });
+
+  it("keeps the danger colour on a stage's undelivered badge, as a timeline row does", () => {
+    show(fallbackData);
+
+    const badge = within(screen.getByTestId('selection-stage-3')).getByText('no turn delivered');
+    expect(badge.getAttribute('style')).toContain('--status-danger');
+  });
+
+  it("a derived seat's floor request is marked beside its name on the Metrics tab", () => {
+    const asked: CommitteeData = {
+      ...seatedWithTurnsData,
+      timeline: seatedWithTurnsData.timeline.map((e) =>
+        e.n === 3 || e.n === 5 ? { ...e, badges: ['request_floor'] } : e,
+      ),
+    };
+    render(<CommitteeView runId="run-2" data={asked} refetch={noop} variant="metrics" />);
+
+    expect(screen.getByTestId('floor-ask-5')).toHaveTextContent(
+      'Noor Haddad (crew_owner · derived seat) asked on turn 5 · still waiting',
+    );
+    expect(screen.getByTestId('floor-ask-3')).toHaveTextContent('Ruth Delgado asked on turn 3 · still waiting');
+  });
+
+  it('the Document card marks a derived reviewer who raised an edit', () => {
+    const step = { delivered: true, verified: true, owner_turn: null, provenance: 'recorded' as const };
+    const doc: DocumentBlock = {
+      name: 'federation-future.md',
+      captured: true,
+      original: { path: 'doc/00-original.md', bytes: 30 },
+      steps: [
+        { ...step, turn: 7, path: 'doc/t07.md', bytes: 31, reviewer_turn: 5 },
+        { ...step, turn: 8, path: 'doc/t08.md', bytes: 32, reviewer_turn: 3 },
+      ],
+      final: null,
+      dropped_delegation: null,
+    };
+    show({ ...seatedWithTurnsData, document: doc });
+
+    fireEvent.click(screen.getByTestId('step-7'));
+    expect(screen.getByTestId('step-raised')).toHaveTextContent('raised by Noor Haddad (crew_owner · derived seat)');
+    fireEvent.click(screen.getByTestId('step-8'));
+    expect(screen.getByTestId('step-raised')).toHaveTextContent('raised by Ruth Delgado');
+    expect(screen.getByTestId('step-raised')).not.toHaveTextContent('derived');
+  });
+
+  it('a stage kept after a retake says which take and what it broke, as a transcript row does', () => {
+    const sel = cardData.selection!;
+    show({
+      ...cardData,
+      selection: {
+        ...sel,
+        stages: sel.stages.map((st) => (st.stage === 2 ? { ...st, take: 2, takes: 2, violations: ['over_cap'] } : st)),
+      },
+    });
+
+    expect(screen.getByTestId('selection-kept-take-2')).toHaveTextContent(
+      `kept take 2 of 2; broke: ${violationText(['over_cap'])}`,
+    );
+    // A first take kept clean says nothing.
+    expect(screen.queryByTestId('selection-kept-take-1')).toBeNull();
+  });
+
+  it('the considered list is labelled, and no empty list stands in for counts alone', () => {
+    const { unmount } = show(cardData);
+    expect(screen.getByRole('list', { name: 'Considered, not seated' })).toBeInTheDocument();
+    // Section's title is no heading, so nothing on the card claims a level under it.
+    expect(within(screen.getByTestId('selection-card')).queryAllByRole('heading')).toHaveLength(0);
+    unmount();
+
+    show({ ...cardData, selection: { ...cardData.selection!, considered: [], considered_dropped: 3 } });
+    const considered = screen.getByTestId('selection-considered');
+    expect(considered).toHaveTextContent('3 more considered, not listed.');
+    expect(within(considered).queryByRole('list')).toBeNull();
+  });
+
+  it("a stage whose list could seat nobody says why, in its thread entry's words", () => {
+    const sel = cardData.selection!;
+    const code: Record<number, string> = { 1: 'too_few', 2: 'no_block', 3: 'unparseable' };
+    const { unmount } = show({
+      ...cardData,
+      selection: { ...sel, stages: sel.stages.map((st) => ({ ...st, proposed: [], code: code[st.stage] })) },
+    });
+
+    // thread._NO_LIST's labels.
+    expect(screen.getByTestId('selection-code-1')).toHaveTextContent('no usable seat list: no valid seats');
+    expect(screen.getByTestId('selection-code-2')).toHaveTextContent('no usable seat list: no_block');
+    expect(screen.getByTestId('selection-code-3')).toHaveTextContent('no usable seat list: unparseable');
+    unmount();
+
+    // A usable list says nothing, and an undelivered stage (no_answer) says it through its badge and body.
+    show(fallbackData);
+    expect(screen.queryByTestId('selection-code-1')).toBeNull();
+    expect(screen.queryByTestId('selection-code-3')).toBeNull();
+  });
 });
+

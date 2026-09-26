@@ -807,7 +807,7 @@
 		});
 	}
 	/** Who raised it, who delegated it, what the junior said, what the re-check found. */
-	function StepContext({ step, timeline, onOpenTurn }) {
+	function StepContext({ step, timeline, onOpenTurn, derived }) {
 		const at = (n) => n === null ? void 0 : timeline.findLast((e) => e.n === n);
 		const reviewer = at(step.reviewer_turn);
 		const owner = at(step.owner_turn);
@@ -853,6 +853,7 @@
 					children: step.reviewer_turn !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
 						"raised by ",
 						reviewer?.name ?? "a seat the transcript does not name",
+						reviewer && derived?.has(reviewer.role) && ` (${reviewer.role} · derived seat)`,
 						reviewer?.stance ? ` — ${reviewer.stance}` : "",
 						" ",
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Goto, {
@@ -1076,7 +1077,7 @@
 			children: text
 		});
 	});
-	function DocumentHistory({ runId, document: doc, timeline, intact, legacy, selected, onSelect, diffMode, onDiffMode, onOpenTurn }) {
+	function DocumentHistory({ runId, document: doc, timeline, intact, legacy, selected, onSelect, diffMode, onDiffMode, onOpenTurn, derived }) {
 		const [finalDiff, setFinalDiff] = (0, react.useState)(false);
 		const { name, captured, original, steps, final } = doc;
 		const ids = original ? [
@@ -1304,7 +1305,8 @@
 				step && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StepContext, {
 					step,
 					timeline,
-					onOpenTurn
+					onOpenTurn,
+					derived
 				}),
 				current === "final" && final && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "final-label",
@@ -1678,8 +1680,33 @@
 		fontStyle: "italic",
 		color: "var(--text-muted)"
 	};
-	/** `slug · derived seat` for a seat the roster says a selector invented (decision 12), else the slug. */
-	var seatSlug = (role, derived) => derived.has(role) ? `${role} · derived seat` : role;
+	/** A derived seat's marker (decision 12): its name is a selector's words, the slug is not. */
+	var derivedSeat = (role) => `${role} · derived seat`;
+	/** thread._NO_LIST: a stage's code in the words its thread entry uses. */
+	var NO_LIST = {
+		no_block: "no_block",
+		unparseable: "unparseable",
+		too_few: "no valid seats"
+	};
+	/** "kept take 2 of 2; broke: …" when a take was retaken or kept flagged, else nothing. */
+	function KeptTake({ take, takes, violations, testId }) {
+		if (take == null || takes == null || takes <= 1 && violations.length === 0) return null;
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": testId,
+			style: {
+				fontSize: 11.5,
+				marginBottom: 6,
+				color: "var(--text-muted)"
+			},
+			children: [
+				"kept take ",
+				take,
+				" of ",
+				takes,
+				violations.length > 0 && `; broke: ${violationText(violations)}`
+			]
+		});
+	}
 	function SelectionCard({ selection, runId, derived }) {
 		const { Badge } = ds();
 		const settled = selection.state === "seated" || selection.state === "fallback";
@@ -1721,7 +1748,7 @@
 									alignItems: "baseline",
 									flexWrap: "wrap"
 								},
-								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("h3", {
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 									style: selectionHeading,
 									children: [
 										st.name,
@@ -1737,6 +1764,12 @@
 									children: BADGE_LABEL[b] ?? b
 								}, b))]
 							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(KeptTake, {
+								take: st.take,
+								takes: st.takes,
+								violations: st.violations,
+								testId: `selection-kept-take-${st.stage}`
+							}),
 							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Segments, {
 								segments: st.segments,
 								runId
@@ -1746,10 +1779,11 @@
 								"aria-label": `Seats ${st.name} listed`,
 								style: selectionList,
 								children: st.proposed.map((p, j) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", { children: [
-									seatSlug(p.role, derived),
+									p.source === "derived" || derived.has(p.role) ? derivedSeat(p.role) : p.role,
 									": ",
 									p.name,
-									", ",
+									",",
+									" ",
 									p.title,
 									". Why: ",
 									p.rationale
@@ -1758,6 +1792,11 @@
 							(st.proposed_dropped ?? 0) > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								style: selectionCount,
 								children: [st.proposed_dropped, " more not listed."]
+							}),
+							st.code && st.code !== "no_answer" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								"data-testid": `selection-code-${st.stage}`,
+								style: selectionCount,
+								children: ["no usable seat list: ", NO_LIST[st.code] ?? st.code]
 							})
 						]
 					}, i)),
@@ -1771,17 +1810,19 @@
 							color: "var(--text-secondary)"
 						},
 						children: selection.considered.length === 0 && considered + invalid === 0 ? "Everyone considered was seated." : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", {
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 								style: selectionHeading,
 								children: "Considered, not seated"
 							}),
-							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+							selection.considered.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+								"aria-label": "Considered, not seated",
 								style: selectionList,
 								children: selection.considered.map((c, j) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", { children: [
 									c.stakeholder,
 									": ",
 									c.reason.replace(/\.$/, ""),
-									c.represented_by_name && `. Represented by ${c.represented_by_name}`
+									c.represented_by_name && `. Represented by ${c.represented_by_name}`,
+									c.represented_by && derived.has(c.represented_by) && ` (${derivedSeat(c.represented_by)})`
 								] }, j))
 							}),
 							considered > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -1931,19 +1972,11 @@
 						paddingLeft: 18,
 						color: "var(--text-muted)"
 					},
-					children: [entry.take != null && entry.takes != null && (entry.takes > 1 || violations.length > 0) && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-						"data-testid": `kept-take-${entry.n}`,
-						style: {
-							fontSize: 11.5,
-							marginBottom: 6
-						},
-						children: [
-							"kept take ",
-							entry.take,
-							" of ",
-							entry.takes,
-							violations.length > 0 && `; broke: ${violationText(violations)}`
-						]
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(KeptTake, {
+						take: entry.take,
+						takes: entry.takes,
+						violations,
+						testId: `kept-take-${entry.n}`
 					}), segments.length > 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Segments, {
 						segments,
 						runId
@@ -2052,7 +2085,7 @@
 		if (typeof value === "object") return Object.entries(value).map(([role, n]) => `${role} ${n ?? "—"}`).join(", ");
 		return String(value);
 	}
-	function MeetingMetrics({ data }) {
+	function MeetingMetrics({ data, derived }) {
 		const turns = [...data.timeline].sort((a, b) => a.n - b.n);
 		const delivered = (e) => !e.badges.includes("no_turn");
 		const over = data.verdict !== null;
@@ -2189,6 +2222,7 @@
 							style: quiet,
 							children: [
 								a.name,
+								derived.has(a.role) && ` (${derivedSeat(a.role)})`,
 								" asked on turn ",
 								a.asked,
 								" ·",
@@ -2499,7 +2533,8 @@
 				onSelect: setSelected,
 				diffMode,
 				onDiffMode: setDiffMode,
-				onOpenTurn: openTurn
+				onOpenTurn: openTurn,
+				derived
 			})
 		});
 		if (data.timeline.length === 0 && (data.selection == null || variant === "metrics")) {
@@ -2524,7 +2559,10 @@
 				flexDirection: "column",
 				gap: 16
 			},
-			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, { data }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EvaluationBlock, {
+			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, {
+				data,
+				derived
+			}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EvaluationBlock, {
 				runId,
 				evaluation: data.evaluation ?? null,
 				scorable: !!data.verdict?.text

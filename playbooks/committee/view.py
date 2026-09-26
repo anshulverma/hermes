@@ -496,11 +496,16 @@ def _stage(doc: dict, seats: dict[str, dict]) -> dict:
         "name": who["name"] if who else "unattributed",
         "delivered": bool(doc.get("delivered")),
         "body": body if isinstance(body, str) else "",
+        # validate skips reserved slugs and calls every other valid slug outside
+        # the library derived, so a seat the chair dropped is still marked.
         "proposed": [
-            {key: _str(p.get(key)) or "" for key in ("role", "name", "title", "rationale")}
+            {**{key: _str(p.get(key)) or "" for key in ("role", "name", "title", "rationale")},
+             "source": "library" if _role(p) in cast.LIBRARY else "derived"}
             for p in _as_list(doc.get("proposed")) if isinstance(p, dict)
         ],
         "proposed_dropped": _count(doc.get("proposed_dropped")),
+        # selection.stage_code's reason this stage's list could seat nobody, or None.
+        "code": _str(doc.get("code")) or None,
         "segments": _segments(doc),
         "badges": [b for b in _badges(doc, attributed=True) if b not in _SOFT_BADGES],
         "take": _int(doc.get("take")),

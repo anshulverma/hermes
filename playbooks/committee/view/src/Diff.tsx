@@ -319,10 +319,12 @@ function StepContext({
   step,
   timeline,
   onOpenTurn,
+  derived,
 }: {
   step: DocStep;
   timeline: Entry[];
   onOpenTurn: (n: number) => void;
+  derived?: Set<string>;
 }) {
   // The LAST entry for a turn, as `view_data` keeps the last reduction for it:
   // a turn settled twice pairs its diff and verdict with the take that made them.
@@ -369,6 +371,8 @@ function StepContext({
         {step.reviewer_turn !== null ? (
           <>
             raised by {reviewer?.name ?? 'a seat the transcript does not name'}
+            {/* A derived seat's name is a selector's words; the slug says whose turn it was. */}
+            {reviewer && derived?.has(reviewer.role) && ` (${reviewer.role} · derived seat)`}
             {reviewer?.stance ? ` — ${reviewer.stance}` : ''}{' '}
             <Goto n={step.reviewer_turn} onOpenTurn={onOpenTurn} />
             {inferred}
@@ -602,6 +606,7 @@ export default function DocumentHistory({
   diffMode,
   onDiffMode,
   onOpenTurn,
+  derived,
 }: {
   runId: string;
   document: DocumentBlock;
@@ -621,6 +626,8 @@ export default function DocumentHistory({
   diffMode: DiffMode;
   onDiffMode: (mode: DiffMode) => void;
   onOpenTurn: (n: number) => void;
+  /** Roles whose seat a selector invented (the roster's `source`). */
+  derived?: Set<string>;
 }) {
   // Off until asked for. Local, because the card stays mounted while stepping:
   // it is still on when the reader comes back to Final.
@@ -863,7 +870,7 @@ export default function DocumentHistory({
               Original — as the committee was handed it
             </div>
           )}
-          {step && <StepContext step={step} timeline={timeline} onOpenTurn={onOpenTurn} />}
+          {step && <StepContext step={step} timeline={timeline} onOpenTurn={onOpenTurn} derived={derived} />}
           {current === 'final' && final && (
             <div data-testid="final-label" style={heading}>
               {FINAL_LABEL[final.ruling]}

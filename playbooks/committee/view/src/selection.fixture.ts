@@ -76,6 +76,9 @@ const fixed = (role: string): Persona => row(role, FIXED_WHY[role], 'fixed', 'fi
 /** `_seats` in "selecting" and "lost": selection.fixed_seats(), and nobody has the floor. */
 const FIXED_FOUR: Persona[] = ['owner', 'senior_director', 'manager', 'junior_ic'].map(fixed);
 
+/** The seats outside cast.LIBRARY here, which `_stage` calls derived. */
+const DERIVED = new Set(['crew_owner', 'zone_owner']);
+
 /** `proposed` items are [slug, rationale]. Their name and title come off WHO, as `_selection` carries them. */
 function stage(n: number, role: string, body: string, proposed: Array<[string, string]>): SelectionStage {
   return {
@@ -89,7 +92,9 @@ function stage(n: number, role: string, body: string, proposed: Array<[string, s
       name: WHO[slug][0],
       title: WHO[slug][1],
       rationale,
+      source: DERIVED.has(slug) ? ('derived' as const) : ('library' as const),
     })),
+    code: null,
     proposed_dropped: 0,
     segments: [{ kind: 'text', text: body }],
     badges: [],
@@ -128,6 +133,7 @@ const CHAIR_FAILED: SelectionStage = {
   ...stage(3, 'senior_director', NO_TURN, []),
   delivered: false,
   badges: ['no_turn'],
+  code: 'no_answer',
 };
 
 /**

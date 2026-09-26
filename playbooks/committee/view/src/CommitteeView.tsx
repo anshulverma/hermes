@@ -57,9 +57,15 @@ export type SelectionStage = {
   delivered: boolean;
   /** The selector's prose with both fences stripped; thread.NO_TURN when undelivered. */
   body: string;
-  proposed: Array<{ role: string; name: string; title: string; rationale: string }>;
+  /**
+   * `source` is the seat's own, so a derived seat the chair dropped is still
+   * marked (the roster knows only seated ones). Optional: older payloads lack it.
+   */
+  proposed: Array<{ role: string; name: string; title: string; rationale: string; source?: 'library' | 'derived' }>;
   /** How many proposed seats the reduction cut past its cap; absent reads as 0. */
   proposed_dropped?: number;
+  /** selection.stage_code: why this list could seat nobody (no_answer, no_block, too_few, unparseable), else null. */
+  code?: string | null;
   segments: Segment[];
   badges: string[];
   take: number | null;
@@ -521,8 +527,32 @@ const selectionHeading = { margin: 0, fontSize: 13, fontWeight: 600, color: 'var
 const selectionList = { margin: 0, paddingLeft: 18, fontSize: 12, color: 'var(--text-secondary)' } as const;
 const selectionCount = { fontSize: 11.5, fontStyle: 'italic', color: 'var(--text-muted)' } as const;
 
-/** `slug · derived seat` for a seat the roster says a selector invented (decision 12), else the slug. */
-const seatSlug = (role: string, derived: Set<string>) => (derived.has(role) ? `${role} · derived seat` : role);
+/** A derived seat's marker (decision 12): its name is a selector's words, the slug is not. */
+const derivedSeat = (role: string) => `${role} · derived seat`;
+
+/** thread._NO_LIST: a stage's code in the words its thread entry uses. */
+const NO_LIST: Record<string, string> = { no_block: 'no_block', unparseable: 'unparseable', too_few: 'no valid seats' };
+
+/** "kept take 2 of 2; broke: …" when a take was retaken or kept flagged, else nothing. */
+function KeptTake({
+  take,
+  takes,
+  violations,
+  testId,
+}: {
+  take?: number | null;
+  takes?: number | null;
+  violations: string[];
+  testId: string;
+}) {
+  if (take == null || takes == null || (takes <= 1 && violations.length === 0)) return null;
+  return (
+    <div data-testid={testId} style={{ fontSize: 11.5, marginBottom: 6, color: 'var(--text-muted)' }}>
+      kept take {take} of {takes}
+      {violations.length > 0 && `; broke: ${violationText(violations)}`}
+    </div>
+  );
+}
 
 function SelectionCard({
   selection,
@@ -566,9 +596,10 @@ function SelectionCard({
             }}
           >
             <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
-              <h3 style={selectionHeading}>
+              {/* Not an h3: Section's title is no heading, so there is no level for it to sit under. */}
+              <div style={selectionHeading}>
                 {st.name} ({st.role}) {STAGE_VERB[st.stage] ?? ''}
-              </h3>
+              </div>
               {/* Exactly as a timeline entry badges its turn. */}
               {st.badges.map((b) => (
                 <Badge key={b} size="sm" variant="outline" tone={BADGE_TONE[b]}>
@@ -576,6 +607,12 @@ function SelectionCard({
                 </Badge>
               ))}
             </div>
+            <KeptTake
+              take={st.take}
+              takes={st.takes}
+              violations={st.violations}
+              testId={`selection-kept-take-${st.stage}`}
+            />
             <Segments segments={st.segments} runId={runId} />
             {/* The body arrives with its hermes-selection fence stripped, so
                 the list the selector gave is drawn here from the reduction. */}
@@ -587,12 +624,19 @@ function SelectionCard({
               >
                 {st.proposed.map((p, j) => (
                   <li key={j}>
-                    {seatSlug(p.role, derived)}: {p.name}, {p.title}. Why: {p.rationale}
+                    {p.source === 'derived' || derived.has(p.role) ? derivedSeat(p.role) : p.role}: {p.name},{' '}
+                    {p.title}. Why: {p.rationale}
                   </li>
                 ))}
               </ul>
             )}
             {(st.proposed_dropped ?? 0) > 0 && <div style={selectionCount}>{st.proposed_dropped} more not listed.</div>}
+            {/* As its thread entry says it; an undelivered stage says so through its badge and body. */}
+            {st.code && st.code !== 'no_answer' && (
+              <div data-testid={`selection-code-${st.stage}`} style={selectionCount}>
+                no usable seat list: {NO_LIST[st.code] ?? st.code}
+              </div>
+            )}
           </div>
         ))}
         {settled && (
@@ -605,15 +649,20 @@ function SelectionCard({
               'Everyone considered was seated.'
             ) : (
               <>
-                <h3 style={selectionHeading}>Considered, not seated</h3>
-                <ul style={selectionList}>
-                  {selection.considered.map((c, j) => (
-                    <li key={j}>
-                      {c.stakeholder}: {c.reason.replace(/\.$/, '')}
-                      {c.represented_by_name && `. Represented by ${c.represented_by_name}`}
-                    </li>
-                  ))}
-                </ul>
+                <div style={selectionHeading}>Considered, not seated</div>
+                {/* No empty list when only the counts below were cut. */}
+                {selection.considered.length > 0 && (
+                  <ul aria-label="Considered, not seated" style={selectionList}>
+                    {selection.considered.map((c, j) => (
+                      <li key={j}>
+                        {c.stakeholder}: {c.reason.replace(/\.$/, '')}
+                        {c.represented_by_name && `. Represented by ${c.represented_by_name}`}
+                        {/* The name check is exact, so a lookalike name passes it: the slug is the defence. */}
+                        {c.represented_by && derived.has(c.represented_by) && ` (${derivedSeat(c.represented_by)})`}
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {considered > 0 && <div style={selectionCount}>{considered} more considered, not listed.</div>}
                 {invalid > 0 && <div style={selectionCount}>{invalid} more invalid entries, not listed.</div>}
               </>
@@ -769,12 +818,7 @@ function TimelineEntry({
 
       {open ? (
         <div style={{ marginTop: 6, paddingLeft: 18, color: 'var(--text-muted)' }}>
-          {entry.take != null && entry.takes != null && (entry.takes > 1 || violations.length > 0) && (
-            <div data-testid={`kept-take-${entry.n}`} style={{ fontSize: 11.5, marginBottom: 6 }}>
-              kept take {entry.take} of {entry.takes}
-              {violations.length > 0 && `; broke: ${violationText(violations)}`}
-            </div>
-          )}
+          <KeptTake take={entry.take} takes={entry.takes} violations={violations} testId={`kept-take-${entry.n}`} />
           {segments.length > 0 ? <Segments segments={segments} runId={runId} /> : noProse}
         </div>
       ) : (
@@ -918,7 +962,7 @@ function voiceValue(value: VoiceSummary[string] | undefined): string {
   return String(value);
 }
 
-function MeetingMetrics({ data }: { data: CommitteeData }) {
+function MeetingMetrics({ data, derived }: { data: CommitteeData; derived: Set<string> }) {
   const turns = [...data.timeline].sort((a, b) => a.n - b.n);
   const delivered = (e: Entry) => !e.badges.includes('no_turn');
   const over = data.verdict !== null;
@@ -1025,7 +1069,8 @@ function MeetingMetrics({ data }: { data: CommitteeData }) {
           {asks.length === 0 && <div style={quiet}>Nobody asked for the floor.</div>}
           {asks.map((a) => (
             <div key={a.asked} data-testid={`floor-ask-${a.asked}`} style={quiet}>
-              {a.name} asked on turn {a.asked} ·{' '}
+              {a.name}
+              {derived.has(a.role) && ` (${derivedSeat(a.role)})`} asked on turn {a.asked} ·{' '}
               {a.got !== null
                 ? `got the floor on turn ${a.got}, ${a.got - a.asked} turns later`
                 : over
@@ -1320,6 +1365,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
         diffMode={diffMode}
         onDiffMode={setDiffMode}
         onOpenTurn={openTurn}
+        derived={derived}
       />
     </Section>
   );
@@ -1359,7 +1405,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   if (variant === 'metrics')
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <MeetingMetrics data={data} />
+        <MeetingMetrics data={data} derived={derived} />
         <EvaluationBlock runId={runId} evaluation={data.evaluation ?? null} scorable={!!data.verdict?.text} />
       </div>
     );

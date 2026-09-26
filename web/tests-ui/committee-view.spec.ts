@@ -298,6 +298,7 @@ const RATIFIED = {
   parsed: true, code: null,
   proposed: SEATED.filter((s) => s.source !== 'fixed')
     .map(({ role, name, title, rationale }) => ({ role, name, title, rationale })),
+  proposed_dropped: 0,
   error: null, cap: SELECTION_CAP, take: 3, takes: 3, kept: true,
   voice: {
     words: 15,
@@ -306,7 +307,9 @@ const RATIFIED = {
       description: 'who carries the pager each week', ok: false,
     }],
   },
-  violations: ['image_missing'], flags: [],
+  // A selector is asked for no code pointer, so voice's soft flag rides here
+  // and is never badged (decision 11).
+  violations: ['image_missing'], flags: ['no_pointer'],
   seated: SEATED,
   reviewers: ['senior_director', 'manager', 'security', 'crew_owner'],
   considered: [{
@@ -314,8 +317,36 @@ const RATIFIED = {
     reason: 'the crews keep their own pager, so their owner speaks for on-call',
     represented_by: 'crew_owner',
   }],
+  considered_dropped: 0, invalid_dropped: 0,
   fallback: null,
 };
+
+/** A seat as a stage's `proposed` lists it: the four keys `_reduce_select` keeps. */
+const listed = (role: string) => {
+  const { name, title, rationale } = SEATED.find((s) => s.role === role)!;
+  return { role, name, title, rationale };
+};
+
+/** The owner's and the manager's kept stages, as `_reduce_select` writes them
+ *  before the chair: not final, and carrying the provisional cap of 30 that the
+ *  chair's row then replaces. The owner puts security forward, the manager adds
+ *  the crew owner. */
+const EARLIER = [
+  { stage: 1, role: 'owner', body: 'Security should sit: this opens a trust boundary.', proposed: [listed('security')] },
+  { stage: 2, role: 'manager', body: 'Keep security, and seat the crew owner who carries the work.',
+    proposed: [listed('security'), listed('crew_owner')] },
+].map((st) => ({
+  ...st, final: false, delivered: true, parsed: true, code: null, proposed_dropped: 0, error: null,
+  cap: 30, take: 1, takes: 1, kept: true, voice: { words: 9, images: [] }, violations: [], flags: ['no_pointer'],
+}));
+
+/** The chair's first two takes, which voice discarded (`_discard`): a `take`
+ *  row each, under the stage's base phase, with no turn and no cap. */
+const DISCARDED = [1, 2].map((take) => ({
+  phase: 's3-senior_director', role: 'senior_director', stage: 3, turn: null, take, kept: false,
+  delivered: true, body: RATIFIED.body, action: null, stance: null, error: null,
+  voice: RATIFIED.voice, violations: ['image_missing'], flags: ['no_pointer'],
+}));
 
 /** Idempotent, like `seed()`. Rows only: the off-site figure has no file. */
 function seedSelection(): void {
@@ -329,11 +360,21 @@ function seedSelection(): void {
                          created_at, updated_at)
        VALUES (?, 'committee', 'local', 'main', '{}', 'running', 't01-senior_director', ?, ?)`,
     ).run(SELECTION_RUN, now, now);
-    // The phase `record_reduction` writes for the chair's ratification.
-    db.prepare(
+    // Every row a run at t01 has, in order, each under the phase `record_reduction`
+    // writes: the two earlier stages, the chair's discarded takes, her ratification.
+    const insert = db.prepare(
       `INSERT INTO reductions (run_id, phase, kind, json, review_state, created_at, updated_at)
-       VALUES (?, 's3-senior_director-take3', 'selection', ?, 'pending', ?, ?)`,
-    ).run(SELECTION_RUN, JSON.stringify(RATIFIED), now, now);
+       VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+    );
+    const rows: Array<[string, string, object]> = [
+      ['s1-owner', 'selection', EARLIER[0]],
+      ['s2-manager', 'selection', EARLIER[1]],
+      ['s3-senior_director', 'take', DISCARDED[0]],
+      ['s3-senior_director-take2', 'take', DISCARDED[1]],
+      ['s3-senior_director-take3', 'selection', RATIFIED],
+    ];
+    rows.forEach(([phase, kind, doc], i) =>
+      insert.run(SELECTION_RUN, phase, kind, JSON.stringify(doc), now + i, now + i));
   } finally {
     db.close();
   }
@@ -574,6 +615,8 @@ test('the committee tab shows the seated roster before the first turn', async ({
   const data = await (await request.get(`/api/runs/${SELECTION_RUN}/view`)).json();
   expect(data.timeline).toEqual([]);
   expect(data.selection?.state).toBe('seated');
+  // One card block per kept stage: the discarded takes are not stages.
+  expect(data.selection.stages.map((st: { stage: number }) => st.stage)).toEqual([1, 2, 3]);
   expect(data.progress.cap).toBe(SELECTION_CAP);
   expect(data.roster.map((p: { role: string }) => p.role)).toEqual(SEATED.map((s) => s.role));
   expect(data.roster.find((p: { role: string }) => p.role === 'crew_owner')).toMatchObject({
@@ -603,11 +646,18 @@ test('the committee tab shows the seated roster before the first turn', async ({
   await expect(by('crew_owner')).toContainText('put forward by Ruth Delgado');
   // A seat nobody had to put forward.
   await expect(by('owner')).toContainText('fixed seat');
-  // The cap the master resolved, not the server's env guess of 30.
+  // The cap the master resolved, not the server's env guess of 30, and the
+  // chair's row's, not the provisional 30 the two earlier stages carry.
   await expect(page.locator('[data-testid="turn-count"]')).toHaveText(`turn 0 of ${SELECTION_CAP}`);
 
-  // The Selection card: the chair's ratification, its seats, who was considered.
+  // The Selection card: every stage, the chair's ratification, its seats, who was considered.
   await expect(page.locator('[data-testid="selection-card"]')).toBeVisible();
+  await expect(page.locator('[data-testid="selection-stage-1"]')).toContainText('proposes');
+  await expect(page.locator('[data-testid="selection-stage-2"]')).toContainText('amends');
+  // Every stage carries voice's soft no_pointer flag, and no stage badges it.
+  for (const n of [1, 2, 3]) {
+    await expect(page.locator(`[data-testid="selection-stage-${n}"]`)).not.toContainText('no pointer');
+  }
   const stage = page.locator('[data-testid="selection-stage-3"]');
   await expect(stage).toContainText('Dana Whitfield');
   await expect(stage).toContainText('ratifies');
@@ -623,9 +673,10 @@ test('the committee tab shows the seated roster before the first turn', async ({
   await expect(considered).toContainText('On-call SRE');
   await expect(considered).toContainText('Represented by Iris Kovacs');
 
-  // Neither worker-written image became an <img>, and nothing on the page asked
-  // another origin for one. The DOM check holds even where the CSP would have
-  // blocked the request before the listener saw it.
+  // Neither worker-written image became an <img>: the DOM check is the guard.
+  // The request check below cannot fire on this page, because the CSP
+  // (img-src 'self' blob: data:) blocks an off-site image before any request
+  // leaves; it stays as a harmless second net.
   await expect(page.locator('img[src*="outside.example"]')).toHaveCount(0);
   const origin = new URL(page.url()).origin;
   const outside = images.filter((u) => /^https?:/.test(u) && new URL(u).origin !== origin);

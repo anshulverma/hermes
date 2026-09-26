@@ -1503,7 +1503,7 @@ def test_a_seated_run_before_t01_carries_the_roster_and_the_selection_block():
         (1, "owner", "Maya Okonkwo"), (2, "manager", "Ruth Delgado"),
         (3, "senior_director", "Dana Whitfield"),
     ]
-    assert block["stages"][0]["proposed"] == proposed
+    assert block["stages"][0]["proposed"] == [{**proposed[0], "source": "library"}]
     assert [s["proposed_dropped"] for s in block["stages"]] == [5, 0, 0]
     assert block["considered"] == [
         {**considered[0], "represented_by_name": security["name"]},
@@ -1556,7 +1556,7 @@ def test_a_stage_carries_voice_fields_badges_and_segments():
 
     assert set(stage) == {
         "stage", "role", "name", "delivered", "body", "proposed", "proposed_dropped",
-        "segments", "badges", "take", "takes", "violations", "flags",
+        "code", "segments", "badges", "take", "takes", "violations", "flags",
     }
     assert (stage["take"], stage["takes"]) == (3, 3)
     assert (stage["violations"], stage["flags"]) == (["over_cap"], soft)
@@ -1581,6 +1581,36 @@ def test_a_stage_image_that_checked_ok_is_ok():
 
     assert (image(checked)["ok"], image(checked)["name"]) == (True, "s1-owner.svg")
     assert image(unchecked)["ok"] is False
+
+
+def test_a_proposed_seat_the_chair_dropped_still_says_library_or_derived():
+    """The roster marks only a seated derived seat, so each listed seat carries its own source."""
+    crew = {"role": "crew_owner", "name": "Priya Nair", "title": "Crew Owner, fleet team",
+            "rationale": "owns the crews"}
+    sre = {"role": "sre", "name": cast.LIBRARY["sre"]["name"],
+           "title": cast.LIBRARY["sre"]["title"], "rationale": "carries the pager"}
+    security = _seat("security", "owner")
+    reductions = [_sel(1, proposed=[crew, sre]), _sel(2), _ratified(security)]
+
+    for phase, rows in (("s2-manager", reductions[:1]), ("t01-senior_director", reductions)):
+        [stage, *_] = view_data(_run(phase), rows)["selection"]["stages"]
+
+        # Neither seat reached the roster; the chair seated security alone.
+        assert [(p["role"], p["source"]) for p in stage["proposed"]] == [
+            ("crew_owner", "derived"), ("sre", "library")], phase
+
+
+def test_a_stage_carries_why_its_list_could_seat_nobody():
+    stages = view_data(_run("t01-senior_director"), [
+        _sel(1, code="too_few"), _sel(2, code=7), _ratified(_seat("security", "owner")),
+    ])["selection"]["stages"]
+    absent = dict(_sel(1).json)
+    del absent["code"]  # a reduction written before the key
+    [legacy] = view_data(_run("s2-manager"), [Reduction(kind="selection", json=absent)])[
+        "selection"]["stages"]
+
+    assert [s["code"] for s in stages] == ["too_few", None, None]
+    assert legacy["code"] is None
 
 
 def test_a_legacy_run_lost_mid_meeting_has_no_selection(run2):
@@ -1672,7 +1702,8 @@ def test_an_unknown_role_is_unattributed_and_never_raises():
     assert all(row["stance"] is None for row in data["roster"])
     stages = data["selection"]["stages"]
     assert stages[0]["name"] == "unattributed"
-    assert stages[1]["proposed"] == [{"role": "tpm", "name": "", "title": "", "rationale": ""}]
+    assert stages[1]["proposed"] == [
+        {"role": "tpm", "name": "", "title": "", "rationale": "", "source": "library"}]
     assert stages[1]["proposed_dropped"] == 0
     assert (data["selection"]["considered_dropped"], data["selection"]["invalid_dropped"]) == (0, 0)
     assert data["selection"]["considered"] == [{
