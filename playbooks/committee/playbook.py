@@ -227,6 +227,67 @@ def _apply_plan(s: dict, block: dict, *, delivered: bool) -> dict:
     return out
 
 
+def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
+    """The gates of one kept 1:1 exchange, and the only place a 1:1 ends.
+
+    The speaker is ``s["current_role"]``. A member's ``aligned`` and the host's
+    ``agreed``/``still_open`` are the only keys honoured here: ``request_floor``,
+    ``close``, ``align`` and ``meet_*`` never are inside a 1:1. ``next``
+    alternates between the two members, and the end is tested only after
+    ``members[1]``'s exchange, so a member host always speaks last and its
+    outcome postdates the guest's last word. An undelivered exchange ends the
+    1:1 at once. Finalize records the seq as done and clears
+    ``s["one_on_one"]``. ``reduce`` does only the file writes around this call,
+    and ``_drive`` reaches it through the real ``reduce``, so it is never
+    transcribed.
+
+    Returns what this exchange said (``aligned``, ``agreed``, ``still_open``,
+    each None unless honoured), whether it was the ``final`` one, why the 1:1
+    ``ended``, the ``outcome`` on the final exchange, and ``delegated_action``.
+    """
+    one = s["one_on_one"]
+    role = s["current_role"]
+    first, second = one["members"]
+    aligned = agreed = still_open = None
+    if delivered and role in one["members"]:
+        # the member's latest block decides; one that omits `aligned` reads as no
+        aligned = block.get("aligned")
+        one["aligned"][role] = aligned
+    if delivered and role == one["host"]:
+        agreed, still_open = block.get("agreed"), block.get("still_open")
+        # the host's latest STATED values: an exchange that omits one keeps it
+        one["agreed"] = agreed if agreed is not None else one["agreed"]
+        one["still_open"] = still_open if still_open is not None else one["still_open"]
+    if not delivered:
+        one["ended"] = "not delivered"
+    elif role == second:
+        if all(one["aligned"][m] is True for m in one["members"]):
+            one["ended"] = "aligned"
+        elif one["exchange"] >= ONE_ON_ONE_MAX_EXCHANGES:
+            one["ended"] = "exchange cap"
+        elif _free(s) < 2:  # another round needs two; never a lone exchange
+            one["ended"] = "budget"
+    one["next"] = None if one["ended"] else (second if role == first else first)
+    outcome = None
+    if one["next"] is None:
+        outcome = {
+            "aligned": one["ended"] == "aligned",
+            "agreed": one["agreed"],
+            "still_open": one["still_open"],
+        }
+        s["one_on_ones_done"].append(one["seq"])
+        s["one_on_one"] = None
+    return {
+        "aligned": aligned,
+        "agreed": agreed,
+        "still_open": still_open,
+        "final": outcome is not None,
+        "ended": one["ended"],
+        "outcome": outcome,
+        "delegated_action": None,
+    }
+
+
 def _latest_answer(findings: list[Finding] | None) -> str:
     """The last non-empty ``answer`` in a settled phase's findings.
 
@@ -496,6 +557,21 @@ class CommitteePlaybook:
         self._begin(s, name)
         return name
 
+    def _exchange(self, s: dict) -> str:
+        """Mint the next exchange of the 1:1 in progress: ``o{NN}-{speaker}``.
+
+        NN is ``one_on_one_used`` after the bump, so names never repeat across
+        1:1s. A retake never comes here (voice's ``_retake`` names it off
+        ``s["base"]``), so a retake spends neither the budget nor an exchange.
+        """
+        one = s["one_on_one"]
+        role = one["next"]
+        s["one_on_one_used"] += 1
+        one["exchange"] += 1
+        return self._mint(
+            s, kind="one_on_one", role=role, name=f"o{s['one_on_one_used']:02d}-{role}"
+        )
+
     def _decision(self, s: dict, ended: str) -> str:
         """Route to the terminal decision phase, chaired, losing nothing.
 
@@ -676,6 +752,52 @@ class CommitteePlaybook:
                         roster=s["roster"],
                     ),
                     "kind": "plan",
+                    "action": None,
+                },
+            )]
+
+        if s["current_kind"] == "one_on_one":
+            # A 1:1 exchange: the speaker `_mint` recorded, the other member,
+            # and the private file only the 1:1's two participants are told of.
+            # A retake names its kept take and a seated member says whom it
+            # speaks for, as a meeting goal does.
+            one, role = s["one_on_one"], s["current_role"]
+            other = next(m for m in one["members"] if m != role)
+            return [Ticket(
+                id=f"{run.id}/{phase}",
+                run_id=run.id,
+                phase=phase,
+                state="queued",
+                resource_req="cpu",
+                priority=0.0,
+                attempts=0,
+                payload={
+                    "role": role,
+                    "title": cast.title(
+                        role, "one_on_one", turn=s["current_turn"], take=s["take"],
+                        roster=s["roster"] or None, other=other, seq=one["seq"],
+                        exchange=one["exchange"],
+                    ),
+                    "goal": cast.one_on_one_goal(
+                        role,
+                        charge=s["charge"],
+                        artifact=s["artifact"],
+                        thread=str(thread.path(run.id)),
+                        file=str(thread.one_on_one_path(
+                            run.id, seq=one["seq"], members=one["members"])),
+                        other=other,
+                        members=list(one["members"]),
+                        topic=one["topic"],
+                        exchange=one["exchange"],
+                        host=one["host"],
+                        closing=False,
+                        roster=s["roster"],
+                        retake=s["note"],
+                        last_take=s["last_take"],
+                        speaks_for=[entry["stakeholder"] for entry in s["considered"]
+                                    if entry.get("represented_by") == role],
+                    ),
+                    "kind": "one_on_one",
                     "action": None,
                 },
             )]
@@ -926,6 +1048,8 @@ class CommitteePlaybook:
             return self._reduce_select(run, s, findings)
         if s["current_kind"] == "plan":
             return self._reduce_plan(run, s, findings)
+        if s["current_kind"] == "one_on_one":
+            return self._reduce_one_on_one(run, s, findings)
         return self._reduce_turn(run, s, findings)
 
     # --- the voice gate (voice D3) --------------------------------------
@@ -1237,6 +1361,86 @@ class CommitteePlaybook:
             "flags": flags,
         })]
 
+    def _reduce_one_on_one(
+        self, run: Run, s: dict, findings: list[Finding]
+    ) -> list[Reduction]:
+        """One kept 1:1 exchange: the private file, the gates, the outcome entry.
+
+        Exactly one ``one_on_one`` reduction per kept take. It carries no
+        ``cap``, ``artifact``, ``revised``, ``role`` or ``turn`` (kind-blind
+        readers pick those up) and no path under ``one-on-ones/``: only the two
+        participants' goals name the private file. Never raises.
+        """
+        errors: list[str] = []
+        role = s["current_role"]
+        one = dict(s["one_on_one"])  # finalize clears s["one_on_one"]
+        seq, host, members = one["seq"], one["host"], list(one["members"])
+        answer = _latest_answer(findings)
+        # A 1:1 never keeps a file image: images/ is the room's (voice D8).
+        _, metrics, violations, flags = self._grade(run, s, role, answer, file_images=False)
+        take = takes = s["take"]
+        delivered = bool(answer)
+        body = turnblock.strip(answer)
+        if answer and not body:
+            body = _SIGNALS_ONLY
+        try:
+            thread.append_one_on_one(
+                run.id, seq=seq, host=host, members=members, topic=one["topic"],
+                speaker=role, exchange=one["exchange"], body=body,
+                closing=one["closing"], roster=s["roster"],
+            )
+        except Exception as exc:  # never raise out of reduce
+            errors.append(f"one-on-one file: {exc}")
+        block = turnblock.parse(answer)
+        gate = _apply_one_on_one(s, block, delivered=delivered)
+        if gate["final"]:
+            try:
+                thread.append_one_on_one_outcome(
+                    run.id, seq=seq, host=host, members=members,
+                    aligned=gate["outcome"]["aligned"], agreed=gate["outcome"]["agreed"],
+                    still_open=gate["outcome"]["still_open"], ended=gate["ended"],
+                    roster=s["roster"],
+                )
+            except Exception as exc:  # never raise out of reduce
+                errors.append(f"thread: {exc}")
+        return [Reduction(kind="one_on_one", json={
+            "seq": seq,
+            "origin": one["origin"],
+            "called_by": one["called_by"],
+            "after_turn": one["after_turn"],
+            "host": host,
+            "members": members,
+            "topic": one["topic"],
+            "speaker": role,
+            "exchange": one["exchange"],
+            "closing": one["closing"],
+            "delivered": delivered,
+            "body": body,
+            # what this exchange said and was honoured; the 1:1's standing
+            # outcome rides on `outcome`, on the final exchange only
+            "aligned": gate["aligned"],
+            "agreed": gate["agreed"],
+            "still_open": gate["still_open"],
+            # what the speaker ASKED for, as a meeting turn records it
+            "delegate": bool(block.get("delegate")),
+            "action": block.get("action"),
+            "final": gate["final"],
+            "ended": gate["ended"],
+            "outcome": gate["outcome"],
+            "delegated_action": gate["delegated_action"],
+            # read by the view: the server process cannot see this state
+            "one_on_one_budget": s["one_on_one_budget"],
+            "one_on_one_used": s["one_on_one_used"],
+            "error": "; ".join(errors) or None,
+            # voice C4's kept fields
+            "take": take,
+            "takes": takes,
+            "kept": True,
+            "voice": metrics,
+            "violations": violations,
+            "flags": flags,
+        })]
+
     def _reduce_turn(
         self, run: Run, s: dict, findings: list[Finding]
     ) -> list[Reduction]:
@@ -1537,6 +1741,9 @@ class CommitteePlaybook:
             # and before anyone else speaks. A 1:1 needs two exchanges, so a
             # budget of 0 or 1 is off and changes no phase.
             return self._mint(s, kind="plan", role=cast.OWNER, name="p01-owner")
+        if s["one_on_one"]:
+            # D3 item 5: a 1:1 in progress runs to its end before anything else.
+            return self._exchange(s)
         # a delegation outranks `close`: an edit the owner asked for still happens,
         # and costs one turn. The cap outranks BOTH, so this can never mint t31.
         if s["delegation"] and s["turn"] <= s["max_turns"]:
@@ -1551,6 +1758,30 @@ class CommitteePlaybook:
             # the owner answers every reviewer; `current_turn` is still that
             # reviewer's when the argument is evaluated.
             return self._turn(s, cast.OWNER, answers=s["current_turn"])
+        if s["pending_one_on_ones"]:
+            # D3 item 9: start the next scheduled 1:1, guest first. The owner
+            # spoke last (item 8 is above), and no o-phase moves `last_speaker`,
+            # `turn`, `opening` or `queue`, so the meeting resumes with no restore.
+            pair = s["pending_one_on_ones"].pop(0)
+            first, second = pair["members"]
+            s["one_on_one"] = {
+                "seq": pair["seq"],
+                "origin": pair["origin"],
+                "called_by": pair["called_by"],
+                "after_turn": s["turn"] - 1,  # 0 for an up-front 1:1
+                "host": pair["host"],
+                "members": [first, second],
+                "topic": pair["topic"],
+                "exchange": 0,
+                "next": first,
+                "closing": False,
+                "aligned": {first: None, second: None},
+                "agreed": None,
+                "still_open": None,
+                "held_action": None,
+                "ended": None,
+            }
+            return self._exchange(s)
         if s["opening"]:
             return self._turn(s, s["opening"].pop(0))
         if s["queue"]:

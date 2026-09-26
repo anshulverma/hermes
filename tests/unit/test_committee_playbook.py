@@ -2842,6 +2842,27 @@ def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, *, reducti
                     reductions.append((nxt, reduction))
             continue
         block = script(nxt, s) if callable(script) else dict(script.get(nxt, {}))
+        if s["current_kind"] == "one_on_one":
+            # A 1:1 exchange, seeded and reduced for real: the o-phase seed,
+            # `_grade`, `_apply_one_on_one` and both file writes run with nothing
+            # transcribed. Its speaker never joins `speakers`: the reviewer ->
+            # owner rule is about the room, and a 1:1 is not the room.
+            from engine import contracts
+
+            assert nxt == f"o{s['one_on_one_used']:02d}-{s['current_role']}", nxt
+            ticket = pb.seed(run, _NamedSite("local"))[0]
+            contracts.validate(ticket.payload, pb.payload_schema(nxt))
+            assert (ticket.id, ticket.payload["kind"], ticket.payload["role"]) == (
+                f"{run.id}/{nxt}", s["current_kind"], s["current_role"])
+            answer = _answer(block)
+            for red in pb.reduce(
+                run, nxt,
+                [_finding(run, f"{run.id}/{nxt}", answer)] if answer is not None else [],
+                _NamedSite("local"),
+            ):
+                red.phase = nxt  # as the queue stores it, so a test can read it back
+                run.reductions.append(red)
+            continue
         if s["current_kind"] == "plan":
             # The owner's plan through the REAL seed and reduce: the plan
             # ticket, `_grade`, `_apply_plan` and the plan entry run with
@@ -2909,6 +2930,15 @@ def check_invariants(s, seen, speakers, max_turns=30, delivered=None, reviewers=
     assert len(seen) == len(set(seen)), "duplicate phase name"
     reviewers = _REVIEWERS if reviewers is None else reviewers
     seen = [phase for phase in seen if not re.match(r"s[1-3]-", phase)]
+    # 1:1 exchanges have their own counter: oNN runs 1, 2, 3... with no gap or
+    # repeat and never past the budget. Every check below is about the
+    # meeting, whose speakers `_drive` records without them, so o-phases
+    # (retakes `oNN-<role>-takeK` included) leave `seen` here.
+    onums = [int(p[1:3]) for p in seen if _O_PHASE.match(p) and "-take" not in p]
+    assert onums == list(range(1, len(onums) + 1)), f"oNN not 1, 2, 3...: {onums}"
+    assert len(onums) == s["one_on_one_used"] <= s["one_on_one_budget"], (
+        onums, s["one_on_one_used"], s["one_on_one_budget"])
+    seen = [p for p in seen if not _O_PHASE.match(p)]
     # The plan is not a meeting turn (D2): minted at most once, then out of
     # every NN, kept-take and reply check below.
     assert seen.count("p01-owner") <= 1, "the plan was minted twice"
@@ -7674,6 +7704,305 @@ def test_a_selection_entry_prints_no_empty_list_and_no_en_dash():
     assert "\n- Legal - contracts: none - yet. Not represented.\n" in text
     body = text.split("\n## selection 1:", 1)[1]
     assert "\u2013" not in body.replace("One seat \u2013 security.", "")  # prose is the speaker's own
+
+
+# --- one-on-ones: up-front 1:1s end to end (one-on-ones D3, D6, D9) ----------
+
+# A 1:1 exchange phase, retakes included: `o{NN}-{role}[-take{k}]`.
+_O_PHASE = re.compile(r"^o\d{2}-")
+
+# C6: every field of a kept `one_on_one` reduction, voice's C4 kept fields included.
+_ONE_ON_ONE_KEYS = {
+    "seq", "origin", "called_by", "after_turn", "host", "members", "topic",
+    "speaker", "exchange", "closing", "delivered", "body", "aligned", "agreed",
+    "still_open", "delegate", "action", "final", "ended", "outcome",
+    "delegated_action", "one_on_one_budget", "one_on_one_used", "error",
+    "take", "takes", "kept", "voice", "violations", "flags",
+}
+
+# A selection that seats the library seat `security` and a derived
+# `crew_owner` (selection C4) beside `tpm`: the same full list at every stage.
+_CREW_ANSWER = (
+    "Seat the people who run the crews and guard the zones.\n\n"
+    "```hermes-selection\n"
+    '{"seats": ['
+    '{"role": "security", "rationale": "The crews run inside security zones."}, '
+    '{"role": "crew_owner", "name": "Noor Haddad", "title": "Owner of the team-owned crews", '
+    '"rationale": "Every crew is team-owned, and she runs them."}, '
+    '{"role": "tpm", "rationale": "Someone has to sequence the rollout."}'
+    '], "not_seated": []}\n'
+    "```\n"
+)
+CREW_SELECTION = {"owner": _CREW_ANSWER, "manager": _CREW_ANSWER, "senior_director": _CREW_ANSWER}
+
+
+def _exchanges(run):
+    """The kept 1:1 exchanges `_drive` banked on `run.reductions`, in dispatch order."""
+    return [r for r in run.reductions if r.kind == "one_on_one"]
+
+
+def _drive_plan(plan, blocks=None, *, budget=16, selection=None):
+    """`_drive` a whole run whose owner plans `plan`, with o-phase `blocks` by name."""
+    return _drive({"p01-owner": plan, **(blocks or {})},
+                  selection=selection or DEFAULT_SELECTION, one_on_one_budget=budget)
+
+
+def test_plan_mints_named_one_on_ones_before_the_opening_round():
+    """AC1: after selection, the plan, every exchange of 1:1 1, then 1:1 2's,
+    then the first opening-round turn. oNN counts every exchange of the run."""
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "manager tpm: rollback plan", "meet_2": "owner staff_ic: cost"})
+
+    i = seen.index("p01-owner")
+    assert all(p.startswith("s") for p in seen[1:i])  # selection's phases, then the plan
+    assert seen[i:i + 10] == [
+        "p01-owner",
+        "o01-tpm", "o02-manager", "o03-tpm", "o04-manager",
+        "o05-staff_ic", "o06-owner", "o07-staff_ic", "o08-owner",
+        f"t01-{s['reviewers'][0]}",
+    ]
+    assert [(r.json["seq"], r.json["exchange"]) for r in _exchanges(run)] == [
+        (1, 1), (1, 2), (1, 3), (1, 4), (2, 1), (2, 2), (2, 3), (2, 4)]
+    assert s["one_on_ones_done"] == [1, 2] and s["pending_one_on_ones"] == []
+    assert s["one_on_one"] is None and s["one_on_one_used"] == 8
+    check_invariants(s, seen, sp, delivered=ok)
+
+
+def test_reduce_one_on_one_writes_file_outcome_and_one_kept_reduction():
+    """AC2 and D9: one kept reduction per exchange with every C6 field, the
+    private file with one entry per exchange, and only the outcome in thread.md."""
+    from playbooks.committee import thread, voice
+
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "owner tpm: rollback plan"},
+        {
+            "o01-tpm": {"_prose": "Rollback needs a named owner before launch.",
+                        "aligned": False},
+            "o02-owner": {"_prose": "I will own rollback and write the drill.",
+                          "aligned": True, "agreed": "Maya owns the rollback plan"},
+            "o03-tpm": {"_prose": "With an owner named, I am aligned.", "aligned": True},
+            "o04-owner": {"_prose": "Then only the drill date is left.", "aligned": True,
+                          "still_open": "the rollback drill date"},
+        },
+    )
+
+    reds = _exchanges(run)
+    docs = [r.json for r in reds]
+    assert [r.phase for r in reds] == ["o01-tpm", "o02-owner", "o03-tpm", "o04-owner"]
+    assert all(set(d) == _ONE_ON_ONE_KEYS for d in docs)
+    assert all((d["kept"], d["delivered"], d["take"], d["takes"]) == (True, True, 1, 1)
+               for d in docs)
+    assert all(d["error"] is None and d["closing"] is False for d in docs)
+    assert [d["speaker"] for d in docs] == ["tpm", "owner", "tpm", "owner"]
+    assert [d["aligned"] for d in docs] == [False, True, True, True]
+    assert [d["final"] for d in docs] == [False, False, False, True]
+    first, last = docs[0], docs[-1]
+    assert (first["seq"], first["origin"], first["called_by"], first["after_turn"]) == (
+        1, "upfront", "owner", 0)
+    assert (first["host"], first["members"], first["topic"]) == (
+        "owner", ["tpm", "owner"], "rollback plan")
+    assert first["ended"] is None and first["outcome"] is None and first["agreed"] is None
+    assert docs[1]["agreed"] == "Maya owns the rollback plan"
+    assert (last["ended"], last["delegated_action"]) == ("aligned", None)
+    assert last["outcome"] == {"aligned": True, "agreed": "Maya owns the rollback plan",
+                               "still_open": "the rollback drill date"}
+    assert (last["one_on_one_budget"], last["one_on_one_used"]) == (16, 4)
+    assert last["body"] == "Then only the drill date is left."
+    assert last["voice"]["words"] == 7
+
+    private = thread.one_on_one_path(run.id, seq=1, members=["tpm", "owner"]).read_text(
+        encoding="utf-8")
+    assert private.startswith(
+        "# 1:1 1: Sam Iyer \u2194 Maya Okonkwo, hosted by Maya Okonkwo\n\nTopic: rollback plan\n")
+    assert "\n".join(voice.RULES) in private
+    assert private.count("\n## exchange ") == 4
+    assert ("## exchange 1: Sam Iyer, Technical Program Manager (tpm)\n\n"
+            "Rollback needs a named owner before launch.\n") in private
+    assert private.index("## exchange 3: Sam Iyer") < private.index("## exchange 4: Maya Okonkwo")
+
+    shared = thread.path(run.id).read_text(encoding="utf-8")
+    assert ("\n## 1:1 1: Maya Okonkwo \u2194 Sam Iyer (aligned)\n\n"
+            "Agreed: Maya owns the rollback plan\n"
+            "Still open: the rollback drill date\n") in shared
+    assert "Rollback needs a named owner" not in shared  # the room reads the outcome only
+    assert seen[seen.index("o04-owner") + 1] == f"t01-{s['reviewers'][0]}"
+
+
+def test_one_on_one_reductions_carry_no_cap_role_turn_or_paths():
+    """AC2 and C6: kind-blind readers (view._cap, eval's artifact path) never
+    pick a 1:1 up, no exchange routes a ticket, and none names the private file."""
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "manager tpm: rollback plan", "meet_2": "owner staff_ic: cost"})
+
+    docs = [r.json for r in _exchanges(run)]
+    assert len(docs) == 8
+    for doc in docs:
+        assert not {"cap", "role", "turn", "artifact", "revised"} & set(doc), doc
+        assert "needs_human_ticket_ids" not in doc
+        assert "one-on-ones" not in json.dumps(doc)
+
+
+def test_one_on_one_alternates_guest_first_and_ends_on_the_host():
+    """D6: the guest opens and the two alternate. The end is tested only after
+    the host's exchange, so both aligned after the guest's o03 is not an end."""
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "manager tpm: rollback plan"},
+        {
+            "o01-tpm": {"aligned": False},
+            "o02-manager": {"aligned": True},
+            "o03-tpm": {"aligned": True},
+            "o04-manager": {"aligned": True, "agreed": "Ship the rollback runbook first"},
+        },
+    )
+
+    docs = [r.json for r in _exchanges(run)]
+    assert [(d["speaker"], d["exchange"]) for d in docs] == [
+        ("tpm", 1), ("manager", 2), ("tpm", 3), ("manager", 4)]
+    assert [d["final"] for d in docs] == [False, False, False, True]
+    assert docs[2]["ended"] is None  # both aligned after the guest: not tested yet
+    assert docs[-1]["ended"] == "aligned"  # aligned outranks the exchange cap
+    assert docs[-1]["outcome"] == {"aligned": True, "agreed": "Ship the rollback runbook first",
+                                   "still_open": None}
+
+
+def test_one_on_one_stops_early_when_both_aligned():
+    """Q3: both members say aligned in one round, so the 1:1 ends at two
+    exchanges, and the opening round still starts at turn 1."""
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "owner staff_ic: cost"},
+        {"o01-staff_ic": {"aligned": True},
+         "o02-owner": {"aligned": True, "agreed": "Cost is capped at two crews"}},
+    )
+
+    i = seen.index("p01-owner")
+    assert seen[i:i + 4] == ["p01-owner", "o01-staff_ic", "o02-owner",
+                             f"t01-{s['reviewers'][0]}"]
+    last = _exchanges(run)[-1].json
+    assert (last["ended"], last["final"], last["exchange"], last["after_turn"]) == (
+        "aligned", True, 2, 0)
+    assert last["outcome"] == {"aligned": True, "agreed": "Cost is capped at two crews",
+                               "still_open": None}
+    assert s["one_on_one_used"] == 2 and s["one_on_ones_done"] == [1]
+
+
+def test_one_on_one_stops_at_four_exchanges():
+    """Q3 and D6: a guest that never says aligned runs to the exchange cap, and
+    an outcome nobody stated reads as no outcome recorded."""
+    from playbooks.committee import thread
+
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "owner tl: api freeze"},
+        {"o02-owner": {"aligned": True}, "o04-owner": {"aligned": True}},
+    )
+
+    docs = [r.json for r in _exchanges(run)]
+    assert [(d["speaker"], d["exchange"]) for d in docs] == [
+        ("tl", 1), ("owner", 2), ("tl", 3), ("owner", 4)]
+    assert (docs[-1]["ended"], docs[-1]["final"]) == ("exchange cap", True)
+    assert docs[-1]["outcome"] == {"aligned": False, "agreed": None, "still_open": None}
+    assert "o05-tl" not in seen
+    shared = thread.path(run.id).read_text(encoding="utf-8")
+    assert ("\n## 1:1 1: Maya Okonkwo \u2194 Marcus Feld (not aligned)\n\n"
+            "_(no outcome recorded: exchange cap)_\n") in shared
+
+
+def test_undelivered_exchange_ends_the_one_on_one_not_aligned():
+    """AC5 and D6: an exchange with no finding ends its 1:1 at once, not
+    aligned, keeping what the host stated earlier. The run still reaches the
+    decision, and only the decision holds a ticket for a human."""
+    from playbooks.committee import thread
+
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "owner tpm: rollback plan", "meet_2": "manager pm: launch scope"},
+        {
+            "o01-tpm": {"_ok": False},
+            "o03-manager": {"agreed": "Scope stays at the pilot"},
+            "o04-pm": {"_ok": False},
+        },
+    )
+
+    i = seen.index("p01-owner")
+    assert seen[i:i + 6] == ["p01-owner", "o01-tpm", "o02-pm", "o03-manager", "o04-pm",
+                             f"t01-{s['reviewers'][0]}"]
+    docs = [r.json for r in _exchanges(run)]
+    assert [(d["seq"], d["delivered"], d["final"], d["ended"]) for d in docs] == [
+        (1, False, True, "not delivered"),
+        (2, True, False, None),
+        (2, True, False, None),
+        (2, False, True, "not delivered"),
+    ]
+    assert docs[0]["outcome"] == {"aligned": False, "agreed": None, "still_open": None}
+    assert docs[0]["body"] == "" and docs[0]["voice"] is None
+    assert docs[-1]["outcome"] == {"aligned": False, "agreed": "Scope stays at the pilot",
+                                   "still_open": None}
+    private = thread.one_on_one_path(run.id, seq=1, members=["tpm", "owner"]).read_text(
+        encoding="utf-8")
+    assert f"## exchange 1: Sam Iyer, Technical Program Manager (tpm)\n\n{thread.NO_TURN}\n" in private
+    shared = thread.path(run.id).read_text(encoding="utf-8")
+    assert ("\n## 1:1 1: Maya Okonkwo \u2194 Sam Iyer (not aligned)\n\n"
+            "_(no outcome recorded: not delivered)_\n") in shared
+    assert ("\n## 1:1 2: Ruth Delgado \u2194 Elena Vargas (not aligned)\n\n"
+            "Agreed: Scope stays at the pilot\n") in shared
+
+    assert seen[-1] == "decision" and s["one_on_one"] is None
+    run.reductions.extend(pb.reduce(
+        run, "decision",
+        [_finding(run, f"{run.id}/decision",
+                  "Approve with changes: name the rollback owner. A simulation, not an approval.")],
+        _NamedSite("local"),
+    ))
+    held = [r.kind for r in run.reductions if r.json.get("needs_human_ticket_ids")]
+    assert held == ["decision"]
+
+
+def test_budget_is_reserved_for_scheduled_pairs():
+    """D5: scheduling reserves two exchanges per pair, so every scheduled pair
+    meets; a 1:1 stops for budget only at a round boundary, never mid-round."""
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "owner tpm: rollback plan", "meet_2": "manager pm: launch scope",
+         "meet_3": "owner tl: api freeze"},
+        budget=5,
+    )
+
+    # 5 - 2 - 2 leaves 1: the third pair cannot be reserved, so it never meets
+    assert [(d["seq"], d["reason"]) for d in s["dropped_one_on_ones"]] == [(None, "budget")]
+    docs = [r.json for r in _exchanges(run)]
+    assert [(d["seq"], d["exchange"]) for d in docs] == [(1, 1), (1, 2), (2, 1), (2, 2)]
+    assert [d["ended"] for d in docs if d["final"]] == ["budget", "budget"]
+    # one exchange is left over, and it is never spent alone
+    assert (s["one_on_one_used"], s["one_on_one_budget"]) == (4, 5)
+    assert s["one_on_ones_done"] == [1, 2]
+    check_invariants(s, seen, sp, delivered=ok)
+
+
+def test_derived_seat_can_be_a_one_on_one_guest():
+    """AC16 (unit): a derived seat and a library seat, planned as guests, meet
+    under the names selection gave them, in the private file and the outcome."""
+    from playbooks.committee import thread
+
+    pb, run, s, seen, sp, ok = _drive_plan(
+        {"meet_1": "owner crew_owner: crew handover", "meet_2": "manager security: zone review"},
+        {name: {"aligned": True}
+         for name in ("o01-crew_owner", "o02-owner", "o03-security", "o04-manager")},
+        selection=CREW_SELECTION,
+    )
+
+    assert "crew_owner" not in cast.CAST and "security" not in cast.CAST
+    names = {role: seat["name"] for role, seat in s["roster"].items()}
+    assert names["crew_owner"] == "Noor Haddad"
+    crew = thread.one_on_one_path(run.id, seq=1, members=["crew_owner", "owner"]).read_text(
+        encoding="utf-8")
+    assert crew.startswith("# 1:1 1: Noor Haddad \u2194 Maya Okonkwo, hosted by Maya Okonkwo\n")
+    assert "## exchange 1: Noor Haddad, Owner of the team-owned crews (crew_owner)\n" in crew
+    zone = thread.one_on_one_path(run.id, seq=2, members=["security", "manager"]).read_text(
+        encoding="utf-8")
+    assert zone.startswith(f"# 1:1 2: {names['security']} \u2194 Ruth Delgado, hosted by Ruth Delgado\n")
+    shared = thread.path(run.id).read_text(encoding="utf-8")
+    assert "\n## 1:1 1: Maya Okonkwo \u2194 Noor Haddad (aligned)\n" in shared
+    assert f"\n## 1:1 2: Ruth Delgado \u2194 {names['security']} (aligned)\n" in shared
+    # a name lookup that skipped the roster would have raised into `error`
+    assert [r.json["error"] for r in _exchanges(run)] == [None] * 4
+    assert seen[seen.index("o04-manager") + 1] == f"t01-{s['reviewers'][0]}"
 
 
 # --- registration and wiring ---------------------------------------------
