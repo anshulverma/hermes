@@ -100,9 +100,10 @@ def test_every_key_in_the_declared_vocabulary_is_one_the_parser_reads():
     # Pinned literally, as ACTION_MAX is: each value rides back into a goal or
     # the thread, so a silent change silently changes what a reader is handed.
     assert T.PAIR_MAX == 200 and T.OUTCOME_MAX == 200
-    for key, cap in (("align", T.PAIR_MAX), ("meet_3", T.PAIR_MAX),
-                     ("agreed", T.OUTCOME_MAX), ("still_open", T.OUTCOME_MAX)):
-        assert len(T.parse(_fenced(f"{key}: keep-this " + "z" * 500))[key]) <= cap, key
+    for key, cap in (("align", T.PAIR_MAX), ("meet_1", T.PAIR_MAX), ("meet_2", T.PAIR_MAX),
+                     ("meet_3", T.PAIR_MAX), ("agreed", T.OUTCOME_MAX),
+                     ("still_open", T.OUTCOME_MAX)):
+        assert len(T.parse(_fenced(f"{key}: keep-this " + "z" * 500))[key]) == cap, key
     # voice's `lengths` measures the action and the stance only. The new text
     # keys must not leak `agreed_chars` and the like into a take's metrics.
     assert T.lengths(_fenced(
@@ -394,6 +395,9 @@ def test_the_plan_instruction_documents_the_meet_lines():
         assert part in text, part
     for key in ("meet_4", "request_floor", "delegate", "action", "close", "stance", "align"):
         assert key not in text, key
+    assert "The host is `owner` or `manager`" in text
+    assert "never `owner` or `junior_ic`" in text
+    assert "Omit every meet line to hold none." in text
 
 
 def test_the_one_on_one_instruction_documents_its_keys_by_shape():
@@ -414,10 +418,16 @@ def test_the_one_on_one_instruction_documents_its_keys_by_shape():
         assert "`agreed: <one line>`" in text and "`still_open: <one line>`" in text
     assert "agreed" not in guest and "still_open" not in guest
     for text in (owner_host, owner_close):
-        assert "delegate: no" in text and f"`{T.ACTION}: <" in text
+        assert "delegate: no" in text
+        assert "`action: <one sentence, 200 characters or fewer>`" in text
     for text in (guest, manager_host, manager_close):
         assert "delegate" not in text and "action" not in text
+    for text in (guest, owner_host, manager_host, owner_close):
+        assert "never as yes" in text
+    for text in (guest, owner_host, manager_host):
+        assert "Set aligned: yes only once" in text
     assert T.FENCE_TAG in manager_close
+    assert manager_close.rstrip().endswith("nothing after it.")
     for text in (guest, owner_host, manager_host, owner_close, manager_close):
         for key in ("request_floor", "close:", "align:", "meet_", "stance"):
             assert key not in text, key
@@ -1004,9 +1014,12 @@ def test_every_goal_stays_under_the_budget_at_maximum_size():
         assert "the only file you may write is one image" in low, shape
         assert "images folder beside the thread (not your working directory)" in low, shape
         assert "write no file at all" not in low, shape
-        assert f"{base}.svg or {base}.png" in g, shape
+        assert f"{base}.svg or .png" in g, shape
         named = f"your last take is in takes/{base}-take2.md beside the thread"
         assert (named in low) is (retake is not None), shape
+
+    # The 1:1 shapes and the align offer, at the same worst case (one-on-ones AC10).
+    _assert_one_on_one_goals_fit()
 
 
 def _goal(role, **over):
@@ -1080,10 +1093,12 @@ def test_the_junior_retake_is_report_only():
 def test_owner_and_reviewers_may_write_one_image_named_for_their_phase():
     g = _goal("owner", image="t02-owner")
 
+    # One stem, one allowed file: the guardrail says so once, which pays for the
+    # align offer in the owner's goal (one-on-ones orchestrator decision 1).
     assert (
-        "The only file you may write is one image, t02-owner.svg or t02-owner.png, "
-        "in the images folder beside the thread (not your working directory); write "
-        "nothing else."
+        "Land nothing, submit nothing, touch no repository. The only file you may "
+        "write is one image, t02-owner.svg or .png, in the images folder beside the "
+        "thread (not your working directory)."
     ) in g
     assert _GUARDRAIL not in g
     assert _GUARDRAIL in _goal("tl")  # no image stem, no write
@@ -1147,7 +1162,7 @@ def test_persona_brief_title_and_goal_read_the_run_roster():
     )
     g = _goal("crew_owner", roster=roster, image="t07-crew_owner")
     assert g.startswith(brief + "\n\n")
-    assert "t07-crew_owner.svg or t07-crew_owner.png" in g
+    assert "t07-crew_owner.svg or .png" in g
     assert "Your cap: 150 words." in g  # a derived seat is a reviewer
     with pytest.raises(KeyError):
         _goal("crew_owner")
@@ -1266,7 +1281,7 @@ def test_select_goals_carry_the_stage_duty_the_seat_rule_and_the_block():
             "Follow the ground rules at the top of the thread; they outrank your "
             f"style. Your cap: {voice.cap_text(role)}.",
             f"The only file you may write is one image, s{stage}-{role}.svg or "
-            f"s{stage}-{role}.png, in the images folder beside the thread",
+            ".png, in the images folder beside the thread",
         ):
             assert text in g, (stage, text)
         # every one of the fixed four is named, the junior IC included (C07)
@@ -1315,6 +1330,262 @@ def test_the_select_goals_example_block_parses_once_its_placeholders_are_filled(
     seats, invalid = selection.validate(doc, cast.LIBRARY)
     assert ([seat["role"] for seat in seats], invalid) == (["security"], [])
     assert [note["represented_by"] for note in selection.not_seated(doc)] == ["security"]
+
+
+# --- 1:1 goals and titles (one-on-ones C5, D8, AC10) -------------------------
+
+_DONE_ONE_ON_ONE = (
+    "Done when: your exchange is written as your answer and ends with one "
+    "hermes-turn block."
+)
+
+
+def _seated_roster(slug="crew_owner", **derived):
+    """The fixed four, the library `security` seat and one derived seat.
+
+    Built the way selection builds seat records, so names resolve through the
+    roster exactly as they do in a run: neither `security` nor a derived slug
+    is in `cast.CAST`.
+    """
+    from playbooks.committee import selection
+
+    roster = dict(selection.fixed_seats())
+    roster["security"] = {
+        **cast.LIBRARY["security"], "role": "security",
+        "rationale": "owns the threat model", "nominated_by": "owner",
+        "source": "library",
+    }
+    roster[slug] = {
+        "role": slug, "name": "Kofi Mensah", "title": "Crew Service Owner",
+        "altitude": "the rota.", "goal": "keep the rota whole.",
+        "ambition": "a quiet quarter.", "stake": "carries the pager.",
+        "lens": "who is on call.", "style": cast.DERIVED_STYLE,
+        "rationale": "owns the crew", "nominated_by": "owner",
+        "source": "derived", **derived,
+    }
+    return roster
+
+
+def _assert_one_on_one_goals_fit():
+    """AC10: every 1:1 shape, and the owner's and the manager's align goals.
+
+    Called at the end of test_every_goal_stays_under_the_budget_at_maximum_size,
+    at that test's worst case: charge, topic and action 5000, deep paths, a
+    retake note of 5000 naming its last take, a derived seat at selection's
+    clip limits, every library seat with its rationale at RATIONALE_MAX, and a
+    speaks-for line at SPEAKS_FOR_MAX on every seat that can represent someone
+    (all but the owner, selection D1). Each keeps the 20-character margin under
+    GOAL_MAX in characters and in UTF-16 units. Returns each shape's
+    (characters, units), the longest library seat's where the shape has one,
+    for the commit body and the docs budget table.
+    """
+    from playbooks.committee import selection
+
+    deep = "/home/anshulverma/.hermes/runs/committee-20260918-000000/" + "d" * 100
+    artifact = f"{deep}/proposal-under-review.md"
+    thread = f"{deep}/thread.md"
+    revised = f"{deep}/revised/proposal-under-review.md"
+    slug = "d" + "x" * 23  # the longest slug SLUG_RE accepts
+    fields = ("altitude", "goal", "ambition", "stake", "lens")
+    roster = _seated_roster(
+        slug, name="N" * selection.NAME_MAX, title="T" * selection.TITLE_MAX,
+        **{k: "F" * selection.FIELD_MAX for k in fields},
+    )
+    for lib in cast.LIBRARY:  # each "Why you hold this seat" line at its longest
+        roster[lib] = {**cast.LIBRARY[lib], "role": lib, "source": "library",
+                       "rationale": "y" * selection.RATIONALE_MAX, "nominated_by": "owner"}
+    speaks = ["s" * 63, "s" * 64]  # a speaks-for line of exactly SPEAKS_FOR_MAX
+    owner, manager, libs = cast.OWNER, cast.MANAGER, list(cast.LIBRARY)
+    common = dict(charge="c" * 5000, artifact=artifact, thread=thread, roster=roster)
+    goals = [("plan", None, None, cast.plan_goal(**common))]
+    exchanges = {
+        # label: [(speaker, other, members, host, exchange, closing), ...]
+        "owner host": [(owner, slug, [slug, owner], owner, 4, False)],
+        "manager host": [(manager, slug, [slug, manager], manager, 4, False)],
+        "library guest": [(lib, manager, [lib, manager], manager, 1, False) for lib in libs],
+        "derived guest": [(slug, owner, [slug, owner], owner, 1, False)],
+        "library member of a pause": [(lib, slug, [lib, slug], manager, 1, False) for lib in libs],
+        "derived member of a pause": [(slug, lib, [slug, lib], owner, 1, False) for lib in libs],
+        "owner closing": [(owner, None, [slug, lib], owner, None, True) for lib in libs],
+        "manager closing": [(manager, None, [slug, lib], manager, None, True) for lib in libs],
+    }
+    for label, cases in exchanges.items():
+        for role, other, members, host, x, closing in cases:
+            for retake in (None, "r" * 5000):
+                goals.append((f"{label} retake={retake is not None}", role, retake,
+                              cast.one_on_one_goal(
+                    role, **common, file=f"{deep}/one-on-ones/01-{'-'.join(members)}.md",
+                    other=other, members=members, topic="t" * 5000, exchange=x,
+                    host=host, closing=closing, retake=retake,
+                    last_take=f"takes/o99-{role}-take2.md",
+                    speaks_for=() if role == owner else speaks,
+                )))
+    lengths = {}
+    for shape, role, retake, g in goals:
+        units = len(g.encode("utf-16-le")) // 2
+        assert max(len(g), units) <= cast.GOAL_MAX - 20, f"{shape}: {len(g)} chars, {units} units"
+        low = g.lower()
+        assert "write no file at all" in low, shape
+        assert "the only file you may write" not in low, shape
+        if role is not None:
+            named = f"your last take is in takes/o99-{role}-take2.md beside the thread"
+            assert (named in low) is (retake is not None), shape
+            assert ("you also speak for:" in low) is (role != owner), shape
+        lengths[shape] = max(lengths.get(shape, (0, 0)), (len(g), units))
+
+    # The align offer rides in the meeting goal, at voice's worst case: a 48-char
+    # stem and a retake naming its last take (orchestrator decision 1).
+    for role in (owner, manager):
+        for retake in (None, "r" * 5000):
+            g = cast.goal(
+                role, charge="c" * 5000, artifact=artifact, thread=thread,
+                revised=revised, action="a" * 5000, image="x" * 48,
+                retake=retake, last_take=f"takes/{'x' * 48}-take2.md", roster=roster,
+                speaks_for=() if role == owner else speaks, align=True,
+            )
+            shape = f"{role} align retake={retake is not None}"
+            units = len(g.encode("utf-16-le")) // 2
+            assert max(len(g), units) <= cast.GOAL_MAX - 20, f"{shape}: {len(g)} chars, {units} units"
+            low = g.lower()
+            assert "the only file you may write is one image" in low, shape
+            assert turnblock.instruction(owner=role == owner, align=True).strip() in g, shape
+            assert ("your last take is in takes/" in low) is (retake is not None), shape
+            lengths[shape] = (len(g), units)
+    return lengths
+
+
+def test_titles_name_the_plan_the_exchange_and_the_outcome():
+    assert (cast.MANAGER, cast.TOPIC_MAX) == ("manager", 160)
+    roster = _seated_roster()
+
+    assert cast.title(cast.OWNER, "plan", turn=1, roster=roster) == (
+        "Maya Okonkwo (owner) plans the 1:1s"
+    )
+    # `other` is a role resolved through the roster: a derived seat is not in CAST.
+    assert cast.title(
+        cast.MANAGER, "one_on_one", turn=1, roster=roster,
+        other="crew_owner", seq=2, exchange=3,
+    ) == "1:1 2 · exchange 3 — Ruth Delgado (manager) with Kofi Mensah"
+    assert cast.title(
+        "crew_owner", "one_on_one", turn=1, take=2, roster=roster,
+        other=cast.OWNER, seq=1, exchange=1,
+    ) == "1:1 1 · exchange 1 — Kofi Mensah (crew_owner) with Maya Okonkwo (take 2)"
+    assert cast.title(cast.OWNER, "one_on_one_close", turn=4, roster=roster, seq=2) == (
+        "1:1 2 — Maya Okonkwo (owner) records the outcome"
+    )
+    # The legacy kinds are untouched by the new keyword arguments.
+    assert cast.title("tpm", "turn", turn=5) == "turn 5 — Sam Iyer (tpm) takes the floor"
+
+
+def test_plan_goal_lists_its_parts_in_order():
+    from playbooks.committee import voice
+
+    g = cast.plan_goal(
+        charge=_CHARGE, artifact=_ARTIFACT, thread=_THREAD, roster=_seated_roster(),
+    )
+    parts = [
+        "You are Maya Okonkwo, Staff Engineer & proposal owner.",
+        "Before the opening round you may hold one to three 1:1s, hosted by you "
+        "or your manager (`manager`); the seated committee and its role keys are "
+        f"listed under `## committee seated` in {_THREAD}.",
+        f"The charge: {_CHARGE}",
+        f"The artifact under review: {_ARTIFACT}",
+        f"The thread: {_THREAD}",
+        f"Your cap: {voice.cap_text(cast.OWNER)}.",
+        cast._GUARDRAIL,
+        turnblock.plan_instruction().strip(),
+    ]
+    at = [g.index(p) for p in parts]
+    assert at == sorted(at)
+    assert g.endswith(
+        "Done when: your answer names the 1:1s you want and ends with one "
+        "hermes-turn block."
+    )
+    # Not speech in the room: no floor, no meeting keys, no image allowance.
+    for absent in ("request_floor", "images folder", cast._UNCHANGED_ORIGINAL):
+        assert absent not in g, absent
+    assert "–" not in g and "—" not in g
+
+
+def test_one_on_one_goal_duty_by_shape():
+    from playbooks.committee import voice
+
+    roster = _seated_roster()
+    file = "/home/x/.hermes/runs/committee-20260918-000000/one-on-ones/01-crew_owner-owner.md"
+    kw = dict(charge=_CHARGE, artifact=_ARTIFACT, thread=_THREAD, file=file,
+              topic="rollback — who pages", roster=roster)
+    pair, owner, manager = ["crew_owner", cast.OWNER], cast.OWNER, cast.MANAGER
+
+    def shape(role, other, x, members=pair, host=owner, closing=False, **over):
+        return cast.one_on_one_goal(role, other=other, members=members, exchange=x,
+                                    host=host, closing=closing, **{**kw, **over})
+
+    guest = shape("crew_owner", owner, 1)
+    later = shape("crew_owner", owner, 3)
+    host = shape(owner, "crew_owner", 2)
+    member = shape("security", "crew_owner", 1, ["security", "crew_owner"], manager)
+    closer = shape(manager, None, None, ["crew_owner", "security"], manager, True)
+    security = cast.persona("security", roster)["name"]
+
+    assert "You are Kofi Mensah, Crew Service Owner." in guest
+    assert "with Maya Okonkwo, who hosts it, on: rollback - who pages." in guest
+    assert "exchange 1 of at most 4" in guest and "so do not read it" in guest
+    assert "exchange 3 of at most 4" in later and "do not read" not in later
+    assert "with Kofi Mensah, which you host, on:" in host
+    assert "exchange 2 of at most 4" in host and "do not read" not in host
+    assert "Read the 1:1 file, answer Kofi Mensah and keep `agreed`" in host
+    assert "with Kofi Mensah, hosted by Ruth Delgado, on:" in member
+    assert "the closing exchange: the members have finished" in closer
+    assert f"You called this 1:1 between Kofi Mensah and {security}." in closer
+
+    for role, is_host, g in (("crew_owner", False, guest), (owner, True, host),
+                             (manager, True, closer)):
+        parts = [
+            file,
+            f"The charge: {_CHARGE}",
+            f"The artifact under review: {_ARTIFACT}",
+            f"The thread: {_THREAD}",
+            f"Your cap: {voice.cap_text(role)}.",
+            cast._GUARDRAIL,
+            turnblock.one_on_one_instruction(
+                host=is_host, owner=role == owner, closing=g is closer).strip(),
+        ]
+        at = [g.index(p) for p in parts]
+        assert at == sorted(at), role
+        assert g.count(file) == 1, role
+        assert g.endswith(_DONE_ONE_ON_ONE), role
+        for absent in ("request_floor", "images folder", cast._UNCHANGED_ORIGINAL):
+            assert absent not in g, (role, absent)
+        assert "–" not in g and "—" not in g, role
+
+    note = "Retake 2 of 3. Say it again within them."
+    assert f"\n\n{note}\n\n{_DONE_ONE_ON_ONE}" in shape(owner, "crew_owner", 2, retake=note)
+    long = shape(owner, "crew_owner", 2, retake="r" * 5000)
+    assert "r" * voice.RETAKE_NOTE_MAX not in long
+    assert "r" * (voice.RETAKE_NOTE_MAX - 1) in long
+    # A retake names its kept take under the note, as every voice shape does;
+    # take 1 has none to name.
+    kept = "takes/o02-owner-take1.md"
+    line = f"Your last take is in {kept} beside the thread; keep its substance."
+    assert f"\n\n{note}\n{line}\n\n{_DONE_ONE_ON_ONE}" in shape(
+        owner, "crew_owner", 2, retake=note, last_take=kept)
+    assert "Your last take" not in shape(owner, "crew_owner", 2, last_take=kept)
+    # A seated member names who it speaks for, as its meeting goal does (selection D1).
+    spoken = shape("crew_owner", owner, 1, speaks_for=["Payments on-call"])
+    assert "\nYou also speak for: Payments on-call.\n" in spoken
+    assert "You also speak for" not in guest
+
+
+def test_goal_align_adds_one_sentence():
+    seated = _seated_roster()
+    for role, roster in ((cast.OWNER, None), ("tpm", None), (cast.MANAGER, seated)):
+        kw = dict(charge=_CHARGE, artifact=_ARTIFACT, thread=_THREAD, revised=_REVISED,
+                  roster=roster)
+        off, on = cast.goal(role, **kw), cast.goal(role, align=True, **kw)
+        assert off == cast.goal(role, align=False, **kw), role
+        assert turnblock.instruction(owner=role == cast.OWNER, align=True).strip() in on, role
+        assert 0 < len(on) - len(off) <= 120, role
+        assert "align:" in on and "align:" not in off, role
 
 
 # --- thread.md: the transcript ---
@@ -3327,7 +3598,7 @@ def test_turn_ticket_carries_exactly_the_frozen_payload_keys(artifact):
     assert t.payload["title"] == "selection 1 — Maya Okonkwo (owner) seats the committee (take 2)"
     assert "Retake 2 of 3. Rules broken: 1 bold.\nYour last take is in " \
         "takes/s1-owner-take1.md beside the thread" in t.payload["goal"]
-    assert "one image, s1-owner.svg or s1-owner.png" in t.payload["goal"]
+    assert "one image, s1-owner.svg or .png" in t.payload["goal"]
     assert "hermes-selection" in t.payload["goal"] and t.payload["kind"] == "select"
     contracts.validate(t.payload, pb.payload_schema(run.phase))
 
@@ -5223,8 +5494,8 @@ def test_retake_and_image_names_key_on_the_base_not_on_turn_and_role():
         names.append(pb.next_phase(run))
 
     assert names == ["s1-owner-take2", "o01-owner-take2"]
-    assert "one image, s1-owner.svg or s1-owner.png" in goals[0]
-    assert "one image, o01-owner.svg or o01-owner.png" in goals[1]
+    assert "one image, s1-owner.svg or .png" in goals[0]
+    assert "one image, o01-owner.svg or .png" in goals[1]
 
 
 def test_grade_without_file_images_never_accepts_a_file():
@@ -5313,7 +5584,7 @@ def test_a_turn_seed_makes_the_images_folder_and_offers_no_image_through_a_refus
     offered = pb.seed(run, site)[0].payload["goal"]
 
     assert folder.is_dir() and (folder.stat().st_mode & 0o777) == 0o700
-    assert "one image, t02-owner.svg or t02-owner.png" in offered
+    assert "one image, t02-owner.svg or .png" in offered
 
     planted = _run(phase="t03-tl")
     planted.id = "committee-planted"
@@ -5352,7 +5623,7 @@ def test_a_retake_ticket_names_its_take_and_carries_the_note():
     assert ticket.id == f"{run.id}/t02-owner-take2"
     assert ticket.payload["title"] == "turn 2 — Maya Okonkwo (owner) takes the floor (take 2)"
     assert "Retake 2 of 3. Your last take broke the ground rules: 1 bold." in ticket.payload["goal"]
-    assert "one image, t02-owner.svg or t02-owner.png" in ticket.payload["goal"]
+    assert "one image, t02-owner.svg or .png" in ticket.payload["goal"]
     assert set(ticket.payload) == {"role", "title", "goal", "kind", "action"}
 
 
@@ -6062,7 +6333,7 @@ def test_the_ratified_list_takes_the_opening_round(artifact):
     goal = ticket.payload["goal"]
     assert "You are Noor Haddad, Crew Owner, dependent team." in goal
     assert f"style: {cast.DERIVED_STYLE}" in goal
-    assert "one image, t04-crew_owner.svg or t04-crew_owner.png" in goal  # voice's image
+    assert "one image, t04-crew_owner.svg or .png" in goal  # voice's image
     assert len(goal) < cast.GOAL_MAX
 
     # A take voice sends back: the retake is still the derived seat's, named
@@ -6077,7 +6348,7 @@ def test_the_ratified_list_takes_the_opening_round(artifact):
     goal = retake.payload["goal"]
     assert goal.startswith("You are Noor Haddad, Crew Owner, dependent team.\n")
     assert "\nYour last take is in takes/t04-crew_owner-take1.md beside the thread" in goal
-    assert "one image, t04-crew_owner.svg or t04-crew_owner.png" in goal
+    assert "one image, t04-crew_owner.svg or .png" in goal
     assert len(goal) < cast.GOAL_MAX
 
     said = [_finding(run, retake.id, "Crews break first when a lease drops.")]
@@ -6304,7 +6575,7 @@ def test_a_select_retake_keeps_its_stage():
     goal = ticket.payload["goal"]
     assert "Retake 2 of 3." in goal
     assert "\nYour last take is in takes/s2-manager-take1.md beside the thread" in goal
-    assert "one image, s2-manager.svg or s2-manager.png" in goal
+    assert "one image, s2-manager.svg or .png" in goal
     assert len(goal) < cast.GOAL_MAX
 
     kept = pb.reduce(run, run.phase, [_finding(run, ticket.id, DEFAULT_SELECTION["manager"])], site)

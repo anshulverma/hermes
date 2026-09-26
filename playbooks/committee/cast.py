@@ -19,10 +19,10 @@ runtime-sized set of material blocks; a committee goal has a fixed shape with
 three runtime-variable strings. Clip those three -- the charge to
 ``CHARGE_MAX``, a delegated action to ``turnblock.ACTION_MAX``, a retake note to
 ``voice.RETAKE_NOTE_MAX`` -- and the largest shape, the owner's retake naming
-its last take, lands around 3570 characters against a 3600 budget. The assembled string
-is never clipped from the end, which is what keeps the read-only guardrail and
-the completion condition in every goal; ``GOAL_MAX`` and the unit test are what
-keep that honest.
+its last take and offering a 1:1 pause, lands around 3570 characters against a
+3600 budget. The assembled string is never clipped from the end, which is what
+keeps the read-only guardrail and the completion condition in every goal;
+``GOAL_MAX`` and the unit test are what keep that honest.
 
 Stdlib-only.
 """
@@ -34,6 +34,8 @@ from playbooks.committee import voice as _voice
 # Role keys the state machine branches on.
 OWNER = "owner"
 JUNIOR = "junior_ic"
+# The owner's manager: with the owner, the only possible host of a 1:1.
+MANAGER = "manager"
 
 # The chair appears twice: as a reviewer under their own role, and as the author
 # of the decision under the sentinel key. `persona` maps the sentinel back.
@@ -46,6 +48,10 @@ CHARGE_MAX = 400
 # The whole goal's ceiling. Claude's `/goal` accepts about 4000 characters and
 # the adapter appends the driver command inside that allowance.
 GOAL_MAX = 3600
+
+# A 1:1 topic rides in every exchange goal and its title, so it is bounded like
+# the charge. The playbook clips it at scheduling too.
+TOPIC_MAX = 160
 
 CAST: dict[str, dict] = {
     "owner": {
@@ -316,6 +322,10 @@ _TITLES = {
     "decision": "{name} ({role}) delivers the committee decision",
     # `n` is the selection stage. Payload-only, so the dash stays (voice D2).
     "select": "selection {n} — {name} ({role}) seats the committee",
+    # One-on-ones C5; payload-only like the rest, so the dashes stay.
+    "plan": "{name} (owner) plans the 1:1s",
+    "one_on_one": "1:1 {seq} · exchange {x} — {name} ({role}) with {other}",
+    "one_on_one_close": "1:1 {seq} — {name} ({role}) records the outcome",
 }
 
 # A title is a board card's heading, not the brief: the full action is in the
@@ -378,15 +388,21 @@ def title(
     action: str | None = None,
     take: int = 1,
     roster: dict | None = None,
+    other: str | None = None,
+    seq: int | None = None,
+    exchange: int | None = None,
 ) -> str:
-    """The ticket payload's one-line title, for a turn, an edit or the decision.
+    """The ticket payload's one-line title, for every kind of ticket.
 
     The parenthetical is the role as the state machine knows it, so the chair's
     decision ticket reads ``(chair)`` even though the name comes from the
     ``senior_director`` persona. ``turn`` has no default because a title that
     says "turn 0" is wrong. The decision is not a turn, so its title ignores it.
     A retake says which take it is; the payload keys are frozen, so the title
-    and the goal are the only channels a retake has.
+    and the goal are the only channels a retake has. Names resolve through the
+    run's ``roster`` (None means ``CAST``). A 1:1 title names its ``seq``, the
+    ``exchange`` and ``other``: the other member's role, resolved through the
+    same roster, since a library or derived seat is not in ``CAST``.
 
     An unknown ``kind`` raises ``KeyError``, like ``persona``: a fallback to
     ``turn`` would title the DECISION ticket "takes the floor".
@@ -394,6 +410,8 @@ def title(
     text = _TITLES[kind].format(
         name=persona(role, roster)["name"], role=role, n=turn,
         action=clip(action, _TITLE_ACTION_MAX),
+        other=persona(other, roster)["name"] if other else "",
+        seq=seq, x=exchange,
     )
     return f"{text} (take {take})" if take > 1 else text
 
@@ -454,7 +472,7 @@ _FLOOR_OWNER = (
     "You wrote this proposal and you are accountable for it. Answer the member "
     "who spoke last, directly and in your own voice: concede what their "
     "argument earns and defend what it does not. You make no edits yourself; "
-    "an edit is something you delegate. You cannot close the discussion until "
+    "you delegate them. You cannot close the discussion until "
     "every member of the committee has taken an opening turn: a close before "
     "that is ignored."
 )
@@ -505,12 +523,14 @@ _RULES_POINTER = (
 # run directory, and a relative `images/` there writes into whatever checkout
 # it was launched from. (The absolute folder would cost up to 170 characters of
 # the owner retake's headroom.) No "Read the artifact and the thread" here: the
-# floor paragraph above it already says so.
+# floor paragraph above it already says so. The stem is named once and "the
+# only file" already forbids every other write: the owner's retake is the
+# tightest goal, and this is the text voice's rule shortens first
+# (one-on-ones paid for the align offer here).
 _GUARDRAIL_IMAGE = (
-    "This review lands nothing, submits nothing and touches no repository. The "
-    "only file you may write is one image, {image}.svg or {image}.png, in the "
-    "images folder beside the thread (not your working directory); write "
-    "nothing else."
+    "Land nothing, submit nothing, touch no repository. The only file you may "
+    "write is one image, {image}.svg or .png, in the images folder beside the "
+    "thread (not your working directory)."
 )
 
 # A retake's one line naming the discarded take the master kept for it
@@ -581,6 +601,7 @@ def goal(
     last_take: str = "",
     roster: dict | None = None,
     speaks_for: tuple[str, ...] | list[str] = (),
+    align: bool = False,
 ) -> str:
     """The whole goal string handed to one worker.
 
@@ -601,6 +622,11 @@ def goal(
     retake. Only the charge, a delegated action and the note are bounded, and
     ``last_take`` is the stem plus 15 characters, so the assembled goal has a
     known size and the unit test holds it under ``GOAL_MAX``.
+
+    ``align`` adds turnblock's one sentence offering ``align:`` to the owner's
+    or a reviewer's meeting instruction. seed sets it for the owner and the
+    manager, and only while the run's 1:1 budget can hold a 1:1; the chair's
+    and the junior IC's shapes ignore it.
     """
     charge = clip(charge, CHARGE_MAX)
     pointer = _RULES_POINTER.format(cap=_voice.cap_text(role))
@@ -671,14 +697,14 @@ def goal(
 
     floor = _FLOOR_OWNER if role == OWNER else _FLOOR_REVIEWER
     guardrail = _GUARDRAIL_IMAGE.format(image=image) if image else _GUARDRAIL
-    instruction = _turnblock.instruction(owner=role == OWNER).strip()
+    instruction = _turnblock.instruction(owner=role == OWNER, align=align).strip()
     return (
         f"{brief(role, roster, speaks_for)}\n\n"
         "You are in a proposal review committee and it is your floor.\n\n"
         f"The charge: {charge}\n"
         f"The artifact under review: {artifact}\n"
         f"The thread: {thread}\n\n"
-        "The thread is one single-threaded channel: one speaker at a time, "
+        "The thread is one channel: one speaker at a time, "
         "appended in order. Your answer becomes the next entry; Hermes "
         "appends it for you. Read the artifact and the thread first.\n\n"
         f"{floor}\n\n"
@@ -787,4 +813,153 @@ def select_goal(
         f"{guardrail}\n\n"
         f"{_again(retake, last_take)}"
         f"{_DONE_SELECT}"
+    )
+
+
+# --- 1:1s: the plan and the exchanges ---------------------------------------
+#
+# A 1:1 is not speech in the room. Its goals drop the floor text, the meeting
+# keys and the unchanged-original paragraph, which keeps the longest of them
+# inside GOAL_MAX, and they always carry the write-nothing guardrail, never
+# the image one: the images folder is shared with the room, and a 1:1 is
+# private. The master grades every 1:1 answer with file images off, so an
+# image file a worker wrote anyway is never accepted.
+
+_DONE_PLAN = (
+    "Done when: your answer names the 1:1s you want and ends with one "
+    "hermes-turn block."
+)
+
+_DONE_ONE_ON_ONE = (
+    "Done when: your exchange is written as your answer and ends with one "
+    "hermes-turn block."
+)
+
+_PLAN_DUTY = (
+    "Before the opening round you may hold one to three 1:1s, hosted by you or "
+    "your manager (`manager`); the seated committee and its role keys are "
+    "listed under `## committee seated` in {thread}."
+)
+
+# Named once, in the line that says who: every later mention says "the 1:1
+# file", because the path is the longest string in the goal.
+_FILE_LINE = (
+    "Only this 1:1's participants are told about its file, and Hermes appends "
+    "your answer to it: {file}"
+)
+
+
+def _undash(text: str | None) -> str:
+    """Both long dashes as ``-``: worker text re-entering a goal keeps voice's rule 5."""
+    return str(text or "").replace("\u2013", "-").replace("\u2014", "-")
+
+
+def plan_goal(*, charge: str, artifact: str, thread: str, roster: dict) -> str:
+    """The owner's one planning ticket, between selection and the opening round.
+
+    ``roster`` is the run's seated roster; its role keys are the ones a
+    ``meet_N`` line may name, and the thread lists them under
+    ``## committee seated``.
+    """
+    pointer = _RULES_POINTER.format(cap=_voice.cap_text(OWNER))
+    return (
+        f"{brief(OWNER, roster or None)}\n\n"
+        f"{_PLAN_DUTY.format(thread=thread)}\n\n"
+        f"The charge: {clip(charge, CHARGE_MAX)}\n"
+        f"The artifact under review: {artifact}\n"
+        f"The thread: {thread}\n\n"
+        f"{pointer}\n\n"
+        f"{_GUARDRAIL}\n\n"
+        f"{_turnblock.plan_instruction().strip()}\n\n"
+        f"{_DONE_PLAN}"
+    )
+
+
+def one_on_one_goal(
+    role: str,
+    *,
+    charge: str,
+    artifact: str,
+    thread: str,
+    file: str,
+    other: str | None,
+    members: list[str],
+    topic: str,
+    exchange: int | None,
+    host: str,
+    closing: bool,
+    roster: dict,
+    retake: str | None = None,
+    last_take: str = "",
+    speaks_for: tuple[str, ...] | list[str] = (),
+) -> str:
+    """One exchange of a 1:1, or its host's closing exchange.
+
+    ``role`` speaks. ``members`` are the two who exchange, ``other`` is the
+    member ``role`` is talking to (None on a closing exchange), and ``host``
+    is the owner or the manager who keeps the outcome. ``file`` is the private
+    1:1 file's absolute path. ``exchange`` is the member exchange number
+    (1-4), None on a closing exchange; the "4" below is the playbook's
+    exchange cap written out, since cast cannot import playbook. ``retake``,
+    ``last_take`` and ``speaks_for`` behave as in ``goal``: the clipped note
+    and the line naming the kept take are their own paragraph before the Done
+    line, and a seated member's brief says who it speaks for.
+    """
+    roster = roster or None
+
+    def name(seat: str) -> str:
+        return persona(seat, roster)["name"]
+
+    subject = clip(_undash(topic), TOPIC_MAX)
+    if closing:
+        who = (
+            f"You host a private 1:1 on: {subject}. This is the closing "
+            "exchange: the members have finished."
+        )
+        duty = (
+            f"You called this 1:1 between {name(members[0])} and "
+            f"{name(members[1])}. Read the 1:1 file and record the outcome: "
+            "the room reads only your `agreed` and `still_open`."
+        )
+    else:
+        if role == host:
+            hosted = "which you host"
+        elif other == host:
+            hosted = "who hosts it"
+        else:
+            hosted = f"hosted by {name(host)}"
+        who = (
+            f"You are in a private 1:1 with {name(other)}, {hosted}, on: "
+            f"{subject}. This is exchange {exchange} of at most 4."
+        )
+        if role == host:
+            duty = (
+                f"Read the 1:1 file, answer {name(other)} and keep `agreed` and "
+                "`still_open` current: the room reads only those."
+            )
+        elif exchange == 1:
+            duty = (
+                "State your position and what would align you. The 1:1 file is "
+                "empty until your exchange, which opens it, so do not read it."
+            )
+        else:
+            duty = (
+                "State your position and what would align you. Read the 1:1 "
+                "file first."
+            )
+    instruction = _turnblock.one_on_one_instruction(
+        host=role == host, owner=role == OWNER, closing=closing,
+    ).strip()
+    return (
+        f"{brief(role, roster, speaks_for)}\n\n"
+        f"{who} {_FILE_LINE.format(file=file)}\n\n"
+        f"The charge: {clip(charge, CHARGE_MAX)}\n"
+        f"The artifact under review: {artifact}\n"
+        f"The thread: {thread} (its header holds the ground rules)\n\n"
+        f"{duty}\n\n"
+        f"{_RULES_POINTER.format(cap=_voice.cap_text(role))}\n\n"
+        f"{_GUARDRAIL}\n\n"
+        f"{instruction}\n\n"
+        f"{_again(retake, last_take)}"
+        f"{_DONE_ONE_ON_ONE}"
     )
