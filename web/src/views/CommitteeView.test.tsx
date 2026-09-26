@@ -2760,7 +2760,7 @@ describe('CommitteeView before t01 and the seated roster', () => {
     show(fallbackData);
     expect(screen.getByTestId('roster-nominated-pm')).toHaveTextContent('default seat');
     expect(screen.getByTestId('roster-why-pm')).toHaveTextContent(
-      'why: default committee (selection fell back: chair_failed)',
+      'why: in the default committee (the chair gave no usable list)',
     );
     expect(screen.getByTestId('roster-nominated-manager')).toHaveTextContent('fixed seat');
   });
@@ -2831,6 +2831,9 @@ describe('CommitteeView selection card', () => {
     (URL as any).createObjectURL = realCreate;
     (URL as any).revokeObjectURL = realRevoke;
   });
+
+  /** `selection.current` on s3, once the owner's and the manager's stages are kept. */
+  const RATIFYING = { role: 'senior_director', name: 'Dana Whitfield', verb: 'ratifying' as const };
 
   /** `b` comes after `a` in document order. */
   const follows = (a: Element, b: Element) =>
@@ -2942,7 +2945,7 @@ describe('CommitteeView selection card', () => {
 
     show({ ...cardData, selection: { ...cardData.selection!, state: 'fallback', fallback: 'chair_failed' } });
     expect(screen.getByTestId('selection-fallback')).toHaveTextContent(
-      'Default committee: selection fell back (chair_failed)',
+      'Default committee: selection fell back (the chair gave no usable list)',
     );
   });
 
@@ -3093,7 +3096,7 @@ describe('CommitteeView selection card', () => {
     const two = seatedData.selection!.stages.slice(0, 2);
 
     // On s3: the fixed four are in the room and nobody else is seated yet.
-    const { unmount } = show({ ...selectingData, selection: { ...selectingData.selection!, stages: two } });
+    const { unmount } = show({ ...selectingData, selection: { ...selectingData.selection!, stages: two, current: RATIFYING } });
     expect(listed(2)).toEqual(['tpm', 'crew_owner · derived seat']);
     unmount();
 
@@ -3223,10 +3226,12 @@ describe('CommitteeView selection card', () => {
       selection: { ...sel, stages: sel.stages.map((st) => ({ ...st, proposed: [], code: code[st.stage] })) },
     });
 
-    // thread._NO_LIST's labels.
+    // selection.fallback_words, as the thread entry says it.
     expect(screen.getByTestId('selection-code-1')).toHaveTextContent('no usable seat list: no valid seats');
-    expect(screen.getByTestId('selection-code-2')).toHaveTextContent('no usable seat list: no_block');
-    expect(screen.getByTestId('selection-code-3')).toHaveTextContent('no usable seat list: unparseable');
+    expect(screen.getByTestId('selection-code-2')).toHaveTextContent('no usable seat list: no hermes-selection block');
+    expect(screen.getByTestId('selection-code-3')).toHaveTextContent(
+      'no usable seat list: a hermes-selection block that did not parse',
+    );
     unmount();
 
     // A usable list says nothing, and an undelivered stage (no_answer) says it through its badge and body.
@@ -3286,7 +3291,7 @@ describe('CommitteeView selection card', () => {
       not_seated_dropped: 2,
       invalid_count: 3,
     };
-    show({ ...selectingData, selection: { ...selectingData.selection!, stages: [sel.stages[0], amends] } });
+    show({ ...selectingData, selection: { ...selectingData.selection!, stages: [sel.stages[0], amends], current: RATIFYING } });
     expect(items(2)).toEqual([
       "Left out: Product Manager: the roadmap slot is Sam's call this half. Represented by Noor Haddad (crew_owner · derived seat).",
     ]);
@@ -3301,7 +3306,7 @@ describe('CommitteeView selection card', () => {
 
     expect(
       within(screen.getByTestId('selection-considered')).getAllByRole('listitem').map((li) => li.textContent),
-    ).toEqual(['Owner, team-owned crews: not in the default committee (fallback: chair_failed). Not represented.']);
+    ).toEqual(['Owner, team-owned crews: not in the default committee (the chair gave no usable list). Not represented.']);
     expect(screen.queryByTestId('selection-proposed-3')).toBeNull();
     expect(screen.getByTestId('selection-proposed-2')).toBeInTheDocument();
   });

@@ -224,7 +224,7 @@ export const seatedData: CommitteeData = {
   },
 };
 
-const FALLBACK_WHY = 'default committee (selection fell back: chair_failed)';
+const FALLBACK_WHY = 'in the default committee (the chair gave no usable list)';
 
 /** The chair's worker failed, so today's seven reviewers sit: 2 x 7 + 16 = 30. */
 export const fallbackData: CommitteeData = {
@@ -251,7 +251,7 @@ export const fallbackData: CommitteeData = {
       {
         stakeholder: 'Owner, team-owned crews',
         role: 'crew_owner',
-        reason: 'not in the default committee (fallback: chair_failed)',
+        reason: 'not in the default committee (the chair gave no usable list)',
         represented_by: null,
         represented_by_name: null,
       },

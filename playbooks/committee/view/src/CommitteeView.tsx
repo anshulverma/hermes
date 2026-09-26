@@ -546,8 +546,13 @@ function represented(slug: string | null, name: string | null, isDerived: boolea
   return `Represented by ${name ?? slug}${isDerived ? ` (${derivedSeat(slug)})` : ''}.`;
 }
 
-/** thread._NO_LIST: a stage's code in the words its thread entry uses. */
-const NO_LIST: Record<string, string> = { no_block: 'no_block', unparseable: 'unparseable', too_few: 'no valid seats' };
+/** selection.fallback_words: a stage or fallback code as thread.md says it; an unknown code is itself. */
+const WORDS: Record<string, string> = {
+  chair_failed: 'the chair gave no usable list',
+  no_block: 'no hermes-selection block',
+  unparseable: 'a hermes-selection block that did not parse',
+  too_few: 'no valid seats',
+};
 
 /** "kept take 2 of 2; broke: …" when a take was retaken or kept flagged, else nothing. */
 function KeptTake({
@@ -591,7 +596,7 @@ function SelectionCard({
       <Section title="Selection">
         {selection.fallback && (
           <div data-testid="selection-fallback" style={selectionNotice}>
-            Default committee: selection fell back ({selection.fallback})
+            Default committee: selection fell back ({WORDS[selection.fallback] ?? selection.fallback})
           </div>
         )}
         {selection.state === 'lost' && (
@@ -671,7 +676,7 @@ function SelectionCard({
             {/* As its thread entry says it; an undelivered stage says so through its badge and body. */}
             {st.code && st.code !== 'no_answer' && (
               <div data-testid={`selection-code-${st.stage}`} style={selectionCount}>
-                no usable seat list: {NO_LIST[st.code] ?? st.code}
+                no usable seat list: {WORDS[st.code] ?? st.code}
               </div>
             )}
           </div>

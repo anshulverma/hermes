@@ -1690,10 +1690,11 @@
 		if (!slug) return "Not represented.";
 		return `Represented by ${name ?? slug}${isDerived ? ` (${derivedSeat(slug)})` : ""}.`;
 	}
-	/** thread._NO_LIST: a stage's code in the words its thread entry uses. */
-	var NO_LIST = {
-		no_block: "no_block",
-		unparseable: "unparseable",
+	/** selection.fallback_words: a stage or fallback code as thread.md says it; an unknown code is itself. */
+	var WORDS = {
+		chair_failed: "the chair gave no usable list",
+		no_block: "no hermes-selection block",
+		unparseable: "a hermes-selection block that did not parse",
 		too_few: "no valid seats"
 	};
 	/** "kept take 2 of 2; broke: …" when a take was retaken or kept flagged, else nothing. */
@@ -1730,7 +1731,7 @@
 						style: selectionNotice,
 						children: [
 							"Default committee: selection fell back (",
-							selection.fallback,
+							WORDS[selection.fallback] ?? selection.fallback,
 							")"
 						]
 					}),
@@ -1826,7 +1827,7 @@
 							st.code && st.code !== "no_answer" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 								"data-testid": `selection-code-${st.stage}`,
 								style: selectionCount,
-								children: ["no usable seat list: ", NO_LIST[st.code] ?? st.code]
+								children: ["no usable seat list: ", WORDS[st.code] ?? st.code]
 							})
 						]
 					}, i)),
