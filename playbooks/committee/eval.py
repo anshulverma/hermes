@@ -24,6 +24,8 @@ import os
 import re
 import sqlite3
 import statistics
+import tempfile
+import time
 import urllib.parse
 from collections.abc import Mapping
 from contextlib import closing
@@ -1355,3 +1357,225 @@ def score_judge(parsed: dict | None, inputs: dict, metrics: dict) -> tuple[dict[
             out["detail"] = detail
         dims[dim] = out
     return dims, rejected
+
+
+# --- D7/D8: eval.json, the ledger, calibration ---------------------------------
+
+EVAL_JSON_MAX = 256 * 1024
+LEDGER_MAX = 2 * 1024 * 1024
+
+
+def eval_json_path(eval_home: str, source_home: str, run_id: str) -> Path:
+    """Where the latest evaluation of (source home, run) lives. Creates nothing.
+
+    Same home, compared as realpaths: ``<home>/runs/<run>/eval.json`` (Q5), the
+    one file the eval writes under the target's run directory. A foreign home
+    gets zero writes, so its result goes under ``<eval home>/evals/``, prefixed
+    with the source realpath's sha1 so one run id in two homes never collides.
+    """
+    home, source = os.path.realpath(eval_home), os.path.realpath(source_home)
+    if home == source:
+        return Path(home) / "runs" / run_id / "eval.json"
+    tag = hashlib.sha1(source.encode("utf-8")).hexdigest()[:8]
+    return Path(home) / "evals" / f"{tag}-{run_id}.json"
+
+
+def write_eval_json(path: Path, body: dict) -> None:
+    """Replace ``path`` with ``body`` atomically: a 0600 temp file, then os.replace.
+
+    The directory is made only by ``config.state_dir``: ``runs/<run>`` in the
+    same-home case (G11: the target may have no ``runs/<run>/`` yet), ``evals``
+    otherwise. So a path anywhere else, a foreign home included, is refused and
+    never written. The file holds the latest evaluation; the ledger keeps them all.
+
+    Raises:
+        ValueError: ``path`` is not ``<eval home>/runs/<run>/<name>`` or
+            ``<eval home>/evals/<name>``.
+        OSError: the write failed; no temp file is left. judge.reduce turns
+            either into an error value.
+    """
+    path = Path(path)
+    parts = path.parent.relative_to(eval_home()).parts
+    if parts != ("evals",) and not (len(parts) == 2 and parts[0] == "runs"):
+        raise ValueError(f"not an eval.json path under the eval home: {path}")
+    directory = config.state_dir(*parts)
+    fd, temp = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.")
+    try:
+        with open(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(body, indent=2, ensure_ascii=False) + "\n")
+        os.replace(temp, directory / path.name)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
+
+def ledger_path(home: str) -> Path:
+    """``<home>/evals.jsonl``: every eval and every anchor, append-only."""
+    return Path(home) / "evals.jsonl"
+
+
+def append_ledger(home: str, line: dict) -> None:
+    """Append ``line`` as one canonical JSON line with a single ``os.write``.
+
+    ``O_APPEND`` lands that one write whole at the end of the file even when
+    two evals append at once. Created 0600; never truncated or rewritten.
+    """
+    data = (canonical(line) + "\n").encode("utf-8")
+    fd = os.open(ledger_path(home), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
+
+
+def read_ledger(path: Path, limit: int | None = None) -> list[dict] | None:
+    """The ledger's JSON-object lines in file order, or None past ``limit`` bytes.
+
+    A missing ledger is ``[]``: nothing is evaluated or anchored yet. Lines that
+    do not parse as a JSON object are skipped. It splits on "\\n" only, because
+    a canonical line may hold a literal U+2028, which ``splitlines`` would cut.
+    It reads through ``thread.read_regular``, so a symlink or a FIFO reads as
+    missing, and it creates nothing.
+    """
+    try:
+        if limit is not None and os.stat(path).st_size > limit:
+            return None
+    except OSError:
+        return []
+    data = thread.read_regular(path)
+    if data is None:
+        return []
+    if limit is not None and len(data) > limit:
+        return None
+    lines = []
+    for raw in data.decode("utf-8", "replace").split("\n"):
+        try:
+            line = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(line, dict):
+            lines.append(line)
+    return lines
+
+
+def eval_line(body: dict) -> dict:
+    """The C6 ledger line for one eval.json body: all six dimensions, ``ts`` now.
+
+    It reads ``target.{home, run, created_at}``, ``rubric_version``,
+    ``rubric.<id>``, ``dimensions.<id>.score``, ``eval_run`` and ``judge.status``.
+    """
+    target = body["target"]
+    return {
+        "ts": time.time(),
+        "source": "eval",
+        "target": {"home": target["home"], "run": target["run"], "created_at": target["created_at"]},
+        "rubric_version": body["rubric_version"],
+        "dimensions": {d: {"version": body["rubric"][d], "score": body["dimensions"][d]["score"]}
+                       for d in DIMENSIONS},
+        "eval_run": body["eval_run"],
+        "judge_status": body["judge"]["status"],
+        "rater": None,
+        "note": None,
+    }
+
+
+def anchor_line(target: dict, scores: dict[str, int], versions: dict[str, str],
+                rater: str | None, note: str | None) -> dict:
+    """The C6 ledger line for the user's own scores: only the entered dimensions.
+
+    Each carries its dimension's current version, so the anchor stays valid
+    until that one dimension is redefined, whatever happens to the others (D5).
+    The caller (``eval_cli anchor``) has already checked the ids and the 1-5 range.
+    """
+    return {
+        "ts": time.time(),
+        "source": "anchor",
+        "target": {"home": target["home"], "run": target["run"], "created_at": target["created_at"]},
+        "rubric_version": rubric_version(versions),
+        "dimensions": {d: {"version": versions[d], "score": scores[d]} for d in DIMENSIONS if d in scores},
+        "eval_run": None,
+        "judge_status": None,
+        "rater": rater,
+        "note": note,
+    }
+
+
+def _target_key(line: dict) -> tuple | None:
+    """A ledger line's target key ``(home, run, created_at)``, or None when malformed."""
+    target = line.get("target")
+    if not isinstance(target, dict):
+        return None
+    home, run, created_at = target.get("home"), target.get("run"), target.get("created_at")
+    if isinstance(home, str) and isinstance(run, str) and isinstance(created_at, (int, float)):
+        return (home, run, created_at)
+    return None
+
+
+def _cells(line: dict) -> list[tuple[str, dict]]:
+    """A ledger line's ``(dimension id, {version, score})`` pairs; malformed cells skipped."""
+    dims = line.get("dimensions")
+    if not isinstance(dims, dict):
+        return []
+    return [(d, cell) for d, cell in dims.items() if isinstance(cell, dict)]
+
+
+def _score(value: object) -> int | None:
+    """An int score, or None (a null, a bool or anything else is no score)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def latest_evals(lines: list[dict]) -> dict[tuple, dict]:
+    """The latest eval line per target key ``(home, run, created_at)``, in ledger order.
+
+    First the last line per ``eval_run`` (a resumed judge.reduce appends a
+    second one), then the last of those per target.
+    """
+    per_run: dict[str, dict] = {}
+    for line in lines:
+        if isinstance(line, dict) and line.get("source") == "eval" and isinstance(line.get("eval_run"), str):
+            per_run.pop(line["eval_run"], None)  # re-insert, so the order is each run's last line
+            per_run[line["eval_run"]] = line
+    latest: dict[tuple, dict] = {}
+    for line in per_run.values():
+        key = _target_key(line)
+        if key is not None:
+            latest[key] = line
+    return latest
+
+
+def calibration(ledger_lines: list[dict]) -> dict[str, str]:
+    """``{judge dimension version: label}``, computed from the ledger and never stored (D8).
+
+    A target counts at version V when its latest anchor for that dimension is
+    at V and its latest eval line (``latest_evals``) scored that dimension at V.
+    A null eval score is no score, so a later failed eval hides an earlier one
+    (G6). The label is ``"off (Δn)"`` when any |eval - anchor| >= 2, with n the
+    largest; else ``"calibrated"`` with at least MIN_ANCHORS targets; else
+    ``"uncalibrated"``. Every current judge version, and every judge version in
+    any eval line, gets a label. Deterministic versions never do.
+    """
+    lines = [line for line in ledger_lines if isinstance(line, dict)]
+    versions = {v for d, v in dimension_versions().items() if d in JUDGE_DIMS}
+    anchors: dict[tuple, tuple[str, int]] = {}
+    for line in lines:
+        key = _target_key(line)
+        for d, cell in _cells(line):
+            version, score = cell.get("version"), _score(cell.get("score"))
+            if d not in JUDGE_DIMS or not isinstance(version, str):
+                continue
+            if line.get("source") == "eval":
+                versions.add(version)
+            elif line.get("source") == "anchor" and key is not None and score is not None:
+                anchors[(key, d)] = (version, score)  # the latest anchor per target and dimension wins
+    deltas: dict[str, list[int]] = {v: [] for v in versions}
+    for key, line in latest_evals(lines).items():
+        for d, cell in _cells(line):
+            score, anchor = _score(cell.get("score")), anchors.get((key, d))
+            if d in JUDGE_DIMS and score is not None and anchor and anchor[0] == cell.get("version"):
+                deltas[anchor[0]].append(abs(score - anchor[1]))
+    labels = {}
+    for version, diffs in deltas.items():
+        worst = max(diffs, default=0)
+        labels[version] = (f"off (Δ{worst})" if worst >= 2
+                           else "calibrated" if len(diffs) >= MIN_ANCHORS else "uncalibrated")
+    return labels

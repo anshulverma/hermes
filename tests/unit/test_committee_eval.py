@@ -1744,3 +1744,164 @@ def test_evidence_verification(tmp_path, monkeypatch):
     assert E.verify_evidence({"turn": None, "where": "original", "quote": crews},
                              e2, inputs2)["verified"] is False
     assert E.judge_goal(inputs2).count("unavailable") == 2
+
+
+# --- Task 8: eval.json, the ledger, calibration (D7, D8) -----------------------
+
+
+def _ledger_body(target: dict, scores: dict, *, eval_run: str, versions: dict | None = None,
+                 status: str = "ok") -> dict:
+    """The keys of a C5 eval.json body that ``eval_line`` reads, for synthetic ledger lines."""
+    from playbooks.committee import eval as ev
+
+    versions = versions or ev.dimension_versions()
+    return {
+        "schema": 1,
+        "rubric_version": ev.rubric_version(versions),
+        "rubric": versions,
+        "target": dict(target, playbook="committee", state="done", review_state="pending", legacy=False),
+        "eval_run": eval_run,
+        "dimensions": {d: {"scorer": "judge" if d in ev.JUDGE_DIMS else "deterministic",
+                           "score": scores.get(d)} for d in ev.DIMENSIONS},
+        "judge": {"status": status},
+    }
+
+
+def test_calibration_labels():
+    """D8: anchors calibrate a judge dimension only at its own version, over two targets within ±1."""
+    from playbooks.committee import eval as ev
+
+    versions = ev.dimension_versions()
+    vg, ea, cc = (versions[d] for d in ev.JUDGE_DIMS)
+    run9 = {"home": "/h/.hermes", "run": "run-9", "created_at": 9.5}
+    run2 = {"home": "/spin/home", "run": "run-2", "created_at": 2.5}
+    e9 = ev.eval_line(_ledger_body(run9, {"verdict_grounded": 4, "edits_address_concerns": 2,
+                                          "concern_coverage": 3, "efficiency": 3, "concision": 1,
+                                          "verdict_consistency": 1}, eval_run="run-10"))
+    e2_old = ev.eval_line(_ledger_body(run2, {"verdict_grounded": 3, "edits_address_concerns": 5,
+                                              "concern_coverage": 1}, eval_run="run-11"))
+    e2 = ev.eval_line(_ledger_body(run2, {"verdict_grounded": 3, "edits_address_concerns": 5,
+                                          "concern_coverage": None}, eval_run="run-12", status="partial"))
+    # C6 eval line: all six dimensions, each with its version.
+    assert set(e9) == {"ts", "source", "target", "rubric_version", "dimensions", "eval_run",
+                       "judge_status", "rater", "note"}
+    assert e9["source"] == "eval" and e9["target"] == run9 and e9["eval_run"] == "run-10"
+    assert e9["rubric_version"] == ev.rubric_version(versions) and e9["judge_status"] == "ok"
+    assert e9["dimensions"] == {d: {"version": versions[d], "score": s} for d, s in
+                                zip(ev.DIMENSIONS, (4, 2, 3, 3, 1, 1))}
+    assert e9["rater"] is None and e9["note"] is None and isinstance(e9["ts"], float)
+
+    # No anchors: every judge version is uncalibrated, and no deterministic version is labelled (G6).
+    assert ev.calibration([e9, e2_old, e2]) == dict.fromkeys((vg, ea, cc), "uncalibrated")
+
+    stale = dict(versions, verdict_grounded="verdict_grounded@0")
+    a2_stale = ev.anchor_line(run2, {"verdict_grounded": 1}, stale, None, None)
+    a9 = ev.anchor_line(run9, {"verdict_grounded": 5, "edits_address_concerns": 4,
+                               "concern_coverage": 3, "efficiency": 1}, versions, "av", None)
+    a2 = ev.anchor_line(run2, {"edits_address_concerns": 5, "concern_coverage": 1},
+                        versions, None, "first pass")
+    # C6 anchor line: only the entered dimensions, at the versions given.
+    assert a9["source"] == "anchor" and a9["eval_run"] is None and a9["judge_status"] is None
+    assert list(a9["dimensions"]) == ["verdict_grounded", "edits_address_concerns",
+                                      "concern_coverage", "efficiency"]
+    assert a9["dimensions"]["efficiency"] == {"version": versions["efficiency"], "score": 1}
+    assert a9["rubric_version"] == ev.rubric_version(versions) and a9["rater"] == "av"
+    assert a2["note"] == "first pass" and a2_stale["dimensions"] == {
+        "verdict_grounded": {"version": "verdict_grounded@0", "score": 1}}
+
+    lines = [e9, e2_old, e2, a2_stale, a9, a2]
+    # verdict_grounded: run-2's only anchor is at an older version, so it never counts (had it
+    # counted, |3-1| = 2 would read off); run-9 alone is one target. edits_address_concerns:
+    # |2-4| = 2. concern_coverage: run-2's latest eval scored it null, which hides run-11's 1
+    # (G6), so run-9 alone counts.
+    assert ev.calibration(lines) == {vg: "uncalibrated", ea: "off (Δ2)", cc: "uncalibrated"}
+    # Re-anchored at the current version: |4-5| = 1 and |3-3| = 0 over two targets.
+    a2_vg = ev.anchor_line(run2, {"verdict_grounded": 3}, versions, None, None)
+    assert ev.calibration(lines + [a2_vg])[vg] == "calibrated"
+
+    # An eval line at an older version still gets a label for it; deterministic ones never do.
+    old = dict(versions, concern_coverage="concern_coverage@0")
+    e8 = ev.eval_line(_ledger_body({"home": "/h/.hermes", "run": "run-8", "created_at": 8.5},
+                                   {"concern_coverage": 4}, eval_run="run-13", versions=old))
+    labels = ev.calibration(lines + [a2_vg, e8])
+    assert labels["concern_coverage@0"] == "uncalibrated" and labels[cc] == "uncalibrated"
+    assert set(labels) == {vg, ea, cc, "concern_coverage@0"}
+
+    # latest_evals: the last line per eval_run, then the latest per target, in ledger order. A
+    # resumed run-11 re-appends after run-12, so run-11's second line is run-2's latest.
+    resumed = dict(e2_old, ts=e2["ts"] + 1)
+    latest = ev.latest_evals([e9, e2_old, a9, e2, resumed])
+    assert list(latest) == [("/h/.hermes", "run-9", 9.5), ("/spin/home", "run-2", 2.5)]
+    assert latest[("/spin/home", "run-2", 2.5)] is resumed
+    # ...so concern_coverage now has two targets within ±1 (run-9 |3-3|, run-2 |1-1|).
+    assert ev.calibration([e9, e2_old, e2, resumed, a9, a2])[cc] == "calibrated"
+
+
+def test_eval_json_path_and_ledger_writes(tmp_path, monkeypatch):
+    """D7: eval.json lands by realpath, atomically and 0600; the ledger only ever grows by whole lines."""
+    import hashlib
+    import json
+    import os
+    import stat
+    from pathlib import Path
+
+    import pytest
+
+    from playbooks.committee import eval as ev
+
+    home = tmp_path / "home"
+    home.mkdir()
+    foreign = tmp_path / "spin" / "home"
+    foreign.mkdir(parents=True)
+    (tmp_path / "home-link").symlink_to(home, target_is_directory=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    real = Path(os.path.realpath(home))
+
+    # Same home, even named through a symlink: the target's own run directory (Q5).
+    same = ev.eval_json_path(str(home), str(tmp_path / "home-link"), "run-9")
+    assert same == real / "runs" / "run-9" / "eval.json"
+    # A foreign home: under the eval home's evals/, keyed by the source realpath's sha1.
+    tag = hashlib.sha1(os.path.realpath(foreign).encode("utf-8")).hexdigest()[:8]
+    other = ev.eval_json_path(str(home), str(foreign), "run-2")
+    assert other == real / "evals" / f"{tag}-run-2.json"
+    assert list(home.iterdir()) == []  # eval_json_path creates nothing
+
+    # G11: runs/run-9/ does not exist yet; write_eval_json makes it (0700) and replaces atomically.
+    ev.write_eval_json(same, {"schema": 1, "headline": "first"})
+    ev.write_eval_json(same, {"schema": 1, "headline": "second"})
+    assert json.loads(same.read_text(encoding="utf-8")) == {"schema": 1, "headline": "second"}
+    assert stat.S_IMODE(same.stat().st_mode) == 0o600
+    assert stat.S_IMODE(same.parent.stat().st_mode) == 0o700
+    assert [p.name for p in same.parent.iterdir()] == ["eval.json"]  # no temp file left
+    ev.write_eval_json(other, {"schema": 1})
+    assert [p.name for p in other.parent.iterdir()] == [other.name]
+    assert stat.S_IMODE(other.stat().st_mode) == 0o600
+    # A path outside the eval home (a foreign home's run dir) is refused before anything is made.
+    with pytest.raises(ValueError):
+        ev.write_eval_json(foreign / "runs" / "run-2" / "eval.json", {"schema": 1})
+    assert list(foreign.iterdir()) == []
+
+    ledger = ev.ledger_path(str(home))
+    assert ledger == home / "evals.jsonl"
+    assert ev.read_ledger(ledger) == [] and not ledger.exists()  # reading creates nothing
+
+    writes = []
+    real_write = os.write
+    monkeypatch.setattr(os, "write", lambda fd, data: writes.append(data) or real_write(fd, data))
+    ev.append_ledger(str(home), {"source": "eval", "n": 1})
+    monkeypatch.setattr(os, "write", real_write)
+    first = b'{"n":1,"source":"eval"}\n'  # canonical: sorted keys, compact, one line
+    assert writes == [first] and ledger.read_bytes() == first  # one os.write per line
+    assert stat.S_IMODE(ledger.stat().st_mode) == 0o600
+
+    ev.append_ledger(str(home), {"source": "anchor", "note": "déjà vu"})
+    data = ledger.read_bytes()
+    assert data.startswith(first) and data.count(b"\n") == 2  # earlier bytes untouched
+    assert stat.S_IMODE(ledger.stat().st_mode) == 0o600
+    with ledger.open("ab") as handle:
+        handle.write(b"not json\n[1, 2]\n")
+    assert ev.read_ledger(ledger) == [{"source": "eval", "n": 1},
+                                      {"source": "anchor", "note": "déjà vu"}]
+    size = ledger.stat().st_size
+    assert ev.read_ledger(ledger, limit=size) is not None
+    assert ev.read_ledger(ledger, limit=size - 1) is None
