@@ -5,6 +5,7 @@ A stub playbook stands in for the committee: the seam is two duck-typed methods
 and the server must not care which playbook supplies them.
 """
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -216,6 +217,8 @@ def test_artifact_route_reads_no_reduction(client, temp_home, viewed, tmp_path):
 @pytest.mark.parametrize("path", [
     "", None, "../../etc/passwd", "/etc/passwd", "doc/../../x", "doc/../thread.md",
     "doc", "thread.md", "traces/1.jsonl", "doc/a/b", "doc/t03\x00.md",
+    "doc/.t03.md",       # a leading dot: a temp file mid-write is never served
+    "doc/" + "a" * 129,  # one past the 128-character name bound
 ])
 def test_artifact_route_400s_a_path_that_is_not_dir_slash_name(
     client, temp_home, viewed, path
@@ -248,18 +251,33 @@ def _a_directory(doc: Path, outside: Path) -> None:
     (doc / "t03.md").mkdir()
 
 
-def _a_fifo(doc: Path, outside: Path) -> None:
-    os.mkfifo(doc / "t03.md")
+def _symlink_to_the_run_root(doc: Path, outside: Path) -> None:
+    """Inside the run, but outside ``doc/``: the route serves ``<dir>/`` only."""
+    (doc.parent / "thread.md").write_text("outside the run\n", encoding="utf-8")
+    (doc / "t03.md").symlink_to("../thread.md")
+
+
+def _run_dir_symlinked_out(doc: Path, outside: Path) -> None:
+    (outside / "doc").mkdir()
+    (outside / "doc" / "t03.md").write_text("outside the run\n", encoding="utf-8")
+    doc.rmdir()
+    doc.parent.rmdir()
+    doc.parent.symlink_to(outside, target_is_directory=True)
 
 
 @pytest.mark.parametrize("prepare", [
-    _missing, _symlink_to_passwd, _doc_symlinked_out, _a_directory, _a_fifo,
+    _missing, _symlink_to_passwd, _symlink_to_the_run_root,
+    # A doc/ swapped for a symlink mid-request is this case by the time the
+    # route opens it: the walk holds an fd per directory, so there is no
+    # window between a check and an open for the swap to land in.
+    _doc_symlinked_out,
+    _run_dir_symlinked_out, _a_directory,
 ])
 def test_artifact_route_404s_anything_but_a_regular_file_inside_the_run(
     client, temp_home, viewed, tmp_path, prepare
 ):
-    """A FIFO would block the worker thread and a directory is no file; a symlink
-    anywhere in the chain that leaves ``runs/<id>/doc/`` is not the run's."""
+    """A directory is no file; a symlink at any level below ``runs/`` -- the
+    run's directory, ``doc/``, or the file -- is not the run's."""
     run_id = _run_row(temp_home, "run-view", "stubview")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -272,25 +290,49 @@ def test_artifact_route_404s_anything_but_a_regular_file_inside_the_run(
     assert "outside the run" not in response.text
 
 
-def test_open_regular_refuses_a_symlink_and_a_fifo_swapped_in_after_the_resolve(tmp_path):
-    """The fd-level check every reader of a ``_run_file`` result goes through."""
+def test_artifact_route_refuses_a_fifo_without_blocking(client, temp_home, viewed):
+    """``O_NONBLOCK``: without it the open waits for a writer that never comes.
+    The request runs on a thread so that fails here at the timeout rather than
+    hanging the suite."""
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    fifo = _doc(temp_home, run_id) / "t03.md"
+    os.mkfifo(fifo)
+    result = {}
+    worker = threading.Thread(daemon=True, target=lambda: result.update(
+        response=client.get(f"/api/runs/{run_id}/view/artifact?path=doc/t03.md")))
+
+    worker.start()
+    worker.join(timeout=5)
+    blocked = worker.is_alive()
+    if blocked:  # hand the stuck open a writer so the thread can finish
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(timeout=5)
+
+    assert not blocked, "the open blocked on a FIFO"
+    assert result["response"].status_code == 404
+
+
+def test_open_run_file_closes_every_fd_it_opened_but_the_one_it_returns(temp_home):
     from fastapi import HTTPException
 
-    from server.app import _open_regular
+    from server.app import _open_run_file
 
-    real = tmp_path / "t03.md"
-    real.write_text("fine\n", encoding="utf-8")
-    fd = _open_regular(real)
+    doc = _doc(temp_home, "run-view")
+    (doc / "t03.md").write_text("fine\n", encoding="utf-8")
+    (doc / "t04.md").symlink_to(doc / "t03.md")
+    (doc / "t05.md").mkdir()
+    before = len(os.listdir("/proc/self/fd"))
+
+    fd = _open_run_file(temp_home, "run-view", "doc/t03.md")
+    assert os.read(fd, 16) == b"fine\n"
     os.close(fd)
-
-    link = tmp_path / "t04.md"
-    link.symlink_to(real)
-    fifo = tmp_path / "t05.md"
-    os.mkfifo(fifo)
-    for target in (link, fifo):
+    for run_id, path in [("run-view", "doc/t04.md"), ("run-view", "doc/t05.md"),
+                         ("run-view", "doc/t06.md"), ("no-such-run", "doc/t03.md")]:
         with pytest.raises(HTTPException) as caught:
-            _open_regular(target)
+            _open_run_file(temp_home, run_id, path)
         assert caught.value.status_code == 404
+
+    assert len(os.listdir("/proc/self/fd")) == before
 
 
 def test_artifact_route_404s_a_playbook_without_a_view(client, temp_home, blind):
@@ -312,13 +354,14 @@ def test_artifact_route_caps_the_read_in_characters(
     from server.app import ARTIFACT_MAX_CHARS
 
     run_id = _run_row(temp_home, "run-view", "stubview")
+    # Two bytes a character: a cap counted in bytes cuts this at half.
     (_doc(temp_home, run_id) / "t03.md").write_text(
-        "x" * (ARTIFACT_MAX_CHARS + extra), encoding="utf-8")
+        "é" * (ARTIFACT_MAX_CHARS + extra), encoding="utf-8")
 
     body = client.get(f"/api/runs/{run_id}/view/artifact?path=doc/t03.md").json()
 
     assert body["truncated"] is truncated
-    assert len(body["text"]) == ARTIFACT_MAX_CHARS
+    assert body["text"] == "é" * ARTIFACT_MAX_CHARS
 
 
 def test_kill_switch_404s_all_three_routes_and_clears_has_view(

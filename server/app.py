@@ -81,15 +81,19 @@ _RUN_FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 METRICS_MAX_BUCKETS = 1440
 
 
-def _run_file(home: Path, run_id: str, path: str) -> Path:
-    """The file ``path`` names inside ``home/runs/<run_id>/``, or an HTTPException.
+def _open_run_file(home: Path, run_id: str, path: str) -> int:
+    """A read-only fd on the file ``path`` names in ``home/runs/<run_id>/``, or an HTTPException.
 
     ``path`` must be exactly ``<dir>/<name>`` with ``dir`` in RUN_FILE_DIRS
     (400 otherwise: empty, absolute, ``..``, NUL, a backslash, three parts).
-    Then it must resolve to a regular file still inside ``runs/<run_id>/<dir>/``
-    (404 otherwise), which refuses a symlink anywhere in the chain that leads
-    out. Built only from a validated run id and this process's own home, the
-    way ``engine.trace.trace_path`` builds a trace path -- never from a path a
+    Then it must be a regular file reached without following a symlink at any
+    level below ``runs/`` (404 otherwise). Walked one directory fd at a time,
+    each opened ``O_NOFOLLOW`` relative to the last, because the run directory
+    is worker-written: a path checked and then opened leaves a window to swap
+    ``doc/`` for a symlink between the two. ``O_NONBLOCK`` keeps the open from
+    hanging on a FIFO, and ``fstat`` refuses one, a device or a directory.
+    Built only from a validated run id and this process's own home, the way
+    ``engine.trace.trace_path`` builds a trace path -- never from a path a
     reduction recorded.
     """
     if not trace._RUN_ID_OK.match(run_id):
@@ -105,32 +109,22 @@ def _run_file(home: Path, run_id: str, path: str) -> Path:
             detail=f"path must be <dir>/<name> with dir one of {list(RUN_FILE_DIRS)}, "
                    f"not {path!r}",
         )
-    root = (home / "runs" / run_id).resolve()
     missing = HTTPException(status_code=404, detail=f"Run {run_id!r} has no {path}")
+    below = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    dirs: list[int] = []
     try:
-        target = (root / parts[0] / parts[1]).resolve(strict=True)
+        dirs.append(os.open((home / "runs").resolve(), os.O_RDONLY | os.O_DIRECTORY))
+        dirs.append(os.open(run_id, below, dir_fd=dirs[-1]))
+        dirs.append(os.open(parts[0], below, dir_fd=dirs[-1]))
+        fd = os.open(parts[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=dirs[-1])
     except (OSError, RuntimeError):
         raise missing
-    if not target.is_relative_to(root / parts[0]) or not target.is_file():
-        raise missing
-    return target
-
-
-def _open_regular(target: Path) -> int:
-    """A read-only fd on ``target`` if it is still a regular file, else a 404.
-
-    Shared by every reader of a ``_run_file`` result, because a worker-written
-    directory can swap the file between the resolve and the open:
-    ``O_NOFOLLOW`` refuses a symlink put there since, ``fstat`` a FIFO or a
-    device, and ``O_NONBLOCK`` keeps the open itself from hanging on a FIFO.
-    """
-    try:
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        raise HTTPException(status_code=404, detail=f"{target.name} is not readable")
+    finally:
+        for d in dirs:
+            os.close(d)
     if not stat.S_ISREG(os.fstat(fd).st_mode):
         os.close(fd)
-        raise HTTPException(status_code=404, detail=f"{target.name} is not a regular file")
+        raise missing
     return fd
 
 
@@ -2192,7 +2186,7 @@ def create_app(bind: str | None = None) -> FastAPI:
         # route is live on a server that has turned it off.
         if view_playbook(row[0]) is None:
             raise HTTPException(status_code=404, detail=f"Run {run_id!r} has no view")
-        fd = _open_regular(_run_file(home, run_id, path))
+        fd = _open_run_file(home, run_id, path)
         try:
             with open(fd, encoding="utf-8", errors="replace") as handle:
                 text = handle.read(ARTIFACT_MAX_CHARS + 1)
