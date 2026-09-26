@@ -16,6 +16,11 @@ import { setToken, clearToken } from '../api/auth';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
+import {
+  selectingData,
+  seatedData,
+  fallbackData,
+} from '../../../playbooks/committee/view/src/selection.fixture';
 import type { CommitteeData, Entry, Evaluation } from '../../../playbooks/committee/view/src/CommitteeView';
 import DocumentHistory, {
   diffLines,
@@ -2662,5 +2667,145 @@ describe('CommitteeView voice metrics and verdict', () => {
         expect.objectContaining({ method: 'POST' }),
       ),
     );
+  });
+});
+
+// --- selection (committee-selection Task 14) -----------------------------------
+
+describe('CommitteeView before t01 and the seated roster', () => {
+  it('shows the roster, not "Nothing said yet", while the committee is being selected', () => {
+    show(selectingData);
+
+    expect(screen.queryByText('Nothing said yet')).toBeNull();
+    expect(screen.getByTestId('committee-view')).toBeInTheDocument();
+    // `_seats` while selecting is the fixed four: no reviewer is seated yet.
+    expect(screen.getByText('Committee — 4')).toBeInTheDocument();
+    for (const role of ['owner', 'senior_director', 'manager', 'junior_ic']) {
+      expect(screen.getByTestId(`roster-${role}`)).toHaveTextContent('has not spoken');
+    }
+    expect(screen.queryByTestId('roster-tpm')).toBeNull();
+    expect(screen.queryByTestId('floor-holder')).toBeNull();
+  });
+
+  it('the progress bar shows the cap from the latest selection reduction', () => {
+    // Provisional while selecting (DEFAULT_MAX_TURNS), resolved once the chair
+    // ratified: 2 x 5 reviewers + 16.
+    const { unmount } = show(selectingData);
+    expect(screen.getByTestId('turn-count')).toHaveTextContent('turn 0 of 30');
+    unmount();
+
+    show(seatedData);
+    expect(screen.getByTestId('turn-count')).toHaveTextContent('turn 0 of 26');
+    expect(screen.getByTestId('ended-reason')).not.toHaveTextContent('predates');
+  });
+
+  it('a seated run before t01 shows no document card and no timeline', () => {
+    const { unmount } = show(seatedData);
+    expect(screen.getByTestId('roster-crew_owner')).toBeInTheDocument();
+    expect(screen.queryByTestId('expand-all')).toBeNull();
+    expect(screen.queryByText(/^Transcript/)).toBeNull();
+    expect(screen.queryByTestId('verdict-pending')).toBeNull();
+    // doc-diff's placeholders never sit under a seated committee: neither the
+    // "names the file it is reviewing on its first reduction" text nor the
+    // not-captured card.
+    expect(screen.queryByTestId('diff-no-artifacts')).toBeNull();
+    expect(screen.queryByTestId('doc-not-captured')).toBeNull();
+    unmount();
+
+    // C6: the Document card comes with t01 even once `open` kept the original,
+    // which it does on every live run. The fetch stub only makes a regression
+    // that draws the card fail on these assertions, not on a network error.
+    vi.stubGlobal('fetch', vi.fn((u: string) =>
+      String(u).includes('/view/artifact') ? ok({ text: '# Proposal\n\nold clause\n' }) : new Promise(() => {}),
+    ));
+    show({ ...seatedData, document: { ...DOC, steps: [], final: null } });
+    expect(screen.getByTestId('roster-crew_owner')).toBeInTheDocument();
+    expect(screen.queryByText(/^Document/)).toBeNull();
+    expect(screen.queryByTestId('step-original')).toBeNull();
+    expect(screen.queryByTestId('diff-no-artifacts')).toBeNull();
+    expect(screen.queryByTestId('expand-all')).toBeNull();
+  });
+
+  it('roster rows say why each seat is there and who put it forward', () => {
+    const { unmount } = show(seatedData);
+
+    expect(screen.getByTestId('roster-crew_owner')).toHaveTextContent('Noor Haddad');
+    expect(screen.getByTestId('roster-crew_owner')).toHaveTextContent('Owner, team-owned crews');
+    expect(screen.getByTestId('roster-why-crew_owner')).toHaveTextContent(
+      'why: owns the team-owned crews the proposal would federate',
+    );
+    // The earliest selector whose list held the seat, by name.
+    expect(screen.getByTestId('roster-nominated-tpm')).toHaveTextContent('put forward by Maya Okonkwo');
+    expect(screen.getByTestId('roster-nominated-crew_owner')).toHaveTextContent(
+      'put forward by Ruth Delgado',
+    );
+    expect(screen.getByTestId('roster-nominated-staff_ic')).toHaveTextContent(
+      'put forward by Dana Whitfield',
+    );
+    expect(screen.getByTestId('roster-nominated-owner')).toHaveTextContent('fixed seat');
+    expect(screen.getByTestId('roster-why-junior_ic')).toHaveTextContent(
+      'why: applies the edits the owner delegates',
+    );
+    unmount();
+
+    show(fallbackData);
+    expect(screen.getByTestId('roster-nominated-pm')).toHaveTextContent('default seat');
+    expect(screen.getByTestId('roster-why-pm')).toHaveTextContent(
+      'why: default committee (selection fell back: chair_failed)',
+    );
+    expect(screen.getByTestId('roster-nominated-manager')).toHaveTextContent('fixed seat');
+  });
+
+  it('the metrics variant keeps its empty state before t01', () => {
+    // The Metrics tab counts turns, and there are none yet.
+    render(<CommitteeView runId="run-2" data={seatedData} refetch={noop} variant="metrics" />);
+
+    expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
+    expect(screen.queryByTestId('committee-metrics')).toBeNull();
+    expect(screen.queryByTestId('committee-view')).toBeNull();
+  });
+
+  it('a legacy run shows no why and no put forward', () => {
+    const { unmount } = show(run2);
+    for (const p of run2.roster) {
+      expect(screen.getByTestId(`roster-${p.role}`)).toBeInTheDocument();
+      expect(screen.queryByTestId(`roster-why-${p.role}`)).toBeNull();
+      expect(screen.queryByTestId(`roster-nominated-${p.role}`)).toBeNull();
+    }
+    unmount();
+
+    // A payload from before selection has no `selection` key at all. Every
+    // guard reads it as null, so an empty one is still "Nothing said yet".
+    const before: CommitteeData = { ...run2, timeline: [], verdict: null, document: EMPTY_DOC };
+    delete before.selection;
+    show(before);
+    expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
+    expect(screen.queryByTestId('committee-view')).toBeNull();
+  });
+
+  it("a seat's worker-written text stays plain text, and a derived seat cannot pass for the owner", () => {
+    // A derived seat's name, title and rationale are a selector's words. This
+    // one copies the owner's name and title and carries markup, a Markdown
+    // image, a link and bold: all of it must read as the literal text, never
+    // as an element, and its slug and "derived seat" must sit beside it.
+    const hostile = '<img src=x onerror=alert(1)> ![x](http://evil.test/x.png) [owner](javascript:alert(1)) **bold**';
+    const impostor = {
+      ...seatedData.roster.find((p) => p.role === 'crew_owner')!,
+      name: 'Maya Okonkwo',
+      title: 'Staff Engineer & proposal owner',
+      rationale: hostile,
+    };
+    show({
+      ...seatedData,
+      roster: seatedData.roster.map((p) => (p.role === 'crew_owner' ? impostor : p)),
+    });
+
+    const row = screen.getByTestId('roster-crew_owner');
+    expect(screen.getByTestId('roster-why-crew_owner')).toHaveTextContent(`why: ${hostile}`);
+    expect(row.querySelector('img, a, strong, script, iframe')).toBeNull();
+    expect(row).toHaveTextContent('crew_owner · derived seat');
+    // The real owner's row carries no such marker, and neither does a library seat.
+    expect(screen.getByTestId('roster-owner')).not.toHaveTextContent('derived');
+    expect(screen.getByTestId('roster-tpm')).not.toHaveTextContent('derived');
   });
 });

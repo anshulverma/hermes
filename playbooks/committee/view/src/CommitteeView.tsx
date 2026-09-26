@@ -37,6 +37,55 @@ export type Persona = {
   /** spoke · holds_floor · queued · idle */
   state: string;
   stance: string | null;
+  /**
+   * selection C6: why this seat is in the room and who put it there. Null on
+   * every row of a run from before selection, which shows neither line.
+   * Optional, because such a payload may not carry the keys at all.
+   */
+  rationale?: string | null;
+  nominated_by?: 'owner' | 'manager' | 'senior_director' | 'fixed' | 'default' | null;
+  /** The selector's name for an owner, manager or senior_director nomination, else null. */
+  nominated_by_name?: string | null;
+  source?: 'fixed' | 'library' | 'derived' | null;
+};
+
+/** One kept selection stage, as `view._stage` builds it (C6). */
+export type SelectionStage = {
+  stage: number;
+  role: string;
+  name: string;
+  delivered: boolean;
+  /** The selector's prose with both fences stripped; thread.NO_TURN when undelivered. */
+  body: string;
+  proposed: Array<{ role: string; name: string; title: string; rationale: string }>;
+  /** How many proposed seats the reduction cut past its cap; absent reads as 0. */
+  proposed_dropped?: number;
+  segments: Segment[];
+  badges: string[];
+  take: number | null;
+  takes: number | null;
+  violations: string[];
+  flags: string[];
+};
+
+/** A stakeholder the selectors named and did not seat. */
+export type Considered = {
+  stakeholder: string;
+  role: string | null;
+  reason: string;
+  represented_by: string | null;
+  represented_by_name: string | null;
+};
+
+/** `view_data`'s `selection` block. It is null on a run from before selection. */
+export type Selection = {
+  state: 'selecting' | 'seated' | 'fallback' | 'lost';
+  stages: SelectionStage[];
+  fallback: string | null;
+  considered: Considered[];
+  /** What resolve's caps cut (spec amendment FIX_SA); absent reads as 0. */
+  considered_dropped?: number;
+  invalid_dropped?: number;
 };
 
 export type Entry = {
@@ -128,6 +177,12 @@ export type CommitteeData = {
    * when the tab first appears -- so `tsc` forces that branch downstream.
    */
   document: DocumentBlock;
+  /**
+   * selection C6: the stages, the stakeholders considered and any fallback.
+   * null for a run from before selection, and absent on a payload older than
+   * the key. Every guard reads it with `== null` / `!= null`, so absent is null.
+   */
+  selection?: Selection | null;
   /**
    * What committee-eval concluded, from runs/<id>/eval.json; null when the run
    * was never scored. Optional because a payload from before the eval carries
@@ -351,13 +406,24 @@ function ProgressBar({ progress, legacy }: { progress: Progress; legacy: boolean
 
 // --- roster ------------------------------------------------------------------
 
+/** Who put a seat forward, as the roster says it. Null when the row records nobody. */
+function nominated(p: Persona): string | null {
+  if (p.nominated_by === 'fixed') return 'fixed seat';
+  if (p.nominated_by === 'default') return 'default seat';
+  if (p.nominated_by) return `put forward by ${p.nominated_by_name ?? p.nominated_by}`;
+  return null;
+}
+
 function Roster({ roster, legacy }: { roster: Persona[]; legacy: boolean }) {
   const { Badge } = ds();
   return (
     <Section title={`Committee — ${roster.length}`}>
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
+      <ul
+        aria-label="Committee"
+        style={{ display: 'flex', flexDirection: 'column', listStyle: 'none', margin: 0, padding: 0 }}
+      >
         {roster.map((p) => (
-          <div
+          <li
             key={p.role}
             data-testid={`roster-${p.role}`}
             style={{
@@ -373,7 +439,14 @@ function Roster({ roster, legacy }: { roster: Persona[]; legacy: boolean }) {
               {p.name}
             </span>
             <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{p.title}</span>
-            <span style={{ ...mono, fontSize: 10, color: 'var(--text-muted)' }}>{p.role}</span>
+            {/* The slug is the seat's identity; the name and title beside it
+                are, for a derived seat, a selector's words. So a derived seat
+                says so here, and one that copies the owner's name and title
+                still cannot pass for her. */}
+            <span style={{ ...mono, fontSize: 10, color: 'var(--text-muted)' }}>
+              {p.role}
+              {p.source === 'derived' && ' · derived seat'}
+            </span>
             <span style={{ marginLeft: 'auto', flex: 'none' }}>
               <Badge
                 size="sm"
@@ -385,6 +458,22 @@ function Roster({ roster, legacy }: { roster: Persona[]; legacy: boolean }) {
                 {ROSTER_STATE[p.state] ?? p.state}
               </Badge>
             </span>
+            {/* Why the seat is in the room and who put it there. Only a run
+                that went through selection records either. A legacy row
+                carries nulls and shows neither, never a blank "why:". Plain
+                text: a rationale is worker-written. */}
+            {p.rationale != null && (
+              <div style={{ flexBasis: '100%', display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
+                <span data-testid={`roster-why-${p.role}`} style={{ color: 'var(--text-secondary)' }}>
+                  why: {p.rationale}
+                </span>
+                {nominated(p) !== null && (
+                  <span data-testid={`roster-nominated-${p.role}`} style={{ color: 'var(--text-muted)' }}>
+                    {nominated(p)}
+                  </span>
+                )}
+              </div>
+            )}
             {/* Absent stays absent: a persona that stated no stance is shown as
                 having none, never as neutral. On a run that predates the stance
                 signal every seat is absent, and "no stance stated" would be
@@ -400,9 +489,9 @@ function Roster({ roster, legacy }: { roster: Persona[]; legacy: boolean }) {
             >
               {p.stance ?? (legacy ? 'stance not recorded — this run predates the signal' : 'no stance stated')}
             </div>
-          </div>
+          </li>
         ))}
-      </div>
+      </ul>
     </Section>
   );
 }
@@ -1074,12 +1163,15 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     </Section>
   );
 
-  // The timeline alone, NOT `&& roster.length === 0`. `view_data`'s `_roster`
-  // walks `cast.CAST`, so it returns all nine rows from the first poll onward
-  // and a roster-length test can never fire on real data. The state this guard
-  // exists for is a run whose first turn has not settled: no reductions, so no
-  // timeline and no verdict -- and it is exactly when the tab first appears.
-  if (data.timeline.length === 0) {
+  // An empty timeline, NOT `&& roster.length === 0`: `view_data` always sends
+  // roster rows (the fixed four while a committee is being seated), so a
+  // roster-length test can never fire on real data. This guard is for a run
+  // with nothing to show yet: phase `open`, or a run from before selection
+  // whose first turn has not settled (`selection` null, or absent on an older
+  // payload). A run that is seating its committee does have something to show,
+  // and falls through to the pre-t01 layout below. The Metrics tab is the
+  // exception: it counts turns, and there are none.
+  if (data.timeline.length === 0 && (data.selection == null || variant === 'metrics')) {
     // No padding of its own, for the same reason the populated branch has none:
     // PlaybookView.tsx already wraps this component in `padding: 20`, and 32
     // inside 20 is 52px on one branch and 20 on the other.
@@ -1110,6 +1202,23 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
         <EvaluationBlock runId={runId} evaluation={data.evaluation ?? null} scorable={!!data.verdict?.text} />
       </div>
     );
+
+  // Before t01, on a run that is seating its committee (the gate above has
+  // returned for every other empty timeline). Nothing has been said in the
+  // meeting yet, but who is in the room, why, and who put them there is
+  // already known, so the tab shows that. There is no transcript and no
+  // verdict card, which would only restate "nothing yet". No Document card
+  // either (C6): it comes with t01, like the transcript, even though `open`
+  // has already kept the original. doc-diff's pre-t01 card stays on the gate's
+  // empty-state branch above, for runs with `selection` null.
+  if (data.timeline.length === 0) {
+    return (
+      <div data-testid="committee-view" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <ProgressBar progress={data.progress} legacy={legacy} />
+        <Roster roster={data.roster} legacy={legacy} />
+      </div>
+    );
+  }
 
   // The other direction: the reviewer who raised an edit, the owner turn that
   // delegated it and the junior turn that applied it all link to its step --

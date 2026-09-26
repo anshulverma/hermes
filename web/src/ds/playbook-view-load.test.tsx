@@ -53,6 +53,7 @@ describe('playbook view UMD boundary', () => {
         },
       ],
       verdict: null,
+      selection: null,
       document: {
         name: 'proposal.md',
         captured: true,

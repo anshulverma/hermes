@@ -186,6 +186,11 @@ const roster: Persona[] = Object.keys(CAST).map((role) => ({
   title: CAST[role][1],
   state: 'spoke',
   stance: stanceAt(role, 20),
+  // run-2 predates selection: `_roster` sends the four keys, all null.
+  rationale: null,
+  nominated_by: null,
+  nominated_by_name: null,
+  source: null,
 }));
 
 /** run-2's decision text, trimmed. */
@@ -207,6 +212,8 @@ export const run2: CommitteeData = {
     dropped_floor_requests: [],
   },
   document: runDocument,
+  // run-2 predates selection, so `view_data` returns `selection: null` for it.
+  selection: null,
 };
 
 /**

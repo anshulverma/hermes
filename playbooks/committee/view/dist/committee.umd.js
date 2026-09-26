@@ -1549,16 +1549,27 @@
 			]
 		});
 	}
+	/** Who put a seat forward, as the roster says it. Null when the row records nobody. */
+	function nominated(p) {
+		if (p.nominated_by === "fixed") return "fixed seat";
+		if (p.nominated_by === "default") return "default seat";
+		if (p.nominated_by) return `put forward by ${p.nominated_by_name ?? p.nominated_by}`;
+		return null;
+	}
 	function Roster({ roster, legacy }) {
 		const { Badge } = ds();
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
 			title: `Committee — ${roster.length}`,
-			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+				"aria-label": "Committee",
 				style: {
 					display: "flex",
-					flexDirection: "column"
+					flexDirection: "column",
+					listStyle: "none",
+					margin: 0,
+					padding: 0
 				},
-				children: roster.map((p) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				children: roster.map((p) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", {
 					"data-testid": `roster-${p.role}`,
 					style: {
 						display: "flex",
@@ -1584,13 +1595,13 @@
 							},
 							children: p.title
 						}),
-						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 							style: {
 								...mono,
 								fontSize: 10,
 								color: "var(--text-muted)"
 							},
-							children: p.role
+							children: [p.role, p.source === "derived" && " · derived seat"]
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							style: {
@@ -1603,6 +1614,24 @@
 								tone: p.state === "holds_floor" ? "live" : p.state === "queued" ? "attention" : void 0,
 								children: ROSTER_STATE[p.state] ?? p.state
 							})
+						}),
+						p.rationale != null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+							style: {
+								flexBasis: "100%",
+								display: "flex",
+								gap: 8,
+								flexWrap: "wrap",
+								fontSize: 12
+							},
+							children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+								"data-testid": `roster-why-${p.role}`,
+								style: { color: "var(--text-secondary)" },
+								children: ["why: ", p.rationale]
+							}), nominated(p) !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								"data-testid": `roster-nominated-${p.role}`,
+								style: { color: "var(--text-muted)" },
+								children: nominated(p)
+							})]
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 							"data-testid": `stance-${p.role}`,
@@ -2303,7 +2332,7 @@
 				onOpenTurn: openTurn
 			})
 		});
-		if (data.timeline.length === 0) {
+		if (data.timeline.length === 0 && (data.selection == null || variant === "metrics")) {
 			const empty = /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
 				title: "Nothing said yet",
 				description: "The committee view fills in as each member takes the floor.",
@@ -2329,6 +2358,21 @@
 				runId,
 				evaluation: data.evaluation ?? null,
 				scorable: !!data.verdict?.text
+			})]
+		});
+		if (data.timeline.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": "committee-view",
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 16
+			},
+			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, {
+				progress: data.progress,
+				legacy
+			}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, {
+				roster: data.roster,
+				legacy
 			})]
 		});
 		const edits = /* @__PURE__ */ new Map();
