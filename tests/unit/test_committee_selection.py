@@ -392,3 +392,429 @@ def test_not_seated_drops_entries_without_a_stakeholder_and_a_reason():
     clipped = S.not_seated({"not_seated": [{"stakeholder": "y" * 500, "reason": "r"}]})
     assert clipped[0]["stakeholder"] == "y" * (S.STAKEHOLDER_MAX - 1) + "\u2026"
     assert S.not_seated(None) == [] and S.not_seated({"not_seated": "Legal"}) == []
+
+
+# --- resolve -------------------------------------------------------------
+
+SELECTORS = ("owner", "manager", "senior_director")
+FIXED = ("owner", "senior_director", "manager", "junior_ic")
+RECORD_KEYS = SEAT_KEYS | {"nominated_by"}
+MANAGER = cast.CAST["manager"]["name"]
+CHAIR = cast.CAST["senior_director"]["name"]
+
+
+def _stages(*answers) -> list[dict]:
+    """``s["stages"]`` as the playbook builds it, one kept take per stage.
+
+    A dict is one seat-list block under a sentence of prose, a str is the
+    whole answer and None is an undelivered take.
+    """
+    stages = []
+    for n, answer in enumerate(answers, 1):
+        if isinstance(answer, dict):
+            answer = _answer(answer)
+        doc, code = S.parse(answer)
+        seats, _ = S.validate(doc, cast.LIBRARY)
+        delivered = bool(answer)
+        stages.append({
+            "stage": n, "role": SELECTORS[n - 1], "delivered": delivered,
+            "doc": doc, "code": S.stage_code(delivered, code, seats),
+        })
+    return stages
+
+
+def _derived(role, title) -> dict:
+    return _seat(role, title=title)
+
+
+def _roles(seats) -> list[str]:
+    return [s["role"] for s in seats]
+
+
+def _by_stakeholder(considered) -> dict:
+    return {c["stakeholder"]: c for c in considered}
+
+
+def _considered(stakeholder, role, reason, represented_by=None) -> dict:
+    return {
+        "stakeholder": stakeholder, "role": role, "reason": reason,
+        "represented_by": represented_by,
+    }
+
+
+def test_fixed_seats_are_the_four_fixed_records():
+    """Nobody puts the fixed four forward: they are always at the table (Q5)."""
+    fixed = S.fixed_seats()
+
+    assert tuple(fixed) == FIXED
+    for role, seat in fixed.items():
+        assert seat == {
+            **cast.CAST[role], "role": role, "rationale": cast.FIXED_RATIONALE[role],
+            "nominated_by": "fixed", "source": "fixed",
+        }
+        assert set(seat) == RECORD_KEYS, role
+        assert seat is not cast.CAST[role]
+    again = S.fixed_seats()
+    assert again == fixed and all(again[r] is not fixed[r] for r in FIXED)
+
+
+def test_resolve_takes_the_chairs_list_as_authoritative():
+    """Stage 3 is the committee. The owner's and the manager's lists only say
+    who put a seat forward first, whatever they seated."""
+    crew = _derived("crew_owner", "Crew lead")
+    stages = _stages(
+        {"seats": [_seat("security"), _seat("sre")]},
+        {"seats": [_seat("security"), _seat("privacy")]},
+        {"seats": [_seat("privacy"), _seat("tl"), crew, _seat("owner"), _seat("chair")]},
+    )
+
+    out = S.resolve(stages, cast.LIBRARY)
+
+    assert set(out) == {"seated", "reviewers", "considered", "fallback"}
+    assert out["fallback"] is None
+    assert out["reviewers"] == ["senior_director", "manager", "privacy", "tl", "crew_owner"]
+    assert _roles(out["seated"]) == [
+        "owner", "senior_director", "manager", "privacy", "tl", "crew_owner", "junior_ic",
+    ]
+    fixed = S.fixed_seats()
+    seated = {s["role"]: s for s in out["seated"]}
+    for role in FIXED:
+        assert seated[role] == fixed[role]
+    assert seated["privacy"] == {
+        "role": "privacy", **cast.LIBRARY["privacy"],
+        "rationale": "privacy carries a risk in this proposal",
+        "nominated_by": "manager", "source": "library",
+    }
+    assert seated["tl"]["nominated_by"] == "senior_director"
+    assert seated["crew_owner"]["source"] == "derived"
+    assert seated["crew_owner"]["title"] == "Crew lead"
+    assert seated["crew_owner"]["style"] == cast.DERIVED_STYLE
+    assert all(set(s) == RECORD_KEYS for s in out["seated"])
+    # security and sre were put forward and the chair left them out
+    assert {c["role"] for c in out["considered"]} == {"security", "sre"}
+
+
+def test_resolve_never_falls_back_on_a_failed_earlier_stage():
+    """A failed owner or manager costs the run nothing: the chair proposes
+    from scratch and her list is seated. This covers a stage-1 block whose
+    seats are a string, not a list (gap 3)."""
+    chair = {"seats": [_seat("security"), _seat("tl")]}
+    failures = [
+        (None, "no_answer"),
+        ("I would seat security and sre.", "no_block"),
+        (_answer("{broken"), "unparseable"),
+        ({"seats": "security"}, "too_few"),
+        ({"seats": [_seat("owner"), _seat("Security")]}, "too_few"),
+    ]
+    for first, code in failures:
+        stages = _stages(first, None, chair)
+        assert [st["code"] for st in stages] == [code, "no_answer", None], first
+
+        out = S.resolve(stages, cast.LIBRARY)
+
+        assert out["fallback"] is None, first
+        assert out["reviewers"] == ["senior_director", "manager", "security", "tl"], first
+        assert {s["nominated_by"] for s in out["seated"][3:5]} == {"senior_director"}
+    # a usable owner and a failed manager: the owner still gets the credit
+    out = S.resolve(_stages({"seats": [_seat("tl")]}, "no block here", chair), cast.LIBRARY)
+    assert out["fallback"] is None
+    assert [s["nominated_by"] for s in out["seated"]][3:5] == ["senior_director", "owner"]
+    # every JSON value a worker can put in an entry's fields: resolve never
+    # raises, junk earlier lists change nothing, and a junk chair list falls back
+    values = (None, True, 7, 1.5, "", "x", [], ["tl"], {}, {"a": 1}, "Legal")
+    junk = {
+        "seats": [{k: v for k in ("role", "title", "rationale", "name", "lens")}
+                  for v in values],
+        "not_seated": [{"stakeholder": v, "reason": v, "represented_by": v} for v in values],
+    }
+    out = S.resolve(_stages(junk, junk, chair), cast.LIBRARY)
+    assert out["reviewers"] == ["senior_director", "manager", "security", "tl"]
+    assert S.resolve(_stages(junk, junk, junk), cast.LIBRARY)["fallback"] == "too_few"
+
+
+def test_resolve_falls_back_with_the_chairs_code():
+    """A chair list that cannot seat anyone gives today's seven, and the code
+    says why. An undelivered chair is reported as chair_failed."""
+    assert S.stage_code(False, None, [{"role": "tpm"}]) == "no_answer"
+    assert S.stage_code(False, "no_block", []) == "no_answer"
+    assert S.stage_code(True, "no_block", []) == "no_block"
+    assert S.stage_code(True, "unparseable", []) == "unparseable"
+    assert S.stage_code(True, None, []) == "too_few"
+    assert S.stage_code(True, None, [{"role": "tpm"}]) is None
+
+    owner = {"seats": [_seat("tpm"), _seat("pm")]}  # both in the default seven
+    chairs = [
+        (None, "chair_failed"),
+        ("I ratify the list above.", "no_block"),
+        (_answer("[1, 2]"), "unparseable"),
+        ({"seats": []}, "too_few"),
+        ({"seats": "security"}, "too_few"),
+        ({"seats": [_seat("owner"), _seat("chair"), _seat("manager")]}, "too_few"),
+    ]
+    for chair, fallback in chairs:
+        out = S.resolve(_stages(owner, owner, chair), cast.LIBRARY)
+        assert out == S.fallback(fallback), chair
+    # no stage-3 entry at all is a chair who never answered
+    assert S.resolve([], cast.LIBRARY) == S.fallback("chair_failed")
+    assert S.resolve(_stages(owner), cast.LIBRARY) == S.fallback("chair_failed")
+
+
+def test_resolve_cuts_an_overflow_to_twelve_and_names_a_seated_representative():
+    """Fifteen valid seats: the first ten join senior_director and manager,
+    and the last five are considered, each represented by someone seated
+    (Q4). A chair note keyed "security" names security's representative; a
+    note keyed "security team" is a different stakeholder. A list of any
+    length is read in linear time and still seats twelve."""
+    seated_ten = [
+        _seat("tpm"), _seat("pm"), _seat("tl"), _seat("staff_ic"), _seat("data_scientist"),
+        _seat("sre"), _seat("privacy"), _seat("partner_owner"),
+        _derived("crew_owner", "Crew lead"), _derived("fleet_ops", "Fleet operations lead"),
+    ]
+    overflow = [
+        _seat("security"), _derived("billing", "Billing lead"), _derived("legal", "Counsel"),
+        _derived("support", "Support lead"), _derived("growth", "Growth PM"),
+    ]
+    notes = [
+        {"stakeholder": "Security", "reason": "covered", "represented_by": "privacy"},
+        {"stakeholder": "Security team", "reason": "one voice is enough", "represented_by": "tpm"},
+        {"stakeholder": "Billing", "reason": "later", "represented_by": "nobody"},
+        {"stakeholder": "legal ", "reason": "later", "represented_by": "security"},
+    ]
+    chair = {"seats": seated_ten + overflow, "not_seated": notes}
+
+    out = S.resolve(_stages(None, None, chair), cast.LIBRARY)
+
+    assert out["fallback"] is None
+    assert len(out["reviewers"]) == S.MAX_REVIEWERS == 12
+    assert out["reviewers"] == ["senior_director", "manager", *_roles(seated_ten)]
+    assert _roles(out["seated"]) == ["owner", *out["reviewers"], "junior_ic"]
+    over = "over the 12-seat bound"
+    assert _by_stakeholder(out["considered"]) == {
+        "Security Engineer": _considered("Security Engineer", "security", over, "privacy"),
+        "Billing lead": _considered("Billing lead", "billing", over, "senior_director"),
+        # "legal " is keyed "legal", but it names an unseated representative
+        "Counsel": _considered("Counsel", "legal", over, "senior_director"),
+        "Support lead": _considered("Support lead", "support", over, "senior_director"),
+        "Growth PM": _considered("Growth PM", "growth", over, "senior_director"),
+        "Security team": _considered("Security team", None, "one voice is enough", "tpm"),
+    }
+    seated = set(_roles(out["seated"]))
+    assert all(c["represented_by"] in seated for c in out["considered"])
+
+    # 20 000 valid seats on every stage: twelve seated, the rest considered,
+    # and no pairwise work (a list scan per seat would take minutes here)
+    many = {"seats": [_derived(f"d{i}", f"Lead {i}") for i in range(20_000)]}
+    stages = _stages(many, many, many)
+    start = time.perf_counter()
+    out = S.resolve(stages, cast.LIBRARY)
+    assert time.perf_counter() - start < 2.0
+    assert out["reviewers"] == ["senior_director", "manager", *(f"d{i}" for i in range(10))]
+    assert len(out["considered"]) == 20_000 - 10
+    assert {c["represented_by"] for c in out["considered"]} == {"senior_director"}
+    assert S.resolve(stages, cast.LIBRARY) == out  # the same lists, the same committee
+
+
+def test_resolve_credits_the_earliest_stage_that_listed_a_seat():
+    """nominated_by is the master's to compute: the first selector whose valid
+    list held the slug. A worker's own nominated_by never survives."""
+    stages = _stages(
+        {"seats": [_seat("security"), _seat("sre"), {"role": "tl"}]},  # tl: no rationale
+        {"seats": [_seat("privacy"), _seat("security"), _seat("tl")]},
+        {"seats": [
+            _seat("tl"), _seat("privacy"), _seat("security"), _seat("sre"),
+            _derived("crew_owner", "Crew lead"),
+        ]},
+    )
+    stages[2]["doc"]["seats"][4]["nominated_by"] = "owner"  # a raw doc, never parsed
+
+    out = S.resolve(stages, cast.LIBRARY)
+
+    assert {s["role"]: s["nominated_by"] for s in out["seated"]} == {
+        "owner": "fixed", "senior_director": "fixed", "manager": "fixed",
+        "tl": "manager", "privacy": "manager", "security": "owner", "sre": "owner",
+        "crew_owner": "senior_director", "junior_ic": "fixed",
+    }
+    assert out["considered"] == []
+
+
+def test_resolve_collects_considered_from_every_source():
+    """Everyone named and not seated is on the record with a reason: a note, a
+    seat a later list dropped, an invalid entry, or a seat the default
+    committee has no room for."""
+    stages = _stages(
+        {"seats": [_seat("security"), _seat("sre"), _seat("Finance")],
+         "not_seated": [{"stakeholder": "Legal", "reason": "no filing is involved",
+                         "represented_by": "privacy"}]},
+        {"seats": [_seat("security"), _seat("privacy"), {"role": "crew_owner", "rationale": "x"}],
+         "not_seated": [{"stakeholder": "Support", "reason": "takes the calls later",
+                         "represented_by": "tpm"}]},
+        {"seats": [_seat("security"), _seat("tl")],
+         "not_seated": [{"stakeholder": "Privacy", "reason": "security covers the data flow",
+                         "represented_by": "security"}]},
+    )
+
+    out = S.resolve(stages, cast.LIBRARY)
+
+    assert _roles(out["seated"]) == [
+        "owner", "senior_director", "manager", "security", "tl", "junior_ic",
+    ]
+    assert _by_stakeholder(out["considered"]) == {
+        "Finance": _considered("Finance", None, "invalid: bad slug"),
+        # privacy is not seated, so Legal has no representative
+        "Legal": _considered("Legal", None, "no filing is involved"),
+        "Site Reliability Engineer, on-call": _considered(
+            "Site Reliability Engineer, on-call", "sre", f"dropped by {MANAGER}"),
+        "crew_owner": _considered("crew_owner", "crew_owner", "invalid: no title"),
+        "Support": _considered("Support", None, "takes the calls later"),
+        # the chair's note keyed "privacy" is the reason the seat was dropped
+        "Privacy Engineer": _considered(
+            "Privacy Engineer", "privacy", "security covers the data flow", "security"),
+    }
+
+    # a fallback: the stage 1-2 seats the default seven leave out are
+    # considered, and a note may name a default reviewer as its representative
+    stages = _stages(
+        {"seats": [_seat("security"), _seat("tpm")],
+         "not_seated": [{"stakeholder": "Legal", "reason": "no filing", "represented_by": "tpm"}]},
+        None,
+        _answer("{broken"),
+    )
+
+    out = S.resolve(stages, cast.LIBRARY)
+
+    assert out["fallback"] == "unparseable"
+    assert out["seated"] == S.fallback("unparseable")["seated"]
+    assert _by_stakeholder(out["considered"]) == {
+        "Security Engineer": _considered(
+            "Security Engineer", "security",
+            "not in the default committee (fallback: unparseable)"),
+        "Legal": _considered("Legal", None, "no filing", "tpm"),
+    }
+
+
+def test_resolve_matches_considered_entries_on_their_keys():
+    """Rule 6: one entry per key (a seat's slug, a note's stakeholder
+    lowercased) and the latest stage wins. A seated slug is never considered,
+    even when an earlier stage listed it invalidly. A dropped seat's dropper
+    is the first later stage with a usable list that leaves it out."""
+    owner = {"seats": [{"role": "sre"}, _seat("privacy")]}  # sre has no rationale
+    chair = {"seats": [_seat("security"), _seat("sre")]}
+
+    # the manager's usable list leaves privacy out and says nothing about it
+    out = S.resolve(_stages(owner, {"seats": [_seat("security")]}, chair), cast.LIBRARY)
+
+    assert out["reviewers"] == ["senior_director", "manager", "security", "sre"]
+    assert out["considered"] == [
+        _considered("Privacy Engineer", "privacy", f"dropped by {MANAGER}"),
+    ]
+
+    # the manager fails, so the chair's omission is the dropper; her note
+    # keyed "privacy team" is another stakeholder
+    notes = [{"stakeholder": "Privacy team", "reason": "no data moves", "represented_by": "sre"}]
+    out = S.resolve(_stages(owner, None, {**chair, "not_seated": notes}), cast.LIBRARY)
+
+    assert _by_stakeholder(out["considered"]) == {
+        "Privacy Engineer": _considered("Privacy Engineer", "privacy", f"dropped by {CHAIR}"),
+        "Privacy team": _considered("Privacy team", None, "no data moves", "sre"),
+    }
+
+    # a later note on the same key replaces an earlier one, and gives the
+    # dropped seat its reason; a note keyed on a seated slug is dropped
+    manager = {"seats": [_seat("security")], "not_seated": [
+        {"stakeholder": " PRIVACY ", "reason": "security reads the data flow",
+         "represented_by": "security"},
+        {"stakeholder": "Security", "reason": "already here", "represented_by": "security"},
+    ]}
+    first = {**owner, "not_seated": [{"stakeholder": "privacy", "reason": "stale"}]}
+    out = S.resolve(_stages(first, manager, chair), cast.LIBRARY)
+
+    assert out["considered"] == [
+        _considered("Privacy Engineer", "privacy", "security reads the data flow", "security"),
+    ]
+
+
+def test_resolve_nulls_a_representative_who_is_not_seated():
+    """Outside the overflow rule a representative must be a seated slug; an
+    unseated one, a sentinel or a non-string becomes null."""
+    notes = [
+        {"stakeholder": "Legal", "reason": "a", "represented_by": "privacy"},
+        {"stakeholder": "Finance", "reason": "b", "represented_by": "manager"},
+        {"stakeholder": "Support", "reason": "c", "represented_by": "security"},
+        {"stakeholder": "Board", "reason": "d", "represented_by": "chair"},
+        {"stakeholder": "Ops", "reason": "e", "represented_by": " security "},
+        {"stakeholder": "Growth", "reason": "f", "represented_by": 7},
+        {"stakeholder": "Sales", "reason": "g", "represented_by": "Security"},
+    ]
+    owner = {"seats": [_seat("tpm")],
+             "not_seated": [{"stakeholder": "Billing", "reason": "h", "represented_by": "tpm"}]}
+
+    out = S.resolve(_stages(owner, None, {"seats": [_seat("security")], "not_seated": notes}),
+                    cast.LIBRARY)
+
+    reps = {c["stakeholder"]: c["represented_by"] for c in out["considered"]}
+    assert reps == {
+        "Legal": None, "Finance": "manager", "Support": "security", "Board": None,
+        "Ops": "security", "Growth": None, "Sales": None,
+        # the chair dropped tpm, so the owner's note has no one to point at
+        "Billing": None, "Technical Program Manager": None,
+    }
+
+
+def test_fallback_never_raises_and_is_the_default_committee(monkeypatch):
+    """Rule 7: the fixed four plus today's five reviewers, in CAST order. It
+    reads no stage data, and a failure while collecting the considered list
+    on a fallback leaves that list empty instead of costing the committee."""
+    fixed = S.fixed_seats()
+    for code in ("chair_failed", "no_block", "unparseable", "too_few"):
+        out = S.fallback(code)
+
+        assert out["fallback"] == code and out["considered"] == []
+        assert out["reviewers"] == list(cast.SENIORITY)
+        assert _roles(out["seated"]) == list(cast.CAST)
+        for seat in out["seated"]:
+            role = seat["role"]
+            assert set(seat) == RECORD_KEYS, role
+            if role in fixed:
+                assert seat == fixed[role]
+            else:
+                assert seat == {
+                    **cast.CAST[role],
+                    "rationale": f"default committee (selection fell back: {code})",
+                    "nominated_by": "default", "source": "library",
+                }
+
+    stages = _stages({"seats": [_seat("security")]}, None, "no block")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("validate broke")
+
+    monkeypatch.setattr(S, "validate", boom)
+    monkeypatch.setattr(S, "not_seated", boom)
+    assert S.fallback("too_few")["reviewers"] == list(cast.SENIORITY)  # no stage data read
+    assert S.resolve(stages, cast.LIBRARY) == S.fallback("no_block")
+
+
+def test_seat_records_are_new_dicts():
+    """A seat record is built, never borrowed: changing one cannot touch the
+    cast or the library, and no two calls share a dict."""
+    before = json.dumps({"cast": cast.CAST, "library": cast.LIBRARY}, sort_keys=True)
+    borrowed = {id(p) for p in (*cast.CAST.values(), *cast.LIBRARY.values())}
+    stages = _stages(
+        {"seats": [_seat("tpm"), _seat("security")]},
+        {"seats": [_seat("security"), _derived("crew_owner", "Crew lead")]},
+        {"seats": [_seat("tpm"), _seat("security"), _derived("crew_owner", "Crew lead")]},
+    )
+
+    results = [
+        S.resolve(stages, cast.LIBRARY), S.resolve(stages, cast.LIBRARY),
+        S.fallback("too_few"), S.fallback("too_few"),
+    ]
+
+    records = [seat for out in results for seat in out["seated"]]
+    records += list(S.fixed_seats().values())
+    assert len({id(r) for r in records}) == len(records)
+    assert not {id(r) for r in records} & borrowed
+    for record in records:
+        record["name"] = "changed"
+        record["stake"] = "changed"
+    assert json.dumps({"cast": cast.CAST, "library": cast.LIBRARY}, sort_keys=True) == before

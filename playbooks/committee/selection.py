@@ -20,6 +20,12 @@ thread or the view. A library slug takes its hand-written persona whatever the
 worker said about it; a derived seat gets clipped fields and
 ``cast.DERIVED_STYLE``.
 
+``resolve`` turns the three kept lists into the run's committee. The chair's
+list is final and the fixed four are always seated. Everyone else a selector
+named is recorded as considered, with a reason and, when one is seated, a
+representative. A chair list that cannot seat anyone falls back to today's
+seven reviewers (``fallback``), and nothing here raises on a parsed list.
+
 Pure and stdlib-only. It imports cast and voice, and neither imports it.
 """
 from __future__ import annotations
@@ -226,3 +232,204 @@ def _invalid(raw: object, role: str | None, why: str) -> dict:
         "reason": f"invalid: {why}",
         "represented_by": None,
     }
+
+
+# --- resolution ----------------------------------------------------------
+
+# The seats no selection can empty (Q5), in roster order.
+_FIXED = ("owner", "senior_director", "manager", "junior_ic")
+
+
+def fixed_seats() -> dict[str, dict]:
+    """The four fixed seats as new seat records, in roster order.
+
+    ``open``, ``resolve``, ``fallback`` and the tests all take the fixed four
+    from here, so a fixed seat reads the same on every path.
+    """
+    return {
+        role: {
+            **cast.CAST[role],
+            "role": role,
+            "rationale": cast.FIXED_RATIONALE[role],
+            "nominated_by": "fixed",
+            "source": "fixed",
+        }
+        for role in _FIXED
+    }
+
+
+def stage_code(delivered: bool, parse_code: str | None, seats: list) -> str | None:
+    """Why one stage's list cannot seat a committee, or None when it can.
+
+    ``too_few`` counts the two fixed reviewers, so it means no valid seat at
+    all (D2 rule 3).
+    """
+    if not delivered:
+        return "no_answer"
+    if parse_code:
+        return parse_code
+    if 2 + len(seats) < MIN_REVIEWERS:
+        return "too_few"
+    return None
+
+
+def resolve(stages: list[dict], library: dict) -> dict:
+    """The run's committee from the selectors' kept lists (D2 rules 1-7).
+
+    ``stages`` is the playbook's ``s["stages"]``: ``{stage, role, delivered,
+    doc, code}`` per kept take, in stage order. The chair's stage-3 list is
+    final. Stages 1-2 only decide who put a seat forward and who was
+    considered, so their failure never costs the run its committee. A chair
+    list that cannot seat anyone gives ``fallback(code)``, with an undelivered
+    chair reported as ``chair_failed``.
+
+    Returns ``{seated, reviewers, considered, fallback}``: ``seated`` is the
+    owner, the reviewers in opening order, then the junior IC. Deterministic,
+    and linear in the lists' length: ``validate`` keeps no cap on entries, so
+    the reviewers are cut to MAX_REVIEWERS here and the rest are considered.
+    """
+    chair = next((st for st in reversed(stages) if st.get("stage") == 3), None)
+    code = chair.get("code") if chair else "no_answer"
+    if code is not None:
+        out = fallback("chair_failed" if code == "no_answer" else code)
+        try:
+            earlier = [_read(st, library) for st in stages if st.get("stage") != 3]
+            out["considered"] = _considered(earlier, out, [])
+        except Exception:
+            out["considered"] = []  # the default committee never waits on its footnotes
+        return out
+    read = [_read(st, library) for st in stages]
+    ratified = next(r for r in reversed(read) if r["stage"] == 3)
+    room = MAX_REVIEWERS - 2  # senior_director and manager hold two reviewer seats
+    chosen = [
+        {**seat, "nominated_by": next(r["role"] for r in read if seat["role"] in r["slugs"])}
+        for seat in ratified["seats"][:room]
+    ]
+    fixed = fixed_seats()
+    out = {
+        "seated": [
+            fixed["owner"], fixed["senior_director"], fixed["manager"],
+            *chosen, fixed["junior_ic"],
+        ],
+        "reviewers": ["senior_director", "manager", *(seat["role"] for seat in chosen)],
+        "considered": [],
+        "fallback": None,
+    }
+    out["considered"] = _considered(read, out, ratified["seats"][room:])
+    return out
+
+
+def fallback(code: str) -> dict:
+    """Today's committee, for a chair list that cannot seat anyone (D2 rule 7).
+
+    The fixed four plus the default reviewers from ``cast.CAST``, in roster
+    order, with ``reviewers`` equal to ``cast.SENIORITY``. It reads no stage
+    data, so it cannot fail the way the list did.
+    """
+    fixed = fixed_seats()
+    why = f"default committee (selection fell back: {code})"
+    reviewers = [
+        fixed.get(role) or {
+            **cast.CAST[role],
+            "role": role,
+            "rationale": why,
+            "nominated_by": "default",
+            "source": "library",
+        }
+        for role in cast.SENIORITY
+    ]
+    return {
+        "seated": [fixed["owner"], *reviewers, fixed["junior_ic"]],
+        "reviewers": list(cast.SENIORITY),
+        "considered": [],
+        "fallback": code,
+    }
+
+
+def _read(stage: dict, library: dict) -> dict:
+    """One kept stage, validated: its seats, invalid entries and notes."""
+    doc = stage.get("doc")
+    seats, invalid = validate(doc, library)
+    return {
+        "stage": stage.get("stage"),
+        "role": stage.get("role"),
+        "code": stage.get("code"),
+        "seats": seats,
+        "slugs": {seat["role"] for seat in seats},
+        "invalid": invalid,
+        "notes": not_seated(doc),
+    }
+
+
+def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> list[dict]:
+    """Everyone named and not seated, one entry per key (D2 rules 4 and 6).
+
+    A seat's key is its slug (a bad slug's, its raw role lowercased) and a
+    note's is its stakeholder lowercased. Stages are read in order, so the
+    latest stage wins a key. A stage 1-2 seat that did not make the roster is
+    dropped by the first later usable list that leaves it out, whose note on
+    the same key gives the reason. No entry whose key is a seated slug
+    survives, and a representative must be seated, except that an overflow
+    seat always names one.
+    """
+    seated = {seat["role"] for seat in resolved["seated"]}
+    found: dict[str, dict] = {}
+    for i, st in enumerate(read):
+        for entry in st["invalid"]:
+            found[entry["role"] or entry["stakeholder"].lower()] = dict(entry)
+        notes = {}
+        for note in st["notes"]:
+            key = note["stakeholder"].strip().lower()
+            notes[key] = note
+            found[key] = _entry(
+                note["stakeholder"], None, note["reason"],
+                _rep(note["represented_by"], seated),
+            )
+        for k, earlier in enumerate(read[:i]):
+            for seat in earlier["seats"]:
+                slug = seat["role"]
+                if slug in seated or _dropper(read, k, slug) is not st:
+                    continue
+                note = notes.get(slug)
+                found[slug] = _entry(
+                    seat["title"], slug,
+                    note["reason"] if note else f"dropped by {cast.CAST[st['role']]['name']}",
+                    _rep(note["represented_by"], seated) if note else None,
+                )
+    if resolved["fallback"]:
+        for k, st in enumerate(read):
+            for seat in st["seats"]:
+                slug = seat["role"]
+                if slug not in seated and _dropper(read, k, slug) is None:
+                    found[slug] = _entry(
+                        seat["title"], slug,
+                        f"not in the default committee (fallback: {resolved['fallback']})",
+                        None,
+                    )
+    chair_notes = {
+        note["stakeholder"].strip().lower(): note
+        for st in read if st["stage"] == 3 for note in st["notes"]
+    }
+    for seat in overflow:
+        note = chair_notes.get(seat["role"]) or {}
+        found[seat["role"]] = _entry(
+            seat["title"], seat["role"], f"over the {MAX_REVIEWERS}-seat bound",
+            _rep(note.get("represented_by"), seated) or "senior_director",
+        )
+    return [entry for key, entry in found.items() if key not in seated]
+
+
+def _dropper(read: list[dict], k: int, slug: str) -> dict | None:
+    """The first stage after ``read[k]`` with a usable list that leaves ``slug`` out."""
+    return next(
+        (st for st in read[k + 1:] if st["code"] is None and slug not in st["slugs"]),
+        None,
+    )
+
+
+def _rep(slug: str | None, seated: set[str]) -> str | None:
+    return slug if slug in seated else None
+
+
+def _entry(stakeholder: str, role: str | None, reason: str, rep: str | None) -> dict:
+    return {"stakeholder": stakeholder, "role": role, "reason": reason, "represented_by": rep}
