@@ -166,15 +166,16 @@ def connect_ro(home: str) -> sqlite3.Connection | None:
     """``<home>/queue.db`` opened read-only, or None when it is not a regular file.
 
     The D2 URI with ``mode=ro``: never ``migrate.connect``, which creates and
-    chmods. Creates nothing (SQLite may touch a WAL database's ``-shm``).
+    chmods. queue.db itself is never written, but on a WAL database SQLite
+    may create its ``-wal`` (empty) and ``-shm`` beside it.
+
+    Raises:
+        sqlite3.Error: queue.db exists but SQLite cannot open it.
     """
-    try:
-        db = f"{home}/queue.db"
-        if not os.path.isfile(db):
-            return None
-        conn = sqlite3.connect("file:" + urllib.parse.quote(db) + "?mode=ro", uri=True)
-    except (OSError, TypeError, ValueError, sqlite3.Error):
+    db = f"{home}/queue.db"
+    if not os.path.isfile(db):
         return None
+    conn = sqlite3.connect("file:" + urllib.parse.quote(db) + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -214,14 +215,15 @@ def validate_target(home: str, run_id: str | None) -> str | None:
     Evaluable (D2): queue.db exists, the id is well formed, the run exists and
     is a committee run, its latest decision was delivered, and a legacy run
     still has its thread.md. runs.state and the ruling never gate (Q1/R1). A
-    queue.db SQLite cannot read counts as none. Never raises; creates nothing.
+    queue.db SQLite cannot read is "unreadable", with SQLite's reason. Never
+    raises; creates nothing.
     """
     if not run_id:
         return f"{ENV_RUN} is not set"
-    conn = connect_ro(home)
-    if conn is None:
-        return f"no queue.db in {home}"
     try:
+        conn = connect_ro(home)
+        if conn is None:
+            return f"no queue.db in {home}"
         with closing(conn):
             if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
                 return f"bad run id: {run_id}"
@@ -231,8 +233,8 @@ def validate_target(home: str, run_id: str | None) -> str | None:
             if row["playbook"] != "committee":
                 return f"not a committee run: {run_id} ({row['playbook']})"
             rows = _reductions(conn, run_id)
-    except sqlite3.Error:
-        return f"no queue.db in {home}"
+    except sqlite3.Error as exc:
+        return f"queue.db unreadable in {home}: {exc}"
     if _decision(rows)[0].get("delivered") is not True:
         return f"no delivered decision: {run_id}"
     if _legacy(rows) and thread.read_regular(Path(home) / "runs" / run_id / "thread.md") is None:
@@ -259,6 +261,7 @@ class Target:
     decision: dict
     # the transcript
     thread_path: str
+    thread_raw: bytes | None  # the bytes read once: inputs/thread.md copies these, never a re-read
     thread_text: str | None
     thread: dict | None
     # the document
@@ -274,6 +277,17 @@ class Target:
     traces: dict[int, bytes | None]
 
 
+def _lines(text: str) -> list[str]:
+    """``text``'s lines, ended by "\\n" only (a CRLF counts once), with no trailing "".
+
+    Never ``str.splitlines``: it also ends a line at a form feed, U+0085 or
+    U+2028, so one such character quoted in a turn would shift every later
+    line number by one.
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    return lines[:-1] if lines[-1] == "" else lines
+
+
 def parse_thread(text: str) -> dict:
     """thread.md as D3 reads it: header, labels, the Committee roster, turn and decision entries.
 
@@ -281,11 +295,11 @@ def parse_thread(text: str) -> dict:
     only thread.py's ``## turn NN — Name (role)`` and ``## decision — …``
     headings, so any other ``## `` line after the first boundary is body. Lines
     between the header and the first boundary (selection, 1:1 plans) belong to
-    no entry. Lines are 1-based and inclusive over ``text.splitlines()``: an
-    entry runs from its heading to the line before the next boundary. A turn
-    number written twice keeps its last entry.
+    no entry. Lines are 1-based and inclusive over ``_lines(text)``: an entry
+    runs from its heading to the line before the next boundary. A turn number
+    written twice keeps its last entry.
     """
-    lines = text.splitlines() if isinstance(text, str) else []
+    lines = _lines(text) if isinstance(text, str) else []
     first = next((i for i, line in enumerate(lines) if line.startswith("## ")), len(lines))
     labels: dict[str, str] = {}
     seats: list[str] = []
@@ -404,7 +418,7 @@ def load_target(home: str, run_id: str) -> Target:
         review_state=review_state, legacy=_legacy(rows),
         turns=turns, duplicate_turns=turn_rows - len(turns),
         takes=takes, other_kinds=other, decision=decision,
-        thread_path=str(run_dir / "thread.md"), thread_text=text, thread=parsed,
+        thread_path=str(run_dir / "thread.md"), thread_raw=raw, thread_text=text, thread=parsed,
         artifact=artifact, original_path=original_path, original=original,
         original_source=original_source, revised_path=revised_path,
         revised=thread.read_regular(revised_path) if revised_path else None, steps=steps,
@@ -429,7 +443,7 @@ def chair_prose(decision: dict) -> str:
     verdict = decision.get("verdict")
     if not isinstance(verdict, str):
         return ""
-    kept = [line for line in verdict.replace(_SIMULATION, "").splitlines()
+    kept = [line for line in _lines(verdict.replace(_SIMULATION, ""))
             if not _FOOTER.match(line)]
     return "\n".join(kept).strip()
 
@@ -619,8 +633,8 @@ def _outside_room_mentions(target: Target) -> list[dict]:
     if target.thread is None or target.thread_text is None:
         texts = [body(target, n) for n in target.turns] + [chair_prose(target.decision)]
         return [{"line": None, "quote": ln.strip()[:QUOTE_MAX]}
-                for text in texts for ln in text.splitlines() if OUTSIDE_ROOM.search(ln)]
-    lines = target.thread_text.splitlines()
+                for text in texts for ln in _lines(text) if OUTSIDE_ROOM.search(ln)]
+    lines = _lines(target.thread_text)
     entries = list(target.thread["turns"].values())
     if target.thread.get("decision"):
         entries.append(target.thread["decision"])
@@ -867,14 +881,14 @@ def _delegator(target: Target, n: int) -> dict | None:
 
 def compute_flags(target: Target, metrics: dict) -> list[dict]:
     """D4 flags, every field per G1 and every claim per G2. Never raises on odd json."""
-    lines = None if target.thread_text is None else target.thread_text.splitlines()
+    lines = None if target.thread_text is None else _lines(target.thread_text)
     decision = target.decision if isinstance(target.decision, dict) else {}
     flags: list[dict] = []
     for n in sorted(target.turns):
         turn = target.turns[n]
         if turn.get("role") != cast.JUNIOR or turn.get("verified") is not True:
             continue
-        hit = next((ln.strip() for ln in body(target, n).splitlines() if TRUNCATION.search(ln)), None)
+        hit = next((ln.strip() for ln in _lines(body(target, n)) if TRUNCATION.search(ln)), None)
         if hit is None:
             continue
         line = _find_line(lines, _span(target, n), TRUNCATION.search)
@@ -903,7 +917,7 @@ def compute_flags(target: Target, metrics: dict) -> list[dict]:
             })
     recorded = metrics.get("rechecks_verified")
     after = 0
-    for raw in chair_prose(decision).splitlines():
+    for raw in _lines(chair_prose(decision)):
         text = raw.strip()
         wrong = [m for m in EDIT_CLAIM.finditer(text) if _claimed(m) != recorded]
         if not wrong:
@@ -1118,11 +1132,11 @@ def write_inputs(eval_run_id: str, target: Target, block: str,
             digests[source] = inputs_digests[str(path)]
         return name
 
-    # The raw bytes, re-read: Target keeps only the decoded text, and a re-encode
-    # of text decoded with errors="replace" would not hash to the source's digest.
-    raw = thread.read_regular(target.thread_path) if target.thread_text is not None else None
-    if raw is not None:
-        names["thread"] = put("thread.md", raw, target.thread_path)
+    # The raw bytes load_target measured: a re-read could copy a file that moved
+    # since, and a re-encode of text decoded with errors="replace" would not
+    # hash to the source's digest.
+    if target.thread_raw is not None:
+        names["thread"] = put("thread.md", target.thread_raw, target.thread_path)
     entries = json.dumps(build_entries(target), ensure_ascii=False, indent=1)
     names["entries"] = put("entries.json", entries.encode("utf-8"))
     if target.original is not None:
@@ -1250,7 +1264,7 @@ def _entry_line(inputs: dict, entry: dict, key: str) -> int | None:
     text = _input_text(inputs, "thread")
     if text is None or not isinstance(start, int) or not isinstance(end, int):
         return None
-    found = _find_line(text.splitlines(), (start, end), lambda line: key in _collapse(line))
+    found = _find_line(_lines(text), (start, end), lambda line: key in _collapse(line))
     return start if found is None else found
 
 
@@ -1278,7 +1292,7 @@ def verify_evidence(item: object, entries: dict, inputs: dict) -> dict | None:
     if where in ("original", "revised"):
         text = _input_text(inputs, where)
         if quote and text is not None and quote in _collapse(text):
-            lines = text.splitlines()
+            lines = _lines(text)
             out["verified"] = True
             out["line"] = _find_line(lines, (1, len(lines)), lambda line: key in _collapse(line))
         return out

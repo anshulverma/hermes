@@ -497,6 +497,16 @@ def test_source_home_never_written(tmp_path, monkeypatch):
             assert [s["data"] for s in target.steps] == [
                 (fixture / "doc" / f"t{n:02d}.md").read_bytes() for n in junior]
 
+    # URI metacharacters in the home's path stay path: quote() keeps the URI's mode=ro.
+    # Unquoted, "#" ends the path and SQLite opens (and creates) "h " read-write.
+    odd = tmp_path / "h #?%é"
+    odd.mkdir()
+    odd_home, _ = build_home(odd, "run-9")
+    listing, before = sorted(os.listdir(tmp_path)), _tree(odd)
+    assert E.validate_target(str(odd_home), "run-9") is None
+    assert E.load_target(str(odd_home), "run-9").turns
+    assert sorted(os.listdir(tmp_path)) == listing and _tree(odd) == before
+
     # The two homes (D2), both resolved; the source home defaults to the eval home.
     link = tmp_path / "link-to-run-9"
     link.symlink_to(tmp_path / "run-9" / "home")
@@ -569,7 +579,9 @@ def test_validate_target_reasons(tmp_path):
     corrupt = tmp_path / "corrupt"
     corrupt.mkdir()
     (corrupt / "queue.db").write_bytes(b"this is not a database")
-    assert E.validate_target(str(corrupt), "ok") == f"no queue.db in {corrupt}"
+    # it exists, so it is not "no queue.db": SQLite's own reason is given
+    assert E.validate_target(str(corrupt), "ok") == (
+        f"queue.db unreadable in {corrupt}: file is not a database")
     for bad in ("../ok", "run 9", ".hidden", "-x", "ok\n", "ok/x", "café"):
         assert E.validate_target(h, bad) == f"bad run id: {bad}"
     assert E.validate_target(h, "run-404") == "run not found: run-404"
@@ -627,6 +639,90 @@ def test_answered_reviewer_turns_both_rules(tmp_path):
     assert E.unanswered_reviewer_turns(target("all")) == [4, 8, 10, 17]
     # One explicit null is enough to mean recorded, and it answers nobody.
     assert E.unanswered_reviewer_turns(target("t06")) == [1, 4, 7, 8, 10, 13, 17]
+
+
+ODD_SEPARATORS = "a\x0cb\x1cc\x1dd\x1ee\x85f\u2028g\u2029h\x0bi"  # str.splitlines splits on each
+
+
+def test_line_numbers_count_newlines_only(tmp_path):
+    """Only "\\n" ends a line (a CRLF counts once), so a form feed or U+2028 in a turn never shifts a later line."""
+    text = "\r\n".join([
+        "# Committee — run-x", "",
+        "## turn 01 — Sam Iyer, Technical Program Manager (tpm)", "",
+        f"odd {ODD_SEPARATORS} separators",
+        "## turn 02 — Maya Okonkwo, Staff Engineer & proposal owner (owner)", "",
+        "Nobody outside this room signed off.",
+    ]) + "\n"
+    parsed = E.parse_thread(text)
+    assert parsed["turns"][1] == {"role": "tpm", "line_start": 3, "line_end": 5,
+                                  "body": f"odd {ODD_SEPARATORS} separators"}
+    assert (parsed["turns"][2]["line_start"], parsed["turns"][2]["line_end"]) == (6, 8)
+
+    home, run_id = build_home(tmp_path, "run-9")
+    target = dataclasses.replace(E.load_target(str(home), run_id), thread_text=text, thread=parsed)
+    assert E.compute_metrics(target)["outside_room_mentions"] == [
+        {"line": 8, "quote": "Nobody outside this room signed off."}]
+
+    # The judge's lines: thread.md within the entry's range, and the original copy.
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "thread.md").write_text(text, encoding="utf-8", newline="")
+    (inputs / "original.md").write_text(f"{ODD_SEPARATORS}\nthe gate needs an owner\n",
+                                        encoding="utf-8", newline="")
+    names = {"dir": str(inputs), "thread": "thread.md", "original": "original.md"}
+    entries = {"turns": {"2": {"body": "Nobody outside this room signed off.",
+                               "line_start": 6, "line_end": 8}}}
+    quote = {"turn": 2, "where": "turn", "quote": "outside this room signed off"}
+    assert E.verify_evidence(quote, entries, names)["line"] == 8
+    quote = {"turn": None, "where": "original", "quote": "the gate needs an owner"}
+    assert E.verify_evidence(quote, entries, names)["line"] == 2
+
+
+def test_loader_rules(tmp_path):
+    """D3's loader rules no baseline exercises: roster union, last turn row wins, relative artifact, no symlinked thread.md."""
+    home, run_id = _home(tmp_path, "roster", "run-9")
+    base = E.load_target(str(home), run_id)
+    # The header's Committee block first, then turn roles by first appearance.
+    turns = {n: {"turn": n, "role": role, "delivered": True, "body": "b"}
+             for n, role in enumerate(("tpm", "security", "owner", "pm", "security"), 1)}
+    target = dataclasses.replace(base, thread={**base.thread, "roster": ["owner", "tpm"]}, turns=turns)
+    assert E.roster(target) == ["owner", "tpm", "security", "pm"]
+    assert E.roster(dataclasses.replace(target, thread=None)) == ["tpm", "security", "owner", "pm"]
+
+    # A repeated turn number: the last row by id wins, and the loser is an extra take.
+    t03 = next(json.loads(r["json"]) for r in json.loads(
+        (EVAL_FIXTURES / "run-9" / "reductions.json").read_text(encoding="utf-8"))
+        if r["kind"] == "turn" and json.loads(r["json"])["turn"] == 3)
+    with closing(sqlite3.connect(str(home / "queue.db"))) as conn:
+        conn.execute(
+            "INSERT INTO reductions (run_id, kind, json, review_state, created_at, updated_at, phase)"
+            " VALUES (?, 'turn', ?, 'pending', 0, 0, 't03-junior_ic')",
+            (run_id, json.dumps({**t03, "body": "the retake"})))
+        conn.commit()
+    retaken = E.load_target(str(home), run_id)
+    assert retaken.turns[3]["body"] == "the retake" and retaken.duplicate_turns == 1
+
+    # A relative artifact resolves against the source home, never the working directory.
+    home, run_id = _home(tmp_path, "relative", "run-9")
+    moved = home / "docs" / "federation-future.md"
+    moved.parent.mkdir()
+    shutil.copyfile(tmp_path / "relative" / "artifact" / "federation-future.md", moved)
+    _patch_reductions(home, run_id, lambda kind, doc: (
+        {**doc, "artifact": "docs/federation-future.md"} if "artifact" in doc else None))
+    (home / "runs" / run_id / "doc" / "00-original.md").unlink()  # so the live copy is read
+    target = E.load_target(str(home), run_id)
+    assert (target.artifact, target.original_path) == (str(moved), str(moved))
+    assert target.original == moved.read_bytes()
+
+    # A symlinked thread.md is no thread.md (read_regular): a non-legacy run reads from reductions.
+    home, run_id = _home(tmp_path, "linked", "run-9")
+    thread_md = home / "runs" / run_id / "thread.md"
+    kept = tmp_path / "linked" / "thread-copy.md"
+    thread_md.rename(kept)
+    thread_md.symlink_to(kept)
+    target = E.load_target(str(home), run_id)
+    assert (target.thread_text, target.thread) == (None, None)
+    assert target.turns[1]["body"] == E.body(target, 1) != ""
 
 
 # Claude Code's modelUsage totals on each trace's last cost-state, summed (G4). The
@@ -1732,7 +1828,7 @@ def test_evidence_verification(tmp_path, monkeypatch):
     assert n_rejected == 2
 
     # No thread.md and no copies: entries come from the reductions, every line is null.
-    bare = dataclasses.replace(target, thread=None, thread_text=None,
+    bare = dataclasses.replace(target, thread=None, thread_raw=None, thread_text=None,
                                original=None, revised=None, steps=[])
     out2 = E.write_inputs("run-98", bare, block, versions, version)
     inputs2 = out2["inputs"]
@@ -1750,6 +1846,22 @@ def test_evidence_verification(tmp_path, monkeypatch):
     assert E.verify_evidence({"turn": None, "where": "original", "quote": crews},
                              e2, inputs2)["verified"] is False
     assert E.judge_goal(inputs2).count("unavailable") == 2
+
+
+def test_inputs_thread_is_the_bytes_measured(tmp_path, monkeypatch):
+    """inputs/thread.md is the raw bytes load_target read, never a re-read or a re-encode of the decoded text."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "eval"))
+    home, run_id = build_home(tmp_path, "run-9")
+    src = home / "runs" / run_id / "thread.md"
+    raw = src.read_bytes() + b"not utf-8: \xff\xfe\n"
+    src.write_bytes(raw)
+    target = E.measure_target(str(home), run_id)["target"]
+    assert target.thread_raw == raw and "�" in target.thread_text
+    src.write_bytes(b"rewritten between measure and the snapshot\n")
+    versions = E.dimension_versions()
+    out = E.write_inputs("run-99", target, "{}", versions, E.rubric_version(versions))
+    assert (Path(out["inputs"]["dir"]) / "thread.md").read_bytes() == raw
+    assert out["digests"][str(src)] == hashlib.sha256(raw).hexdigest()  # so the re-hash sees the rewrite
 
 
 # --- Task 8: eval.json, the ledger, calibration (D7, D8) -----------------------
