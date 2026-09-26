@@ -68,6 +68,30 @@ export type Progress = {
   ended: string | null;
 };
 
+/** One row of the Evaluation block: `view_data`'s `evaluation.dimensions[id]`. */
+export type EvaluationDimension = {
+  score: number | null;
+  scorer: 'judge' | 'deterministic';
+  /** The first verified evidence quote; null when nothing verified. */
+  quote: string | null;
+  /** calibrated · off (Δn) · uncalibrated · unknown on a judge row; null on a deterministic one. */
+  calibration: string | null;
+};
+
+/** `view_data()["evaluation"]` for a run that has an eval.json (C7). */
+export type Evaluation =
+  | { state: 'error'; error: string }
+  | {
+      state: 'ok';
+      rubric_version: string;
+      evaluated_at: number;
+      headline: string;
+      judge_status: 'ok' | 'partial' | 'unparseable' | 'failed';
+      judge_error: string | null;
+      dimensions: Record<string, EvaluationDimension>;
+      flags: string[];
+    };
+
 export type CommitteeData = {
   kind: string;
   roster: Persona[];
@@ -86,6 +110,12 @@ export type CommitteeData = {
    * when the tab first appears -- so `tsc` forces that branch downstream.
    */
   document: DocumentBlock;
+  /**
+   * What committee-eval concluded, from runs/<id>/eval.json; null when the run
+   * was never scored. Optional because a payload from before the eval carries
+   * no such key, and the block reads absent exactly as null.
+   */
+  evaluation?: Evaluation | null;
 };
 
 export type CommitteeViewProps = {
@@ -703,6 +733,150 @@ function MeetingMetrics({ data }: { data: CommitteeData }) {
   );
 }
 
+// --- the evaluation ----------------------------------------------------------
+//
+// What committee-eval concluded about this run, under the counts above and
+// never repeating them: a score per dimension, the quote that carries it, and
+// whether the user's own scores have calibrated the judge yet. Always drawn:
+// "Not evaluated" is a state of the run, not a reason to hide the section.
+
+/** D5, the rubric's order: the three judge dimensions, then the three deterministic ones. */
+const EVAL_ORDER = [
+  'verdict_grounded',
+  'edits_address_concerns',
+  'concern_coverage',
+  'efficiency',
+  'concision',
+  'verdict_consistency',
+];
+
+const cell = {
+  padding: '4px 10px 4px 0',
+  borderTop: '1px solid var(--border-hairline)',
+  textAlign: 'left',
+  verticalAlign: 'baseline',
+} as const;
+
+function EvaluationBlock({ runId, evaluation }: { runId: string; evaluation: Evaluation | null }) {
+  const { Badge } = ds();
+  let body: React.ReactNode;
+
+  if (evaluation === null) {
+    body = (
+      <div data-testid="evaluation-empty" style={quiet}>
+        Not evaluated. Score it with{' '}
+        <code style={mono}>{`python -m playbooks.committee.eval_cli run ${runId}`}</code>.
+      </div>
+    );
+  } else if (evaluation.state === 'error') {
+    body = (
+      <div data-testid="evaluation-error" style={{ ...quiet, color: 'var(--status-danger, #f85149)' }}>
+        {evaluation.error}
+      </div>
+    );
+  } else {
+    const dims = evaluation.dimensions;
+    // eval.json's key order is not the rubric's. A dimension this bundle does
+    // not know yet still gets its row, after the six it does.
+    const ids = [
+      ...EVAL_ORDER.filter((id) => id in dims),
+      ...Object.keys(dims).filter((id) => !EVAL_ORDER.includes(id)),
+    ];
+    const flags = new Map<string, number>();
+    for (const f of evaluation.flags) flags.set(f, (flags.get(f) ?? 0) + 1);
+
+    body = (
+      <>
+        <div data-testid="evaluation-headline" style={{ fontSize: 12, color: 'var(--text-primary)' }}>
+          {evaluation.headline}
+        </div>
+        {evaluation.judge_status !== 'ok' && (
+          <div
+            data-testid="evaluation-judge-status"
+            style={{ ...quiet, color: 'var(--status-attention, #e3b341)' }}
+          >
+            Judge {evaluation.judge_status}
+            {evaluation.judge_error ? `: ${evaluation.judge_error}` : ''}
+          </div>
+        )}
+        <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
+          <thead>
+            <tr>
+              {['dimension', 'score', 'scorer', 'evidence'].map((h) => (
+                <th
+                  key={h}
+                  style={{ ...cell, borderTop: 'none', fontSize: 11, fontWeight: 500, color: 'var(--text-muted)' }}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {ids.map((id) => {
+              const d = dims[id];
+              return (
+                <tr key={id} data-testid={`eval-dim-${id}`}>
+                  <td style={{ ...cell, whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
+                    {id.replace(/_/g, ' ')}
+                  </td>
+                  <td style={{ ...cell, whiteSpace: 'nowrap' }}>
+                    <span data-testid={`eval-score-${id}`} style={mono}>
+                      {d.score ?? '—'}
+                    </span>
+                    {d.scorer === 'judge' && d.calibration !== 'calibrated' && (
+                      <span style={{ marginLeft: 6 }}>
+                        <Badge
+                          data-testid={`eval-uncalibrated-${id}`}
+                          size="sm"
+                          variant="outline"
+                          tone="attention"
+                        >
+                          {d.calibration ?? 'uncalibrated'}
+                        </Badge>
+                      </span>
+                    )}
+                  </td>
+                  <td style={{ ...cell, color: 'var(--text-muted)' }}>{d.scorer}</td>
+                  <td
+                    title={d.quote ?? undefined}
+                    style={{
+                      ...cell,
+                      maxWidth: 0,
+                      width: '100%',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      color: d.quote ? 'var(--text-secondary)' : 'var(--text-muted)',
+                    }}
+                  >
+                    {d.quote ?? 'no verified quote'}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div data-testid="eval-flags" style={quiet}>
+          Flags:{' '}
+          {flags.size === 0
+            ? 'none'
+            : [...flags].map(([id, n]) => (n > 1 ? `${id} ×${n}` : id)).join(' · ')}
+        </div>
+        <div data-testid="evaluation-rubric" style={{ ...mono, fontSize: 11, color: 'var(--text-muted)' }}>
+          rubric {evaluation.rubric_version}
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div data-testid="evaluation">
+      <Section title="Evaluation">{body}</Section>
+    </div>
+  );
+}
+
 // --- the view ----------------------------------------------------------------
 
 export default function CommitteeView({ runId, data, variant }: CommitteeViewProps) {
@@ -790,7 +964,14 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     );
   }
 
-  if (variant === 'metrics') return <MeetingMetrics data={data} />;
+  // The evaluation under the counts, never instead of them.
+  if (variant === 'metrics')
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <MeetingMetrics data={data} />
+        <EvaluationBlock runId={runId} evaluation={data.evaluation ?? null} />
+      </div>
+    );
 
   // The other direction: the reviewer who raised an edit, the owner turn that
   // delegated it and the junior turn that applied it all link to its step --

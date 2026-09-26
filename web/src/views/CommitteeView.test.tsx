@@ -16,7 +16,7 @@ import { setToken, clearToken } from '../api/auth';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
-import type { CommitteeData } from '../../../playbooks/committee/view/src/CommitteeView';
+import type { CommitteeData, Evaluation } from '../../../playbooks/committee/view/src/CommitteeView';
 import DocumentHistory, {
   diffLines,
   splitRows,
@@ -1843,5 +1843,164 @@ describe('CommitteeView on the Metrics tab', () => {
   it('says nothing was said yet on a run that has no turns', () => {
     metrics({ ...midRun, timeline: [] });
     expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
+  });
+});
+
+describe('CommitteeView evaluation on the Metrics tab', () => {
+  type EvalOk = Extract<Evaluation, { state: 'ok' }>;
+
+  const dim = (
+    score: number | null,
+    scorer: 'judge' | 'deterministic',
+    quote: string | null,
+    calibration: string | null,
+  ) => ({ score, scorer, quote, calibration });
+
+  // Deterministic first and judge last on purpose: eval.json's key order is not
+  // the rubric's, and the table reads in D5 order whatever order it arrives in.
+  const EVAL_OK: EvalOk = {
+    state: 'ok',
+    rubric_version: 'r1a2b3c4d',
+    evaluated_at: 1790000000.5,
+    headline: 'weakest: concision 1/5: words.median_reviewer_owner=825.0',
+    judge_status: 'ok',
+    judge_error: null,
+    dimensions: {
+      verdict_consistency: dim(1, 'deterministic', 'flags.verdict_count_mismatch=1', null),
+      concision: dim(1, 'deterministic', 'words.median_reviewer_owner=825.0', null),
+      efficiency: dim(3, 'deterministic', 'cost_usd=30.3875', null),
+      concern_coverage: dim(3, 'judge', 'Reading this as a staffing question first.', 'calibrated'),
+      edits_address_concerns: dim(3, 'judge', 'Fair point; here is where I land on it.', 'off (Δ2)'),
+      verdict_grounded: dim(
+        4,
+        'judge',
+        'Approve with changes: fund the migration once the rollback plan lands.',
+        'uncalibrated',
+      ),
+    },
+    flags: [
+      'delegation_truncated_but_applied',
+      'delegation_truncated_but_applied',
+      'action_clipped',
+      'verdict_count_mismatch',
+    ],
+  };
+
+  const D5 = [
+    'verdict_grounded',
+    'edits_address_concerns',
+    'concern_coverage',
+    'efficiency',
+    'concision',
+    'verdict_consistency',
+  ];
+
+  // `undefined` leaves the key out entirely: run2.fixture.ts predates the eval.
+  const metrics = (evaluation?: Evaluation | null) =>
+    render(
+      <CommitteeView
+        runId="run-2"
+        data={evaluation === undefined ? run2 : { ...run2, evaluation }}
+        refetch={noop}
+        variant="metrics"
+      />,
+    );
+
+  it('says a run nobody has scored is not evaluated, and how to score it', () => {
+    const { unmount } = metrics();
+
+    const empty = screen.getByTestId('evaluation-empty');
+    expect(empty.textContent).toBe(
+      'Not evaluated. Score it with python -m playbooks.committee.eval_cli run run-2.',
+    );
+    expect(within(empty).getByText('python -m playbooks.committee.eval_cli run run-2').tagName).toBe('CODE');
+    expect(screen.queryByTestId('evaluation-headline')).toBeNull();
+    unmount();
+
+    metrics(null);
+    expect(screen.getByTestId('evaluation-empty')).toBeInTheDocument();
+    expect(screen.queryAllByTestId(/^eval-dim-/)).toHaveLength(0);
+  });
+
+  it('shows the scores in rubric order under the meeting metrics, badging only uncalibrated judge scores', () => {
+    const { unmount } = metrics(EVAL_OK);
+
+    const block = screen.getByTestId('evaluation');
+    const counts = screen.getByTestId('committee-metrics');
+    expect(counts.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getAllByTestId(/^eval-dim-/).map((r) => r.getAttribute('data-testid'))).toEqual(
+      D5.map((id) => `eval-dim-${id}`),
+    );
+    expect(screen.getByTestId('eval-score-verdict_grounded')).toHaveTextContent(/^4$/);
+    expect(screen.getByTestId('eval-score-efficiency')).toHaveTextContent(/^3$/);
+    expect(screen.getByTestId('eval-score-concision')).toHaveTextContent(/^1$/);
+    expect(screen.getByTestId('evaluation-headline')).toHaveTextContent(EVAL_OK.headline);
+    expect(screen.getByTestId('evaluation-rubric')).toHaveTextContent('r1a2b3c4d');
+
+    expect(screen.getByTestId('eval-uncalibrated-verdict_grounded')).toHaveTextContent('uncalibrated');
+    expect(screen.getByTestId('eval-uncalibrated-edits_address_concerns')).toHaveTextContent('off (Δ2)');
+    for (const id of ['concern_coverage', 'efficiency', 'concision', 'verdict_consistency']) {
+      expect(screen.queryByTestId(`eval-uncalibrated-${id}`)).toBeNull();
+    }
+    expect(screen.getByTestId('eval-flags')).toHaveTextContent(
+      'delegation_truncated_but_applied ×2 · action_clipped · verdict_count_mismatch',
+    );
+    expect(screen.queryByTestId('evaluation-judge-status')).toBeNull();
+    expect(screen.queryByTestId('evaluation-empty')).toBeNull();
+
+    // Scores and their quotes only: every count here is MeetingMetrics' to show.
+    expect(block.textContent).not.toMatch(/turns|delegated|re-check|characters of prose/i);
+    unmount();
+
+    // The Metrics tab's, not the transcript tab's.
+    show({ ...run2, evaluation: EVAL_OK });
+    expect(screen.queryByTestId('evaluation')).toBeNull();
+  });
+
+  it('keeps the deterministic scores and says why the judge scored nothing when it failed or was partial', () => {
+    const noJudge = dim(null, 'judge', null, 'uncalibrated');
+    const { unmount } = metrics({
+      ...EVAL_OK,
+      judge_status: 'failed',
+      judge_error: 'driver_error: the judge exited 1',
+      dimensions: {
+        ...EVAL_OK.dimensions,
+        verdict_grounded: noJudge,
+        edits_address_concerns: noJudge,
+        concern_coverage: noJudge,
+      },
+    });
+
+    for (const id of ['verdict_grounded', 'edits_address_concerns', 'concern_coverage']) {
+      expect(screen.getByTestId(`eval-score-${id}`)).toHaveTextContent(/^—$/);
+    }
+    expect(screen.getByTestId('eval-score-efficiency')).toHaveTextContent(/^3$/);
+    expect(screen.getByTestId('eval-score-concision')).toHaveTextContent(/^1$/);
+    expect(screen.getByTestId('eval-score-verdict_consistency')).toHaveTextContent(/^1$/);
+    expect(screen.getByTestId('evaluation-judge-status')).toHaveTextContent(
+      'Judge failed: driver_error: the judge exited 1',
+    );
+    unmount();
+
+    metrics({
+      ...EVAL_OK,
+      judge_status: 'partial',
+      judge_error: 'concern_coverage: no verifiable evidence',
+      dimensions: { ...EVAL_OK.dimensions, concern_coverage: noJudge },
+    });
+    expect(screen.getByTestId('eval-score-concern_coverage')).toHaveTextContent(/^—$/);
+    expect(screen.getByTestId('eval-score-verdict_grounded')).toHaveTextContent(/^4$/);
+    expect(screen.getByTestId('evaluation-judge-status')).toHaveTextContent(
+      'Judge partial: concern_coverage: no verifiable evidence',
+    );
+  });
+
+  it('shows the message, and no score table, when eval.json cannot be read', () => {
+    metrics({ state: 'error', error: 'eval.json is not JSON' });
+
+    expect(screen.getByTestId('evaluation-error')).toHaveTextContent('eval.json is not JSON');
+    expect(screen.queryAllByTestId(/^eval-dim-/)).toHaveLength(0);
+    expect(screen.queryByTestId('evaluation-empty')).toBeNull();
+    expect(screen.getByTestId('committee-metrics')).toBeInTheDocument();
   });
 });

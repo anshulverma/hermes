@@ -1781,6 +1781,176 @@
 			]
 		});
 	}
+	/** D5, the rubric's order: the three judge dimensions, then the three deterministic ones. */
+	var EVAL_ORDER = [
+		"verdict_grounded",
+		"edits_address_concerns",
+		"concern_coverage",
+		"efficiency",
+		"concision",
+		"verdict_consistency"
+	];
+	var cell = {
+		padding: "4px 10px 4px 0",
+		borderTop: "1px solid var(--border-hairline)",
+		textAlign: "left",
+		verticalAlign: "baseline"
+	};
+	function EvaluationBlock({ runId, evaluation }) {
+		const { Badge } = ds();
+		let body;
+		if (evaluation === null) body = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": "evaluation-empty",
+			style: quiet,
+			children: [
+				"Not evaluated. Score it with",
+				" ",
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
+					style: mono,
+					children: `python -m playbooks.committee.eval_cli run ${runId}`
+				}),
+				"."
+			]
+		});
+		else if (evaluation.state === "error") body = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "evaluation-error",
+			style: {
+				...quiet,
+				color: "var(--status-danger, #f85149)"
+			},
+			children: evaluation.error
+		});
+		else {
+			const dims = evaluation.dimensions;
+			const ids = [...EVAL_ORDER.filter((id) => id in dims), ...Object.keys(dims).filter((id) => !EVAL_ORDER.includes(id))];
+			const flags = /* @__PURE__ */ new Map();
+			for (const f of evaluation.flags) flags.set(f, (flags.get(f) ?? 0) + 1);
+			body = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": "evaluation-headline",
+					style: {
+						fontSize: 12,
+						color: "var(--text-primary)"
+					},
+					children: evaluation.headline
+				}),
+				evaluation.judge_status !== "ok" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "evaluation-judge-status",
+					style: {
+						...quiet,
+						color: "var(--status-attention, #e3b341)"
+					},
+					children: [
+						"Judge ",
+						evaluation.judge_status,
+						evaluation.judge_error ? `: ${evaluation.judge_error}` : ""
+					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("table", {
+					style: {
+						borderCollapse: "collapse",
+						width: "100%",
+						fontSize: 12
+					},
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("thead", { children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("tr", { children: [
+						"dimension",
+						"score",
+						"scorer",
+						"evidence"
+					].map((h) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("th", {
+						style: {
+							...cell,
+							borderTop: "none",
+							fontSize: 11,
+							fontWeight: 500,
+							color: "var(--text-muted)"
+						},
+						children: h
+					}, h)) }) }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("tbody", { children: ids.map((id) => {
+						const d = dims[id];
+						return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("tr", {
+							"data-testid": `eval-dim-${id}`,
+							children: [
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("td", {
+									style: {
+										...cell,
+										whiteSpace: "nowrap",
+										color: "var(--text-primary)"
+									},
+									children: id.replace(/_/g, " ")
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("td", {
+									style: {
+										...cell,
+										whiteSpace: "nowrap"
+									},
+									children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										"data-testid": `eval-score-${id}`,
+										style: mono,
+										children: d.score ?? "—"
+									}), d.scorer === "judge" && d.calibration !== "calibrated" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+										style: { marginLeft: 6 },
+										children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Badge, {
+											"data-testid": `eval-uncalibrated-${id}`,
+											size: "sm",
+											variant: "outline",
+											tone: "attention",
+											children: d.calibration ?? "uncalibrated"
+										})
+									})]
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("td", {
+									style: {
+										...cell,
+										color: "var(--text-muted)"
+									},
+									children: d.scorer
+								}),
+								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("td", {
+									title: d.quote ?? void 0,
+									style: {
+										...cell,
+										maxWidth: 0,
+										width: "100%",
+										overflow: "hidden",
+										textOverflow: "ellipsis",
+										whiteSpace: "nowrap",
+										color: d.quote ? "var(--text-secondary)" : "var(--text-muted)"
+									},
+									children: d.quote ?? "no verified quote"
+								})
+							]
+						}, id);
+					}) })]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "eval-flags",
+					style: quiet,
+					children: [
+						"Flags:",
+						" ",
+						flags.size === 0 ? "none" : [...flags].map(([id, n]) => n > 1 ? `${id} ×${n}` : id).join(" · ")
+					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "evaluation-rubric",
+					style: {
+						...mono,
+						fontSize: 11,
+						color: "var(--text-muted)"
+					},
+					children: ["rubric ", evaluation.rubric_version]
+				})
+			] });
+		}
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "evaluation",
+			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
+				title: "Evaluation",
+				children: body
+			})
+		});
+	}
 	function CommitteeView({ runId, data, variant }) {
 		const { EmptyState } = ds();
 		const [selected, setSelected] = (0, react.useState)("original");
@@ -1824,7 +1994,17 @@
 				children: [empty, history]
 			});
 		}
-		if (variant === "metrics") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, { data });
+		if (variant === "metrics") return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 16
+			},
+			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, { data }), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EvaluationBlock, {
+				runId,
+				evaluation: data.evaluation ?? null
+			})]
+		});
 		const edits = /* @__PURE__ */ new Map();
 		if (data.document.captured) data.document.steps.forEach((step, i) => {
 			if (step.reviewer_turn !== null) edits.set(step.reviewer_turn, [i + 1, step.turn]);
