@@ -1,4 +1,7 @@
-"""The committee eval's command line: ``python -m playbooks.committee.eval_cli <cmd>``.
+"""The committee eval's command line. Run it from the hermes checkout, with
+HERMES_HOME set to the control plane's home:
+
+    .venv/bin/python -m playbooks.committee.eval_cli run <run>
 
 - ``run <run> [--home H] [--agent A]`` scores one finished committee run.
 - ``show <run> [--home H]`` prints that run's eval.json as a table.
@@ -9,15 +12,16 @@
 It is not in engine/cli.py, for two reasons: the guard test forbids naming the
 committee there, and ``hermes run`` exits 0 whatever state its run ends in
 (spec D9). The package ``__init__`` never imports this module.
-``python -m playbooks.committee.eval`` hands off to ``main`` here.
+``.venv/bin/python -m playbooks.committee.eval`` hands off to ``main`` here.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
-import time
+from collections import Counter
 from pathlib import Path
 
 from engine import cli as engine_cli
@@ -57,10 +61,12 @@ def _quote(dim: dict) -> str:
                  if isinstance(e, dict) and e.get("verified") is True), "")
 
 
-def _key(line: dict) -> tuple:
-    """A ledger line's target key: (home realpath, run, created_at)."""
-    target = line.get("target") or {}
-    return (target.get("home"), target.get("run"), target.get("created_at"))
+def _label(home: str, run: str) -> str:
+    """``<run>`` for the eval home, else ``<parent>/<basename>:<run>`` (spec D9)."""
+    if home == ev.eval_home():
+        return run
+    where = Path(home)
+    return f"{where.parent.name}/{where.name}:{run}"
 
 
 def _table(rows: list[list[str]]) -> str:
@@ -84,107 +90,142 @@ def _run(run: str, home: str, agent: str | None) -> int:
     modules = [m.strip() for m in os.environ.get(MODULES, "").split(",") if m.strip()]
     if PACKAGE not in modules:
         os.environ[MODULES] = ",".join([*modules, PACKAGE])
-    started = time.time()
+    before = {rid for rid, _ in _eval_runs()}
     engine_cli.main(["run", "committee-eval", "--site", "local", "--wait",
                      *(["--agent", agent] if agent else [])])
-    row = None
-    conn = ev.connect_ro(ev.eval_home())
-    if conn is not None:
-        try:
-            row = conn.execute(
-                "SELECT id, state FROM runs WHERE playbook = 'committee-eval'"
-                " AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
-                (started,),
-            ).fetchone()
-        finally:
-            conn.close()
-    if row is None:
+    new = [(rid, state) for rid, state in _eval_runs() if rid not in before]
+    if not new:
         print("no committee-eval run was started", file=sys.stderr)
         return 1
-    print(f"eval run {row[0]}: {row[1]}")
-    _show(run, home)
-    return 0 if row[1] == "done" else 1
+    eval_run, state = new[0]
+    print(f"eval run {eval_run}: {state}")
+    _show(run, home, eval_run)
+    return 0 if state == "done" else 1
 
 
-def _show(run: str, home: str) -> int:
-    """Print the target's eval.json as a table. Exits 1 when there is none."""
+def _eval_runs() -> list[tuple[str, str]]:
+    """The eval home's committee-eval runs as (id, state), newest first; [] with no queue.db."""
+    conn = ev.connect_ro(ev.eval_home())
+    if conn is None:
+        return []
+    try:
+        return [tuple(row) for row in conn.execute(
+            "SELECT id, state FROM runs WHERE playbook = 'committee-eval'"
+            " ORDER BY created_at DESC, rowid DESC")]
+    finally:
+        conn.close()
+
+
+def _show(run: str, home: str, eval_run: str | None = None) -> int:
+    """Print the target's eval.json as a table. Exits 1 when there is none or it is unreadable.
+
+    From ``run``, ``eval_run`` is the eval run just driven: an eval.json any
+    other run wrote is not its result, so it is never shown as one.
+    """
     path = ev.eval_json_path(ev.eval_home(), home, run)
     data = thread.read_regular(path)
-    if data is None:
-        print(f"no eval.json for {run}", file=sys.stderr)
-        return 1
     try:
-        body = json.loads(data)
-    except ValueError:
-        body = None
-    if not isinstance(body, dict):
+        body = None if data is None else json.loads(data)
+        if eval_run is not None and (not isinstance(body, dict) or body.get("eval_run") != eval_run):
+            print(f"eval run {eval_run} wrote no eval.json", file=sys.stderr)
+            return 1
+        if body is None:
+            print(f"no eval.json for {run}: {path}", file=sys.stderr)
+            return 1
+        text = _render(body, home, run)
+    except (ValueError, RecursionError, AttributeError, TypeError, KeyError):  # bad JSON or a wrong shape
         print(f"unreadable eval.json for {run}: {path}", file=sys.stderr)
         return 1
+    print(text)
+    return 0
+
+
+def _render(body: dict, home: str, run: str) -> str:
+    """show's text for one eval.json body. A wrong shape raises AttributeError, TypeError or KeyError.
+
+    Each judge row is labelled at the version its eval scored at, and a row
+    whose version is not the current one is starred.
+    """
     ledger = _ledger()
     labels = ev.calibration(ledger) if ledger is not None else {}
     unlabelled = "uncalibrated" if ledger is not None else "unknown"  # an unreadable ledger
-    rubric = body.get("rubric") or {}
-    dims = body.get("dimensions") or {}
-    rows = [["dimension", "score", "scorer", "calibration", "quote"]]
+    rubric = body.get("rubric", {})  # absent is empty; any other non-dict raises
+    dims = body.get("dimensions", {})
+    current = ev.dimension_versions()
+    rows, stale = [["dimension", "score", "scorer", "calibration", "quote"]], False
     for d in ev.DIMENSIONS:
         dim = dims.get(d) or {}
         judged = d in ev.JUDGE_DIMS
-        rows.append([d, _score(dim.get("score")), "judge" if judged else "deterministic",
+        score = _score(dim.get("score"))
+        if rubric.get(d) != current[d]:
+            score, stale = score + "*", True
+        rows.append([d, score, "judge" if judged else "deterministic",
                      labels.get(rubric.get(d), unlabelled) if judged else "",
                      _quote(dim)[:QUOTE_COLS]])
-    print(_table(rows))
     flags = [f"{f.get('id')}@t{f['turn']:02d}" if isinstance(f.get("turn"), int) else str(f.get("id"))
              for f in body.get("flags") or [] if isinstance(f, dict)]
-    print("flags: " + (", ".join(flags) or "none"))
-    print(f"headline: {body.get('headline', '')}")
-    judge = body.get("judge") or {}
+    judge = body.get("judge", {})
     error = f" ({judge['error']})" if judge.get("error") else ""
-    print(f"judge: {judge.get('status')}{error}")
-    return 0
+    return "\n".join([
+        f"target: {_label(home, run)}  eval run: {body.get('eval_run')}  rubric: {body.get('rubric_version')}",
+        _table(rows),
+        *([STALE_NOTE] if stale else []),
+        "flags: " + (", ".join(flags) or "none"),
+        f"headline: {body.get('headline', '')}",
+        f"judge: {judge.get('status')}{error}",
+    ])
 
 
 def _compare(rubrics: list[str] | None) -> int:
     """One row per evaluated target: its latest eval line, whatever its rubric.
 
-    ``--rubric`` filters the evaluations only. Anchors always count, so a
-    filtered table still shows the user's scores and their calibration.
+    ``--rubric`` filters the evaluation rows only. Anchors and the calibration
+    row always read the whole ledger. Malformed lines and cells are skipped,
+    and two targets that would share a label each get a short hash of their key.
     """
     ledger = _ledger()
+    where = ev.ledger_path(ev.eval_home())
     if ledger is None:
-        print(f"cannot read {ev.ledger_path(ev.eval_home())}", file=sys.stderr)
+        print(f"cannot read {where}", file=sys.stderr)
         return 1
-    kept = [line for line in ledger
-            if line.get("source") != "eval" or not rubrics
-            or line.get("rubric_version") in rubrics]
-    latest = ev.latest_evals([line for line in kept if line.get("source") == "eval"])
+    latest = ev.latest_evals([line for line in ledger if line.get("source") == "eval"
+                              and (not rubrics or line.get("rubric_version") in rubrics)])
     if not latest:
-        print(f"no evaluations in {ev.ledger_path(ev.eval_home())}")
+        print(f"no evaluations at rubric {', '.join(rubrics)} in {where}" if rubrics
+              else f"no evaluations in {where}")
         return 0
     anchored: dict[tuple, dict] = {}  # (target key, dimension) -> {version: score}
-    for line in kept:
-        if line.get("source") == "anchor":
-            for d, cell in (line.get("dimensions") or {}).items():
-                anchored.setdefault((_key(line), d), {})[cell.get("version")] = cell.get("score")
+    for line in ledger:
+        key = ev._target_key(line)
+        if line.get("source") == "anchor" and key is not None:
+            for d, cell in ev._cells(line):
+                score = ev._score(cell.get("score"))
+                if isinstance(cell.get("version"), str) and score is not None:
+                    anchored.setdefault((key, d), {})[cell["version"]] = score
+    names = {key: _label(key[0], key[1]) for key in latest}
+    taken = Counter(names.values())
     current = ev.dimension_versions()
-    home = ev.eval_home()
     rows, stale = [], False
-    for line in latest.values():
-        key = _key(line)
-        where = Path(key[0])
-        row = [key[1] if key[0] == home else f"{where.parent.name}/{where.name}:{key[1]}"]
+    for key, line in latest.items():
+        cells = dict(ev._cells(line))
+        name = names[key]
+        if taken[name] > 1:
+            name += "@" + hashlib.sha1(repr(key).encode("utf-8")).hexdigest()[:6]
+        row = [name]
         for d in ev.DIMENSIONS:
-            cell = (line.get("dimensions") or {}).get(d) or {}
+            cell = cells.get(d, {})
             version, text = cell.get("version"), _score(cell.get("score"))
+            version = version if isinstance(version, str) else None
             if version != current[d]:
                 text, stale = text + "*", True
-            marks = anchored.get((key, d), {}) if d in ev.JUDGE_DIMS else {}
+            marks = anchored.get((key, d), {})
             if version in marks:
                 text += f" (a:{marks[version]})"
             elif marks and current[d] not in marks:
                 text += " (re-score needed)"
             row.append(text)
         rows.append(row)
-    labels = ev.calibration(kept)
+    labels = ev.calibration(ledger)
     calibration = [labels.get(current[d], "uncalibrated") if d in ev.JUDGE_DIMS else ""
                    for d in ev.DIMENSIONS]
     print(_table([["target", *ev.DIMENSIONS], *sorted(rows), ["calibration", *calibration]]))
@@ -226,8 +267,9 @@ def _anchor(run: str, home: str, pairs: list[str], rater: str | None, note: str 
 
 def main(argv: list[str] | None = None) -> int:
     """Parse ``argv`` (default ``sys.argv[1:]``) and run one command; returns the exit code."""
-    parser = argparse.ArgumentParser(prog="python -m playbooks.committee.eval_cli",
-                                     description="Score finished committee runs.")
+    parser = argparse.ArgumentParser(
+        prog=".venv/bin/python -m playbooks.committee.eval_cli", description="Score finished committee runs. Run it from the hermes checkout,"
+        " with HERMES_HOME set to the control plane's home.")
     sub = parser.add_subparsers(dest="cmd", required=True)
     cmd = sub.add_parser("run", help="score one finished committee run")
     cmd.add_argument("run")

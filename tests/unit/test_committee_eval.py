@@ -2784,9 +2784,20 @@ def test_anchor_cli(tmp_path, monkeypatch, capsys):
     assert ledger.stat().st_mode & 0o777 == 0o600
     assert hashlib.sha256(db.read_bytes()).hexdigest() == before, "anchor wrote the target's queue.db"
 
+    # A ledger that cannot be appended to (a symlink) is exit 1, never a traceback.
+    ledger.rename(tmp_path / "real.jsonl")
+    ledger.symlink_to(tmp_path / "real.jsonl")
+    assert eval_cli.main(["anchor", run, "concision=4"]) == 1
+    assert f"cannot append to {ledger}" in capsys.readouterr().err
+    assert len(E.read_ledger(tmp_path / "real.jsonl")) == 1
+
 
 def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
-    """T13: one compare row per target from its latest eval line; stars, anchors, --rubric."""
+    """T13: one compare row per target from its latest eval line; stars, anchors, --rubric.
+
+    Anchors show on every dimension, calibration always reads the whole ledger,
+    malformed lines are skipped, and two targets never share a label.
+    """
     from playbooks.committee import eval_cli
 
     (tmp_path / "hermes").mkdir()
@@ -2815,6 +2826,9 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
                       {"verdict_grounded": 3}, current, "av", None),
         E.anchor_line({"home": spin, "run": "run-2", "created_at": 200.0},
                       {"edits_address_concerns": 2}, stale_edits, "av", None),
+        # A deterministic anchor shows too; concern_coverage is off by 2.
+        E.anchor_line({"home": here, "run": "run-2", "created_at": 100.0},
+                      {"concern_coverage": 1, "efficiency": 2}, current, "av", None),
     ):
         E.append_ledger(here, line)
 
@@ -2822,29 +2836,69 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
     assert sorted({l["target"]["home"] for l in lines
                    if l["source"] == "eval" and l["target"]["run"] == "run-2"}) == sorted([here, spin])
 
+    # Malformed lines and cells are skipped, never a traceback.
+    for line in (
+        {"source": "anchor", "target": "run-2",
+         "dimensions": {"verdict_grounded": {"version": current["verdict_grounded"], "score": 1}}},
+        {"source": "anchor", "target": {"home": here, "run": "run-2", "created_at": 100.0},
+         "dimensions": {"verdict_grounded": {"version": ["x"], "score": 1}, "efficiency": 3}},
+        {"source": "eval", "target": "run-2", "eval_run": "run-16", "dimensions": []},
+        {"source": "eval", "target": {"home": here, "run": "run-5", "created_at": 5.0},
+         "eval_run": "run-15", "rubric_version": "x",
+         "dimensions": {"verdict_grounded": 7, "concision": {"version": ["x"], "score": 2}}},
+    ):
+        E.append_ledger(here, line)
+
     def compare(*extra):
         assert eval_cli.main(["compare", *extra]) == 0
         out = capsys.readouterr().out
         return {cells[0]: cells[1:7] for cells in _cli_rows(out)}, out
 
     rows, out = compare()
-    assert list(rows) == ["target", "run-2", "run-9", "spin/home:run-2", "calibration"]
+    assert list(rows) == ["target", "run-2", "run-5", "run-9", "spin/home:run-2", "calibration"]
     assert rows["target"] == list(E.DIMENSIONS)
-    assert rows["run-2"] == ["4 (a:3)", "3", "3", "4", "1", "5"]
+    assert rows["run-2"] == ["4 (a:3)", "3", "3 (a:1)", "4 (a:2)", "1", "5"]
     assert rows["spin/home:run-2"] == ["2", "3 (re-score needed)", "3", "4", "1", "5"]
     assert rows["run-9"] == ["2", "3", "3", "3", "1*", "1"]  # only concision is starred
-    assert rows["calibration"] == ["uncalibrated"] * 3 + ["", "", ""]
+    assert rows["run-5"] == ["—*", "—*", "—*", "—*", "2*", "—*"]
+    assert rows["calibration"] == ["uncalibrated", "uncalibrated", "off (Δ2)", "", "", ""]
     assert "* older definition; re-run `eval run <target>`" in out.splitlines()
+    everything = rows
 
+    # --rubric filters the evaluation rows only: anchors and the calibration row stay whole.
     rows, _ = compare("--rubric", E.rubric_version(older))
     assert list(rows) == ["target", "run-9", "calibration"]
+    assert rows["calibration"] == everything["calibration"]
     rows, out = compare("--rubric", E.rubric_version(current))
     assert list(rows) == ["target", "run-2", "spin/home:run-2", "calibration"]
+    assert {k: rows[k] for k in ("run-2", "spin/home:run-2", "calibration")} == {
+        k: everything[k] for k in ("run-2", "spin/home:run-2", "calibration")}
     assert "older definition" not in out
+    assert eval_cli.main(["compare", "--rubric", "bogus"]) == 0
+    assert capsys.readouterr().out == f"no evaluations at rubric bogus in {E.ledger_path(here)}\n"
+
+    # run-2 again in the same home, after a queue.db reset: two labels, each suffixed.
+    E.append_ledger(here, E.eval_line(_cli_eval_body(here, "run-2", 300.0, "run-30",
+                                                     {**judge, **det, "verdict_grounded": 5}, current)))
+    rows, _ = compare()
+    reused = sorted(label for label in rows if label.startswith("run-2"))
+    assert len(reused) == 2 and all(re.fullmatch(r"run-2@[0-9a-f]{6}", label) for label in reused)
+    assert sorted(rows[label][0] for label in reused) == ["4 (a:3)", "5"]
+
+    # An unreadable ledger (a symlink) is exit 1, never an empty table.
+    ledger = E.ledger_path(here)
+    ledger.rename(tmp_path / "real.jsonl")
+    ledger.symlink_to(tmp_path / "real.jsonl")
+    assert eval_cli.main(["compare"]) == 1
+    assert f"cannot read {ledger}" in capsys.readouterr().err
 
 
-def test_run_wrapper_and_dry_run(tmp_path, monkeypatch, capsys):
-    """T31: a bad target exits 2 before anything exists, by either spelling; --dry-run leaves nothing."""
+def test_run_wrapper_and_dry_run(tmp_path, monkeypatch, capsys, eval_cli_home):
+    """T31: a bad target exits 2 before anything exists, by either spelling; --dry-run leaves nothing.
+
+    A good one is scored end to end with the mock judge, and the wrapper shows
+    only the eval.json its own eval run wrote.
+    """
     from engine import cli as engine_cli
     from playbooks.committee import eval_cli
 
@@ -2895,18 +2949,61 @@ def test_run_wrapper_and_dry_run(tmp_path, monkeypatch, capsys):
     assert not (home / "runs" / run / "eval.json").exists()
     assert not (home / "evals").exists()
 
+    # End to end into a separate eval home. The mock judge echoes its payload back, which
+    # holds no hermes-eval fence: the eval is unparseable, the run ends failed, eval.json is written.
+    monkeypatch.setenv("HERMES_HOME", str(eval_cli_home))
+    for key in (E.ENV_RUN, E.ENV_HOME, eval_cli.MODULES):
+        monkeypatch.setenv(key, "")  # recorded, so teardown undoes what the wrapper sets
+        monkeypatch.delenv(key)
+    source = os.path.realpath(home)
+    written = E.eval_json_path(str(eval_cli_home), source, run)
+    assert eval_cli.main(["run", run, "--home", str(home)]) == 1
+    out = capsys.readouterr().out
+    body = json.loads(written.read_text(encoding="utf-8"))
+    assert (body["eval_run"], body["judge"]["status"], body["target"]["home"]) == ("run-1", "unparseable", source)
+    assert "eval run run-1: failed" in out.splitlines()
+    label = f"{Path(source).parent.name}/home:{run}"
+    assert f"target: {label}  eval run: run-1  rubric: {body['rubric_version']}" in out.splitlines()
+    assert [cells[0] for cells in _cli_rows(out) if cells[0] in E.DIMENSIONS] == list(E.DIMENSIONS)
+    assert (os.environ[E.ENV_RUN], os.environ[E.ENV_HOME]) == (run, source)
+    assert os.environ[eval_cli.MODULES] == "playbooks.committee"
+
+    # An eval that dies before writing: run-1's eval.json is never shown as run-2's.
+    def refuse(path, body):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(E, "write_eval_json", refuse)
+    assert eval_cli.main(["run", run, "--home", str(home)]) == 1
+    captured = capsys.readouterr()
+    assert "eval run run-2: failed" in captured.out.splitlines()
+    assert "eval run run-2 wrote no eval.json" in captured.err
+    assert "verdict_grounded" not in captured.out
+    assert json.loads(written.read_text(encoding="utf-8"))["eval_run"] == "run-1"
+    assert os.environ[eval_cli.MODULES] == "playbooks.committee"  # appended once
+
+    # The engine started nothing: an older eval run is never reported in its place.
+    monkeypatch.setattr(engine_cli, "main", lambda argv: 0)
+    assert eval_cli.main(["run", run, "--home", str(home)]) == 1
+    assert "no committee-eval run was started" in capsys.readouterr().err
+
 
 def test_show_cli(tmp_path, monkeypatch, capsys):
-    """G7: show prints the table, the flags, the headline and the judge line; exit 1 with no eval.json."""
+    """G7: show prints a header, the table, the flags, the headline and the judge line.
+
+    A judge row carries the calibration label of the version its eval.json
+    scored at, and a row not at the current version is starred. No eval.json,
+    or one of the wrong shape, exits 1 naming the path.
+    """
     from playbooks.committee import eval_cli
 
     (tmp_path / "hermes").mkdir()
     (tmp_path / "spin" / "home").mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     here = E.eval_home()
+    versions = dict(E.dimension_versions(), verdict_grounded="verdict_grounded@0")
     body = _cli_eval_body(here, "run-9", 50.0, "run-12",
                           {"verdict_grounded": 4, "concern_coverage": 3, "efficiency": 3,
-                           "concision": 1, "verdict_consistency": 1}, E.dimension_versions())
+                           "concision": 1, "verdict_consistency": 1}, versions)
 
     def cite(*quotes):
         return [{"turn": None, "where": "turn", "line": None, "quote": q, "verified": ok}
@@ -2928,12 +3025,16 @@ def test_show_cli(tmp_path, monkeypatch, capsys):
     same = E.eval_json_path(here, here, "run-9")
     same.parent.mkdir(parents=True)
     same.write_text(json.dumps(body), encoding="utf-8")
+    # verdict_grounded@0 reads off (Δ3) from this ledger; the current version is uncalibrated.
+    E.append_ledger(here, E.eval_line(body))
+    E.append_ledger(here, E.anchor_line(E.eval_line(body)["target"], {"verdict_grounded": 1},
+                                        versions, "av", None))
 
     assert eval_cli.main(["show", "run-9"]) == 0
     out = capsys.readouterr().out
     assert _cli_rows(out) == [
         ["dimension", "score", "scorer", "calibration", "quote"],
-        ["verdict_grounded", "4", "judge", "uncalibrated", "Q" * 80],
+        ["verdict_grounded", "4*", "judge", "off (Δ3)", "Q" * 80],
         ["edits_address_concerns", "—", "judge", "uncalibrated", ""],
         ["concern_coverage", "3", "judge", "uncalibrated", "Fair point; here is where I land on it."],
         ["efficiency", "3", "deterministic", "", "cost_usd=30.3875"],
@@ -2941,6 +3042,8 @@ def test_show_cli(tmp_path, monkeypatch, capsys):
         ["verdict_consistency", "1", "deterministic", "", "rechecks_verified=8"],
     ]
     lines = out.splitlines()
+    assert lines[0] == f"target: run-9  eval run: run-12  rubric: {E.rubric_version(versions)}"
+    assert eval_cli.STALE_NOTE in lines
     assert "flags: action_clipped@t03, verdict_count_mismatch" in lines
     assert "headline: weakest: concision 1/5: words.median_reviewer_owner=825.0" in lines
     assert "judge: partial (edits_address_concerns: no verifiable evidence)" in lines
@@ -2953,7 +3056,23 @@ def test_show_cli(tmp_path, monkeypatch, capsys):
     foreign.write_text(json.dumps(ok), encoding="utf-8")
     assert eval_cli.main(["show", "run-2", "--home", str(tmp_path / "spin" / "home")]) == 0
     lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("target: spin/home:run-2  eval run: run-12  rubric: ")
     assert "flags: none" in lines and "judge: ok" in lines
 
+    # An unreadable ledger: every judge label is unknown, never uncalibrated.
+    ledger = E.ledger_path(here)
+    ledger.unlink()
+    ledger.mkdir()
+    assert eval_cli.main(["show", "run-9"]) == 0
+    assert [cells[3] for cells in _cli_rows(capsys.readouterr().out)[1:]] == ["unknown"] * 3 + [""] * 3
+
+    # A wrong shape is unreadable (exit 1), never a traceback.
+    for bad in ([body], dict(body, dimensions=[]), dict(body, dimensions={"concision": 5}),
+                dict(body, rubric=["x"]), dict(body, judge="ok"), dict(body, flags=5)):
+        same.write_text(json.dumps(bad), encoding="utf-8")
+        assert eval_cli.main(["show", "run-9"]) == 1, bad
+        captured = capsys.readouterr()
+        assert (captured.out, captured.err) == ("", f"unreadable eval.json for run-9: {same}\n"), bad
+
     assert eval_cli.main(["show", "run-8"]) == 1
-    assert "no eval.json for run-8" in capsys.readouterr().err
+    assert f"no eval.json for run-8: {E.eval_json_path(here, here, 'run-8')}" in capsys.readouterr().err
