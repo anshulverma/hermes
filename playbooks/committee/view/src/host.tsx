@@ -13,6 +13,11 @@
  * does — `require_auth_read` gates GETs on a non-loopback bind, and
  * `require_auth` gates every POST on every bind.
  *
+ * `imageUrl` and `renderMermaid` serve a turn's figures. An <img> cannot send a
+ * bearer header, so `imageUrl` carries the token on the query, the same way the
+ * SPA's <script> tag for this bundle does. `renderMermaid` is the host's: this
+ * committed bundle never carries mermaid, and a host without it gets null.
+ *
  * This file is the ONLY reader of `window.HermesUI` in the bundle. Two readers
  * of one global drift; CommitteeView.tsx imports `Markdown` from here.
  */
@@ -73,4 +78,19 @@ export async function apiGet<T>(path: string): Promise<T> {
 
 export async function apiPost<T>(path: string): Promise<T> {
   return readBody<T>(await fetch(path, { method: 'POST', headers: authHeaders() }));
+}
+
+/** The run's own image, through the per-run file route, with the token when there is one. */
+export function imageUrl(runId: string, name: string): string {
+  const url = `/api/runs/${encodeURIComponent(runId)}/view/artifact?path=${encodeURIComponent('images/' + name)}`;
+  const token = (window as any).HermesUI?.getToken?.() ?? null;
+  return token ? `${url}&token=${encodeURIComponent(token)}` : url;
+}
+
+/** SVG markup for mermaid `source`, or null when the host publishes no renderer. */
+export function renderMermaid(source: string): Promise<string> | null {
+  const render = (window as any).HermesUI?.renderMermaid;
+  // Through the executor, so a renderer that throws instead of rejecting still
+  // reaches the caller's failure branch rather than escaping its effect.
+  return typeof render === 'function' ? new Promise((resolve) => resolve(render(source))) : null;
 }

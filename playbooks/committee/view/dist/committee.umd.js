@@ -39,6 +39,17 @@
 			headers: authHeaders()
 		}));
 	}
+	/** The run's own image, through the per-run file route, with the token when there is one. */
+	function imageUrl(runId, name) {
+		const url = `/api/runs/${encodeURIComponent(runId)}/view/artifact?path=${encodeURIComponent("images/" + name)}`;
+		const token = window.HermesUI?.getToken?.() ?? null;
+		return token ? `${url}&token=${encodeURIComponent(token)}` : url;
+	}
+	/** SVG markup for mermaid `source`, or null when the host publishes no renderer. */
+	function renderMermaid(source) {
+		const render = window.HermesUI?.renderMermaid;
+		return typeof render === "function" ? new Promise((resolve) => resolve(render(source))) : null;
+	}
 	//#endregion
 	//#region ../playbooks/committee/view/src/Verdict.tsx
 	/**
@@ -315,6 +326,174 @@
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Stamp, { runId })
 			]
+		});
+	}
+	//#endregion
+	//#region ../playbooks/committee/view/src/Voice.tsx
+	/**
+	* A turn as the room reads it: its prose, at most one figure, and what the
+	* voice rules made of it.
+	*
+	* `Segments` is the only renderer of a turn body or a verdict. A body is never
+	* handed to Markdown whole: Markdown passes an image's `src` through raw, so a
+	* relative `images/x.svg` resolves against the SPA's own path and an http src
+	* makes the operator's browser fetch whatever a worker wrote. `view_data`
+	* splits every image reference out of the prose first (voice.segments), so
+	* Markdown here only ever receives text. A file image is drawn only when the
+	* master checked it (`ok`) and only from this run's images/ folder, through
+	* `imageUrl`. A mermaid figure is rendered by the host and shown as an <img> of
+	* a blob, never as inline markup, so a diagram cannot run script.
+	*/
+	/** The hard rules in plain words: voice.note's phrasing without the numbers. */
+	var VIOLATION_LABEL = {
+		over_cap: "over the word cap",
+		multi_line: "more than one line",
+		multi_sentence: "more than one sentence",
+		headers: "headers",
+		bold: "bold",
+		tables: "tables",
+		nested: "nested bullets",
+		too_many_bullets: "too many bullets",
+		too_many_images: "too many images",
+		image_uncaptioned: "an image without its caption or description",
+		image_missing: "an image missing or not your own file",
+		action_too_long: "an action over 200 characters",
+		retake_failed: "the retake delivered nothing, so an earlier take was kept"
+	};
+	function violationText(violations) {
+		return violations.map((v) => VIOLATION_LABEL[v] ?? v).join("; ");
+	}
+	var figure = {
+		margin: 0,
+		padding: 8,
+		display: "flex",
+		flexDirection: "column",
+		gap: 6,
+		border: "1px solid var(--border-hairline)",
+		borderRadius: "var(--radius-sm)",
+		background: "var(--wash-subtle)"
+	};
+	var muted$1 = {
+		fontSize: 11.5,
+		fontStyle: "italic",
+		color: "var(--text-muted)"
+	};
+	var code = {
+		margin: 0,
+		fontFamily: "var(--font-mono)",
+		fontSize: 11,
+		whiteSpace: "pre-wrap",
+		color: "var(--text-secondary)"
+	};
+	/** Plain text, never Markdown: a caption is worker-written too. */
+	function Caption({ caption, description }) {
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("figcaption", {
+			style: {
+				fontSize: 11.5,
+				lineHeight: 1.45,
+				color: "var(--text-secondary)"
+			},
+			children: [caption && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				style: {
+					fontWeight: 600,
+					color: "var(--text-primary)"
+				},
+				children: caption
+			}), description && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: description })]
+		});
+	}
+	function FileFigure({ runId, seg }) {
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("figure", {
+			"data-testid": "figure-image",
+			style: figure,
+			children: [seg.ok === true ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+				src: imageUrl(runId, seg.name),
+				alt: seg.caption,
+				style: { maxWidth: "100%" }
+			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				"data-testid": "image-unavailable",
+				style: muted$1,
+				children: "image unavailable"
+			}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Caption, {
+				caption: seg.caption,
+				description: seg.description
+			})]
+		});
+	}
+	function MermaidFigure({ seg }) {
+		const [drawing, setDrawing] = (0, react.useState)({ state: "pending" });
+		(0, react.useEffect)(() => {
+			const pending = renderMermaid(seg.source);
+			if (pending === null) {
+				setDrawing({ state: "absent" });
+				return;
+			}
+			setDrawing({ state: "pending" });
+			let live = true;
+			let url = null;
+			pending.then((svg) => {
+				if (!live) return;
+				url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+				setDrawing({
+					state: "drawn",
+					url
+				});
+			}, (err) => {
+				if (live) setDrawing({
+					state: "failed",
+					error: err instanceof Error ? err.message : String(err)
+				});
+			});
+			return () => {
+				live = false;
+				if (url) URL.revokeObjectURL(url);
+			};
+		}, [seg.source]);
+		const source = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
+			"data-testid": "mermaid-source",
+			style: code,
+			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", { children: seg.source })
+		});
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("figure", {
+			"data-testid": "figure-mermaid",
+			style: figure,
+			children: [
+				drawing.state === "pending" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					style: muted$1,
+					children: "rendering diagram…"
+				}),
+				drawing.state === "drawn" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
+					src: drawing.url,
+					alt: seg.caption,
+					style: { maxWidth: "100%" }
+				}),
+				drawing.state === "absent" && source,
+				drawing.state === "failed" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [source, /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "mermaid-error",
+					style: muted$1,
+					children: ["diagram failed to render: ", drawing.error]
+				})] }),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Caption, {
+					caption: seg.caption,
+					description: seg.description
+				})
+			]
+		});
+	}
+	function Segments({ segments, runId, fontSize = 12 }) {
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			style: {
+				display: "flex",
+				flexDirection: "column",
+				gap: 8
+			},
+			children: segments.map((seg, i) => seg.kind === "text" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Markdown, {
+				fontSize,
+				children: seg.text.replaceAll("![", "!​[")
+			}, i) : seg.kind === "image" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(FileFigure, {
+				runId,
+				seg
+			}, i) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MermaidFigure, { seg }, i))
 		});
 	}
 	//#endregion
@@ -1189,13 +1368,18 @@
 		signals_only: "signals only, no prose",
 		no_turn: "no turn delivered",
 		unattributed: "speaker not identified",
-		error: "error on this turn"
+		error: "error on this turn",
+		voice_flag: "broke the ground rules",
+		retaken: "retaken",
+		no_pointer: "no pointer",
+		no_example: "no example"
 	};
 	var BADGE_TONE = {
 		no_turn: "danger",
 		error: "danger",
 		unattributed: "danger",
-		signals_only: "attention"
+		signals_only: "attention",
+		voice_flag: "attention"
 	};
 	/** spoke · holds_floor · queued · idle, as a reader would say it. */
 	var ROSTER_STATE = {
@@ -1399,9 +1583,15 @@
 			})
 		});
 	}
-	function TimelineEntry({ entry, open, onToggle, edit, onSeeEdit }) {
+	function TimelineEntry({ runId, entry, open, onToggle, edit, onSeeEdit }) {
 		const { Badge } = ds();
-		const firstLine = entry.body.split("\n").find((l) => l.trim()) ?? "";
+		const segments = entry.segments ?? (entry.body ? [{
+			kind: "text",
+			text: entry.body
+		}] : []);
+		const firstText = segments.find((seg) => seg.kind === "text");
+		const firstLine = (firstText?.kind === "text" ? firstText.text : "").split("\n").find((l) => l.trim()) ?? "";
+		const violations = entry.violations ?? [];
 		const noProse = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 			style: { fontStyle: "italic" },
 			children: "no prose recorded for this turn"
@@ -1511,16 +1701,29 @@
 					},
 					children: ["see edit ", edit]
 				}),
-				open ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				open ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					style: {
 						marginTop: 6,
 						paddingLeft: 18,
 						color: "var(--text-muted)"
 					},
-					children: entry.body ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Markdown, {
-						fontSize: 12,
-						children: entry.body
-					}) : noProse
+					children: [entry.take != null && entry.takes != null && (entry.takes > 1 || violations.length > 0) && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": `kept-take-${entry.n}`,
+						style: {
+							fontSize: 11.5,
+							marginBottom: 6
+						},
+						children: [
+							"kept take ",
+							entry.take,
+							" of ",
+							entry.takes,
+							violations.length > 0 && `; broke: ${violationText(violations)}`
+						]
+					}), segments.length > 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Segments, {
+						segments,
+						runId
+					}) : noProse]
 				}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					style: {
 						marginTop: 2,
@@ -1536,7 +1739,7 @@
 			]
 		});
 	}
-	function Timeline({ timeline, open, setOpen, edits, onSeeEdit }) {
+	function Timeline({ runId, timeline, open, setOpen, edits, onSeeEdit }) {
 		const allOpen = timeline.length > 0 && open.size === timeline.length;
 		const ordered = [...timeline].sort((a, b) => a.n - b.n);
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
@@ -1557,6 +1760,7 @@
 				},
 				children: allOpen ? "Collapse all" : "Expand all"
 			}), ordered.map((entry) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TimelineEntry, {
+				runId,
 				entry,
 				open: open.has(entry.n),
 				edit: edits.get(entry.n)?.[0],
@@ -2060,6 +2264,7 @@
 					legacy
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Timeline, {
+					runId,
 					timeline: data.timeline,
 					open,
 					setOpen,

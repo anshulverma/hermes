@@ -58,3 +58,11 @@ def test_committed_view_bundle_matches_a_fresh_build():
         assert fresh.read_bytes() == ARTIFACT.read_bytes(), (
             f"{ARTIFACT.relative_to(REPO)} is stale. Rebuild it with: {REBUILD}"
         )
+
+
+def test_committed_view_bundle_stays_small_and_never_carries_mermaid():
+    """mermaid lives on the host shelf. Bundled, it would be megabytes of
+    committed, unminified artifact; the cap is what notices."""
+    assert ARTIFACT.stat().st_size < 150 * 1024
+    text = ARTIFACT.read_text(encoding="utf-8")
+    assert "securityLevel" not in text  # mermaid's initialize() is the host's, in web/src

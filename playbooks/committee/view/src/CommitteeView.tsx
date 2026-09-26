@@ -24,8 +24,8 @@
  */
 
 import { useState } from 'react';
-import { Markdown } from './host';
-import Verdict from './Verdict';
+import Verdict, { type VerdictData } from './Verdict';
+import { Segments, violationText, type Segment } from './Voice';
 import DocumentHistory, { type DiffMode, type DocumentBlock, type StepId } from './Diff';
 
 // --- the data, exactly as `CommitteePlaybook.view_data` returns it -----------
@@ -57,7 +57,21 @@ export type Entry = {
   verified: boolean | null;
   /** What the speaker said they stand for on this turn; null when they said nothing. */
   stance: string | null;
+  /**
+   * voice C10. Optional because a payload from before voice has none of them;
+   * `view_data` sends them on every entry now, null or empty on a legacy turn.
+   */
+  take?: number | null;
+  takes?: number | null;
+  violations?: string[];
+  flags?: string[];
+  voice?: Record<string, unknown> | null;
+  /** The body split into text, image and mermaid, in order. */
+  segments?: Segment[];
 };
+
+/** voice.summary, C11: every key is always present, null when its population is empty. */
+export type VoiceSummary = Record<string, number | null | Record<string, number | null>>;
 
 export type Progress = {
   turn: number;
@@ -105,13 +119,9 @@ export type CommitteeData = {
   roster: Persona[];
   progress: Progress;
   timeline: Entry[];
-  verdict: {
-    text: string;
-    checks: Array<{ turn: number; action: string; verified: boolean | null }>;
-    artifact_intact: boolean | null;
-    dropped_delegation: string | null;
-    dropped_floor_requests: string[];
-  } | null;
+  verdict: VerdictData | null;
+  /** null for a run reduced before voice: "not measured for this run". */
+  voice?: VoiceSummary | null;
   /**
    * Every version of the document, by run-relative path. `name` is null until
    * some reduction names the file, which in phase `open` is never -- exactly
@@ -191,6 +201,10 @@ const BADGE_LABEL: Record<string, string> = {
   no_turn: 'no turn delivered',
   unattributed: 'speaker not identified',
   error: 'error on this turn',
+  voice_flag: 'broke the ground rules',
+  retaken: 'retaken',
+  no_pointer: 'no pointer',
+  no_example: 'no example',
 };
 
 const BADGE_TONE: Record<string, string | undefined> = {
@@ -198,6 +212,7 @@ const BADGE_TONE: Record<string, string | undefined> = {
   error: 'danger',
   unattributed: 'danger',
   signals_only: 'attention',
+  voice_flag: 'attention',
 };
 
 // Every key above is a slug `view_data`'s `_badges` actually emits — the turn
@@ -382,12 +397,14 @@ function Roster({ roster, legacy }: { roster: Persona[]; legacy: boolean }) {
 // --- timeline ----------------------------------------------------------------
 
 function TimelineEntry({
+  runId,
   entry,
   open,
   onToggle,
   edit,
   onSeeEdit,
 }: {
+  runId: string;
   entry: Entry;
   open: boolean;
   onToggle: () => void;
@@ -396,7 +413,11 @@ function TimelineEntry({
   onSeeEdit: () => void;
 }) {
   const { Badge } = ds();
-  const firstLine = entry.body.split('\n').find((l) => l.trim()) ?? '';
+  // A payload from before voice carries no segments: its body is all text.
+  const segments: Segment[] = entry.segments ?? (entry.body ? [{ kind: 'text', text: entry.body }] : []);
+  const firstText = segments.find((seg) => seg.kind === 'text');
+  const firstLine = (firstText?.kind === 'text' ? firstText.text : '').split('\n').find((l) => l.trim()) ?? '';
+  const violations = entry.violations ?? [];
   // A run captured before the view existed banks no `body`, so every row would
   // be a blank line with no explanation. Say which it is.
   const noProse = (
@@ -503,7 +524,13 @@ function TimelineEntry({
 
       {open ? (
         <div style={{ marginTop: 6, paddingLeft: 18, color: 'var(--text-muted)' }}>
-          {entry.body ? <Markdown fontSize={12}>{entry.body}</Markdown> : noProse}
+          {entry.take != null && entry.takes != null && (entry.takes > 1 || violations.length > 0) && (
+            <div data-testid={`kept-take-${entry.n}`} style={{ fontSize: 11.5, marginBottom: 6 }}>
+              kept take {entry.take} of {entry.takes}
+              {violations.length > 0 && `; broke: ${violationText(violations)}`}
+            </div>
+          )}
+          {segments.length > 0 ? <Segments segments={segments} runId={runId} /> : noProse}
         </div>
       ) : (
         <div
@@ -525,12 +552,14 @@ function TimelineEntry({
 }
 
 function Timeline({
+  runId,
   timeline,
   open,
   setOpen,
   edits,
   onSeeEdit,
 }: {
+  runId: string;
   timeline: Entry[];
   /** Held by the view, so a step's `tNN` link can open an entry from outside. */
   open: Set<number>;
@@ -566,6 +595,7 @@ function Timeline({
       {ordered.map((entry) => (
         <TimelineEntry
           key={entry.n}
+          runId={runId}
           entry={entry}
           open={open.has(entry.n)}
           edit={edits.get(entry.n)?.[0]}
@@ -1045,6 +1075,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
       <ProgressBar progress={data.progress} legacy={legacy} />
       <Roster roster={data.roster} legacy={legacy} />
       <Timeline
+        runId={runId}
         timeline={data.timeline}
         open={open}
         setOpen={setOpen}

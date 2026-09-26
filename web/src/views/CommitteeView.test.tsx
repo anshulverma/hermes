@@ -16,7 +16,7 @@ import { setToken, clearToken } from '../api/auth';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
-import type { CommitteeData, Evaluation } from '../../../playbooks/committee/view/src/CommitteeView';
+import type { CommitteeData, Entry, Evaluation } from '../../../playbooks/committee/view/src/CommitteeView';
 import DocumentHistory, {
   diffLines,
   splitRows,
@@ -2166,5 +2166,256 @@ describe('CommitteeView evaluation on the Metrics tab', () => {
     expect(screen.queryAllByTestId(/^eval-dim-/)).toHaveLength(0);
     expect(screen.queryByTestId('evaluation-empty')).toBeNull();
     expect(screen.getByTestId('committee-metrics')).toBeInTheDocument();
+  });
+});
+
+// --- voice (committee-voice T15) -----------------------------------------------
+
+/** run-2's turn 2 as voice records it: retaken, flagged, with both kinds of figure. */
+const VOICED: Entry = {
+  ...run2.timeline[1],
+  body: 'Conceded.',
+  badges: ['voice_flag', 'retaken', 'no_pointer', 'no_example'],
+  take: 3,
+  takes: 3,
+  violations: ['over_cap', 'bold'],
+  flags: ['no_pointer', 'no_example'],
+  voice: { words: 212 },
+  segments: [
+    { kind: 'text', text: 'Conceded: the staffing line is fiction.' },
+    { kind: 'image', name: 't02-owner.svg', ref: 'images/t02-owner.svg', caption: 'staffing curve',
+      description: 'engineers per week, flat after week 6', ok: true },
+    { kind: 'image', name: 'http://evil.example/x.png', ref: 'http://evil.example/x.png',
+      caption: 'their chart', description: 'a chart from elsewhere', ok: false },
+    { kind: 'mermaid', source: 'graph TD; A-->B', caption: 'the pipeline', description: 'two stages' },
+  ],
+};
+
+function withVoice(entry: Entry = VOICED) {
+  return { ...run2, timeline: run2.timeline.map((e) => (e.n === entry.n ? entry : e)) };
+}
+
+function expand(n: number) {
+  fireEvent.click(within(screen.getByTestId(`entry-${n}`)).getAllByRole('button')[0]);
+  return screen.getByTestId(`entry-${n}`);
+}
+
+/** Point the host shelf's renderMermaid at `render` for one test. */
+function shelf(render: ((source: string) => Promise<string>) | undefined) {
+  const real = (window as any).HermesUI;
+  (window as any).HermesUI = { ...real, renderMermaid: render };
+  return () => {
+    (window as any).HermesUI = real;
+  };
+}
+
+describe('CommitteeView voice', () => {
+  // vitest's jsdom URL has its own createObjectURL. The tests that draw a
+  // diagram assign vi.fn()s; every test puts the originals back. Never delete
+  // them: Node's native URL.createObjectURL then throws on a jsdom Blob, and
+  // the unhandled rejection fails the run while every test reports passed.
+  const realCreate = (URL as any).createObjectURL;
+  const realRevoke = (URL as any).revokeObjectURL;
+  afterEach(() => {
+    (URL as any).createObjectURL = realCreate;
+    (URL as any).revokeObjectURL = realRevoke;
+  });
+
+  it('badges a kept take that broke the rules and one that was retaken', () => {
+    show(withVoice());
+    const entry = screen.getByTestId('entry-2');
+
+    expect(within(entry).getByText('broke the ground rules')).toBeInTheDocument();
+    expect(within(entry).getByText('retaken')).toBeInTheDocument();
+    expect(within(entry).getByText('no pointer')).toBeInTheDocument();
+    expect(within(entry).getByText('no example')).toBeInTheDocument();
+  });
+
+  it('says which take was kept and what it broke, in words', () => {
+    // entry 2 carries a mermaid segment: keep the renderer off the real mermaid
+    const restore = shelf(() => new Promise(() => {}));
+    try {
+      show(withVoice());
+      expand(2);
+
+      expect(screen.getByTestId('kept-take-2')).toHaveTextContent(
+        'kept take 3 of 3; broke: over the word cap; bold',
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it('collapses to the first line of the first text segment', () => {
+    show(withVoice());
+
+    expect(within(screen.getByTestId('entry-2')).getByText('Conceded: the staffing line is fiction.'))
+      .toBeInTheDocument();
+  });
+
+  it('draws a checked image from the run images folder, with its caption and the token', () => {
+    setToken('remote-typed-token');
+    const restore = shelf(() => new Promise(() => {}));
+    try {
+      show(withVoice());
+      const entry = expand(2);
+      const img = within(entry).getByAltText('staffing curve');
+
+      expect(img).toHaveAttribute(
+        'src',
+        '/api/runs/run-2/view/artifact?path=images%2Ft02-owner.svg&token=remote-typed-token',
+      );
+      expect(within(entry).getByText('engineers per week, flat after week 6')).toBeInTheDocument();
+    } finally {
+      restore();
+      clearToken();
+    }
+  });
+
+  it('shows an unchecked image as its caption and "image unavailable", and fetches nothing', () => {
+    const restore = shelf(() => new Promise(() => {}));
+    try {
+      show(withVoice());
+      const entry = expand(2);
+
+      expect(within(entry).getByText('their chart')).toBeInTheDocument();
+      expect(within(entry).getByText('a chart from elsewhere')).toBeInTheDocument();
+      expect(within(entry).getByTestId('image-unavailable')).toHaveTextContent('image unavailable');
+      expect(within(entry).queryByAltText('their chart')).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('never renders an img whose src is not the run images route or a blob', async () => {
+    (URL as any).createObjectURL = vi.fn(() => 'blob:hermes-1');
+    (URL as any).revokeObjectURL = vi.fn();
+    const restore = shelf(async () => '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    try {
+      // references voice.segments leaves in text (committee-voice Task 1 review): alt text
+      // across a line break, an escaped backtick, an unbalanced code span. On the turn as well
+      // as the verdict, so Segments' own disarm is what keeps them out of Markdown, and in a
+      // refused image's caption and description, which render as plain text.
+      const leaky = {
+        kind: 'text' as const,
+        text: 'See ![a\nb](http://evil.example/x.png) and \\`![x](http://evil.example/y.png)` and ``![z](http://evil.example/z.png)` here.',
+      };
+      const refused = { kind: 'image' as const, name: 'x', ref: 'http://evil.example/v.png',
+        caption: 'v ![c](http://evil.example/c.png)', description: 'd ![e](http://evil.example/e.png)', ok: false };
+      const verdict = {
+        ...run2.verdict!,
+        segments: [{ kind: 'text' as const, text: 'Approve with changes.' }, leaky, refused],
+      };
+      const { container } = show({
+        ...withVoice({ ...VOICED, segments: [...VOICED.segments!, leaky, refused] }),
+        verdict,
+      });
+      fireEvent.click(screen.getByTestId('expand-all'));
+      await screen.findByAltText('the pipeline');
+
+      const srcs = [...container.querySelectorAll('img')].map((img) => img.getAttribute('src') ?? '');
+      expect(srcs.length).toBeGreaterThan(0);
+      for (const src of srcs) {
+        expect(src.startsWith('/api/runs/run-2/view/artifact?path=images%2F') || src.startsWith('blob:'))
+          .toBe(true);
+        // an unchecked http image must not reach the route either, even encoded
+        expect(src).not.toContain('http');
+      }
+    } finally {
+      restore();
+    }
+  });
+
+  it('says a diagram is rendering while the host renders it', () => {
+    const restore = shelf(() => new Promise(() => {}));
+    try {
+      show(withVoice());
+      const entry = expand(2);
+
+      expect(within(entry).getByText('rendering diagram…')).toBeInTheDocument();
+      expect(within(entry).getByText('the pipeline')).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  it('draws a rendered diagram as a blob image, revoked when its source changes and on unmount', async () => {
+    const create = vi.fn().mockReturnValueOnce('blob:hermes-1').mockReturnValueOnce('blob:hermes-2');
+    const revoke = vi.fn();
+    (URL as any).createObjectURL = create;
+    (URL as any).revokeObjectURL = revoke;
+    const render = vi.fn(async () => '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    const restore = shelf(render);
+    try {
+      const { rerender, unmount } = show(withVoice());
+      const entry = expand(2);
+
+      expect(await screen.findByAltText('the pipeline')).toHaveAttribute('src', 'blob:hermes-1');
+      expect(render).toHaveBeenCalledWith('graph TD; A-->B');
+      expect(create.mock.calls[0][0].type).toBe('image/svg+xml');
+      // an <img> of the markup, never the markup itself in the page
+      expect(within(entry).getByTestId('figure-mermaid').querySelector('svg')).toBeNull();
+
+      const edited = VOICED.segments!.map((seg) =>
+        seg.kind === 'mermaid' ? { ...seg, source: 'graph TD; A-->C' } : seg,
+      );
+      rerender(<CommitteeView runId="run-2" data={withVoice({ ...VOICED, segments: edited })} refetch={noop} />);
+      expect(revoke).toHaveBeenCalledWith('blob:hermes-1');
+      await waitFor(() => expect(screen.getByAltText('the pipeline')).toHaveAttribute('src', 'blob:hermes-2'));
+      expect(render).toHaveBeenLastCalledWith('graph TD; A-->C');
+
+      unmount();
+      expect(revoke).toHaveBeenLastCalledWith('blob:hermes-2');
+    } finally {
+      restore();
+    }
+  });
+
+  it('shows the source and the reason when a diagram fails to render, rejected or thrown', async () => {
+    // The host's renderer rejects; one that throws instead must not escape the
+    // effect into PlaybookView's error boundary, which never clears.
+    const failures = [
+      () => Promise.reject(new Error('Parse error on line 1')),
+      () => {
+        throw new Error('Parse error on line 1');
+      },
+    ];
+    for (const fail of failures) {
+      const restore = shelf(fail);
+      try {
+        const { unmount } = show(withVoice());
+        const entry = expand(2);
+
+        expect(await within(entry).findByTestId('mermaid-error')).toHaveTextContent(
+          'diagram failed to render: Parse error on line 1',
+        );
+        expect(within(entry).getByTestId('mermaid-source')).toHaveTextContent('graph TD; A-->B');
+        unmount();
+      } finally {
+        restore();
+      }
+    }
+  });
+
+  it('shows the source as code when the host has no renderer', async () => {
+    const restore = shelf(undefined);
+    try {
+      show(withVoice());
+      const entry = expand(2);
+
+      expect(await within(entry).findByTestId('mermaid-source')).toHaveTextContent('graph TD; A-->B');
+      expect(within(entry).queryByText('rendering diagram…')).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
+  it('shows no voice badge and no take line on a turn from before voice', () => {
+    show();
+    const entry = expand(2);
+
+    expect(within(entry).queryByText('broke the ground rules')).toBeNull();
+    expect(within(entry).queryByText('retaken')).toBeNull();
+    expect(screen.queryByTestId('kept-take-2')).toBeNull();
   });
 });
