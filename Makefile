@@ -100,7 +100,6 @@ ui-test-committee: ## committee view end-to-end in a real browser (needs `make b
 	  HERMES_HOME=$(E2E_HOME) LOCAL_DIR=$(E2E_HOME)/local
 	@$(MAKE) --no-print-directory health PORT=$(E2E_PORT)
 	@cd web && HERMES_URL=http://127.0.0.1:$(E2E_PORT) HERMES_E2E_HOME=$(E2E_HOME) \
-	  HERMES_E2E_SERVER_HOME=/hermes-home \
 	  npx playwright test committee-view; \
 	  status=$$?; podman rm -f $(E2E_NAME) >/dev/null 2>&1 || true; exit $$status
 

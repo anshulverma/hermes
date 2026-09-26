@@ -16,23 +16,20 @@
  */
 import { test, expect, type Page } from '@playwright/test';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 
-/** Where the home is on THIS machine -- where the fixture is written. */
+/** Where the home is on THIS machine -- where the fixture is written. The
+ *  container sees the same directory at /hermes-home. */
 const HOME = process.env.HERMES_E2E_HOME ?? '';
-/** The same directory as the SERVER sees it. The container bind-mounts the home
- *  at /hermes-home, and view_data stats the artifact paths off the reductions
- *  inside that process, so the paths stored below must be the server's.
- *
- *  `make ui-test-committee` sets this explicitly. It used to be read, defaulted
- *  and set by nothing, so running the spec against a non-container server on
- *  the same home stored paths no process could stat and the artifact
- *  assertions threw on `null` with no clue why. */
-const SERVER_HOME = process.env.HERMES_E2E_SERVER_HOME ?? '/hermes-home';
 
 const RUN = 'committee-e2e';
-const ORIGINAL = `${SERVER_HOME}/e2e/proposal.md`;
-const REVISED = `${SERVER_HOME}/runs/${RUN}/revised/proposal.md`;
+/** Host paths, as the master records them -- and, like the real thing, paths no
+ *  process in the container can open: the artifact lives outside the home and
+ *  the revised copy is named by the HOST's home. The view and the route must
+ *  find every version by the run's own doc/ layout instead, which is the
+ *  container 404 this spec exists to catch. */
+const ORIGINAL = '/nonexistent-host/workspace/proposal.md';
+const REVISED = `${HOME}/runs/${RUN}/revised/proposal.md`;
 
 const ORIGINAL_TEXT =
   '# Consolidate the ingest pipelines\n\nStaffing: six engineers for two quarters.\n';
@@ -54,35 +51,52 @@ const ACTION_2 = 'Name the Q3 migration freeze in the sequencing section.';
 // over the environment), so seeding it here is what a real run does.
 const CAP = 7;
 
+// `answers_turn` and `delegated_by_turn` exactly as the playbook writes them:
+// always present, an int only on an owner turn (the reviewer it answers) and a
+// junior turn (the owner turn it applied), null everywhere else.
 const TURNS = [
   { turn: 1, role: 'senior_director', delivered: true,
     body: 'The bet is plausible. The staffing line is fiction.',
     stance: 'Leaning no while the ask is six engineers.',
-    request_floor: false, delegate: false, close: false, action: null, verified: null },
+    request_floor: false, delegate: false, close: false, action: null, verified: null,
+    answers_turn: null, delegated_by_turn: null },
   { turn: 2, role: 'owner', delivered: true,
     body: 'Conceded. I will cut the ask and say so in the copy.',
     stance: 'Willing to cut scope to land this quarter.',
-    request_floor: false, delegate: true, close: false, action: ACTION_1, verified: null },
+    request_floor: false, delegate: true, close: false, action: ACTION_1, verified: null,
+    answers_turn: 1, delegated_by_turn: null },
   { turn: 3, role: 'junior_ic', delivered: true,
     body: 'Applied the staffing cut to the revised copy.',
     stance: null,
-    request_floor: false, delegate: false, close: false, action: null, verified: true },
+    request_floor: false, delegate: false, close: false, action: null, verified: true,
+    answers_turn: null, delegated_by_turn: 2 },
   { turn: 4, role: 'manager', delivered: false,
     body: '', stance: null,
-    request_floor: false, delegate: false, close: false, action: null, verified: null },
+    request_floor: false, delegate: false, close: false, action: null, verified: null,
+    answers_turn: null, delegated_by_turn: null },
   { turn: 5, role: 'tpm', delivered: true,
     body: 'Sequencing still collides with the Q3 migration freeze.',
     stance: 'No until the freeze window is named in the plan.',
-    request_floor: true, delegate: false, close: false, action: null, verified: null },
+    request_floor: true, delegate: false, close: false, action: null, verified: null,
+    answers_turn: null, delegated_by_turn: null },
   { turn: 6, role: 'owner', delivered: true,
     body: 'Fair. Delegating the freeze-window edit.',
     stance: 'Willing to cut scope to land this quarter.',
-    request_floor: false, delegate: true, close: false, action: ACTION_2, verified: null },
+    request_floor: false, delegate: true, close: false, action: ACTION_2, verified: null,
+    answers_turn: 5, delegated_by_turn: null },
   { turn: 7, role: 'junior_ic', delivered: true,
     body: 'Re-read the sequencing section and made no change.',
     stance: null,
-    request_floor: false, delegate: false, close: false, action: null, verified: false },
+    request_floor: false, delegate: false, close: false, action: null, verified: false,
+    answers_turn: null, delegated_by_turn: 6 },
 ];
+
+/** What each snapshot under runs/<RUN>/doc/ holds. t07 DID NOT APPLY, so it is t03's text. */
+const SNAPSHOTS: Record<string, string> = {
+  '00-original.md': ORIGINAL_TEXT,
+  't03.md': REVISED_TEXT,
+  't07.md': REVISED_TEXT,
+};
 
 /** Verbatim `playbooks/committee/playbook.py:109-112`. */
 const SIMULATION =
@@ -106,6 +120,7 @@ const DECISION = {
   ],
   artifact_intact: true,
   dropped_delegation: null,
+  dropped_delegation_turn: null,
   dropped_floor_requests: ['tpm'],
   error: null,
   artifact: ORIGINAL,
@@ -115,10 +130,14 @@ const DECISION = {
 
 /** Idempotent: the run's rows are deleted before they are written again. */
 function seed(): void {
-  mkdirSync(`${HOME}/e2e`, { recursive: true });
-  writeFileSync(`${HOME}/e2e/proposal.md`, ORIGINAL_TEXT);
-  mkdirSync(`${HOME}/runs/${RUN}/revised`, { recursive: true });
-  writeFileSync(`${HOME}/runs/${RUN}/revised/proposal.md`, REVISED_TEXT);
+  // The snapshots the playbook writes at `open` and after each junior turn --
+  // and nothing at ORIGINAL or REVISED, so a server that still opened a
+  // recorded path would 404 here exactly as it did in the container.
+  rmSync(`${HOME}/runs/${RUN}`, { recursive: true, force: true });
+  mkdirSync(`${HOME}/runs/${RUN}/doc`, { recursive: true });
+  for (const [name, text] of Object.entries(SNAPSHOTS)) {
+    writeFileSync(`${HOME}/runs/${RUN}/doc/${name}`, text);
+  }
 
   const db = new DatabaseSync(`${HOME}/queue.db`);
   try {
@@ -198,12 +217,31 @@ test('the seeded run is served with a view', async ({ request }) => {
   // Reconstructed from the turns by `_floor`, not read from the decision: the
   // one request_floor in the fixture is tpm's.
   expect(data.verdict.dropped_floor_requests).toEqual(['tpm']);
-  expect(data.artifacts.original.bytes).toBe(ORIGINAL_TEXT.length);
-  expect(data.artifacts.revised.bytes).toBe(REVISED_TEXT.length);
 
-  const original = await request.get(`/api/runs/${RUN}/view/artifact?which=original`);
-  expect((await original.json()).text).toBe(ORIGINAL_TEXT);
-  expect((await request.get(`/api/runs/${RUN}/view/artifact?which=..%2F..%2Fetc%2Fpasswd`)).status())
+  // Every version, found by the run's own doc/ layout under the server's home.
+  const doc = data.document;
+  expect(doc.name).toBe('proposal.md');
+  expect(doc.captured).toBe(true);
+  expect(doc.original).toEqual({ path: 'doc/00-original.md', bytes: ORIGINAL_TEXT.length });
+  expect(doc.steps.map((s: { turn: number }) => s.turn)).toEqual([3, 7]);
+  expect(doc.steps[0]).toMatchObject({
+    path: 'doc/t03.md', bytes: REVISED_TEXT.length, verified: true,
+    owner_turn: 2, reviewer_turn: 1, provenance: 'recorded',
+  });
+  expect(doc.steps[1]).toMatchObject({
+    path: 'doc/t07.md', verified: false, owner_turn: 6, reviewer_turn: 5, provenance: 'recorded',
+  });
+  // t07 did not apply, so Final is what t03 left.
+  expect(doc.final).toEqual({
+    path: 'doc/t03.md', turn: 3, bytes: REVISED_TEXT.length, ruling: 'awaiting_ruling',
+  });
+
+  for (const version of [doc.original, ...doc.steps, doc.final]) {
+    const response = await request.get(`/api/runs/${RUN}/view/artifact?path=${version.path}`);
+    expect(response.status(), version.path).toBe(200);
+    expect((await response.json()).text).toBe(SNAPSHOTS[version.path.slice('doc/'.length)]);
+  }
+  expect((await request.get(`/api/runs/${RUN}/view/artifact?path=..%2F..%2Fetc%2Fpasswd`)).status())
     .toBe(400);
 });
 
@@ -244,6 +282,19 @@ test('the committee tab renders the meeting oldest-first', async ({ page }) => {
   await expect(page.locator('[data-testid="stamp-error"]')).toHaveCount(0);
   await expect(page.getByRole('button', { name: /accept/i })).toBeVisible();
   await expect(page.locator('[data-testid="verdict-recheck-3"]')).toContainText('APPLIED');
+});
+
+test('the document stepper shows Edit 1 as a diff, served inside the container', async ({ page }) => {
+  await openCommittee(page);
+  await page.locator('[data-testid="step-3"]').click();
+  await expect(page.locator('[data-testid="step-3"]')).toHaveAttribute('aria-current', 'step');
+
+  const rows = page.locator('[data-testid="diff-rows"]');
+  await expect(rows).toContainText('- Staffing: six engineers for two quarters.');
+  await expect(rows).toContainText('+ Staffing: two engineers for two quarters.');
+  await expect(page.locator('[data-testid="step-verdict"]')).toContainText('APPLIED');
+  await expect(page.locator('[data-testid="step-delegated"]')).toContainText(ACTION_1);
+  await expect(page.locator('[data-testid="doc-unreadable"]')).toHaveCount(0);
 });
 
 test('one injected script tag, and the host React is the only React', async ({ page }) => {
