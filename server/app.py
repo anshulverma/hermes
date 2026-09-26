@@ -3,7 +3,9 @@ import asyncio
 import json
 import math
 import os
+import re
 import secrets
+import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Annotated, Optional
@@ -63,10 +65,73 @@ VIEWS_OFF = frozenset({"0", "false", "no", "off"})
 # omission.
 ARTIFACT_MAX_CHARS = 2 * 1024 * 1024
 
+# The per-run directories a playbook view may read a file from. The view names
+# each file itself (its `view_data` emits every `path`); the server knows these
+# directory names and no file names. A second kind of per-run file is one more
+# entry here.
+RUN_FILE_DIRS = ("doc",)
+
+# A file name inside one of those directories: no leading dot (so a temp file
+# being written is never served), no separator, no NUL, bounded.
+_RUN_FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
 # A metrics chart never needs more bars than a day of minutes. Past this the
 # bucket widens instead, so a run row with a bad created_at (or ?bucket_s=1 on
 # a long run) cannot ask for millions of buckets.
 METRICS_MAX_BUCKETS = 1440
+
+
+def _run_file(home: Path, run_id: str, path: str) -> Path:
+    """The file ``path`` names inside ``home/runs/<run_id>/``, or an HTTPException.
+
+    ``path`` must be exactly ``<dir>/<name>`` with ``dir`` in RUN_FILE_DIRS
+    (400 otherwise: empty, absolute, ``..``, NUL, a backslash, three parts).
+    Then it must resolve to a regular file still inside ``runs/<run_id>/<dir>/``
+    (404 otherwise), which refuses a symlink anywhere in the chain that leads
+    out. Built only from a validated run id and this process's own home, the
+    way ``engine.trace.trace_path`` builds a trace path -- never from a path a
+    reduction recorded.
+    """
+    if not trace._RUN_ID_OK.match(run_id):
+        raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+    parts = path.split("/")
+    if (
+        len(parts) != 2
+        or parts[0] not in RUN_FILE_DIRS
+        or not _RUN_FILE_NAME.fullmatch(parts[1])
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"path must be <dir>/<name> with dir one of {list(RUN_FILE_DIRS)}, "
+                   f"not {path!r}",
+        )
+    root = (home / "runs" / run_id).resolve()
+    missing = HTTPException(status_code=404, detail=f"Run {run_id!r} has no {path}")
+    try:
+        target = (root / parts[0] / parts[1]).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise missing
+    if not target.is_relative_to(root / parts[0]) or not target.is_file():
+        raise missing
+    return target
+
+
+def _open_regular(target: Path) -> int:
+    """A read-only fd on ``target`` if it is still a regular file, else a 404.
+
+    Shared by every reader of a ``_run_file`` result, because a worker-written
+    directory can swap the file between the resolve and the open:
+    ``O_NOFOLLOW`` refuses a symlink put there since, ``fstat`` a FIFO or a
+    device, and ``O_NONBLOCK`` keeps the open itself from hanging on a FIFO.
+    """
+    try:
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise HTTPException(status_code=404, detail=f"{target.name} is not readable")
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise HTTPException(status_code=404, detail=f"{target.name} is not a regular file")
+    return fd
 
 
 def view_playbook(name: str):
@@ -2101,61 +2166,41 @@ def create_app(bind: str | None = None) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/view/artifact")
     def get_run_view_artifact(
-        run_id: str, which: str, _: None = Depends(require_auth_read)
+        run_id: str, path: str = "", _: None = Depends(require_auth_read)
     ) -> dict[str, Any]:
-        """One of the run's two artifacts, as text, on demand.
+        """One file from the run's own directory, as text, on demand.
 
-        The path is read off the newest reduction that names one: the playbook
-        records the absolute paths it used, and the server never builds one.
-        ``which`` therefore chooses between two literal dict keys and is never
-        itself any part of a path.
+        ``path`` is ``<dir>/<name>`` under ``runs/<run_id>/`` in THIS process's
+        HERMES_HOME; ``view_data`` names every file a view may ask for. No
+        reduction is read and no recorded path is opened -- those are the
+        master's host paths, and a server in a container that mounts only the
+        home cannot open them. ``path`` defaults to "" so a missing one reaches
+        the handler and gets its 400 after the gate, not FastAPI's 422 before.
         """
         home = config.resolve_home()
-        db_path = str(home / "queue.db")
-        conn = connect(db_path)
+        conn = connect(str(home / "queue.db"))
         try:
             row = conn.execute(
                 "SELECT playbook FROM runs WHERE id=?", (run_id,)
             ).fetchone()
-            if row is None:
-                raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
-            # The gate goes ABOVE the `which` check: with the kill switch on,
-            # all three routes 404 (criterion 3), and a 400 here would tell a
-            # caller the route is live on a server that has turned it off.
-            if view_playbook(row[0]) is None:
-                raise HTTPException(status_code=404, detail=f"Run {run_id!r} has no view")
-            if which not in ("original", "revised"):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"which must be 'original' or 'revised', not {which!r}",
-                )
-            rows = conn.execute(
-                "SELECT json FROM reductions WHERE run_id=? ORDER BY id DESC", (run_id,)
-            ).fetchall()
         finally:
             conn.close()
-
-        key = "artifact" if which == "original" else "revised"
-        for (raw,) in rows:
-            path = json.loads(raw).get(key)
-            if isinstance(path, str) and path:
-                try:
-                    target = Path(path)
-                    # A regular file and nothing else. `read_text` on a FIFO
-                    # never returns -- it blocks this worker thread for as long
-                    # as nobody writes -- and on /dev/zero it is a MemoryError.
-                    if not target.is_file():
-                        break
-                    with target.open(encoding="utf-8", errors="replace") as handle:
-                        text = handle.read(ARTIFACT_MAX_CHARS + 1)
-                except (OSError, ValueError):
-                    break
-                return {
-                    "text": text[:ARTIFACT_MAX_CHARS],
-                    "truncated": len(text) > ARTIFACT_MAX_CHARS,
-                }
-        raise HTTPException(
-            status_code=404, detail=f"Run {run_id!r} has no {which} artifact"
-        )
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Run {run_id!r} not found")
+        # The gate goes ABOVE every 400: with the kill switch on, all three
+        # routes 404 (criterion 3), and a 400 here would tell a caller the
+        # route is live on a server that has turned it off.
+        if view_playbook(row[0]) is None:
+            raise HTTPException(status_code=404, detail=f"Run {run_id!r} has no view")
+        fd = _open_regular(_run_file(home, run_id, path))
+        try:
+            with open(fd, encoding="utf-8", errors="replace") as handle:
+                text = handle.read(ARTIFACT_MAX_CHARS + 1)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail=f"Run {run_id!r} has no readable {path}")
+        return {
+            "text": text[:ARTIFACT_MAX_CHARS],
+            "truncated": len(text) > ARTIFACT_MAX_CHARS,
+        }
 
     return app

@@ -167,144 +167,178 @@ def test_view_route_404s_a_run_without_a_view(client, temp_home, blind):
 def test_view_route_404s_an_unknown_run(client, temp_home, viewed):
     """404, and no side effect: a GET for a made-up run writes nothing.
 
-    ``view_data`` reaches the filesystem only through paths the reductions
-    carry. Were it to call ``thread.path()`` instead, this GET would mkdir
-    ``runs/<whatever-the-url-said>/`` under HERMES_HOME.
+    Neither route may mkdir ``runs/<whatever-the-url-said>/`` under HERMES_HOME.
     """
     assert client.get("/api/runs/no-such-run/view").status_code == 404
     assert client.get(
-        "/api/runs/no-such-run/view/artifact?which=original").status_code == 404
+        "/api/runs/no-such-run/view/artifact?path=doc/t03.md").status_code == 404
     assert not (temp_home / "runs").exists()
 
 
-def test_artifact_route_reads_the_path_off_the_newest_reduction(
-    client, temp_home, viewed, tmp_path
-):
-    original = tmp_path / "proposal.md"
-    original.write_text("the original\n", encoding="utf-8")
-    revised = tmp_path / "revised.md"
-    revised.write_text("the revised copy\n", encoding="utf-8")
-    run_id = _run_row(temp_home, "run-view", "stubview")
-    _reduction_row(temp_home, run_id,
-                   {"artifact": str(original), "revised": str(revised)})
+def _doc(home: Path, run_id: str) -> Path:
+    """``runs/<run_id>/doc/`` under the server's own home -- where the route reads."""
+    doc = home / "runs" / run_id / "doc"
+    doc.mkdir(parents=True, exist_ok=True)
+    return doc
 
-    assert client.get(f"/api/runs/{run_id}/view/artifact?which=original").json() == {
+
+def test_artifact_route_serves_a_file_from_the_runs_own_directory(
+    client, temp_home, viewed
+):
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    doc = _doc(temp_home, run_id)
+    (doc / "00-original.md").write_text("the original\n", encoding="utf-8")
+    (doc / "t03.md").write_text("after turn 3\n", encoding="utf-8")
+
+    assert client.get(f"/api/runs/{run_id}/view/artifact?path=doc/00-original.md").json() == {
         "text": "the original\n", "truncated": False}
-    assert client.get(f"/api/runs/{run_id}/view/artifact?which=revised").json() == {
-        "text": "the revised copy\n", "truncated": False}
+    assert client.get(f"/api/runs/{run_id}/view/artifact?path=doc/t03.md").json() == {
+        "text": "after turn 3\n", "truncated": False}
 
 
-def test_artifact_route_400s_an_unknown_which(client, temp_home, viewed):
-    """``which`` names a KEY on the reduction, so it is one of exactly two.
+def test_artifact_route_reads_no_reduction(client, temp_home, viewed, tmp_path):
+    """A readable file a reduction names is never what the route serves.
 
-    Everything else is 400 -- including every shape of traversal, because the
-    only thing a traversal could reach here is a dict lookup that misses.
+    That path is the master's; in a container it is not there at all, which is
+    exactly the 404 this route used to give. Only ``runs/<id>/doc/`` counts.
     """
+    elsewhere = tmp_path / "proposal.md"
+    elsewhere.write_text("the host's copy\n", encoding="utf-8")
     run_id = _run_row(temp_home, "run-view", "stubview")
-    assert client.get(
-        f"/api/runs/{run_id}/view/artifact?which=sideways").status_code == 400
-    for which in ("../../../etc/passwd", "/etc/passwd", "..%2F..%2Fetc%2Fpasswd",
-                  "original/../../../etc/passwd", "", "ORIGINAL", "artifact"):
-        response = client.get(
-            f"/api/runs/{run_id}/view/artifact", params={"which": which})
-        assert response.status_code == 400, which
-        assert "root:" not in response.text
+    _reduction_row(temp_home, run_id, {"artifact": str(elsewhere), "revised": str(elsewhere)})
+
+    url = f"/api/runs/{run_id}/view/artifact?path=doc/00-original.md"
+    assert client.get(url).status_code == 404
+    (_doc(temp_home, run_id) / "00-original.md").write_text("the snapshot\n", encoding="utf-8")
+    assert client.get(url).json()["text"] == "the snapshot\n"
 
 
-def test_artifact_route_404s_a_revised_copy_that_does_not_exist(
-    client, temp_home, viewed, tmp_path
+@pytest.mark.parametrize("path", [
+    "", None, "../../etc/passwd", "/etc/passwd", "doc/../../x", "doc/../thread.md",
+    "doc", "thread.md", "traces/1.jsonl", "doc/a/b", "doc/t03\x00.md",
+])
+def test_artifact_route_400s_a_path_that_is_not_dir_slash_name(
+    client, temp_home, viewed, path
 ):
-    """The original is READABLE here on purpose: serving it when the operator
-    asked for the revised copy is exactly the confusion spec §8 says changed a
-    live verdict, and with an unreadable original that fallback 404s anyway."""
-    original = tmp_path / "proposal.md"
-    original.write_text("the original\n", encoding="utf-8")
     run_id = _run_row(temp_home, "run-view", "stubview")
-    _reduction_row(temp_home, run_id, {"artifact": str(original), "revised": ""})
+    (_doc(temp_home, run_id).parent / "thread.md").write_text("root:x:0:0\n", encoding="utf-8")
+    params = {} if path is None else {"path": path}
 
-    response = client.get(f"/api/runs/{run_id}/view/artifact?which=revised")
+    response = client.get(f"/api/runs/{run_id}/view/artifact", params=params)
+
+    assert response.status_code == 400, path
+    assert "root:" not in response.text
+
+
+def _missing(doc: Path, outside: Path) -> None:
+    pass
+
+
+def _symlink_to_passwd(doc: Path, outside: Path) -> None:
+    (doc / "t03.md").symlink_to("/etc/passwd")
+
+
+def _doc_symlinked_out(doc: Path, outside: Path) -> None:
+    (outside / "t03.md").write_text("outside the run\n", encoding="utf-8")
+    doc.rmdir()
+    doc.symlink_to(outside, target_is_directory=True)
+
+
+def _a_directory(doc: Path, outside: Path) -> None:
+    (doc / "t03.md").mkdir()
+
+
+def _a_fifo(doc: Path, outside: Path) -> None:
+    os.mkfifo(doc / "t03.md")
+
+
+@pytest.mark.parametrize("prepare", [
+    _missing, _symlink_to_passwd, _doc_symlinked_out, _a_directory, _a_fifo,
+])
+def test_artifact_route_404s_anything_but_a_regular_file_inside_the_run(
+    client, temp_home, viewed, tmp_path, prepare
+):
+    """A FIFO would block the worker thread and a directory is no file; a symlink
+    anywhere in the chain that leaves ``runs/<id>/doc/`` is not the run's."""
+    run_id = _run_row(temp_home, "run-view", "stubview")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    prepare(_doc(temp_home, run_id), outside)
+
+    response = client.get(f"/api/runs/{run_id}/view/artifact?path=doc/t03.md")
+
     assert response.status_code == 404
-    assert "the original" not in response.text
+    assert "root:" not in response.text
+    assert "outside the run" not in response.text
 
 
-def test_artifact_route_404s_a_playbook_without_a_view(
-    client, temp_home, blind, tmp_path
-):
-    """The other side of the kill-switch test: a readable artifact, and the
-    route still refuses because this playbook ships no view."""
-    art = tmp_path / "blind.md"
-    art.write_text("readable\n", encoding="utf-8")
-    run_id = _run_row(temp_home, "run-blind", "stubblind")
-    _reduction_row(temp_home, run_id, {"artifact": str(art), "revised": str(art)})
+def test_open_regular_refuses_a_symlink_and_a_fifo_swapped_in_after_the_resolve(tmp_path):
+    """The fd-level check every reader of a ``_run_file`` result goes through."""
+    from fastapi import HTTPException
 
-    assert client.get(
-        f"/api/runs/{run_id}/view/artifact?which=original").status_code == 404
+    from server.app import _open_regular
 
+    real = tmp_path / "t03.md"
+    real.write_text("fine\n", encoding="utf-8")
+    fd = _open_regular(real)
+    os.close(fd)
 
-def test_artifact_route_refuses_anything_that_is_not_a_regular_file(
-    client, temp_home, viewed, tmp_path
-):
-    """A FIFO blocks the worker thread until somebody writes to it -- measured,
-    killed at 45s -- and a character device is an unbounded read. The route
-    stats before it reads, so both are simply "no artifact"."""
-    fifo = tmp_path / "pipe.md"
+    link = tmp_path / "t04.md"
+    link.symlink_to(real)
+    fifo = tmp_path / "t05.md"
     os.mkfifo(fifo)
-    run_id = _run_row(temp_home, "run-view", "stubview")
-    _reduction_row(temp_home, run_id, {"artifact": str(fifo), "revised": str(tmp_path)})
+    for target in (link, fifo):
+        with pytest.raises(HTTPException) as caught:
+            _open_regular(target)
+        assert caught.value.status_code == 404
+
+
+def test_artifact_route_404s_a_playbook_without_a_view(client, temp_home, blind):
+    """The other side of the kill-switch test: a readable file, and the route
+    still refuses because this playbook ships no view."""
+    run_id = _run_row(temp_home, "run-blind", "stubblind")
+    (_doc(temp_home, run_id) / "t03.md").write_text("readable\n", encoding="utf-8")
 
     assert client.get(
-        f"/api/runs/{run_id}/view/artifact?which=original").status_code == 404
-    # ...and a directory, which `read_text` raises IsADirectoryError on.
-    assert client.get(
-        f"/api/runs/{run_id}/view/artifact?which=revised").status_code == 404
+        f"/api/runs/{run_id}/view/artifact?path=doc/t03.md").status_code == 404
 
 
-def test_artifact_route_truncates_a_file_larger_than_the_cap(
-    client, temp_home, viewed, tmp_path
+@pytest.mark.parametrize("extra, truncated", [(1, True), (0, False)])
+def test_artifact_route_caps_the_read_in_characters(
+    client, temp_home, viewed, extra, truncated
 ):
-    """The committee's artifact is an operator-chosen file of unbounded size and
-    the revised copy is a byte copy of it, so "large" needs no malice and no
-    bug. The response says it was cut rather than lying by omission."""
+    """The document is an operator-chosen file of unbounded size; over the cap
+    the response says it was cut rather than lying by omission."""
     from server.app import ARTIFACT_MAX_CHARS
 
-    big = tmp_path / "big.md"
-    big.write_text("x" * (ARTIFACT_MAX_CHARS + 500), encoding="utf-8")
     run_id = _run_row(temp_home, "run-view", "stubview")
-    _reduction_row(temp_home, run_id, {"artifact": str(big)})
+    (_doc(temp_home, run_id) / "t03.md").write_text(
+        "x" * (ARTIFACT_MAX_CHARS + extra), encoding="utf-8")
 
-    body = client.get(f"/api/runs/{run_id}/view/artifact?which=original").json()
-    assert body["truncated"] is True
+    body = client.get(f"/api/runs/{run_id}/view/artifact?path=doc/t03.md").json()
+
+    assert body["truncated"] is truncated
     assert len(body["text"]) == ARTIFACT_MAX_CHARS
 
 
 def test_kill_switch_404s_all_three_routes_and_clears_has_view(
-    client, temp_home, viewed, monkeypatch, tmp_path
+    client, temp_home, viewed, monkeypatch
 ):
-    """The artifact must be one the route WOULD serve, or the 404 proves nothing.
-
-    Without a reduction naming a readable file this route 404s on "no original
-    artifact" whether the switch is on or off, and three mutations to the route
-    -- bypassing the switch, deleting the has-view gate outright, and falling
-    back to the original when `revised` names nothing -- all survive.
-    """
-    art = tmp_path / "served.md"
-    art.write_text("would be served\n", encoding="utf-8")
+    """The file must be one the route WOULD serve, or the 404 proves nothing."""
     run_id = _run_row(temp_home, "run-view", "stubview")
-    _reduction_row(temp_home, run_id, {"artifact": str(art), "revised": str(art)})
+    (_doc(temp_home, run_id) / "t03.md").write_text("would be served\n", encoding="utf-8")
     assert client.get(
-        f"/api/runs/{run_id}/view/artifact?which=revised").status_code == 200
+        f"/api/runs/{run_id}/view/artifact?path=doc/t03.md").status_code == 200
 
     monkeypatch.setenv("HERMES_PLAYBOOK_VIEWS", "0")
     assert client.get("/api/playbooks/stubview/view.js").status_code == 404
     assert client.get(f"/api/runs/{run_id}/view").status_code == 404
     assert client.get(
-        f"/api/runs/{run_id}/view/artifact?which=original").status_code == 404
-    assert client.get(
-        f"/api/runs/{run_id}/view/artifact?which=revised").status_code == 404
-    # Including a bad `which`: the gate is above the enum check, so a server
+        f"/api/runs/{run_id}/view/artifact?path=doc/t03.md").status_code == 404
+    # Including a malformed path: the gate is above the path check, so a server
     # with the feature off never answers 400 and confirms the route is live.
     assert client.get(
-        f"/api/runs/{run_id}/view/artifact?which=evil").status_code == 404
+        f"/api/runs/{run_id}/view/artifact?path=../x").status_code == 404
     assert client.get(f"/api/runs/{run_id}").json()["has_view"] is False
 
 
@@ -376,7 +410,7 @@ def test_non_loopback_gates_all_three_routes(temp_home, viewed):
     paths = [
         "/api/playbooks/stubview/view.js",
         f"/api/runs/{run_id}/view",
-        f"/api/runs/{run_id}/view/artifact?which=original",
+        f"/api/runs/{run_id}/view/artifact?path=doc/t03.md",
     ]
     for path in paths:
         assert client.get(path).status_code == 401, path

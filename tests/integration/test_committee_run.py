@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import time
 from pathlib import Path
@@ -646,6 +647,75 @@ def test_delegated_edit_writes_only_the_revised_copy(
     ]
     assert decision["dropped_delegation"] is None
     assert _heading(15, cast.JUNIOR) in [h for h, _ in _turns(run_id)]
+
+
+def test_every_version_is_served_from_a_home_that_moved_away_from_the_master(
+    home, source_repo, artifact, conn, local_site, monkeypatch
+):
+    """The container, in one process: the server's home is not the master's.
+
+    The master records host paths on every reduction. Move the home somewhere
+    else and delete the original, and every one of those paths is dead -- which
+    is what the control plane in its container sees. Every document version
+    must still be listed with a size and served, because both come from the
+    fixed ``runs/<id>/doc/`` layout under the SERVER's own home.
+    """
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from engine import log
+    from server.app import create_app
+
+    # create_app() configures the process-wide "hermes" logger once, onto this
+    # test's captured stderr; put it back so later tests' capture still works.
+    hermes_logger = logging.getLogger("hermes")
+    monkeypatch.setattr(hermes_logger, "handlers", list(hermes_logger.handlers))
+    monkeypatch.setattr(hermes_logger, "level", hermes_logger.level)
+    monkeypatch.setattr(log, "_configured", log._configured)
+
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(
+        owner_block=OWNER_DELEGATES, owner_phases={"t02-owner", "t15-owner"}
+    )
+    run_id = "committee-20260925-000011"
+    handed = artifact.read_text()
+
+    host = _start(conn, run_id, pb, local_site, agent)
+    assert _drive(conn, run_id, pb, local_site, agent, host) == "running"
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
+    assert "t03-junior_ic" in _dispatched_phases(conn, run_id)
+    assert "t16-junior_ic" in _dispatched_phases(conn, run_id)
+
+    first_home = Path(os.environ["HERMES_HOME"])
+    copy = sqlite3.connect(first_home / "queue.db")
+    conn.backup(copy)
+    copy.close()
+    moved = first_home.parent / "server-home"
+    first_home.rename(moved)
+    artifact.unlink()
+    monkeypatch.setenv("HERMES_HOME", str(moved))
+
+    client = TestClient(create_app())
+    document = client.get(f"/api/runs/{run_id}/view").json()["document"]
+
+    assert document["captured"] is True
+    assert [step["turn"] for step in document["steps"]] == [3, 16]
+    assert all(step["bytes"] is not None for step in document["steps"])
+    assert document["final"]["path"] == document["steps"][-1]["path"]
+    assert document["final"]["ruling"] == "accepted"
+    for version in [document["original"], *document["steps"], document["final"]]:
+        response = client.get(
+            f"/api/runs/{run_id}/view/artifact", params={"path": version["path"]}
+        )
+        assert response.status_code == 200, version["path"]
+        on_disk = (moved / "runs" / run_id / version["path"]).read_text()
+        assert response.json()["text"] == on_disk
+        assert len(on_disk.encode()) == version["bytes"]
+    doc = moved / "runs" / run_id / "doc"
+    assert (doc / "00-original.md").read_text() == handed
+    assert (doc / "t03.md").read_text().count(EDIT_ACTION) == 1
+    assert (doc / "t16.md").read_text().count(EDIT_ACTION) == 2
 
 
 def test_failed_recheck_is_named_in_the_decision(
