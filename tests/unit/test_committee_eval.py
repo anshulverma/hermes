@@ -2291,6 +2291,16 @@ def test_eval_json_path_and_ledger_writes(tmp_path, monkeypatch):
     assert ev.read_ledger(ledger) is None
 
 
+def test_read_ledger_nested_past_the_recursion_limit_is_unknown(tmp_path):
+    """D10: a line json cannot parse for depth (RecursionError, not ValueError)
+    may be an anchor, so the ledger cannot be known: None, never a raise and
+    never the line silently skipped."""
+    ledger = tmp_path / "evals.jsonl"
+    ledger.write_bytes(b'{"source": "eval", "n": 1}\n' + b"[" * 200_000 + b"\n")
+    assert E.read_ledger(ledger) is None
+    assert E.read_ledger(ledger, limit=E.LEDGER_MAX) is None
+
+
 # --- the registered committee-eval playbook (spec D1) ----------------------------
 
 

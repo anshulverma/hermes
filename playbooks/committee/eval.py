@@ -1569,8 +1569,10 @@ def read_ledger(path: Path, limit: int | None = None) -> list[dict] | None:
     (unknown) past ``limit`` bytes, and for anything that is not a readable
     regular file: a symlink, a FIFO, a directory or a permission error, read
     through ``thread.read_regular``. Lines that do not parse as a JSON object
-    are skipped. It splits on "\\n" only, because a canonical line may hold a
-    literal U+2028, which ``splitlines`` would cut. It creates nothing.
+    are skipped. None too for a line nested past json's recursion limit, which
+    may be an object (an anchor) no one can read. It splits on "\\n" only,
+    because a canonical line may hold a literal U+2028, which ``splitlines``
+    would cut. It creates nothing.
     """
     try:
         size = os.lstat(path).st_size
@@ -1591,6 +1593,8 @@ def read_ledger(path: Path, limit: int | None = None) -> list[dict] | None:
             line = json.loads(raw)
         except ValueError:
             continue
+        except RecursionError:
+            return None
         if isinstance(line, dict):
             lines.append(line)
     return lines

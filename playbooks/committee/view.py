@@ -405,7 +405,10 @@ def _evaluation(run_id: str) -> dict | None:
 
     Creates nothing -- no mkdir, no ledger file -- and never raises: this runs
     inside a GET, so an oversized or hand-edited file is an error state on the
-    page, not a 500.
+    page, not a 500. Only a missing ``runs/<id>/`` or eval.json is None; a
+    symlink at either level (dangling too) is an error, as in ``_size``. Every
+    field reaches the UI as the type it renders or null, and no error names an
+    absolute path.
     """
     # Imported here rather than at module scope: eval imports playbook, which
     # imports this module, so importing it at module scope would be a cycle.
@@ -414,21 +417,34 @@ def _evaluation(run_id: str) -> dict | None:
     def error(message: str) -> dict:
         return {"state": "error", "error": message}
 
+    def too_big(size: int) -> dict:
+        return error(f"eval.json is {size} bytes, over the {ev.EVAL_JSON_MAX}-byte limit")
+
     path = thread.run_file(run_id, "eval.json")
     try:
-        size = os.stat(path).st_size
+        # lstat: a symlinked runs/<id> would render an eval.json from outside
+        # this home as this run's.
+        if not stat.S_ISDIR(os.lstat(path.parent).st_mode):
+            return error(f"runs/{run_id} is not a directory")
+        info = os.lstat(path)
     except FileNotFoundError:
         return None
-    except (OSError, ValueError) as exc:
-        return error(f"eval.json could not be read: {exc}")
-    if size > ev.EVAL_JSON_MAX:
-        return error(f"eval.json is {size} bytes, over the {ev.EVAL_JSON_MAX}-byte limit")
+    except (OSError, ValueError) as exc:  # strerror, never the path str(exc) carries
+        return error(f"eval.json could not be read: {getattr(exc, 'strerror', None) or 'bad path'}")
+    if not stat.S_ISREG(info.st_mode):
+        return error("eval.json is not a regular file")
+    if info.st_size > ev.EVAL_JSON_MAX:
+        return too_big(info.st_size)
     data = thread.read_regular(path)
     if data is None:
         return error("eval.json is not a readable regular file")
+    if len(data) > ev.EVAL_JSON_MAX:  # it grew between the lstat and the read
+        return too_big(len(data))
     try:
         body = json.loads(data.decode("utf-8"))
-    except ValueError as exc:  # a UnicodeDecodeError is a ValueError too
+    # A UnicodeDecodeError is a ValueError too; RecursionError is nesting past
+    # json's limit, which a 256 KB file of "[" reaches.
+    except (ValueError, RecursionError) as exc:
         return error(f"eval.json is not JSON: {exc}")
     if not isinstance(body, dict):
         return error("eval.json is not a JSON object")
@@ -453,23 +469,28 @@ def _evaluation(run_id: str) -> dict | None:
             else:
                 label = labels.get(rubric.get(dim), "uncalibrated")
             dimensions[dim] = {
-                "score": doc.get("score"),
+                "score": ev._score(doc.get("score")),
                 "scorer": "judge" if dim in ev.JUDGE_DIMS else "deterministic",
-                "quote": next((item.get("quote") for item in doc.get("evidence") or []
-                               if item.get("verified") is True), None),
+                "quote": _str(next((item.get("quote") for item in doc.get("evidence") or []
+                                    if item.get("verified") is True), None)),
                 "calibration": label,
             }
+        evaluated_at = body.get("evaluated_at")
         return {
             "state": "ok",
-            "rubric_version": body.get("rubric_version"),
-            "evaluated_at": body.get("evaluated_at"),
-            "headline": body.get("headline"),
-            "judge_status": judge.get("status"),
+            "rubric_version": _str(body.get("rubric_version")),
+            "evaluated_at": evaluated_at if isinstance(evaluated_at, (int, float))
+            and not isinstance(evaluated_at, bool) else None,
+            "headline": _str(body.get("headline")),
+            "judge_status": _str(judge.get("status")),
             # Not in C7's key list, but its UI table shows "the judge status and
-            # error", and nothing else in the payload carries the error.
-            "judge_error": judge.get("error"),
+            # error", and nothing else in the payload carries the error. Shown
+            # as written: judge.reduce writes it in the master, and the page
+            # is the same user's.
+            "judge_error": _str(judge.get("error")),
             "dimensions": dimensions,
-            "flags": [flag.get("id") for flag in body.get("flags") or []],
+            "flags": [flag["id"] for flag in _as_list(body.get("flags"))
+                      if isinstance(flag, dict) and isinstance(flag.get("id"), str)],
         }
     except Exception as exc:  # schema 1 with junk inside, or a hand-edited ledger
         return error(f"eval.json could not be read: {exc!r}")
@@ -506,6 +527,11 @@ def _turn_no(doc: dict) -> int:
 def _int(value: object) -> int | None:
     """``value`` when it is an int and not a bool, otherwise None."""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _str(value: object) -> str | None:
+    """``value`` when it is a str, otherwise None: an object is a React crash."""
+    return value if isinstance(value, str) else None
 
 
 def _cap(reductions: list[Reduction]) -> int:

@@ -860,6 +860,14 @@ def test_evaluation_payload_states(tmp_path):
                         "edits_address_concerns": "uncalibrated",
                         "concern_coverage": "calibrated", **deterministic}
 
+    # Labelled by eval.json's OWN version of each dimension: a file scored
+    # under an older verdict_grounded is not vouched for by today's anchors.
+    old = dict(body, rubric=dict(versions, verdict_grounded="verdict_grounded@0"))
+    eval_json.write_text(json.dumps(old), encoding="utf-8")
+    assert labels()["verdict_grounded"] == "uncalibrated"
+    assert labels()["concern_coverage"] == "calibrated"
+    eval_json.write_text(json.dumps(body), encoding="utf-8")
+
     # A ledger that cannot be read (a symlink, which read_ledger refuses) is
     # unknown, never "nothing anchored".
     unknown = {"verdict_grounded": "unknown", "edits_address_concerns": "unknown",
@@ -875,3 +883,108 @@ def test_evaluation_payload_states(tmp_path):
     with open(ledger, "ab") as handle:
         handle.write(b"\n" * ev.LEDGER_MAX)
     assert labels() == unknown
+
+
+def test_evaluation_refuses_what_it_cannot_trust(tmp_path, monkeypatch):
+    """T26, the edges (committee-eval C7). view_data never raises, and an
+    eval.json it cannot trust is the error state -- never ok, never None: JSON
+    nested past the parser's recursion limit, a symlinked eval.json (dangling
+    too) or runs/<id>, a file that grew past 256 KB between the size check and
+    the read, one read_regular refuses, and schema-1 junk inside. Only a missing
+    runs/<id> or eval.json is None. No error names an absolute path."""
+    home = str(tmp_path.resolve())
+    run_dir = tmp_path / "runs" / RUN_ID
+    eval_json = run_dir / "eval.json"
+    body = json.dumps(_eval_body(home, RUN_ID, 1789000000.0, ev.dimension_versions()))
+
+    def evaluation():
+        return view_data(_run("decision"), [])["evaluation"]
+
+    def refused(why):
+        out = evaluation()
+        assert out["state"] == "error" and why in out["error"], out
+        assert str(tmp_path) not in out["error"] and home not in out["error"], out
+
+    # `runs` is a file, so lstat(runs/<id>) fails with ENOTDIR: its strerror, no path.
+    (tmp_path / "runs").write_text("")
+    refused("Not a directory")
+    (tmp_path / "runs").unlink()
+    assert evaluation() is None
+
+    run_dir.mkdir(parents=True)
+    eval_json.write_text("[" * 200_000, encoding="utf-8")  # RecursionError, not ValueError
+    refused("not JSON")
+
+    eval_json.write_text(body, encoding="utf-8")
+    real_read = thread.read_regular
+    monkeypatch.setattr(thread, "read_regular", lambda path: b" " * (ev.EVAL_JSON_MAX + 1))
+    refused("limit")  # it grew after the size check
+    monkeypatch.setattr(thread, "read_regular", lambda path: None)
+    refused("not a readable regular file")
+    monkeypatch.setattr(thread, "read_regular", real_read)
+    assert evaluation()["state"] == "ok"
+
+    eval_json.write_text(json.dumps(dict(json.loads(body), dimensions=[1])), encoding="utf-8")
+    refused("could not be read")  # the catch-all: schema 1 with junk inside
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "eval.json").write_text(body, encoding="utf-8")
+    eval_json.unlink()
+    eval_json.symlink_to(outside / "eval.json")
+    refused("not a regular file")
+    eval_json.unlink()
+    eval_json.symlink_to(tmp_path / "nowhere.json")  # dangling: not "never scored"
+    refused("not a regular file")
+    eval_json.unlink()
+    run_dir.rmdir()
+    run_dir.symlink_to(outside, target_is_directory=True)  # an eval.json outside the home
+    refused("not a directory")
+    run_dir.unlink()
+    assert evaluation() is None
+
+
+def test_evaluation_payload_carries_only_what_the_ui_renders(tmp_path):
+    """C7: every field reaches the UI as the type it renders, whatever the file
+    holds. A score is an int or null (via eval's _score: no "high", no bool);
+    headline, rubric_version, judge status and error, and each quote are a str
+    or null; evaluated_at is a number or null; flags are string ids only. The
+    quote is the first whose ``verified`` is exactly True, and the scorer comes
+    from JUDGE_DIMS, never from the file."""
+    doc = _eval_body(str(tmp_path.resolve()), RUN_ID, 1789000000.0, ev.dimension_versions())
+    dims = doc["dimensions"]
+    dims["verdict_grounded"]["score"] = "high"
+    dims["efficiency"].update(score=True, scorer="judge")
+    dims["concision"]["scorer"] = "judge"
+    dims["concern_coverage"].update(scorer="deterministic", evidence=[
+        {"quote": "one is not True", "verified": 1},
+        {"quote": {"text": "an object"}, "verified": True},
+    ])
+    dims["verdict_consistency"]["evidence"] = [
+        {"quote": "truthy is not True", "verified": "true"},
+        {"quote": "flags.verdict_count_mismatch=1", "verified": True},
+    ]
+    doc.update(headline={"text": "x"}, rubric_version=7, evaluated_at="yesterday",
+               judge={"status": ["ok"], "error": {"why": 1}},
+               flags=[{"id": "action_clipped"}, {"turn": 3}, {"id": 5}, "bare", None])
+    (tmp_path / "runs" / RUN_ID).mkdir(parents=True)
+    (tmp_path / "runs" / RUN_ID / "eval.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    out = view_data(_run("decision"), [])["evaluation"]
+
+    assert out["state"] == "ok", out
+    assert (out["headline"], out["rubric_version"], out["evaluated_at"],
+            out["judge_status"], out["judge_error"]) == (None, None, None, None, None)
+    assert out["flags"] == ["action_clipped"]
+    rows = out["dimensions"]
+    assert {d: rows[d]["score"] for d in ev.DIMENSIONS} == {
+        "verdict_grounded": None, "edits_address_concerns": None, "concern_coverage": 3,
+        "efficiency": None, "concision": 1, "verdict_consistency": 1}
+    assert {d: rows[d]["scorer"] for d in ev.DIMENSIONS} == {
+        d: "judge" if d in ev.JUDGE_DIMS else "deterministic" for d in ev.DIMENSIONS}
+    assert rows["concern_coverage"]["quote"] is None
+    assert rows["verdict_consistency"]["quote"] == "flags.verdict_count_mismatch=1"
+
+    doc["evaluated_at"] = 1790000000  # an int is a number too
+    (tmp_path / "runs" / RUN_ID / "eval.json").write_text(json.dumps(doc), encoding="utf-8")
+    assert view_data(_run("decision"), [])["evaluation"]["evaluated_at"] == 1790000000
