@@ -312,7 +312,8 @@ then by turn, then by line (nulls last), and every `line` is null when thread.md
   - run-9 has it at t06, t09, t15 and t18, on lines 130, 244, 424 and 519.
 - `action_clipped`: a decision re-check whose delegating owner turn has
   `voice.action_chars > turnblock.ACTION_MAX` (200). When that owner turn has no `voice` dict, the
-  test is `len(action) >= ACTION_MAX` instead.
+  test is `len(action) >= ACTION_MAX` or the action ending `…`, because voice's word cut can leave a
+  clipped action under 200 characters.
   - The delegating owner turn is the junior's `delegated_by_turn`, else the nearest earlier
     delivered owner turn with `delegate`.
   - `turn` is the re-check's turn. `quote` is the action's last 40 chars. `line` is the decision
@@ -400,10 +401,11 @@ only.
     reads `cost_usd unknown: -1`, and a drop reads `dropped delegation: -1`). concision starts
     `"start 1 (median_reviewer_owner 825.0 > 800)"`. It ends `"; floor 1"` when the floor bit.
 - **Versions.**
-  - `DIMENSIONS` maps each id to an explicit `"<id>@<n>"`. Today `edits_address_concerns@2` and
-    `verdict_consistency@2`, the rest `@1`. edits_address_concerns@2 rewrote anchors 3 and 1,
-    which both said "partial" at @1. verdict_consistency@2 counts only the chair's claims; @1
-    also took up to 2 points for `delegation_truncated_but_applied` flags (run-9 scored 1).
+  - `DIMENSIONS` maps each id to an explicit `"<id>@<n>"`. Today `edits_address_concerns@2`,
+    `concision@2` and `verdict_consistency@2`, the rest `@1`. edits_address_concerns@2 rewrote
+    anchors 3 and 1, which both said "partial" at @1. concision@2 reads voice's new counts (see
+    voice.py below). verdict_consistency@2 counts only the chair's claims; @1 also took up to 2
+    points for `delegation_truncated_but_applied` flags (run-9 scored 1).
   - `dimension_versions(rules=RULES)` returns `DIMENSIONS` with concision suffixed
     `"+" + sha256("\n".join(rules).encode()).hexdigest()[:8]`. So a rules swap can never silently
     compare.
@@ -711,35 +713,41 @@ repeats the turns, delegations, re-checks or prose counts. It has four states:
 A new eval shows on the page's next load, because nothing lands on the target to trigger a
 refetch. The eval playbook itself has no view, so its runs get the generic tabs.
 
-## voice.py: the interim rules source
+## voice.py: the rules source
 
-`playbooks/committee/voice.py` holds `RULES`, `FILLER` and `measure(body, role="reviewer")`.
-- `RULES` is one line per element, distilled once from the diff-authoring skill in the playbook's
-  own words: lead with the point; bullets of about 1.5 lines or less; no walls of text; no
-  defending decisions; concrete examples and pointers. No element contains `**`, an en dash or
-  an em dash, and the skill is never read at runtime.
-- eval.py imports only `RULES`, `measure` and `summary`, and `words(text)` is
-  `measure(text)["words"]`. eval.py has no other word counter.
+`playbooks/committee/voice.py` is the one home of the voice rules and the one word counter. What
+the rules are, the per-role caps, retakes and images are specified in committee-playbook.md's
+[Voice and retakes](committee-playbook.md#voice-and-retakes); this section is what eval takes from
+it.
+- eval.py imports `RULES`, `measure` and `summary` from voice, and nothing else. `words(text)` is
+  `measure(text)["words"]`, so fenced blocks, image references and the lines that caption an image
+  add no words. eval.py has no other word counter.
 - The wall threshold, 120 words, is `_WALL_WORDS` in eval.py, not a voice.py name, because eval
   imports nothing else from voice.
+- **concision@2.** Voice changed concision's inputs: words skip fenced blocks and images, and
+  `filler_hits` sums every tell. So concision is `concision@2`, on top of the `RULES` hash its
+  version already carries.
 
-`measure` is pure and never raises; a non-str counts as `""`. `role` is unused until
-committee-voice gives each role its own cap. It returns
-`{words, pointers, examples, longest_paragraph_words, filler_hits}`:
-- `words` is `len(body.split())`.
-- `longest_paragraph_words` is the most words in one paragraph, a maximal run of non-blank lines.
-  A wall is over 120.
-- `pointers` counts matches of `(?<![\w./-])[\w./-]+\.\w+:\d+(-\d+)?` plus
-  `§\s?\d+(\.\d+)*|\b[Ss]ection \d+(\.\d+)*`. The lookbehind starts a path match only at a
-  token's first char, so one long token stays linear time.
-- `examples` adds up these counts:
-  - `for example`, `e.g.`, `for instance` and `such as`, as case-insensitive substrings;
-  - inline code spans, matching `` `[^`\n]+` `` with fenced contents removed;
-  - fenced blocks, counted as the lines whose `lstrip()` starts with three backticks,
-    integer-divided by 2;
-  - matches of `\b\d+(\.\d+)?\s?(ms|s|min|h|%|KB|MB|GB|x|QPS)\b`.
-- `filler_hits` is `text.lower().count(p)` summed over the 15 phrases in `FILLER`, so "delved"
-  counts as "delve".
+`measure(body, role="reviewer")` is pure and never raises; a non-str counts as `""`. Of the keys it
+returns, eval reads five:
+- `words`: the whitespace-separated words of the prose, with fenced blocks, image references and
+  caption lines left out.
+- `longest_paragraph_words`: the most words in one paragraph. A wall is over 120.
+- `pointers`: `pointers_path_line` (matches of `_PATH_LINE`,
+  `(?<![\w./-])[\w./-]+\.\w+:\d+(-\d+)?`; the lookbehind keeps one long token linear) plus
+  `pointers_section` (`_SECTION`, `§\s?\d+(\.\d+)*|\b[Ss]ection \d+(\.\d+)*`).
+- `examples`: the phrases in `_EXAMPLE_PHRASES` (case-insensitive), inline code spans, fenced
+  blocks, and `_UNIT` matches such as `5 ms` or `40%`.
+- `filler_hits`: the sum of every tell in `tells`, which are the `FILLER` and `_PREEMPT` phrase
+  counts and the `_TELLS` pattern counts (`process`, `turn_refs`, `unchanged`).
+
+`metrics.voice_summary` is `eval.voice_summary(rows, entries)`: `voice.summary` over the target's
+kept rows, the last `turn` reduction per number plus the latest decision. That is the same fold the
+committee view's top-level `voice` uses, so the Metrics tab and the eval never disagree on one run.
+- A pre-voice row (no `voice` key, delivered) is measured from its inputs/entries.json body, the
+  chair's prose for the decision, on a copy: `action_clipped` reads `voice` off the shared docs.
+- A present `voice: null` (a signals-only or undelivered take) stays null and out.
+- It is null when no row was measured.
 
 `metrics.voice` is `voice_shares(rows)` over P, one measure dict per turn.
 - A reduction's `voice` dict is used verbatim, and every other turn in P is measured with
