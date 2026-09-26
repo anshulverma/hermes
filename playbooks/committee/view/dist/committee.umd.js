@@ -39,9 +39,14 @@
 			headers: authHeaders()
 		}));
 	}
-	/** The run's own image, through the per-run file route, with the token when there is one. */
-	function imageUrl(runId, name) {
-		const url = `/api/runs/${encodeURIComponent(runId)}/view/artifact?path=${encodeURIComponent("images/" + name)}`;
+	/**
+	* The run's own image, through the per-run file route, with the token when there
+	* is one. `sha256` pins the bytes the master checked: a file a later worker
+	* overwrote is then a 404, not someone else's picture under this caption.
+	*/
+	function imageUrl(runId, name, sha256) {
+		let url = `/api/runs/${encodeURIComponent(runId)}/view/artifact?path=${encodeURIComponent("images/" + name)}`;
+		if (sha256) url += `&sha256=${encodeURIComponent(sha256)}`;
 		const token = window.HermesUI?.getToken?.() ?? null;
 		return token ? `${url}&token=${encodeURIComponent(token)}` : url;
 	}
@@ -80,6 +85,8 @@
 		image_uncaptioned: "an image without its caption or description",
 		image_missing: "an image missing or not your own file",
 		action_too_long: "an action over 200 characters",
+		stance_too_long: "a stance over its cap",
+		filler: "filler phrases",
 		retake_failed: "the retake delivered nothing, so an earlier take was kept"
 	};
 	function violationText(violations) {
@@ -129,7 +136,7 @@
 			"data-testid": "figure-image",
 			style: figure,
 			children: [seg.ok === true ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("img", {
-				src: imageUrl(runId, seg.name),
+				src: imageUrl(runId, seg.name, seg.sha256),
 				alt: seg.caption,
 				style: { maxWidth: "100%" }
 			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -1393,7 +1400,8 @@
 		voice_flag: "broke the ground rules",
 		retaken: "retaken",
 		no_pointer: "no pointer",
-		no_example: "no example"
+		no_example: "no example",
+		tells: "AI tells"
 	};
 	var BADGE_TONE = {
 		no_turn: "danger",
@@ -1402,6 +1410,12 @@
 		signals_only: "attention",
 		voice_flag: "attention"
 	};
+	/** voice.tells' non-zero counts as plain text, "process 2, turn refs 1": the tells badge's title. */
+	function tellsText(voice) {
+		const tells = voice?.tells;
+		if (!tells || typeof tells !== "object") return void 0;
+		return Object.entries(tells).filter(([, n]) => typeof n === "number" && n > 0).map(([kind, n]) => `${kind.replaceAll("_", " ")} ${n}`).join(", ");
+	}
 	/** spoke · holds_floor · queued · idle, as a reader would say it. */
 	var ROSTER_STATE = {
 		holds_floor: "has the floor",
@@ -1678,6 +1692,7 @@
 							size: "sm",
 							variant: "outline",
 							tone: BADGE_TONE[b],
+							title: b === "tells" ? tellsText(entry.voice) : void 0,
 							children: BADGE_LABEL[b] ?? b
 						}, b)),
 						entry.verified !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {

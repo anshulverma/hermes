@@ -80,9 +80,14 @@ export async function apiPost<T>(path: string): Promise<T> {
   return readBody<T>(await fetch(path, { method: 'POST', headers: authHeaders() }));
 }
 
-/** The run's own image, through the per-run file route, with the token when there is one. */
-export function imageUrl(runId: string, name: string): string {
-  const url = `/api/runs/${encodeURIComponent(runId)}/view/artifact?path=${encodeURIComponent('images/' + name)}`;
+/**
+ * The run's own image, through the per-run file route, with the token when there
+ * is one. `sha256` pins the bytes the master checked: a file a later worker
+ * overwrote is then a 404, not someone else's picture under this caption.
+ */
+export function imageUrl(runId: string, name: string, sha256?: string): string {
+  let url = `/api/runs/${encodeURIComponent(runId)}/view/artifact?path=${encodeURIComponent('images/' + name)}`;
+  if (sha256) url += `&sha256=${encodeURIComponent(sha256)}`;
   const token = (window as any).HermesUI?.getToken?.() ?? null;
   return token ? `${url}&token=${encodeURIComponent(token)}` : url;
 }

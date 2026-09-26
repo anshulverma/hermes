@@ -17,6 +17,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 
 /** Where the home is on THIS machine -- where the fixture is written. The
  *  container sees the same directory at /hermes-home. */
@@ -198,10 +199,15 @@ function seedVoice(): void {
   writeFileSync(`${HOME}/runs/${VOICE_RUN}/images/t02-owner.svg`, SVG, { mode: 0o600 });
 
   // What `check_images` records for the owner's own file: `ok` true, so the
-  // view merges it onto the reference by position and renders an <img>.
+  // view merges it onto the reference by position and renders an <img>, and the
+  // sha256 of the bytes it checked, which the image route then insists on.
   const image = {
     kind: 'image', name: 't02-owner.svg', ref: 'images/t02-owner.svg',
     caption: 'staffing curve', description: 'engineers per week, flat after week 6', ok: true,
+    sha256: createHash('sha256').update(SVG).digest('hex'),
+  };
+  const diagram = {
+    kind: 'mermaid', name: '', ref: '', caption: 'the pipeline', description: 'two stages', ok: true,
   };
   const turn = (n: number, role: string, body: string, images: unknown[]) => ({
     turn: n, role, delivered: true, body, stance: null, request_floor: false, delegate: false,
@@ -224,8 +230,9 @@ function seedVoice(): void {
       `INSERT INTO reductions (run_id, phase, kind, json, review_state, created_at, updated_at)
        VALUES (?, ?, 'turn', ?, 'pending', ?, ?)`,
     );
-    insert.run(VOICE_RUN, 't01-senior_director', JSON.stringify(
-      turn(1, 'senior_director', 'Defer it: the staffing line is fiction.', [])), now, now);
+    insert.run(VOICE_RUN, 't01-senior_director', JSON.stringify(turn(1, 'senior_director',
+      'Defer it: the staffing line is fiction.\nFigure: the pipeline\n```mermaid\ngraph TD; A-->B\n```\n'
+      + 'Description: two stages', [diagram])), now, now);
     insert.run(VOICE_RUN, 't02-owner', JSON.stringify(turn(2, 'owner',
       'Conceded: staffing is the risk.\n![staffing curve](images/t02-owner.svg)\n'
       + 'Description: engineers per week, flat after week 6', [image])), now + 1, now + 1);
@@ -418,6 +425,23 @@ test('a turn image loads through the run images route, served inside the contain
   expect(images.some((u) => u.includes(`/api/runs/${VOICE_RUN}/view/artifact?path=images%2Ft02-owner.svg`))).toBe(true);
   const outside = images.filter((u) => /^https?:/.test(u) && new URL(u).origin !== origin);
   expect(outside, outside.join('\n')).toEqual([]);
+});
+
+test('a mermaid diagram draws as a decoded blob image in a real browser', async ({ page }) => {
+  await page.goto(`/#playbook?run=${VOICE_RUN}`);
+  await expect(page.getByText('Dana Whitfield').first()).toBeVisible({ timeout: 15000 });
+  const entry = page.locator('[data-testid="entry-1"]');
+  await entry.locator('button').first().click();
+
+  // The host's mermaid chunk loads, draws, passes the markup screen, and the
+  // blob decodes: a failed draw shows the source instead and has no <img>.
+  const img = entry.locator('[data-testid="figure-mermaid"] img[src^="blob:"]');
+  await expect(img).toHaveAttribute('alt', 'the pipeline', { timeout: 15000 });
+  await expect
+    .poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0))
+    .toBe(true);
+  await expect(entry.locator('[data-testid="mermaid-error"]')).toHaveCount(0);
+  await expect(entry.getByText('two stages')).toBeVisible();
 });
 
 test('one injected script tag, and the host React is the only React', async ({ page }) => {

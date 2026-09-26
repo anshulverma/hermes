@@ -205,6 +205,7 @@ const BADGE_LABEL: Record<string, string> = {
   retaken: 'retaken',
   no_pointer: 'no pointer',
   no_example: 'no example',
+  tells: 'AI tells',
 };
 
 const BADGE_TONE: Record<string, string | undefined> = {
@@ -219,6 +220,16 @@ const BADGE_TONE: Record<string, string | undefined> = {
 // reduction's own key names. Keep the two lists in step: a slug with no entry
 // renders as itself with no tone, which is green on both sides of the seam and
 // wrong on screen (an undelivered turn silently loses its danger colour).
+
+/** voice.tells' non-zero counts as plain text, "process 2, turn refs 1": the tells badge's title. */
+function tellsText(voice: Entry['voice']): string | undefined {
+  const tells = voice?.tells;
+  if (!tells || typeof tells !== 'object') return undefined;
+  return Object.entries(tells)
+    .filter(([, n]) => typeof n === 'number' && n > 0)
+    .map(([kind, n]) => `${kind.replaceAll('_', ' ')} ${n}`)
+    .join(', ');
+}
 
 /** spoke · holds_floor · queued · idle, as a reader would say it. */
 const ROSTER_STATE: Record<string, string> = {
@@ -459,7 +470,13 @@ function TimelineEntry({
         </span>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{entry.title}</span>
         {entry.badges.map((b) => (
-          <Badge key={b} size="sm" variant="outline" tone={BADGE_TONE[b]}>
+          <Badge
+            key={b}
+            size="sm"
+            variant="outline"
+            tone={BADGE_TONE[b]}
+            title={b === 'tells' ? tellsText(entry.voice) : undefined}
+          >
             {BADGE_LABEL[b] ?? b}
           </Badge>
         ))}

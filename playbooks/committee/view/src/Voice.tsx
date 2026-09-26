@@ -23,6 +23,8 @@ export type ImageSegment = {
   caption: string;
   description: string;
   ok: boolean;
+  /** The bytes the master checked; the route serves nothing else when it is sent. */
+  sha256?: string;
 };
 export type MermaidSegment = { kind: 'mermaid'; source: string; caption: string; description: string };
 export type Segment = TextSegment | ImageSegment | MermaidSegment;
@@ -41,6 +43,8 @@ export const VIOLATION_LABEL: Record<string, string> = {
   image_uncaptioned: 'an image without its caption or description',
   image_missing: 'an image missing or not your own file',
   action_too_long: 'an action over 200 characters',
+  stance_too_long: 'a stance over its cap',
+  filler: 'filler phrases',
   retake_failed: 'the retake delivered nothing, so an earlier take was kept',
 };
 
@@ -83,7 +87,7 @@ function FileFigure({ runId, seg }: { runId: string; seg: ImageSegment }) {
   return (
     <figure data-testid="figure-image" style={figure}>
       {seg.ok === true ? (
-        <img src={imageUrl(runId, seg.name)} alt={seg.caption} style={{ maxWidth: '100%' }} />
+        <img src={imageUrl(runId, seg.name, seg.sha256)} alt={seg.caption} style={{ maxWidth: '100%' }} />
       ) : (
         <div data-testid="image-unavailable" style={muted}>
           image unavailable

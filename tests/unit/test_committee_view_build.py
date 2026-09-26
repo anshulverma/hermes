@@ -4,6 +4,8 @@ A view ships as a built artifact so the runtime needs no Node — only rebuildin
 does. That buys a file which can drift from the .tsx it came from without anyone
 noticing. This is the test that makes the drift loud.
 """
+import ast
+import re
 import shutil
 import subprocess
 import tempfile
@@ -58,6 +60,27 @@ def test_committed_view_bundle_matches_a_fresh_build():
         assert fresh.read_bytes() == ARTIFACT.read_bytes(), (
             f"{ARTIFACT.relative_to(REPO)} is stale. Rebuild it with: {REBUILD}"
         )
+
+
+def test_every_rule_voice_can_break_has_a_label_in_the_view_and_no_other():
+    """VIOLATION_LABEL (Voice.tsx) keys == the slugs voice.violations checks,
+    plus the ``retake_failed`` the playbook appends. A rule with no label shows
+    its slug on screen; a label with no rule is dead."""
+    voice = ast.parse((REPO / "playbooks" / "committee" / "voice.py").read_text(encoding="utf-8"))
+    fn = next(n for n in voice.body if isinstance(n, ast.FunctionDef) and n.name == "violations")
+    rules = {
+        pair.elts[0].value
+        for pair in ast.walk(fn)
+        if isinstance(pair, ast.Tuple) and len(pair.elts) == 2
+        and isinstance(pair.elts[0], ast.Constant) and isinstance(pair.elts[0].value, str)
+    }
+    tsx = (REPO / "playbooks" / "committee" / "view" / "src" / "Voice.tsx").read_text(encoding="utf-8")
+    block = re.search(r"VIOLATION_LABEL[^=]*=\s*\{(.*?)\n\};", tsx, re.S)
+    assert block, "no VIOLATION_LABEL object in Voice.tsx"
+    labels = set(re.findall(r"^\s*([a-z_]+):", block.group(1), re.M))
+
+    assert "over_cap" in rules  # the walk found the checks at all
+    assert labels == rules | {"retake_failed"}
 
 
 def test_committed_view_bundle_stays_small_and_never_carries_mermaid():

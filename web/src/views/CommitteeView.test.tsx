@@ -26,6 +26,8 @@ import DocumentHistory, {
   type StepId,
 } from '../../../playbooks/committee/view/src/Diff';
 import Verdict from '../../../playbooks/committee/view/src/Verdict';
+import { violationText } from '../../../playbooks/committee/view/src/Voice';
+import { imageUrl } from '../../../playbooks/committee/view/src/host';
 
 const noop = () => {};
 
@@ -2481,6 +2483,81 @@ describe('CommitteeView voice', () => {
     }
   });
 
+  it('paints a kept take that broke the rules in the attention tone', () => {
+    show(withVoice());
+
+    expect(within(screen.getByTestId('entry-2')).getByText('broke the ground rules').getAttribute('style'))
+      .toContain('--status-attention');
+  });
+
+  it('shows no take line for a first take kept clean', () => {
+    show(withVoice({ ...VOICED, badges: [], take: 1, takes: 1, violations: [], flags: [],
+      segments: [VOICED.segments![0]] }));
+    expand(2);
+
+    expect(screen.queryByTestId('kept-take-2')).toBeNull();
+  });
+
+  it('names the two newest rules in words', () => {
+    expect(violationText(['filler', 'stance_too_long'])).toBe('filler phrases; a stance over its cap');
+  });
+
+  it('badges AI tells with the kinds it found and how often, as plain text', () => {
+    show(withVoice({ ...VOICED, badges: ['tells'],
+      voice: { words: 212, tells: { process: 2, turn_refs: 1, unchanged: 0, hedge: 3, filler: 0 } } }));
+
+    expect(within(screen.getByTestId('entry-2')).getByText('AI tells'))
+      .toHaveAttribute('title', 'process 2, turn refs 1, hedge 3');
+  });
+
+  it('asks for the exact bytes the master checked when the image carries their sha256', () => {
+    const sha256 = 'ab'.repeat(32);
+    const segments = VOICED.segments!.map((seg) => (seg.kind === 'image' && seg.ok ? { ...seg, sha256 } : seg));
+    const restore = shelf(() => new Promise(() => {}));
+    try {
+      show(withVoice({ ...VOICED, segments }));
+      const entry = expand(2);
+
+      expect(within(entry).getByAltText('staffing curve')).toHaveAttribute(
+        'src',
+        `/api/runs/run-2/view/artifact?path=images%2Ft02-owner.svg&sha256=${sha256}`,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it('encodes the run id into an image URL', () => {
+    expect(imageUrl('run #2/x', 't02-owner.svg')).toBe(
+      '/api/runs/run%20%232%2Fx/view/artifact?path=images%2Ft02-owner.svg',
+    );
+  });
+
+  it('says a diagram is rendering again when its source changes, not the old drawing', async () => {
+    (URL as any).createObjectURL = vi.fn(() => 'blob:hermes-1');
+    (URL as any).revokeObjectURL = vi.fn();
+    const render = vi
+      .fn()
+      .mockResolvedValueOnce('<svg xmlns="http://www.w3.org/2000/svg"></svg>')
+      .mockReturnValueOnce(new Promise(() => {}));
+    const restore = shelf(render);
+    try {
+      const { rerender } = show(withVoice());
+      const entry = expand(2);
+      expect(await within(entry).findByAltText('the pipeline')).toHaveAttribute('src', 'blob:hermes-1');
+
+      const edited = VOICED.segments!.map((seg) =>
+        seg.kind === 'mermaid' ? { ...seg, source: 'graph TD; A-->C' } : seg,
+      );
+      rerender(<CommitteeView runId="run-2" data={withVoice({ ...VOICED, segments: edited })} refetch={noop} />);
+
+      expect(within(entry).getByText('rendering diagram…')).toBeInTheDocument();
+      expect(within(entry).queryByAltText('the pipeline')).toBeNull();
+    } finally {
+      restore();
+    }
+  });
+
   it('shows no voice badge and no take line on a turn from before voice', () => {
     show();
     const entry = expand(2);
@@ -2536,6 +2613,15 @@ describe('CommitteeView voice metrics and verdict', () => {
     );
     render(<Verdict runId="run-2" verdict={VERDICT} />);
     expect(screen.getAllByTestId('verdict-voice')).toHaveLength(1);
+  });
+
+  it('tints the verdict note for broken rules, and leaves retakes alone muted', () => {
+    const { unmount } = render(<Verdict runId="run-2" verdict={{ ...VERDICT, violations: ['headers'] }} />);
+    expect(screen.getByTestId('verdict-voice').style.background).toBe('var(--status-attention-tint)');
+    unmount();
+
+    render(<Verdict runId="run-2" verdict={{ ...VERDICT, takes: 2 }} />);
+    expect(screen.getByTestId('verdict-voice').style.background).toBe('var(--wash-subtle)');
   });
 
   it('explains a failed chair retake in the attention tone', () => {
