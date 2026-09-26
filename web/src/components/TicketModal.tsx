@@ -543,9 +543,11 @@ export default function TicketModal({ isOpen, ticket, onClose, onActionSuccess }
                   }}
                 >
                   {/* Agents write markdown; rendered flat it arrives as literal
-                      `##` and `- ` noise. */}
+                      `##` and `- ` noise. A zero-width space after every `!`
+                      of `![` leaves no image for Markdown to fetch: a worker's
+                      src is theirs to choose, and a relative one hits this page. */}
                   <Markdown data-testid="ticket-answer" maxHeight={null}>
-                    {answer}
+                    {answer.replaceAll('![', '!\u200B[')}
                   </Markdown>
                 </div>
               </div>

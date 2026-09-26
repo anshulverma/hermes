@@ -87,6 +87,18 @@ describe('TraceModal', () => {
     expect(expanded('trace-record-2-tool_call')).toBe('false');
   });
 
+  it('never loads an image a worker wrote into its prose: the alt text stands in', async () => {
+    const records = [
+      { line: 0, kind: 'answer', role: 'assistant', ts: null, title: '',
+        text: 'Conceded.\n![staffing curve](images/t02-owner.svg)' },
+    ];
+    mockFetch.mockImplementation(() => respond({ ...trace, records, counts: { answer: 1 } }));
+    const { container } = render(<TraceModal attemptId={12} onClose={() => {}} />);
+
+    expect(await screen.findByText(/staffing curve/)).toBeInTheDocument();
+    expect(container.ownerDocument.querySelector('img')).toBeNull();
+  });
+
   it('expands a collapsed record when clicked', async () => {
     render(<TraceModal attemptId={12} onClose={() => {}} />);
     await screen.findByText('review D123');

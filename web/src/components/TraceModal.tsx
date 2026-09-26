@@ -117,9 +117,11 @@ function TraceBody({ record }: { record: TraceRecord }) {
     return <JsonView value={json.value} maxHeight={null} plain />;
   }
   if (PROSE_KINDS.has(record.kind)) {
+    // A zero-width space after the `!` of every `![`: a worker's image src is
+    // theirs to choose, so no image in a trace is ever fetched.
     return (
       <Markdown maxHeight={null} fontSize={12}>
-        {record.text}
+        {record.text.replaceAll('![', '!\u200B[')}
       </Markdown>
     );
   }

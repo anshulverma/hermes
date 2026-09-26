@@ -55,6 +55,25 @@ describe('renderMermaid', () => {
     await expect(renderMermaid('graph TD; A-->B')).rejects.toThrow(/not well-formed/);
   });
 
+  it('removes the container a throwing render leaves in the page, rethrows, and never reuses an id', async () => {
+    // A classDef style that fails insertRule throws outside mermaid's own
+    // cleanup, leaving an empty div#d<id> in <body> per diagram.
+    const ids: string[] = [];
+    const leaveAndThrow = async (id: string) => {
+      ids.push(id);
+      const left = document.createElement('div');
+      left.id = `d${id}`;
+      document.body.appendChild(left);
+      throw new Error('insertRule failed');
+    };
+    mermaid.render.mockImplementationOnce(leaveAndThrow).mockImplementationOnce(leaveAndThrow);
+
+    await expect(renderMermaid('graph TD; A-->B')).rejects.toThrow('insertRule failed');
+    await expect(renderMermaid('graph TD; A-->B')).rejects.toThrow('insertRule failed');
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) expect(document.getElementById(`d${id}`)).toBeNull();
+  });
+
   it('loads mermaid again on the next diagram after its chunk failed to load', async () => {
     vi.resetModules();
     let imports = 0;

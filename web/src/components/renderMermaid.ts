@@ -67,7 +67,16 @@ function load(): Promise<Mermaid> {
 export default async function renderMermaid(source: string): Promise<string> {
   const mermaid = await load();
   drawn += 1;
-  const { svg } = await mermaid.render(`hermes-mermaid-${drawn}`, source);
+  const id = `hermes-mermaid-${drawn}`;
+  let svg: string;
+  try {
+    ({ svg } = await mermaid.render(id, source));
+  } catch (err) {
+    // A classDef style that fails insertRule throws past mermaid's own cleanup,
+    // leaving its empty container in <body>, one per failed diagram.
+    document.getElementById(`d${id}`)?.remove();
+    throw err;
+  }
   if (UNSAFE.test(svg)) throw new Error('unsafe markup in the drawn SVG');
   const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
   if (doc.getElementsByTagName('parsererror').length) throw new Error('the drawn SVG is not well-formed XML');

@@ -560,6 +560,17 @@ describe('TicketModal', () => {
       expect(answer.style.maxHeight).toBe('');
     });
 
+    it('never loads an image a worker wrote into its answer: the alt text stands in', async () => {
+      const answer = 'Conceded.\n![staffing curve](images/t02-owner.svg)';
+      mockFetch.mockResolvedValue({ ok: true, json: async () => ({ ...doneWithAnswer, answer }) });
+      render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
+
+      await waitFor(() => expect(screen.getByTestId('ticket-answer')).toBeInTheDocument());
+      const shown = screen.getByTestId('ticket-answer');
+      expect(shown.querySelector('img')).toBeNull();
+      expect(shown.textContent).toContain('staffing curve');
+    });
+
     it('keeps the full finding document reachable behind a toggle when an answer exists', async () => {
       mockFetch.mockResolvedValue({ ok: true, json: async () => doneWithAnswer });
       render(<TicketModal isOpen={true} ticket={mockTicket} onClose={() => {}} />);
