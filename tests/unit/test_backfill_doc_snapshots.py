@@ -176,7 +176,8 @@ def test_apply_edits_replaces_one_occurrence_or_every_one_with_replace_all():
     _edit("amb", "Ship in Q3.", "Ship in Q4."),                     # twice, not replace_all
     _edit("gone", "Staff nine engineers.", "x"),                    # not there at all
     _edit("gone-all", "Ship in Q9.", "x", replace_all=True),        # replace_all of nothing
-], ids=["ambiguous", "absent", "replace_all-absent"])
+    _edit("empty-all", "", "x", replace_all=True),                  # would splice between bytes
+], ids=["ambiguous", "absent", "replace_all-absent", "replace_all-empty"])
 def test_apply_edits_refuses_an_old_string_that_is_not_exactly_where_it_was(call):
     with pytest.raises(ReplayError):
         apply_edits(ORIGINAL.encode(), [call])
@@ -248,6 +249,27 @@ def test_a_replay_that_contradicts_a_recheck_aborts(home, capsys, attempts, veri
 
     assert _run() == 1
     assert message in capsys.readouterr().err
+    assert not (home / "runs" / RUN / "doc").exists()
+
+
+def test_a_turn_settled_twice_is_checked_against_its_last_reduction(home, capsys):
+    """As in the view. A later t03 that says the edit did not apply contradicts
+    a replay that changed the bytes, so the backfill must see it and abort."""
+    _seed(home)
+    conn = connect(str(home / "queue.db"))
+    try:
+        doc = {"turn": 3, "role": "junior_ic", "delivered": True, "verified": False,
+               "artifact": ARTIFACT, "revised": REVISED}
+        conn.execute(
+            "INSERT INTO reductions (run_id, phase, kind, json, review_state,"
+            " created_at, updated_at) VALUES (?, 't03-junior_ic', 'turn', ?, 'pending', 0, 0)",
+            (RUN, json.dumps(doc)))
+        conn.commit()
+    finally:
+        conn.close()
+
+    assert _run() == 1
+    assert "t03 did not apply but its edits changed the document" in capsys.readouterr().err
     assert not (home / "runs" / RUN / "doc").exists()
 
 

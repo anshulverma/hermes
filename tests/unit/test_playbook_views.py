@@ -321,7 +321,20 @@ def test_open_run_file_closes_every_fd_it_opened_but_the_one_it_returns(temp_hom
     (doc / "t03.md").write_text("fine\n", encoding="utf-8")
     (doc / "t04.md").symlink_to(doc / "t03.md")
     (doc / "t05.md").mkdir()
-    before = len(os.listdir("/proc/self/fd"))
+
+    def open_under_home():
+        """This test's fds, not a process-wide count a GC pass could move."""
+        found = set()
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError:
+                continue  # closed since the listing
+            if target.startswith(str(temp_home)):
+                found.add((fd, target))
+        return found
+
+    before = open_under_home()
 
     fd = _open_run_file(temp_home, "run-view", "doc/t03.md")
     assert os.read(fd, 16) == b"fine\n"
@@ -332,7 +345,7 @@ def test_open_run_file_closes_every_fd_it_opened_but_the_one_it_returns(temp_hom
             _open_run_file(temp_home, run_id, path)
         assert caught.value.status_code == 404
 
-    assert len(os.listdir("/proc/self/fd")) == before
+    assert open_under_home() - before == set()
 
 
 def test_artifact_route_404s_a_playbook_without_a_view(client, temp_home, blind):

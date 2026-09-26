@@ -180,6 +180,9 @@ class CommitteePlaybook:
                 # each is an int only on its own kind of turn.
                 "answers_turn": None,
                 "delegated_by_turn": None,
+                # Set by a junior-IC seed when the revised copy could not be
+                # made from doc/00-original; that turn's reduction records it.
+                "snapshot_note": None,
                 "rechecks": [],
                 # the revised copy's sha256 as seed() found it, just before a
                 # junior-IC worker ran; reduce compares against this rather than
@@ -366,7 +369,9 @@ class CommitteePlaybook:
                 # next_phase sets pending_action before it mints a junior turn.
                 action = str(s["pending_action"] or "")
                 try:
-                    revised = thread.ensure_revised(run.id, s["artifact"])
+                    revised, s["snapshot_note"] = thread.ensure_revised(
+                        run.id, s["artifact"], s["artifact_digest"]
+                    )
                 except OSError:
                     # No copy could be made: the original AND its doc/00-original
                     # snapshot have both gone since `open`, or the write into
@@ -378,13 +383,15 @@ class CommitteePlaybook:
                     # as an edit that did not land, which reduce's re-check
                     # reports in the thread and the chair names in the verdict.
                     revised = thread.revised_path(run.id, s["artifact"])
+                    s["snapshot_note"] = None
                 # Snapshot the copy as it stands BEFORE this worker touches it, so
                 # reduce's re-check (spec 7) measures THIS edit rather than the
                 # accumulated difference from the original. On the first delegation
-                # the copy is a byte copy of the original as `open` read it
-                # (doc/00-original), so this is exactly the
-                # comparison spec 7 describes; on the second and later ones it is
-                # the only comparison that can still fail.
+                # the copy is a byte copy of the bytes `open` hashed --
+                # doc/00-original only while its digest still matches, else the
+                # live file -- so this is exactly the comparison spec 7
+                # describes; on the second and later ones it is the only
+                # comparison that can still fail.
                 s["pre_edit_digest"] = thread.digest(revised)
             else:
                 kind, action = "turn", None
@@ -586,6 +593,9 @@ class CommitteePlaybook:
         # snapshot IS the original's digest, which is the check spec 7 describes.
         verified = None
         if role == cast.JUNIOR:
+            if s["snapshot_note"]:
+                # From this turn's seed: Edit 1's baseline is not doc/00-original.
+                errors.append(s["snapshot_note"])
             verified = False
             data = None
             try:
@@ -639,18 +649,20 @@ class CommitteePlaybook:
             # Uncoerced: absent stays absent, the rule the whole block obeys. A
             # persona that stated no stance has none, never a neutral one.
             "stance": block.get("stance"),
-            # Both paths ride on EVERY turn reduction, which looks redundant
-            # against the decision reduction that also carries them. It is not:
-            # `view_data` runs in the SERVER process, where this instance has
-            # never seen the run and `_state_by_run` is empty, so the paths
-            # cannot be read off state there -- reductions are the only channel.
-            # Do not "optimise" these away to the decision reduction alone.
+            # Both host paths ride on EVERY turn reduction, the master's own
+            # record of what was reviewed and where the edits went. Their
+            # readers are committee-eval and the doc/ backfill, which work from
+            # reductions alone, and the worker goal names the same paths.
+            # `view_data` takes only the file NAME from `artifact` and opens
+            # neither: it runs in the server process, possibly in a container
+            # where host paths mean nothing, and finds every version under doc/
+            # instead. Do not "optimise" these away to the decision reduction
+            # alone -- a run that never reached one would lose them.
             "artifact": s["artifact"],
             "revised": s["revised"],
-            # The turn cap `seed` resolved, for the same reason and by the same
-            # route as the two paths above: `view_data` runs in the SERVER
-            # process, and reading HERMES_COMMITTEE_MAX_TURNS there gets THAT
-            # process's value. A `hermes serve` started without it rendered
+            # The turn cap `seed` resolved: `view_data` runs in the SERVER
+            # process, where `_state_by_run` is empty and reading
+            # HERMES_COMMITTEE_MAX_TURNS gets THAT process's value. A `hermes serve` started without it rendered
             # "turn 20 of 30" for a run that capped at 20 and used all of it.
             "cap": s["max_turns"],
             # what the speaker ASKED for; whether it was honoured is visible in
@@ -744,8 +756,8 @@ class CommitteePlaybook:
             # `decision` state that never went through `next_phase` -- reachable
             # only by seeding the phase directly.
             "ended": "chair turn failed" if not body else (s["ended"] or "queue empty"),
-            # Same reason as the turn reduction: server-side `view_data` cannot
-            # read instance state.
+            # As on every turn reduction: the master's record for readers of
+            # the database; the view takes only the name.
             "artifact": s["artifact"],
             "revised": s["revised"],
             "error": "; ".join(errors) or None,

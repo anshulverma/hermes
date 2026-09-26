@@ -7,11 +7,12 @@ playbook instance state. Every number on screen comes off the reductions
 ``reduce`` already wrote, in the order the queue returns them (``ORDER BY id``),
 which is the order they happened in.
 
-One read is not pure and is stated rather than hidden: the size of each
+Two reads are not pure and are stated rather than hidden: the size of each
 document snapshot under ``runs/<id>/doc/``, stat'd under THIS process's
 HERMES_HOME by the fixed layout ``thread.snapshot_key`` names -- never at a path
 a reduction recorded, which is the master's host path and means nothing inside
-a container. The turn cap rides on the turn reductions; the environment is read
+a container -- and, before any turn has settled, the artifact line of the run's
+own ``thread.md`` header. The turn cap rides on the turn reductions; the environment is read
 only as a fallback for runs captured before that key existed.
 
 Stdlib-only.
@@ -272,6 +273,11 @@ def _document(
         value = doc.get("artifact")
         if isinstance(value, str) and value:
             artifact = value
+    if not artifact and not turns:
+        # No turn has settled, so no reduction names the file -- but `open`
+        # already kept doc/00-original, and the first worker can run for an
+        # hour. The thread header is the master's record of the same path.
+        artifact = thread.header_artifact(run.id)
     name = Path(artifact).name or None
     block = {
         "name": name, "captured": False, "original": None, "steps": [], "final": None,
@@ -309,8 +315,11 @@ def _document(
             "path": last["path"], "turn": last["turn"], "bytes": last["bytes"],
             "ruling": _ruling(decision, lost),
         }
-    block.update(captured=original["bytes"] is not None, original=original,
-                 steps=steps, final=final)
+    # Any readable version, not only the original: a worker (bypassPermissions)
+    # can delete doc/00-original, and the edits it leaves are still worth
+    # stepping through. Original and Edit 1 then say they could not read it.
+    captured = original["bytes"] is not None or any(s["bytes"] is not None for s in steps)
+    block.update(captured=captured, original=original, steps=steps, final=final)
     return block
 
 

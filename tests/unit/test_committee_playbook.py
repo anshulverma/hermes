@@ -801,15 +801,15 @@ def test_thread_ensure_revised_copies_once_and_never_clobbers(tmp_path):
     artifact = tmp_path / "proposal.md"
     artifact.write_bytes(b"hello\n")
 
-    copy = thread.ensure_revised(run_id, str(artifact))
+    copy, _ = thread.ensure_revised(run_id, str(artifact), "")
     assert copy == tmp_path / "runs" / run_id / "revised" / "proposal.md"
     assert copy.read_bytes() == b"hello\n"
 
     copy.write_bytes(b"hello\nworld\n")  # the junior IC's edit
     mtime = copy.stat().st_mtime_ns
 
-    again = thread.ensure_revised(run_id, str(artifact))
-    assert again == copy
+    again, note = thread.ensure_revised(run_id, str(artifact), "")
+    assert (again, note) == (copy, None)  # nothing was copied, so nothing to note
     assert copy.read_bytes() == b"hello\nworld\n"
     assert copy.stat().st_mtime_ns == mtime
     assert artifact.read_bytes() == b"hello\n"  # the original is never touched
@@ -887,8 +887,20 @@ def test_read_regular_reads_a_regular_file_and_nothing_else(tmp_path):
     fifo = tmp_path / "pipe.md"
     os.mkfifo(fifo)
     # Every fd read_regular opens, on every path, is closed again: it runs in
-    # the long-lived master process.
-    open_fds = len(os.listdir("/proc/self/fd"))
+    # the long-lived master process. The fds this test's files are open on, not
+    # a process-wide count another thread or a GC pass could move.
+    def open_under_tmp():
+        found = set()
+        for fd in os.listdir("/proc/self/fd"):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError:
+                continue  # closed since the listing
+            if target.startswith(str(tmp_path)):
+                found.add((fd, target))
+        return found
+
+    before = open_under_tmp()
 
     assert thread.read_regular(real) == b"bytes\n"
     assert thread.read_regular(str(real)) == b"bytes\n"
@@ -906,7 +918,7 @@ def test_read_regular_reads_a_regular_file_and_nothing_else(tmp_path):
     assert thread.read_regular(tmp_path / "missing.md") is None
     assert thread.read_regular(None) is None       # reduce must never raise
     assert thread.read_regular("a\0b") is None     # an embedded NUL is a ValueError
-    assert len(os.listdir("/proc/self/fd")) == open_fds
+    assert open_under_tmp() - before == set()
 
 
 def test_write_snapshot_is_private_and_the_last_write_wins(tmp_path):
@@ -1012,6 +1024,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
         "rechecks", "pre_edit_digest", "artifact_digest", "charge", "artifact",
         "revised", "roster", "max_turns", "ended",
         "delegation_turn", "dropped_delegation_turn", "answers_turn", "delegated_by_turn",
+        "snapshot_note",
     }
     assert s["delegation_turn"] is None and s["dropped_delegation_turn"] is None
     assert s["answers_turn"] is None and s["delegated_by_turn"] is None
@@ -1997,29 +2010,72 @@ def test_edit_one_starts_from_the_open_time_bytes_even_if_the_original_moved(art
 
 
 def test_ensure_revised_prefers_the_open_snapshot_and_falls_back_to_the_artifact(tmp_path):
-    """doc/00-original when it is a regular file; the live artifact otherwise.
+    """doc/00-original when it is a regular file holding the bytes `open`
+    hashed; the live artifact otherwise, with a note saying so.
 
-    Every worker runs bypassPermissions, so one can delete doc/00-original or
-    swap it for a symlink. A symlink is refused, not followed: it is not the
-    snapshot `open` wrote.
+    Every worker runs bypassPermissions, so one can delete doc/00-original,
+    swap it for a symlink or rewrite it. A symlink is refused, not followed,
+    and rewritten bytes fail the digest: neither is the snapshot `open` wrote.
     """
+    import hashlib
+
     from playbooks.committee import thread
 
     artifact = tmp_path / "proposal.md"
     artifact.write_bytes(b"live\n")
     key = thread.snapshot_key(str(artifact), None)
+    handed = hashlib.sha256(b"handed\n").hexdigest()
+    fallback = ("snapshot: doc/00-original.md is not the file open wrote, so the "
+                "revised copy was made from the live artifact")
 
-    assert thread.ensure_revised("run-deleted", str(artifact)).read_bytes() == b"live\n"
+    copy, note = thread.ensure_revised("run-deleted", str(artifact), handed)
+    assert (copy.read_bytes(), note) == (b"live\n", fallback)
 
     thread.write_snapshot("run-new", key, b"handed\n")
-    assert thread.ensure_revised("run-new", str(artifact)).read_bytes() == b"handed\n"
+    copy, note = thread.ensure_revised("run-new", str(artifact), handed)
+    assert (copy.read_bytes(), note) == (b"handed\n", None)
+
+    thread.write_snapshot("run-rewritten", key, b"rewritten by a worker\n")
+    copy, note = thread.ensure_revised("run-rewritten", str(artifact), handed)
+    assert (copy.read_bytes(), note) == (b"live\n", fallback)
 
     decoy = tmp_path / "decoy.md"
-    decoy.write_bytes(b"planted\n")
+    decoy.write_bytes(b"handed\n")  # even the right bytes, behind a symlink
     link = thread.run_file("run-linked", key)
     link.parent.mkdir(parents=True)
     link.symlink_to(decoy)
-    assert thread.ensure_revised("run-linked", str(artifact)).read_bytes() == b"live\n"
+    copy, note = thread.ensure_revised("run-linked", str(artifact), handed)
+    assert (copy.read_bytes(), note) == (b"live\n", fallback)
+
+
+def test_a_rewritten_open_snapshot_is_not_edit_ones_baseline_and_the_turn_says_so(artifact):
+    """doc/00-original is worker-writable, and `artifact_intact` hashes only the
+    live file. Copying a rewritten snapshot would fold the tampering silently
+    into the recommended revision; the live file, which that check covers, is
+    used instead, and the junior turn's reduction names what happened."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    pb.seed(_run(phase="open"), site)
+    handed = artifact.read_bytes()
+    run = _run(phase="t03-junior_ic")
+    thread.run_file(run.id, thread.snapshot_key(str(artifact), None)).write_bytes(
+        b"# Proposal\n\nRewritten by a reviewer worker.\n"
+    )
+
+    s = pb._state(run)
+    s.update(current_role=cast.JUNIOR, current_turn=3, pending_action="tighten the intro")
+    pb.seed(run, site)
+
+    assert thread.revised_path(run.id, str(artifact)).read_bytes() == handed
+    assert s["pre_edit_digest"] == s["artifact_digest"]
+    junior = pb.reduce(
+        run, "t03-junior_ic",
+        [_finding(run, f"{run.id}/t03-junior_ic", _turn_answer("Nothing to tighten."))],
+        site,
+    )[0]
+    assert "snapshot: doc/00-original.md is not the file open wrote" in junior.json["error"]
 
 
 def test_decision_ticket_is_built_for_the_chair(artifact):
@@ -2514,7 +2570,7 @@ def test_reduce_records_a_junior_ic_edit_that_changed_the_file_as_verified(tmp_p
     run = _run(phase="t05-junior_ic")
     artifact = tmp_path / "proposal.md"
     artifact.write_text("the original proposal\n")
-    revised = thread.ensure_revised(run.id, str(artifact))
+    revised, _ = thread.ensure_revised(run.id, str(artifact), "")
     pre = thread.digest(revised)  # what seed() snapshots just before the worker runs
     revised.write_text("the original proposal\nand a rollback paragraph\n")
 
@@ -2552,7 +2608,7 @@ def test_reduce_records_a_junior_ic_edit_that_changed_nothing_as_unverified(tmp_
     run = _run(phase="t05-junior_ic")
     artifact = tmp_path / "proposal.md"
     artifact.write_text("the original proposal\n")
-    revised = thread.ensure_revised(run.id, str(artifact))  # byte-copy, never edited
+    revised, _ = thread.ensure_revised(run.id, str(artifact), "")  # byte-copy, never edited
 
     s = pb._state(run)
     s.update(
@@ -2593,7 +2649,7 @@ def test_reduce_junior_edit_measures_this_edit_not_drift_from_the_original(tmp_p
     run = _run(phase="t09-junior_ic")
     artifact = tmp_path / "proposal.md"
     artifact.write_text("the original proposal\n")
-    revised = thread.ensure_revised(run.id, str(artifact))
+    revised, _ = thread.ensure_revised(run.id, str(artifact), "")
     # Edit one already landed; the copy is permanently unlike the original.
     revised.write_text("the original proposal\nand a rollback paragraph\n")
 
@@ -2717,7 +2773,7 @@ def _junior_turn(pb, run, tmp_path, turn=5):
 
     artifact = tmp_path / "proposal.md"
     artifact.write_text("the original proposal\n")
-    copy = thread.ensure_revised(run.id, str(artifact))
+    copy, _ = thread.ensure_revised(run.id, str(artifact), "")
     pb._state(run).update(
         current_role="junior_ic",
         current_turn=turn,
@@ -3224,6 +3280,20 @@ def test_next_phase_records_which_turn_each_owner_and_junior_turn_answers():
     assert minted["t03-junior_ic"] == (None, 2)
     assert minted["t04-manager"] == (None, None)
     assert minted["t05-owner"] == (4, None)
+
+
+def test_a_junior_turn_records_the_delegating_owner_turn_even_with_turns_between():
+    """Today the junior is minted right after the owner, so the delegating turn
+    and the last turn coincide. Items 2 and 3 put turns between them, and the
+    recorded link must still name the owner turn that delegated."""
+    pb = _committee()
+    run = _run(phase="t05-tpm")
+    s = pb._state(run)
+    s.update(current_role="tpm", current_turn=5, turn=6, last_speaker="tpm",
+             delegation="tighten the risk section", delegation_turn=2)
+
+    assert pb.next_phase(run) == "t06-junior_ic"
+    assert s["delegated_by_turn"] == 2
 
 
 def test_every_turn_reduction_carries_both_links_null_when_not_applicable():

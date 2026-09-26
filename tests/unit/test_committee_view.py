@@ -520,6 +520,54 @@ def test_a_run_whose_versions_were_never_captured_says_so(run2, artifacts):
     assert document["final"]["bytes"] is None
 
 
+def test_an_edit_readable_without_its_original_keeps_the_run_captured(run2):
+    """Every worker runs bypassPermissions and can delete doc/00-original on a
+    new run. The edit snapshots it left are still worth stepping through; only
+    Original and Edit 1, which need the original, say they could not read it."""
+    thread.write_snapshot(RUN_ID, "doc/t03.md", b"after t03\n")
+
+    document = view_data(_run("decision"), run2)["document"]
+
+    assert document["captured"] is True
+    assert document["original"]["bytes"] is None
+    assert document["steps"][0]["bytes"] == 10
+
+
+def test_a_step_reads_delivery_and_its_recheck_as_recorded(run2):
+    run2[5].json["delivered"] = False   # t06: the junior never delivered
+    run2[8].json["verified"] = "junk"   # t09: no boolean re-check
+    del run2[11].json["verified"]       # t12: no re-check key at all
+
+    steps = view_data(_run("decision"), run2)["document"]["steps"]
+
+    assert steps[1]["delivered"] is False
+    assert steps[2]["verified"] is None
+    assert steps[3]["verified"] is None
+
+
+def test_before_any_turn_settles_the_document_is_named_from_the_thread_header():
+    """`open` writes doc/00-original and the header, then the first worker can
+    run for an hour with no reduction naming the file. The header is the
+    master's own record of the artifact `open` resolved."""
+    thread.write_header(RUN_ID, charge="Decide.", artifact="/host/repo/docs/proposal.md",
+                        roster=["owner — Maya Okonkwo"])
+    # run-6/7/8: stopped at open before doc/ existed -- named, nothing to show.
+    assert view_data(_run("t01-senior_director"), [])["document"]["captured"] is False
+
+    thread.write_snapshot(RUN_ID, "doc/00-original.md", b"# Proposal\n")
+    document = view_data(_run("t01-senior_director"), [])["document"]
+
+    assert document == {
+        "name": "proposal.md", "captured": True,
+        "original": {"path": "doc/00-original.md", "bytes": 11},
+        "steps": [], "final": None, "dropped_delegation": None,
+    }
+    # Only before the first turn: a legacy run's turns that name no file stay
+    # unnamed, whatever its thread says.
+    legacy = [Reduction(kind="turn", json={"turn": 1, "role": "senior_director", "delivered": True})]
+    assert view_data(_run("t02-owner"), legacy)["document"]["name"] is None
+
+
 def test_a_zero_byte_version_is_sized_zero_not_missing(run2):
     thread.write_snapshot(RUN_ID, "doc/00-original.md", b"")
 
@@ -658,9 +706,12 @@ def _stamped(reductions, state):
     (lambda rs: _stamped(rs, "rejected"), "rejected"),
     (lambda rs: _stamped(rs, "superseded"), "no_ruling"),
     (lambda rs: rs + [Reduction(kind="lost", json={"error": "gone"})], "no_ruling"),
+    # The realistic lost run: it died at a turn, before any decision existed.
+    (lambda rs: rs[:-1] + [Reduction(kind="lost", json={"error": "gone"})], "no_ruling"),
     (lambda rs: rs[:-1] + [
         Reduction(kind="decision", json=dict(rs[-1].json, delivered=False))], "no_ruling"),
-], ids=["in_session", "awaiting", "accepted", "rejected", "superseded", "lost", "chair_failed"])
+], ids=["in_session", "awaiting", "accepted", "rejected", "superseded", "lost",
+        "lost_before_decision", "chair_failed"])
 def test_final_is_labelled_by_how_the_ruling_stands(run2, change, ruling):
     assert view_data(_run("decision"), change(run2))["document"]["final"]["ruling"] == ruling
 

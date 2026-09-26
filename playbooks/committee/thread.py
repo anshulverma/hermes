@@ -55,6 +55,10 @@ def _entry(run_id: str, heading: str, body: str) -> None:
     _append(run_id, f"\n{heading}\n\n{text or NO_TURN}\n")
 
 
+# The header line naming the artifact; `header_artifact` reads it back.
+_ARTIFACT_LINE = "**Artifact:** "
+
+
 def write_header(run_id: str, *, charge: str, artifact: str, roster: list[str]) -> None:
     """Open the transcript with the charge, the artifact path and the roster."""
     lines = [
@@ -62,13 +66,27 @@ def write_header(run_id: str, *, charge: str, artifact: str, roster: list[str]) 
         "",
         f"**Charge:** {charge}",
         "",
-        f"**Artifact:** {artifact}",
+        f"{_ARTIFACT_LINE}{artifact}",
         "",
         "**Committee:**",
         "",
     ]
     lines.extend(f"- {member}" for member in roster)
     _append(run_id, "\n".join(lines) + "\n")
+
+
+def header_artifact(run_id: str) -> str:
+    """The artifact path the header names, or "". Creates nothing.
+
+    For the view, before the first turn settles: until then no reduction names
+    the file, and the header -- written by ``open`` -- is all thread.md holds.
+    A symlinked thread.md is not followed (``read_regular``).
+    """
+    data = read_regular(run_file(run_id, "thread.md")) or b""
+    for line in data.decode("utf-8", "replace").splitlines():
+        if line.startswith(_ARTIFACT_LINE):
+            return line[len(_ARTIFACT_LINE):].strip()
+    return ""
 
 
 def append_turn(run_id: str, *, turn: int, role: str, body: str) -> None:
@@ -112,33 +130,44 @@ def revised_path(run_id: str, artifact: str) -> Path:
     return _config.state_dir("runs", run_id, "revised") / name
 
 
-def ensure_revised(run_id: str, artifact: str) -> Path:
+def ensure_revised(run_id: str, artifact: str, digest: str) -> tuple[Path, str | None]:
     """Create the editable copy in ``revised/`` if it is not already there.
 
-    Its bytes are doc/00-original's -- what ``open`` read and hashed -- or,
-    when that snapshot is gone, the live artifact's. Called by ``seed`` of a
-    junior-IC turn, so the worker only ever edits a file that already exists
-    and the re-check has something to hash. Existing means the edit already
-    happened: never overwrite it.
+    Its bytes are doc/00-original's when that file still holds what ``open``
+    read -- its sha256 is ``digest``, the one ``open`` took -- and otherwise the
+    live artifact's. Called by ``seed`` of a junior-IC turn, so the worker only
+    ever edits a file that already exists and the re-check has something to
+    hash. Existing means the edit already happened: never overwrite it.
+
+    Returns:
+        The copy's path, and a ``snapshot: …`` note when this call copied the
+        live artifact because doc/00-original was not the file ``open`` wrote;
+        None when it used the snapshot or copied nothing.
 
     Raises:
         OSError: no copy could be made -- doc/00-original and the artifact are
             both unreadable, or writing into ``revised/`` failed.
     """
     destination = revised_path(run_id, artifact)
-    if not destination.exists():
-        # The open-time snapshot, so Edit 1's baseline is exactly what the
-        # committee was handed even if the original moved since. Only when a
-        # worker (every one runs bypassPermissions) deleted doc/00-original or
-        # swapped it for something else does this copy the live file instead.
-        # `read_regular`, not `is_file()`: a symlink there is refused, not
-        # followed, like everywhere else doc/ is read.
-        handed = read_regular(run_file(run_id, snapshot_key(artifact, None)))
-        if handed is None:
-            shutil.copyfile(artifact, destination)
-        else:
-            destination.write_bytes(handed)
-    return destination
+    if destination.exists():
+        return destination, None
+    # The open-time snapshot, so Edit 1's baseline is exactly what the committee
+    # was handed even if the original moved since. But every worker runs
+    # bypassPermissions and can delete doc/00-original, swap it for a symlink
+    # or rewrite it -- and nothing else re-checks it, where `artifact_intact`
+    # does re-check the live file. So only the bytes `open` hashed are used;
+    # anything else copies the live file and says so. `read_regular`, not
+    # `is_file()`: a symlink there is refused, not followed.
+    key = snapshot_key(artifact, None)
+    handed = read_regular(run_file(run_id, key))
+    if handed is not None and hashlib.sha256(handed).hexdigest() == digest:
+        destination.write_bytes(handed)
+        return destination, None
+    shutil.copyfile(artifact, destination)
+    return destination, (
+        f"snapshot: {key} is not the file open wrote, so the revised copy was made "
+        f"from the live artifact"
+    )
 
 
 def digest(path) -> str:
