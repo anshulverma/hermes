@@ -25,6 +25,7 @@ Stdlib-only.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -311,7 +312,10 @@ class CommitteePlaybook:
             # again; the second clip is a no-op on an already-short line.
             s["charge"] = cast.clip(charge or DEFAULT_CHARGE, cast.CHARGE_MAX)
             s["artifact"] = artifact
-            s["artifact_digest"] = thread.digest(artifact)
+            # One read serves both: the digest `reduce("decision")` re-checks
+            # and the doc/00-original snapshot are the same bytes, by construction.
+            data = Path(artifact).read_bytes()
+            s["artifact_digest"] = hashlib.sha256(data).hexdigest()
             s["revised"] = str(thread.revised_path(run.id, artifact))
             s["max_turns"] = max_turns
             s["roster"] = {
@@ -319,8 +323,10 @@ class CommitteePlaybook:
                 for role in cast.CAST
             }
 
-            # Written last: an OSError here fails the command exactly the way the
-            # two ValueErrors above do, with nothing half-written behind it.
+            # Written last, snapshot then header: an OSError from either fails
+            # the command exactly the way the two ValueErrors above do, and a
+            # failed snapshot leaves no header claiming the meeting opened.
+            thread.write_snapshot(run.id, thread.snapshot_key(artifact, None), data)
             thread.write_header(
                 run.id,
                 charge=s["charge"],
@@ -340,7 +346,7 @@ class CommitteePlaybook:
                 try:
                     revised = thread.ensure_revised(run.id, s["artifact"])
                 except OSError:
-                    # The original was readable at `open` and has since gone.
+                    # The original AND its doc/00-original snapshot have both gone since `open`.
                     # seed() is called unguarded inside the master loop
                     # (engine/dispatch.py:287), so letting this out would
                     # abandon the run `running`, with no terminal state and no
@@ -556,25 +562,40 @@ class CommitteePlaybook:
         verified = None
         if role == cast.JUNIOR:
             verified = False
+            data = None
             try:
-                revised = Path(s["revised"]) if s["revised"] else None
+                # ONE read serves the re-check and the doc/tNN snapshot, so the
+                # snapshot is exactly the bytes the re-check judged. A symlinked
+                # or FIFO revised copy reads as absent (`read_regular`).
+                data = thread.read_regular(s["revised"]) if s["revised"] else None
                 # `seed` sets this on every junior-IC phase; there is no
                 # fallback, per the RULE above.
                 before = s["pre_edit_digest"]
                 # An empty `before` is not a digest -- `digest` of a zero-byte
                 # file is e3b0c442..., never "" -- it means the snapshot itself
-                # failed (`seed`'s OSError path: the original vanished before
-                # any copy was made). Without the clause, a worker that INVENTED
-                # the revised file from nothing hashes to something != "" and is
-                # reported verified, inverting the one no-trust check (spec 7).
+                # failed (`seed`'s OSError path: the original and doc/00-original
+                # both vanished before any copy was made). Without the clause, a
+                # worker that INVENTED the revised file from nothing hashes to
+                # something != "" and is reported verified, inverting the one
+                # no-trust check (spec 7).
                 verified = bool(
                     before
-                    and revised is not None
-                    and revised.is_file()
-                    and thread.digest(revised) != before
+                    and data is not None
+                    and hashlib.sha256(data).hexdigest() != before
                 )
             except Exception as exc:  # never raise out of reduce
                 errors.append(f"recheck: {exc}")
+            # Every junior-IC turn, delivered or not: an undelivered turn's
+            # snapshot is the unchanged copy, which is what the stepper shows.
+            try:
+                if data is None:
+                    errors.append("snapshot: revised copy is not a regular file")
+                else:
+                    thread.write_snapshot(
+                        run.id, thread.snapshot_key(s["artifact"], turn), data
+                    )
+            except Exception as exc:  # never raise out of reduce
+                errors.append(f"snapshot: {exc}")
             s["rechecks"].append({
                 "turn": turn,
                 "action": s["pending_action"] or "",

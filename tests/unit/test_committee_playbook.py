@@ -1649,6 +1649,43 @@ def test_seed_open_is_a_zero_ticket_bootstrap(artifact):
     assert s["max_turns"] == 30
 
 
+def test_open_snapshots_the_bytes_it_hashed_before_the_header(artifact, tmp_path):
+    """doc/00-original is exactly what `artifact_digest` hashed, in one process."""
+    import hashlib
+
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="open")
+    pb.seed(run, _NamedSite("local"))
+
+    snap = tmp_path / "runs" / run.id / "doc" / "00-original.md"
+    assert snap.read_bytes() == artifact.read_bytes()
+    assert hashlib.sha256(snap.read_bytes()).hexdigest() == (
+        pb._state_by_run[run.id]["artifact_digest"]
+    )
+    assert snap.stat().st_mode & 0o777 == 0o600
+    assert thread.path(run.id).read_text(encoding="utf-8").startswith(
+        f"# Committee — {run.id}"
+    )
+
+
+def test_a_failed_open_snapshot_fails_open_before_any_header(artifact, tmp_path, monkeypatch):
+    """Snapshot first, header second: no header claims a meeting that never opened."""
+    from playbooks.committee import thread
+
+    def boom(run_id, key, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(thread, "write_snapshot", boom)
+    pb = _committee()
+    run = _run(phase="open")
+
+    with pytest.raises(OSError, match="disk full"):
+        pb.seed(run, _NamedSite("local"))
+    assert not (tmp_path / "runs" / run.id / "thread.md").exists()
+
+
 def test_seed_open_requires_the_artifact_variable():
     """Unset HERMES_COMMITTEE_ARTIFACT fails fast, naming the variable."""
     pb = _committee()
@@ -1870,9 +1907,10 @@ def test_a_second_junior_seed_keeps_the_edited_revised_copy(artifact):
 
 
 def test_a_junior_seed_survives_an_artifact_deleted_mid_run(artifact):
-    """A vanished original degrades the turn; it must not abandon the run.
+    """A vanished original AND snapshot degrade the turn; they must not abandon the run.
 
-    `seed` is called unguarded inside the master loop
+    `ensure_revised` copies from doc/00-original first, so only both files gone
+    reaches its OSError. `seed` is called unguarded inside the master loop
     (engine/dispatch.py:287), so an OSError out of ensure_revised would leave
     the run `running` with no terminal state and no event. The turn is
     dispatched with an empty pre-edit digest instead, which is what reduce's
@@ -1886,6 +1924,7 @@ def test_a_junior_seed_survives_an_artifact_deleted_mid_run(artifact):
     pb.seed(run, site)
 
     artifact.unlink()
+    thread.run_file(run.id, thread.snapshot_key(str(artifact), None)).unlink()
     s = pb._state(run)
     s["current_role"] = cast.JUNIOR
     s["pending_action"] = "add a rollback plan"
@@ -1896,6 +1935,40 @@ def test_a_junior_seed_survives_an_artifact_deleted_mid_run(artifact):
     assert tickets[0].payload["kind"] == "edit"
     assert s["pre_edit_digest"] == ""
     assert not thread.revised_path(run.id, s["artifact"]).exists()
+
+
+def test_edit_one_starts_from_the_open_time_bytes_even_if_the_original_moved(artifact):
+    """Every worker runs bypassPermissions. If one touches the original, the junior
+    still edits what the committee was handed, and the re-check baseline is the
+    digest `open` took."""
+    from playbooks.committee import cast, thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="open")
+    pb.seed(run, site)
+    handed = artifact.read_bytes()
+    artifact.write_text("# Proposal\n\nSomeone rewrote this mid-review.\n", encoding="utf-8")
+
+    s = pb._state(run)
+    s.update(current_role=cast.JUNIOR, current_turn=3, pending_action="tighten the intro")
+    pb.seed(_run(phase="t03-junior_ic"), site)
+
+    assert thread.revised_path(run.id, str(artifact)).read_bytes() == handed
+    assert s["pre_edit_digest"] == s["artifact_digest"]
+
+
+def test_ensure_revised_prefers_the_open_snapshot_and_falls_back_to_the_artifact(tmp_path):
+    """A run from before snapshots existed has no doc/00-original mid-flight."""
+    from playbooks.committee import thread
+
+    artifact = tmp_path / "proposal.md"
+    artifact.write_bytes(b"live\n")
+
+    assert thread.ensure_revised("run-legacy", str(artifact)).read_bytes() == b"live\n"
+
+    thread.write_snapshot("run-new", thread.snapshot_key(str(artifact), None), b"handed\n")
+    assert thread.ensure_revised("run-new", str(artifact)).read_bytes() == b"handed\n"
 
 
 def test_decision_ticket_is_built_for_the_chair(artifact):
@@ -2534,7 +2607,9 @@ def test_reduce_records_a_missing_revised_file_as_unverified(tmp_path):
     )
 
     assert reductions[0].json["verified"] is False
-    assert reductions[0].json["error"] is None  # an absent file is an answer, not a crash
+    # An absent file is an answer, not a crash -- and no snapshot to show for it.
+    assert reductions[0].json["error"] == "snapshot: revised copy is not a regular file"
+    assert not (tmp_path / "runs" / run.id / "doc" / "t05.md").exists()
 
 
 def test_reduce_treats_a_missing_pre_edit_snapshot_as_a_failed_recheck(tmp_path):
@@ -2579,6 +2654,109 @@ def test_reduce_treats_a_missing_pre_edit_snapshot_as_a_failed_recheck(tmp_path)
     assert s["rechecks"] == [
         {"turn": 5, "action": "add a rollback paragraph", "verified": False}
     ]
+
+
+# --- reduce: the doc/tNN snapshot of every junior-IC turn (doc-diff D1) -----
+
+
+def _junior_turn(pb, run, tmp_path, turn=5):
+    """State for junior-IC turn `turn` whose revised copy seed() already made."""
+    from playbooks.committee import thread
+
+    artifact = tmp_path / "proposal.md"
+    artifact.write_text("the original proposal\n")
+    copy = thread.ensure_revised(run.id, str(artifact))
+    pb._state(run).update(
+        current_role="junior_ic",
+        current_turn=turn,
+        opening=[],
+        artifact=str(artifact),
+        revised=str(copy),
+        pending_action="add a rollback paragraph",
+        pre_edit_digest=thread.digest(copy),
+    )
+    return copy
+
+
+def _edited(run):
+    return [_finding(run, f"{run.id}/t05-junior_ic", "Added a rollback paragraph.")]
+
+
+def test_a_junior_turn_leaves_a_snapshot_of_the_copy_it_judged(tmp_path):
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    copy = _junior_turn(pb, run, tmp_path)
+    copy.write_text("the original proposal\nand a rollback paragraph\n")
+
+    red = pb.reduce(run, "t05-junior_ic", _edited(run), _NamedSite("local"))[0]
+
+    snap = tmp_path / "runs" / run.id / "doc" / "t05.md"
+    assert snap.read_bytes() == copy.read_bytes()
+    assert red.json["verified"] is True
+    assert red.json["error"] is None
+
+
+def test_an_undelivered_junior_turn_still_leaves_its_unchanged_snapshot(tmp_path):
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    _junior_turn(pb, run, tmp_path)
+
+    red = pb.reduce(run, "t05-junior_ic", [], _NamedSite("local"))[0]
+
+    assert red.json["delivered"] is False
+    assert red.json["verified"] is False
+    assert (tmp_path / "runs" / run.id / "doc" / "t05.md").read_bytes() == (
+        b"the original proposal\n"
+    )
+
+
+def test_a_symlinked_revised_copy_is_neither_verified_nor_snapshotted(tmp_path):
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    copy = _junior_turn(pb, run, tmp_path)
+    elsewhere = tmp_path / "elsewhere.md"
+    elsewhere.write_text("a file the worker pointed the copy at\n")
+    copy.unlink()
+    copy.symlink_to(elsewhere)
+
+    red = pb.reduce(run, "t05-junior_ic", _edited(run), _NamedSite("local"))[0]
+
+    assert red.json["verified"] is False
+    assert red.json["error"] == "snapshot: revised copy is not a regular file"
+    assert not (tmp_path / "runs" / run.id / "doc" / "t05.md").exists()
+
+
+def test_a_failed_snapshot_write_is_recorded_and_the_meeting_goes_on(tmp_path, monkeypatch):
+    from playbooks.committee import thread
+
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    copy = _junior_turn(pb, run, tmp_path)
+    copy.write_text("the original proposal\nand a rollback paragraph\n")
+
+    def boom(run_id, key, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(thread, "write_snapshot", boom)
+    red = pb.reduce(run, "t05-junior_ic", _edited(run), _NamedSite("local"))[0]
+
+    assert red.json["verified"] is True
+    assert red.json["error"] == "snapshot: disk full"
+    assert pb.next_phase(run) == "decision"
+
+
+def test_a_turn_settled_again_overwrites_its_snapshot(tmp_path):
+    """A committee-voice retake re-settles the same turn: the last settle wins."""
+    pb = _committee()
+    run = _run(phase="t05-junior_ic")
+    copy = _junior_turn(pb, run, tmp_path)
+
+    copy.write_text("take one\n")
+    pb.reduce(run, "t05-junior_ic", _edited(run), _NamedSite("local"))
+    copy.write_text("take two\n")
+    pb.reduce(run, "t05-junior_ic", _edited(run), _NamedSite("local"))
+
+    assert (tmp_path / "runs" / run.id / "doc" / "t05.md").read_bytes() == b"take two\n"
 
 
 # --- reduce: the decision (spec 5.2, 5.3, criteria 7, 8, 9) ---------------

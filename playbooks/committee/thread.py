@@ -116,7 +116,16 @@ def ensure_revised(run_id: str, artifact: str) -> Path:
     """
     destination = revised_path(run_id, artifact)
     if not destination.exists():
-        shutil.copyfile(artifact, destination)
+        # The open-time snapshot, so Edit 1's baseline is exactly what the
+        # committee was handed even if the original moved since. A run from
+        # before snapshots existed has none and copies the live file, as before.
+        # `read_regular`, not `is_file()`: a symlink there is refused, not
+        # followed, like everywhere else doc/ is read.
+        handed = read_regular(run_file(run_id, snapshot_key(artifact, None)))
+        if handed is None:
+            shutil.copyfile(artifact, destination)
+        else:
+            destination.write_bytes(handed)
     return destination
 
 
