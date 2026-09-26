@@ -18,8 +18,8 @@ No goal-budget machinery. Research divides one budget between an unbounded,
 runtime-sized set of material blocks; a committee goal has a fixed shape with
 three runtime-variable strings. Clip those three -- the charge to
 ``CHARGE_MAX``, a delegated action to ``turnblock.ACTION_MAX``, a retake note to
-``voice.RETAKE_NOTE_MAX`` -- and the largest shape, the owner's retake, lands
-around 3450 characters against a 3600 budget. The assembled string
+``voice.RETAKE_NOTE_MAX`` -- and the largest shape, the owner's retake naming
+its last take, lands around 3570 characters against a 3600 budget. The assembled string
 is never clipped from the end, which is what keeps the read-only guardrail and
 the completion condition in every goal; ``GOAL_MAX`` and the unit test are what
 keep that honest.
@@ -390,13 +390,21 @@ _RULES_POINTER = (
 # The owner and the reviewers only, and only when seed names the stem: the
 # speaker's take-1 phase name, so a retake overwrites its own file and two
 # phases never share one. The folder is derived from the thread path already
-# in the goal, so no second absolute path is added.
+# in the goal, so no second absolute path is added: the worker's cwd is not the
+# run directory, and a relative `images/` there writes into whatever checkout
+# it was launched from. (The absolute folder would cost up to 170 characters of
+# the owner retake's headroom.) No "Read the artifact and the thread" here: the
+# floor paragraph above it already says so.
 _GUARDRAIL_IMAGE = (
-    "This review lands nothing, submits nothing and touches no repository. Read "
-    "the artifact and the thread. The only file you may write is one image, "
-    "{image}.svg or {image}.png, in the images folder beside the thread; write "
+    "This review lands nothing, submits nothing and touches no repository. The "
+    "only file you may write is one image, {image}.svg or {image}.png, in the "
+    "images folder beside the thread (not your working directory); write "
     "nothing else."
 )
+
+# A retake's one line naming the discarded take the master kept for it
+# (`thread.write_take`), relative to the thread for the same reason.
+_LAST_TAKE = "Your last take is in {path} beside the thread; keep its substance."
 
 _ALREADY_EDITED = (
     "Do not edit the revised copy again; whatever your first take changed stands."
@@ -421,6 +429,7 @@ def goal(
     action: str | None = None,
     image: str = "",
     retake: str | None = None,
+    last_take: str = "",
 ) -> str:
     """The whole goal string handed to one worker.
 
@@ -430,13 +439,18 @@ def goal(
     a reviewer's take-1 phase name, the stem of the one image file it may write;
     empty means no file at all. ``retake`` is ``voice.note(...)`` on a retake,
     clipped to ``voice.RETAKE_NOTE_MAX`` and set as its own paragraph before the
-    Done line. Only the charge, a delegated action and the note are bounded, so
-    the assembled goal has a known size and the unit test holds it under
-    ``GOAL_MAX``.
+    Done line; ``last_take`` (``takes/<base>-take<n>.md``, run-relative) adds
+    one line under it naming the discarded take, and is ignored without a
+    retake. Only the charge, a delegated action and the note are bounded, and
+    ``last_take`` is the stem plus 15 characters, so the assembled goal has a
+    known size and the unit test holds it under ``GOAL_MAX``.
     """
     charge = clip(charge, CHARGE_MAX)
     pointer = _RULES_POINTER.format(cap=_voice.cap_text(role))
-    again = f"{clip(retake, _voice.RETAKE_NOTE_MAX)}\n\n" if retake is not None else ""
+    again = ""
+    if retake is not None:
+        named = f"\n{_LAST_TAKE.format(path=last_take)}" if last_take else ""
+        again = f"{clip(retake, _voice.RETAKE_NOTE_MAX)}{named}\n\n"
 
     if role == CHAIR:
         return (

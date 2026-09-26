@@ -705,6 +705,7 @@ def test_every_goal_stays_under_the_budget_at_maximum_size():
                 action="a" * 5000,
                 image="x" * 48,
                 retake=retake,
+                last_take=f"takes/{'x' * 48}-take2.md",
             )
             shape = f"{role} retake={retake is not None}"
             assert len(g) < cast.GOAL_MAX, f"{shape}: {len(g)}"
@@ -720,8 +721,10 @@ def test_every_goal_stays_under_the_budget_at_maximum_size():
                 assert "the only file you may write" not in low, shape
             else:
                 assert "the only file you may write is one image" in low, shape
-                assert "images folder beside the thread" in low, shape
+                assert "images folder beside the thread (not your working directory)" in low, shape
                 assert "write no file at all" not in low, shape
+            # a retake names the take it replaces; take 1 has none to name
+            assert ("your last take is in takes/" in low) is (retake is not None), shape
 
 
 def _goal(role, **over):
@@ -758,6 +761,19 @@ def test_a_retake_note_is_its_own_paragraph_before_the_done_line_and_is_clipped(
     assert "r" * (voice.RETAKE_NOTE_MAX - 1) in long
 
 
+@pytest.mark.parametrize("role, done", [("tl", _DONE_TURN), ("owner", _DONE_TURN),
+                                        (cast.CHAIR, _DONE_DECISION)])
+def test_a_retake_names_the_file_holding_its_last_take_in_one_line(role, done):
+    note = "Retake 2 of 3. Rules broken: 1 bold. Say it again within them."
+    line = "Your last take is in takes/t03-tl-take1.md beside the thread; keep its substance."
+    g = _goal(role, retake=note, last_take="takes/t03-tl-take1.md")
+    assert f"\n\n{note}\n{line}\n\n{done}" in g
+    assert "Your last take" not in _goal(role, last_take="takes/t03-tl-take1.md")  # take 1
+    assert "Your last take" not in _goal(role, retake=note)  # no file was kept
+    junior = _goal(cast.JUNIOR, retake=note, last_take="takes/t04-junior_ic-take1.md")
+    assert f"{note}\nYour last take is in takes/t04-junior_ic-take1.md beside the thread" in junior
+
+
 def test_the_junior_retake_is_report_only():
     g = _goal(cast.JUNIOR, retake="Retake 2 of 3. Say it again within them.")
 
@@ -784,7 +800,8 @@ def test_owner_and_reviewers_may_write_one_image_named_for_their_phase():
 
     assert (
         "The only file you may write is one image, t02-owner.svg or t02-owner.png, "
-        "in the images folder beside the thread; write nothing else."
+        "in the images folder beside the thread (not your working directory); write "
+        "nothing else."
     ) in g
     assert _GUARDRAIL not in g
     assert _GUARDRAIL in _goal("tl")  # no image stem, no write
@@ -880,6 +897,57 @@ def test_images_dir_refuses_a_planted_symlink_or_file(tmp_path, planted, create)
     with pytest.raises(ValueError, match="images"):
         thread.images_dir("committee-x", create=create)
     assert (elsewhere.stat().st_mode & 0o777) == 0o755
+
+
+def test_takes_dir_is_the_runs_private_takes_folder(tmp_path):
+    from playbooks.committee import thread
+
+    folder = thread.takes_dir("committee-x")
+
+    assert folder == tmp_path / "runs" / "committee-x" / "takes"
+    assert folder.is_dir() and (folder.stat().st_mode & 0o777) == 0o700
+
+
+@pytest.mark.parametrize("planted", ["symlink", "file"])
+def test_takes_dir_refuses_a_planted_symlink_or_file(tmp_path, planted):
+    from playbooks.committee import thread
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o755)
+    elsewhere.chmod(0o755)
+    run_dir = tmp_path / "runs" / "committee-x"
+    run_dir.mkdir(parents=True)
+    if planted == "symlink":
+        (run_dir / "takes").symlink_to(elsewhere, target_is_directory=True)
+    else:
+        (run_dir / "takes").write_bytes(b"")
+
+    with pytest.raises(ValueError, match="takes"):
+        thread.write_take("committee-x", "t02-owner-take1.md", "Body.")
+    assert (elsewhere.stat().st_mode & 0o777) == 0o755 and not list(elsewhere.iterdir())
+
+
+def test_write_take_is_private_overwrites_and_never_writes_through_a_symlink(tmp_path):
+    from playbooks.committee import thread
+
+    assert thread.write_take("committee-x", "t02-owner-take1.md", "First.") == (
+        "takes/t02-owner-take1.md")
+    path = tmp_path / "runs" / "committee-x" / "takes" / "t02-owner-take1.md"
+    assert path.read_text() == "First." and (path.stat().st_mode & 0o777) == 0o600
+    thread.write_take("committee-x", "t02-owner-take1.md", "Second.")
+    assert path.read_text() == "Second."
+
+    outside = tmp_path / "outside.md"
+    outside.write_text("keep")
+    path.unlink()
+    path.symlink_to(outside)
+    thread.write_take("committee-x", "t02-owner-take1.md", "Third.")
+    assert not path.is_symlink() and path.read_text() == "Third."
+    assert outside.read_text() == "keep"
+    assert [p.name for p in path.parent.iterdir()] == ["t02-owner-take1.md"]  # no temp left
+    for bad in ("../x.md", "a/b.md", "", ".."):
+        with pytest.raises(ValueError):
+            thread.write_take("committee-x", bad, "x")
 
 
 def test_images_dir_without_create_only_looks(tmp_path):
@@ -1224,7 +1292,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
         "revised", "roster", "max_turns", "ended",
         "delegation_turn", "dropped_delegation_turn", "answers_turn", "delegated_by_turn",
         "snapshot_note",
-        "base", "take", "retake", "note", "held", "edit_digest",
+        "base", "take", "retake", "note", "held", "edit_digest", "last_take", "image",
     }
     assert (s["base"], s["take"], s["retake"], s["note"], s["held"], s["edit_digest"]) == (
         "", 1, None, None, None, "")
@@ -3734,6 +3802,152 @@ def test_a_violating_take_is_discarded_and_retaken_under_the_same_turn():
     assert s["note"] == (
         "Retake 2 of 3. Rules broken: 202 words (cap 150); 1 bold. Say it again within them."
     )
+
+
+def test_a_discarded_take_is_kept_in_takes_and_the_retake_goal_names_it(tmp_path):
+    """The retake is not blind: the master writes the discarded body (never
+    its turn block) to takes/, 0600, and the next goal names it in one line."""
+    from playbooks.committee import turnblock
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t02-owner")
+    _speaking(pb, run, "owner", 2)
+    answers = {"t02-owner": _turn_answer(_WALL, stance="defer"),
+               "t02-owner-take2": _turn_answer(_WALL + "again", stance="defer")}
+    takes = tmp_path / "runs" / run.id / "takes"
+
+    for n, phase in enumerate(answers, 1):
+        doc = pb.reduce(run, phase, [_finding(run, f"{run.id}/{phase}", answers[phase])], site)[0]
+        body = turnblock.strip(answers[phase])
+        assert doc.kind == "take" and doc.json["body"] == body and doc.json["error"] is None
+        assert "hermes-turn" not in doc.json["body"] and "stance:" not in doc.json["body"]
+        path = takes / f"t02-owner-take{n}.md"
+        assert path.read_text() == body and (path.stat().st_mode & 0o777) == 0o600
+        run.phase = pb.next_phase(run)
+        goal = pb.seed(run, site)[0].payload["goal"]
+        assert (f"\nYour last take is in takes/t02-owner-take{n}.md beside the thread; "
+                "keep its substance.\n\n") in goal
+    assert (takes.stat().st_mode & 0o777) == 0o700
+    # the next speaker starts clean
+    pb.reduce(run, run.phase, [_finding(run, f"{run.id}/{run.phase}", _turn_answer(
+        "Defer it: `engine/dispatch.py:284` drops the lease, e.g. at 3 s."))], site)
+    run.phase = pb.next_phase(run)
+    assert pb._state(run)["last_take"] == ""
+    assert "Your last take" not in pb.seed(run, site)[0].payload["goal"]
+
+
+def test_a_refused_takes_folder_names_no_file_and_never_raises(tmp_path):
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t03-tl")
+    _speaking(pb, run, "tl", 3)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / "runs" / run.id).mkdir(parents=True)
+    (tmp_path / "runs" / run.id / "takes").symlink_to(elsewhere, target_is_directory=True)
+
+    doc = pb.reduce(run, "t03-tl", [_finding(run, f"{run.id}/t03-tl", _WALL)], site)[0]
+
+    assert doc.kind == "take" and doc.json["error"].startswith("takes: ")
+    assert not list(elsewhere.iterdir())
+    run.phase = pb.next_phase(run)
+    goal = pb.seed(run, site)[0].payload["goal"]
+    assert "Retake 2 of 3" in goal and "Your last take" not in goal
+
+
+def test_a_note_names_the_one_image_reference_that_would_pass():
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t02-owner")
+    s = _speaking(pb, run, "owner", 2)
+    pb.seed(run, site)  # offers t02-owner.svg or .png
+    answer = "Staffing is flat.\n![curve](images/t09-tl.svg)\nDescription: engineers per week."
+
+    pb.reduce(run, "t02-owner", [_finding(run, f"{run.id}/t02-owner", answer)], site)
+
+    assert "an image not at images/t02-owner.svg or .png" in s["retake"]
+    # the chair was offered none, so it is told no file name
+    chair = _run(phase="decision")
+    chair.id = "committee-chair"
+    c = _chairing(pb, chair)
+    pb.seed(chair, site)
+    pb.reduce(chair, "decision", [_finding(chair, f"{chair.id}/decision", answer)], site)
+    assert "an image missing or not your own file" in c["retake"]
+    assert "images/decision" not in c["retake"]
+
+
+def test_filler_and_a_long_stance_send_a_take_back_and_take_three_keeps_the_clip():
+    pb = _committee()
+    site = _NamedSite("local")
+    lead = "Defer it: `engine/dispatch.py:284` drops the lease, e.g. at 3 s."
+    run = _run(phase="t03-tl")
+    _speaking(pb, run, "tl", 3)
+    filler = _turn_answer(f"Great question. {lead} Hope this helps.")
+    doc = pb.reduce(run, "t03-tl", [_finding(run, f"{run.id}/t03-tl", filler)], site)[0]
+    assert (doc.kind, doc.json["violations"]) == ("take", ["filler"])
+
+    long = _run(phase="t05-pm")
+    long.id = "committee-long-stance"
+    s = _speaking(pb, long, "pm", 5)
+    stance = _turn_answer(lead, stance="hold " * 50)
+    doc = pb.reduce(long, "t05-pm", [_finding(long, f"{long.id}/t05-pm", stance)], site)[0]
+    assert (doc.kind, doc.json["violations"]) == ("take", ["stance_too_long"])
+    assert "stance 249 characters (max 200)" in s["retake"]
+    s.update(take=3, retake=None)  # take 3 is kept, clipped as the backstop, and flagged
+    doc = pb.reduce(long, "t05-pm-take3", [_finding(long, f"{long.id}/t05-pm-take3", stance)],
+                    site)[0]
+    assert doc.kind == "turn" and doc.json["violations"] == ["stance_too_long"]
+    assert "stance_clipped" in doc.json["flags"] and doc.json["stance"].endswith("…")
+    assert len(doc.json["stance"]) <= 200
+
+
+def test_a_retake_whose_own_image_checks_ok_is_kept_clean(tmp_path):
+    import hashlib
+
+    from playbooks.committee import thread
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t02-owner")
+    _speaking(pb, run, "owner", 2)
+    pb.seed(run, site)
+    pb.reduce(run, "t02-owner", [_finding(run, f"{run.id}/t02-owner", _WALL)], site)
+    run.phase = pb.next_phase(run)
+    pb.seed(run, site)
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"></svg>'
+    (thread.images_dir(run.id) / "t02-owner.svg").write_bytes(svg)
+    answer = _turn_answer(
+        "Defer it: `engine/dispatch.py:284` drops the lease, e.g. at 3 s.\n\n"
+        "![Lease ends before the retry](images/t02-owner.svg)\n"
+        "Description: the lease ends 2 s before the retry fires.", stance="defer")
+
+    doc = pb.reduce(run, "t02-owner-take2",
+                    [_finding(run, f"{run.id}/t02-owner-take2", answer)], site)[0].json
+
+    assert (doc["take"], doc["takes"], doc["violations"]) == (2, 2, [])
+    (image,) = doc["voice"]["images"]
+    assert image["ok"] is True and image["sha256"] == hashlib.sha256(svg).hexdigest()
+
+
+def test_an_undelivered_third_take_keeps_the_second_by_its_number():
+    from playbooks.committee import turnblock
+
+    pb = _committee()
+    site = _NamedSite("local")
+    run = _run(phase="t02-owner")
+    _speaking(pb, run, "owner", 2)
+    second = _turn_answer(_WALL + "second", stance="defer")
+    for phase, answer in (("t02-owner", _WALL), ("t02-owner-take2", second)):
+        assert pb.reduce(run, phase, [_finding(run, f"{run.id}/{phase}", answer)],
+                         site)[0].kind == "take"
+        run.phase = pb.next_phase(run)
+
+    doc = pb.reduce(run, "t02-owner-take3", [], site)[0].json
+
+    assert (doc["take"], doc["takes"]) == (2, 3)
+    assert doc["body"] == turnblock.strip(second)
+    assert doc["violations"][-1] == "retake_failed"
 
 
 def test_a_discarded_reviewer_take_queues_no_floor_request():

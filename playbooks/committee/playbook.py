@@ -238,6 +238,12 @@ class CommitteePlaybook:
                 # the discarded take kept in reserve: {"answer", "take"}. A
                 # retake that delivers nothing falls back to it.
                 "held": None,
+                # `takes/<base>-take<n>.md`, the discarded take's body as
+                # `_discard` wrote it, which the next take's goal names ("" when
+                # the write was refused); and the image stem this phase's goal
+                # offered ("" for none), which a retake note names.
+                "last_take": "",
+                "image": "",
                 # the revised copy's `_copy_digest` after a discarded junior
                 # take 1, so a report-only retake that edits again is caught.
                 "edit_digest": "",
@@ -261,7 +267,7 @@ class CommitteePlaybook:
         Every mint of a speaking phase calls this with its take-1 name, here and
         in any later loop, so retake and image names never repeat.
         """
-        s.update(base=base, take=1, note=None, held=None, edit_digest="")
+        s.update(base=base, take=1, note=None, held=None, edit_digest="", last_take="", image="")
 
     def _retake(self, s: dict) -> str:
         """Mint the next take of the phase in progress: same speaker, same turn.
@@ -470,6 +476,7 @@ class CommitteePlaybook:
                 image = s["base"]
             except (OSError, ValueError):
                 pass
+        s["image"] = image  # what a retake note names as the one passing reference
 
         return [Ticket(
             id=f"{run.id}/{phase}",
@@ -493,6 +500,7 @@ class CommitteePlaybook:
                     action=action,
                     image=image,
                     retake=s["note"],
+                    last_take=s["last_take"],
                 ),
                 "kind": kind,
                 "action": action,
@@ -671,14 +679,23 @@ class CommitteePlaybook:
     ) -> list[Reduction]:
         """Hold a take that broke a hard rule and ask the same speaker again.
 
-        Writes nothing to thread.md and applies no gate. The take survives only
-        on its ``take`` reduction, which carries no ``artifact``, ``revised`` or
+        Writes nothing to thread.md and applies no gate. The take survives on
+        its ``take`` reduction, which carries no ``artifact``, ``revised`` or
         ``cap`` (the keys the kind-agnostic readers scan) and never routes a
-        ticket. ``extra`` is a later loop's own keys (``stage``, ``seq``).
+        ticket, and its body in ``takes/<base>-take<n>.md``, which the retake's
+        goal names so the speaker keeps what it said and fixes only the rules.
+        A refused or failed write names no file and is the take's ``error``.
+        ``extra`` is a later loop's own keys (``stage``, ``seq``).
         """
         block = turnblock.parse(answer)
+        body = turnblock.strip(answer)
         s["held"] = {"answer": answer, "take": s["take"]}
-        s["retake"] = voice.note(metrics or {}, violations, take=s["take"] + 1)
+        s["retake"] = voice.note(metrics or {}, violations, take=s["take"] + 1, image=s["image"])
+        error = None
+        try:
+            s["last_take"] = thread.write_take(run.id, f"{s['base']}-take{s['take']}.md", body)
+        except Exception as exc:  # never raise out of reduce
+            s["last_take"], error = "", f"takes: {exc}"
         doc = {
             "phase": s["base"],
             "role": role,
@@ -686,13 +703,13 @@ class CommitteePlaybook:
             "take": s["take"],
             "kept": False,
             "delivered": True,
-            "body": turnblock.strip(answer),
+            "body": body,
             "stance": block.get("stance"),
             "action": block.get("action"),
             "voice": metrics,
             "violations": violations,
             "flags": flags,
-            "error": None,
+            "error": error,
         }
         doc.update(extra or {})
         return [Reduction(kind="take", json=doc)]

@@ -17,6 +17,10 @@ And ``doc/``: every version of the document, for the view's stepper --
 revised copy as junior-IC turn NN left it), written atomically and 0600 by
 ``write_snapshot`` and read back by ``read_regular``, which follows no symlink.
 
+And ``takes/``: the body of each take the rules sent back
+(``takes/<base>-take<n>.md``, 0600), written by the master with ``write_take``
+so the retake can reread what it said. The server never serves it.
+
 Stdlib-only.
 """
 from __future__ import annotations
@@ -104,17 +108,15 @@ def header_artifact(run_id: str) -> str:
     return ""
 
 
-def images_dir(run_id: str, *, create: bool = True) -> Path:
-    """``runs/<run_id>/images/``: the one folder an owner or reviewer may write an image into (0700).
+def _plain_dir(run_id: str, name: str, *, create: bool = True) -> Path:
+    """``runs/<run_id>/<name>/`` at 0700, refusing a symlink or a file planted there.
 
-    A worker could leave a symlink or a file there. ``state_dir`` would follow
-    the symlink (and chmod its target), and a file check through it could pass
-    an image the server, which follows none, then refuses. Raise instead.
-
-    ``create=False`` only looks (reduce grading a take): it makes and chmods
-    nothing, and raises ``FileNotFoundError`` when the folder is absent.
+    Every worker runs bypassPermissions and can leave either. ``state_dir``
+    would follow the symlink (and chmod its target). Raise instead.
+    ``create=False`` only looks: it makes and chmods nothing, and raises
+    ``FileNotFoundError`` when the folder is absent.
     """
-    folder = _config.resolve_home() / "runs" / run_id / "images"
+    folder = _config.resolve_home() / "runs" / run_id / name
     try:
         mode = os.lstat(folder).st_mode
     except FileNotFoundError:
@@ -123,7 +125,44 @@ def images_dir(run_id: str, *, create: bool = True) -> Path:
         mode = stat.S_IFDIR
     if not stat.S_ISDIR(mode):
         raise ValueError(f"{folder} is not a plain directory (a symlink or a file); refusing it")
-    return _config.state_dir("runs", run_id, "images") if create else folder
+    return _config.state_dir("runs", run_id, name) if create else folder
+
+
+def images_dir(run_id: str, *, create: bool = True) -> Path:
+    """``runs/<run_id>/images/``: the one folder an owner or reviewer may write an image into (0700).
+
+    A planted symlink or file is refused (``_plain_dir``): a file check through
+    a symlink could pass an image the server, which follows none, then refuses.
+
+    ``create=False`` only looks (reduce grading a take): it makes and chmods
+    nothing, and raises ``FileNotFoundError`` when the folder is absent.
+    """
+    return _plain_dir(run_id, "images", create=create)
+
+
+def takes_dir(run_id: str) -> Path:
+    """``runs/<run_id>/takes/`` (0700): each discarded take's body, for its retake to reread.
+
+    Written by the master only, never served. A planted symlink or file is
+    refused (``_plain_dir``), so a take is never written through one.
+    """
+    return _plain_dir(run_id, "takes")
+
+
+def write_take(run_id: str, name: str, body: str) -> str:
+    """Write one discarded take's body to ``runs/<run_id>/takes/<name>``; return ``takes/<name>``.
+
+    Atomic, 0600 and overwriting, like ``write_snapshot``: ``os.replace``
+    swaps out a symlink planted at the name rather than writing through it.
+
+    Raises:
+        ValueError: ``name`` is not a plain file name, or the folder is refused.
+        OSError: the write failed.
+    """
+    if Path(name).name != name or name in ("", ".", ".."):
+        raise ValueError(f"not a take file name: {name!r}")
+    _write_private(takes_dir(run_id), name, body.encode("utf-8"))
+    return f"takes/{name}"
 
 
 def append_turn(run_id: str, *, turn: int, role: str, body: str) -> None:
@@ -296,12 +335,16 @@ def write_snapshot(run_id: str, key: str, data: bytes) -> None:
     target = Path(key)
     if target.parent != Path("doc") or target.name in ("", ".", ".."):
         raise ValueError(f"not a doc/ snapshot key: {key!r}")
-    directory = _config.state_dir("runs", run_id, "doc")
-    fd, temp = tempfile.mkstemp(dir=directory, prefix=f".{target.name}.")
+    _write_private(_config.state_dir("runs", run_id, "doc"), target.name, data)
+
+
+def _write_private(directory: Path, name: str, data: bytes) -> None:
+    """``data`` to ``directory/name`` through a dot-prefixed 0600 temp file and ``os.replace``."""
+    fd, temp = tempfile.mkstemp(dir=directory, prefix=f".{name}.")
     try:
         with open(fd, "wb") as handle:
             handle.write(data)
-        os.replace(temp, directory / target.name)
+        os.replace(temp, directory / name)
     except BaseException:
         Path(temp).unlink(missing_ok=True)
         raise

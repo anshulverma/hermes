@@ -905,6 +905,14 @@ def test_a_violating_turn_is_retaken_and_only_the_kept_take_reaches_the_thread(
     kept = _reduction_for(conn, run_id, "t02-owner-take3")
     assert (kept["take"], kept["takes"], kept["violations"]) == (3, 3, [])
     assert [b for h, b in _turns(run_id) if h == _heading(2, cast.OWNER)] == [kept["body"]]
+    # each discarded body waits in takes/ for the next take, whose goal names it
+    folder = thread.path(run_id).parent / "takes"
+    for n, (_, doc) in enumerate(takes, 1):
+        assert (folder / f"t02-owner-take{n}.md").read_text() == doc["body"] == VIOLATION.strip()
+        (goal,) = conn.execute("SELECT payload_json FROM tickets WHERE id=?",
+                               (f"{run_id}/t02-owner-take{n + 1}",)).fetchone()
+        assert f"Your last take is in takes/t02-owner-take{n}.md beside the thread" in (
+            json.loads(goal)["goal"])
 
 
 def test_a_junior_retake_reports_without_editing_again(
