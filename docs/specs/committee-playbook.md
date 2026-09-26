@@ -119,6 +119,27 @@ Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
   junior IC's first edit. After each junior-IC turn the master re-checks it — does it exist, did
   its SHA-256 move — and records `verified: true|false` on that turn's reduction, which the
   decision repeats when it failed.
+- `runs/<run_id>/doc/` — every version of the document, mode 0600 in a 0700 directory, each
+  written as a dot-prefixed temp file and renamed into place. `00-original<ext>` is the bytes
+  `open` hashed, written before the thread header; the first edit copies from it rather than from
+  the live file, so an original touched mid-review cannot change what the junior IC edits.
+  `tNN<ext>` is the revised copy as junior-IC turn NN left it, written after every junior-IC turn,
+  delivered or not, and overwritten if that turn settles again. `<ext>` is the artifact's suffix
+  when it is a dot and 1-16 letters or digits, and nothing otherwise. A revised copy that is
+  missing, a symlink or a FIFO leaves no file and puts `snapshot: …` in that turn's `error`.
+
+Every turn reduction also carries `answers_turn` (on an owner turn, the reviewer turn it answered)
+and `delegated_by_turn` (on a junior-IC turn, the owner turn whose delegation it applied), and the
+decision carries `dropped_delegation_turn`. All three are always written, null where they do not
+apply, so an absent key marks a reduction from before they existed. The recorded `artifact` and
+`revised` stay the master's absolute host paths; nothing that serves the view opens them.
+
+A run reduced before `doc/` existed can be backfilled once from its junior-IC traces, from the repo
+root: `python scripts/backfill_doc_snapshots.py --run <id> --rev <commit> --path <repo path>
+[--dry-run]`. It replays each turn's recorded Edit calls onto `git show <commit>:<path>`, aborts
+unless every re-check agrees and the result equals `revised/` byte for byte, refuses a run that
+already has `doc/`, and writes every version or none. It opens `queue.db` read-only and changes no
+database row.
 
 The original is re-checked too, and symmetrically: `open` snapshots its SHA-256 and the decision
 re-hashes it, recording `artifact_intact: true|false` and naming a mismatch in the verdict text.
@@ -152,9 +173,31 @@ that says nothing about the committee.
 
 A committee run gets its own tab in the control plane: where the meeting got to and why it
 stopped, the roster with each persona's current stance, the meeting oldest-first with every turn
-attributed by name, each delegation and its re-check outcome, the verdict card, and the original
-against the revised copy. The view states that the original is never modified — reading an
-unchanged repository file as a failed edit mechanism is what swung a live verdict.
+attributed by name, each delegation and its re-check outcome, the verdict card, and the document as
+it changed. The view states that the original is never modified — reading an unchanged repository
+file as a failed edit mechanism is what swung a live verdict.
+
+**The document card is a stepper: Original · Edit 1 (tNN) … · Final.** An edit step shows that
+edit alone, the previous version against this one, with the re-check's verdict (APPLIED, DID NOT
+APPLY, or re-check not recorded) and its context: who raised it and their stance, the owner's
+delegation line and the junior IC's confirmation, each with a `tNN` link that opens that turn in the
+transcript. When a step is placed by turn order rather than by the recorded keys, its raised-by and
+delegated lines each say "(inferred from turn order)". Original and Final show the whole document,
+rendered as markdown for a `.md` file. Final is the version after the last edit that applied, or
+the original if none did, labelled by the ruling — "Proposed — awaiting your ruling", "Accepted",
+"Rejected", "Latest so far — the meeting is still in session" or "The meeting ended without a
+ruling" — and has an "Original → final diff" toggle, off by default, that shows the whole diff
+instead. Every diff can be unified or side by side, and the choice holds as you step. The owner row
+that delegated an edit and the junior row that applied it each have a "see edit k" link that
+selects that step, scrolls the stepper into view and focuses it, so the arrow keys step from there.
+
+Text is fetched per step from `GET /api/runs/<id>/view/artifact?path=doc/<name>`, which reads only
+`runs/<id>/doc/` under the server's own `HERMES_HOME`, so it works in the container that mounts only
+the home. The server walks there from its `runs/` one directory at a time with `O_NOFOLLOW`, so no
+symlink below `runs/` is followed, and it serves only a regular file; `view_data` sizes each version
+by the same rule. A snapshot the server cannot read says "Could not read …", never that no edit was
+made; a fetch that fails says so with a Retry button; a run from before snapshots says they were not
+captured.
 
 The view is the playbook's, not the control plane's. `playbooks/committee/view/dist/committee.umd.js`
 is built from `playbooks/committee/view/src/` with the toolchain in `web/` and committed, so
@@ -236,7 +279,7 @@ the master" also means "a playbook you trust with the operator's API token".
   says so itself, because thread.md and the Outputs tab show it before and regardless of any
   `hermes reduction accept|reject`.
 - **The original artifact is never mutated.** Edits land in the revised copy; a run that delegated
-  nothing leaves no copy at all.
+  nothing leaves no revised copy, only `doc/00-original<ext>`.
 - **The turn cap is literal.** At a low `HERMES_COMMITTEE_MAX_TURNS` the run stops mid-exchange —
   at `3`, on a reviewer's turn, with no owner reply after it — and goes straight to the decision.
   That is the cap working, not a lost turn.

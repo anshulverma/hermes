@@ -65,3 +65,19 @@ def test_runbook_db_flags_match_cli():
     assert "--events-days" not in content, "RUNBOOK has stale flag --events-days (should be --events-older-than)"
     assert "--attempts-days" not in content, "RUNBOOK has stale flag --attempts-days (should be --attempts-older-than)"
     assert "db backup --output" not in content, "RUNBOOK has wrong flag --output (should be --out)"
+
+
+def test_committee_spec_documents_the_doc_snapshots_and_the_stepper():
+    """docs/specs/committee-playbook.md says where each version lands and how the tab shows it."""
+    spec_path = Path(__file__).parent.parent.parent / "docs" / "specs" / "committee-playbook.md"
+    content = spec_path.read_text()
+
+    for needle in (
+        "runs/<run_id>/doc/", "00-original<ext>", "tNN<ext>",
+        "answers_turn", "delegated_by_turn", "dropped_delegation_turn",
+        "scripts/backfill_doc_snapshots.py",
+        "Original · Edit 1 (tNN) … · Final",
+        "view/artifact?path=doc/<name>",
+    ):
+        assert needle in content, f"committee spec does not document {needle!r}"
+    assert "which=" not in content, "committee spec still documents the removed which= parameter"
