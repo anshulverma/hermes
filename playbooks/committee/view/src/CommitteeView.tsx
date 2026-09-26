@@ -497,7 +497,7 @@ function Timeline({
   /** Held by the view, so a step's `tNN` link can open an entry from outside. */
   open: Set<number>;
   setOpen: React.Dispatch<React.SetStateAction<Set<number>>>;
-  /** turn -> [1-based edit number, that step's junior turn], for owner and junior rows. */
+  /** turn -> [1-based edit number, that step's junior turn], for reviewer, owner and junior rows. */
   edits: Map<number, [number, number]>;
   onSeeEdit: (turn: number) => void;
 }) {
@@ -715,27 +715,6 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   const [open, setOpen] = useState<Set<number>>(new Set());
   const [diffMode, setDiffMode] = useState<DiffMode>('unified');
 
-  // The timeline alone, NOT `&& roster.length === 0`. `view_data`'s `_roster`
-  // walks `cast.CAST`, so it returns all nine rows from the first poll onward
-  // and a roster-length test can never fire on real data. The state this guard
-  // exists for is a run in phase `open`: no reductions, so no timeline, no
-  // verdict and BOTH artifacts null — and it is exactly when the tab first
-  // appears.
-  if (data.timeline.length === 0) {
-    // No padding of its own, for the same reason the populated branch has none:
-    // PlaybookView.tsx already wraps this component in `padding: 20`, and 32
-    // inside 20 is 52px on one branch and 20 on the other.
-    return (
-      <EmptyState
-        title="Nothing said yet"
-        description="The committee view fills in as each member takes the floor."
-        icon="inbox"
-      />
-    );
-  }
-
-  if (variant === 'metrics') return <MeetingMetrics data={data} />;
-
   // A run captured before this view existed. Its reductions predate `body`,
   // `stance`, `ended`, `artifact` and `revised`, so `view_data` returns those
   // five as null/empty and every card would render a confident, reassuring
@@ -747,18 +726,82 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     (data.timeline.length > 0 && data.document.name === null) ||
     (data.verdict !== null && data.progress.ended === null);
 
-  // A step's `tNN` link: open that turn in the transcript and bring it on screen.
+  // A step's `tNN` link: open that turn in the transcript and bring it on screen
+  // -- its last row, the take the step context reads for a turn settled twice.
   const openTurn = (n: number) => {
     setOpen((prev) => new Set(prev).add(n));
-    window.document.querySelector(`[data-testid="entry-${n}"]`)?.scrollIntoView?.({ block: 'center' });
+    const rows = window.document.querySelectorAll(`[data-testid="entry-${n}"]`);
+    rows[rows.length - 1]?.scrollIntoView?.({ block: 'center' });
   };
 
-  // The other direction: the owner turn that delegated an edit and the junior
-  // turn that applied it both link to its step. Only when there are snapshots
-  // to show -- otherwise the link would land on "not captured".
+  // Titled like every other surface: this card sits last, below the transcript
+  // and the verdict, and it is where a reader comes looking for the document.
+  const edited = data.document.steps.length;
+  const history = (
+    <Section
+      title={
+        data.document.name
+          ? `Document — ${data.document.name} · ${edited === 0 ? 'no edits' : edited === 1 ? '1 edit' : `${edited} edits`}`
+          : 'Document'
+      }
+    >
+      {/* `intact` as well as the document: the card guarantees the original
+          was untouched, and only the verdict knows whether it was. */}
+      <DocumentHistory
+        runId={runId}
+        document={data.document}
+        timeline={data.timeline}
+        intact={data.verdict?.artifact_intact ?? null}
+        legacy={legacy}
+        selected={selected}
+        onSelect={setSelected}
+        diffMode={diffMode}
+        onDiffMode={setDiffMode}
+        onOpenTurn={openTurn}
+      />
+    </Section>
+  );
+
+  // The timeline alone, NOT `&& roster.length === 0`. `view_data`'s `_roster`
+  // walks `cast.CAST`, so it returns all nine rows from the first poll onward
+  // and a roster-length test can never fire on real data. The state this guard
+  // exists for is a run whose first turn has not settled: no reductions, so no
+  // timeline and no verdict -- and it is exactly when the tab first appears.
+  if (data.timeline.length === 0) {
+    // No padding of its own, for the same reason the populated branch has none:
+    // PlaybookView.tsx already wraps this component in `padding: 20`, and 32
+    // inside 20 is 52px on one branch and 20 on the other.
+    const empty = (
+      <EmptyState
+        title="Nothing said yet"
+        description="The committee view fills in as each member takes the floor."
+        icon="inbox"
+      />
+    );
+    // `open` keeps the original before the first worker runs, and that worker
+    // can take an hour: once the original is readable, so is the document under
+    // review. Never on another tab, which draws only its own section.
+    if (!data.document.captured || variant === 'metrics') return empty;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {empty}
+        {history}
+      </div>
+    );
+  }
+
+  if (variant === 'metrics') return <MeetingMetrics data={data} />;
+
+  // The other direction: the reviewer who raised an edit, the owner turn that
+  // delegated it and the junior turn that applied it all link to its step --
+  // the way back after "raised by" opened the reviewer's turn. A reviewer turn
+  // is answered by one owner turn, so no turn maps to two steps. Only when
+  // there are snapshots to show -- otherwise the link would land on "not
+  // captured".
   const edits = new Map<number, [number, number]>();
   if (data.document.captured) {
     data.document.steps.forEach((step, i) => {
+      if (step.reviewer_turn !== null) edits.set(step.reviewer_turn, [i + 1, step.turn]);
       if (step.owner_turn !== null) edits.set(step.owner_turn, [i + 1, step.turn]);
       edits.set(step.turn, [i + 1, step.turn]);
     });
@@ -790,20 +833,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
         onSeeEdit={seeEdit}
       />
       <Verdict runId={runId} verdict={data.verdict} />
-      {/* `intact` as well as the document: the card guarantees the original
-          was untouched, and only the verdict knows whether it was. */}
-      <DocumentHistory
-        runId={runId}
-        document={data.document}
-        timeline={data.timeline}
-        intact={data.verdict?.artifact_intact ?? null}
-        legacy={legacy}
-        selected={selected}
-        onSelect={setSelected}
-        diffMode={diffMode}
-        onDiffMode={setDiffMode}
-        onOpenTurn={openTurn}
-      />
+      {history}
     </div>
   );
 }

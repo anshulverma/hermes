@@ -428,6 +428,44 @@
 		}
 		return out;
 	}
+	/** Unchanged lines kept either side of a change; the rest of a run folds away. */
+	var CONTEXT = 3;
+	/**
+	* What an edit diff draws: every change with CONTEXT unchanged lines either
+	* side, and each longer unchanged run as one Fold -- unless its `start` is in
+	* `opened`. A committee edit is a few lines deep in a long document, and
+	* unfolded the pane opened on the document's title every time.
+	*
+	* Returns runs of rows between folds, so the side-by-side layout pairs each run
+	* on its own: a fold only ever replaces `same` rows, which pair with
+	* themselves, so both layouts fold the same lines.
+	*/
+	function foldRows(rows, opened) {
+		const out = [];
+		let shown = [];
+		for (let i = 0; i < rows.length;) {
+			let j = i;
+			while (j < rows.length && rows[j].kind === "same") j++;
+			if (j === i) {
+				shown.push(rows[i++]);
+				continue;
+			}
+			const from = i === 0 ? 0 : i + CONTEXT;
+			const to = j === rows.length ? j : j - CONTEXT;
+			if (to > from && !opened.has(from)) {
+				shown.push(...rows.slice(i, from));
+				if (shown.length) out.push(shown);
+				out.push({
+					start: from,
+					count: to - from
+				});
+				shown = rows.slice(to, j);
+			} else shown.push(...rows.slice(i, j));
+			i = j;
+		}
+		if (shown.length) out.push(shown);
+		return out;
+	}
 	/**
 	* How many diff rows to put in the DOM.
 	*
@@ -438,7 +476,7 @@
 	*/
 	var MAX_ROWS = 5e3;
 	var FINAL_LABEL = {
-		in_session: "Latest so far — the meeting is still in session",
+		in_session: "Latest so far — no verdict yet (in session, or stopped before the chair ruled)",
 		awaiting_ruling: "Proposed — awaiting your ruling",
 		accepted: "Accepted",
 		rejected: "Rejected",
@@ -477,6 +515,11 @@
 		fontSize: 12.5,
 		color: "var(--text-muted)",
 		lineHeight: 1.5
+	};
+	var heading = {
+		fontSize: 13,
+		fontWeight: 600,
+		color: "var(--text-primary)"
 	};
 	var note = (tone) => ({
 		padding: "8px 12px",
@@ -558,10 +601,11 @@
 	}
 	/** Who raised it, who delegated it, what the junior said, what the re-check found. */
 	function StepContext({ step, timeline, onOpenTurn }) {
-		const at = (n) => n === null ? void 0 : timeline.find((e) => e.n === n);
+		const at = (n) => n === null ? void 0 : timeline.findLast((e) => e.n === n);
 		const reviewer = at(step.reviewer_turn);
 		const owner = at(step.owner_turn);
-		const confirmation = at(step.turn)?.body.split("\n").find((l) => l.trim()) ?? "";
+		const junior = at(step.turn);
+		const confirmation = junior?.body.split("\n").find((l) => l.trim()) ?? "";
 		const line = {
 			fontSize: 12.5,
 			color: "var(--text-secondary)",
@@ -615,7 +659,7 @@
 					"data-testid": "step-delegated",
 					style: line,
 					children: [
-						"delegated: ",
+						owner ? `delegated by ${owner.name}: ` : "delegated: ",
 						owner?.action ?? "no action recorded",
 						" ",
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Goto, {
@@ -629,6 +673,7 @@
 					"data-testid": "step-confirmed",
 					style: line,
 					children: [
+						junior ? `${junior.name}: ` : "",
 						step.delivered ? confirmation || "no prose recorded for this turn" : "no turn delivered",
 						" ",
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Goto, {
@@ -640,9 +685,10 @@
 			]
 		});
 	}
-	function UnifiedRow({ row }) {
+	function UnifiedRow({ row, ref }) {
 		const style = ROW_STYLE[row.kind];
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			ref,
 			style: {
 				background: style.background,
 				color: style.color,
@@ -657,9 +703,10 @@
 			]
 		});
 	}
-	function SplitCell({ row, side }) {
+	function SplitCell({ row, side, ref }) {
 		const style = row ? ROW_STYLE[row.kind] : null;
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			ref,
 			"data-testid": `split-${side}`,
 			style: {
 				background: style ? style.background : "transparent",
@@ -672,7 +719,32 @@
 			children: row && style ? `${style.sign} ${row.text}` : ""
 		});
 	}
+	function FoldRow({ fold, onOpen }) {
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+			type: "button",
+			"data-testid": "diff-fold",
+			onClick: () => onOpen(fold.start),
+			style: {
+				gridColumn: "1 / -1",
+				display: "block",
+				width: "100%",
+				textAlign: "left",
+				padding: "0 8px",
+				font: "inherit",
+				color: "var(--text-muted)",
+				background: "var(--wash-subtle)",
+				border: "none",
+				cursor: "pointer"
+			},
+			children: `⋯ ${fold.count} unchanged ${fold.count === 1 ? "line" : "lines"}`
+		});
+	}
 	var DiffView = (0, react.memo)(function DiffView({ before, after, mode }) {
+		const [opened, setOpened] = (0, react.useState)(/* @__PURE__ */ new Set());
+		const first = (0, react.useRef)(null);
+		(0, react.useEffect)(() => {
+			first.current?.scrollIntoView?.({ block: "nearest" });
+		}, []);
 		const rows = diffLines(before, after);
 		const adds = rows.filter((r) => r.kind === "add").length;
 		const dels = rows.filter((r) => r.kind === "del").length;
@@ -681,8 +753,11 @@
 			style: muted,
 			children: "No changes between these two versions."
 		});
-		const pairs = mode === "split" ? splitRows(rows) : null;
-		const total = pairs ? pairs.length : rows.length;
+		const open = (start) => setOpened((prev) => new Set(prev).add(start));
+		const lines = foldRows(rows, opened).flatMap((run) => Array.isArray(run) ? mode === "split" ? splitRows(run) : run : [run]);
+		const firstRow = rows.find((r) => r.kind !== "same");
+		const mark = (row) => row !== null && row === firstRow ? first : void 0;
+		const total = lines.length;
 		const capped = total > MAX_ROWS && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "diff-rows-capped",
 			style: {
@@ -698,6 +773,7 @@
 				"."
 			]
 		});
+		const drawn = lines.slice(0, MAX_ROWS);
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			style: {
 				display: "flex",
@@ -730,24 +806,35 @@
 					}),
 					" a line only the later one has."
 				]
-			}), pairs ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			}), mode === "split" ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				"data-testid": "diff-split",
 				style: {
 					...pane,
 					display: "grid",
 					gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)"
 				},
-				children: [pairs.slice(0, MAX_ROWS).flatMap(([left, right], i) => [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SplitCell, {
-					row: left,
-					side: "left"
+				children: [drawn.flatMap((line, i) => Array.isArray(line) ? [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SplitCell, {
+					row: line[0],
+					side: "left",
+					ref: mark(line[0])
 				}, `${i}-l`), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SplitCell, {
-					row: right,
-					side: "right"
-				}, `${i}-r`)]), capped]
+					row: line[1],
+					side: "right",
+					ref: mark(line[1])
+				}, `${i}-r`)] : "start" in line ? [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(FoldRow, {
+					fold: line,
+					onOpen: open
+				}, i)] : []), capped]
 			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				"data-testid": "diff-rows",
 				style: pane,
-				children: [rows.slice(0, MAX_ROWS).map((row, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(UnifiedRow, { row }, i)), capped]
+				children: [drawn.map((line, i) => Array.isArray(line) ? null : "start" in line ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(FoldRow, {
+					fold: line,
+					onOpen: open
+				}, i) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(UnifiedRow, {
+					row: line,
+					ref: mark(line)
+				}, i)), capped]
 			})]
 		});
 	});
@@ -768,7 +855,7 @@
 			style: frame,
 			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Markdown, {
 				fontSize: 12.5,
-				children: text
+				children: text.replaceAll("![", "!​[")
 			})
 		}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("pre", {
 			"data-testid": "doc-plain",
@@ -798,10 +885,6 @@
 		const unreadable = versions.find((v) => v.bytes === null);
 		const { copies, failures, retry } = useCopies(runId, unreadable ? [] : versions);
 		const shell = {
-			background: "var(--surface-card)",
-			border: "1px solid var(--border-hairline)",
-			borderRadius: "var(--radius-md)",
-			padding: 16,
 			display: "flex",
 			flexDirection: "column",
 			gap: 12
@@ -883,7 +966,7 @@
 				before: texts[0].text,
 				after: texts[1].text,
 				mode: diffMode
-			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(WholeDocument, {
+			}, versions.map(cacheKey).join(" ")) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(WholeDocument, {
 				name,
 				text: texts[0].text
 			})]
@@ -910,10 +993,17 @@
 					intact === true ? "is" : "is meant to be",
 					" byte-for-byte what the committee was handed; the playbook re-checks its digest at the decision and says so in the verdict. Every delegated edit lands in the revised copy, which the committee offers as a recommendation, not a landed change. Reading the repository file and finding it unchanged does not mean the edits failed."
 				]
-			}), !captured ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			}), !captured ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				"data-testid": "doc-not-captured",
 				style: muted,
-				children: "Document snapshots were not captured for this run. It was reduced before the playbook kept a copy of each version, so there is nothing to step through."
+				children: [
+					"No snapshot of this document is readable on the server — not the original's (",
+					/* @__PURE__ */ (0, react_jsx_runtime.jsx)("code", {
+						style: mono$1,
+						children: original.path
+					}),
+					") nor any edit's — so there is nothing to step through."
+				]
 			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					role: "group",
@@ -961,7 +1051,7 @@
 						})
 					]
 				}),
-				steps.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				versions.length === 2 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					role: "group",
 					"aria-label": "Diff layout",
 					style: {
@@ -987,7 +1077,7 @@
 				steps.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					"data-testid": "doc-no-edits",
 					style: muted,
-					children: "No edit has been delegated yet. The original stands as it was."
+					children: "No edit was made. The original stands as it was."
 				}),
 				doc.dropped_delegation && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "doc-dropped",
@@ -999,6 +1089,11 @@
 						doc.dropped_delegation.action
 					]
 				}),
+				current === "original" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": "original-label",
+					style: heading,
+					children: "Original — as the committee was handed it"
+				}),
 				step && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(StepContext, {
 					step,
 					timeline,
@@ -1006,11 +1101,7 @@
 				}),
 				current === "final" && final && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "final-label",
-					style: {
-						fontSize: 13,
-						fontWeight: 600,
-						color: "var(--text-primary)"
-					},
+					style: heading,
 					children: [
 						FINAL_LABEL[final.ruling],
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -1695,19 +1786,48 @@
 		const [selected, setSelected] = (0, react.useState)("original");
 		const [open, setOpen] = (0, react.useState)(/* @__PURE__ */ new Set());
 		const [diffMode, setDiffMode] = (0, react.useState)("unified");
-		if (data.timeline.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
-			title: "Nothing said yet",
-			description: "The committee view fills in as each member takes the floor.",
-			icon: "inbox"
-		});
-		if (variant === "metrics") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, { data });
 		const legacy = data.timeline.length > 0 && data.document.name === null || data.verdict !== null && data.progress.ended === null;
 		const openTurn = (n) => {
 			setOpen((prev) => new Set(prev).add(n));
-			window.document.querySelector(`[data-testid="entry-${n}"]`)?.scrollIntoView?.({ block: "center" });
+			const rows = window.document.querySelectorAll(`[data-testid="entry-${n}"]`);
+			rows[rows.length - 1]?.scrollIntoView?.({ block: "center" });
 		};
+		const edited = data.document.steps.length;
+		const history = /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
+			title: data.document.name ? `Document — ${data.document.name} · ${edited === 0 ? "no edits" : edited === 1 ? "1 edit" : `${edited} edits`}` : "Document",
+			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(DocumentHistory, {
+				runId,
+				document: data.document,
+				timeline: data.timeline,
+				intact: data.verdict?.artifact_intact ?? null,
+				legacy,
+				selected,
+				onSelect: setSelected,
+				diffMode,
+				onDiffMode: setDiffMode,
+				onOpenTurn: openTurn
+			})
+		});
+		if (data.timeline.length === 0) {
+			const empty = /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
+				title: "Nothing said yet",
+				description: "The committee view fills in as each member takes the floor.",
+				icon: "inbox"
+			});
+			if (!data.document.captured || variant === "metrics") return empty;
+			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				style: {
+					display: "flex",
+					flexDirection: "column",
+					gap: 16
+				},
+				children: [empty, history]
+			});
+		}
+		if (variant === "metrics") return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, { data });
 		const edits = /* @__PURE__ */ new Map();
 		if (data.document.captured) data.document.steps.forEach((step, i) => {
+			if (step.reviewer_turn !== null) edits.set(step.reviewer_turn, [i + 1, step.turn]);
 			if (step.owner_turn !== null) edits.set(step.owner_turn, [i + 1, step.turn]);
 			edits.set(step.turn, [i + 1, step.turn]);
 		});
@@ -1744,18 +1864,7 @@
 					runId,
 					verdict: data.verdict
 				}),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(DocumentHistory, {
-					runId,
-					document: data.document,
-					timeline: data.timeline,
-					intact: data.verdict?.artifact_intact ?? null,
-					legacy,
-					selected,
-					onSelect: setSelected,
-					diffMode,
-					onDiffMode: setDiffMode,
-					onOpenTurn: openTurn
-				})
+				history
 			]
 		});
 	}

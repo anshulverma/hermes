@@ -11,11 +11,12 @@
  */
 import '../ds';
 import { useState } from 'react';
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from 'vitest';
 import { setToken, clearToken } from '../api/auth';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
+import type { CommitteeData } from '../../../playbooks/committee/view/src/CommitteeView';
 import DocumentHistory, {
   diffLines,
   splitRows,
@@ -44,6 +45,21 @@ afterEach(() => {
 
 function show(data = run2) {
   return render(<CommitteeView runId="run-2" data={data} refetch={noop} />);
+}
+
+/**
+ * jsdom has no `scrollIntoView`. Stub it for one test and put the prototype
+ * back when that test ends, so no later test runs against a stale spy.
+ */
+function stubScroll() {
+  const scrolled = vi.fn();
+  const had = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView');
+  Element.prototype.scrollIntoView = scrolled;
+  onTestFinished(() => {
+    if (had) Object.defineProperty(Element.prototype, 'scrollIntoView', had);
+    else delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+  return scrolled;
 }
 
 /** What `view_data` returns before any reduction names a file. */
@@ -423,6 +439,39 @@ describe('CommitteeView with nothing yet', () => {
 
     expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
     expect(screen.queryByTestId('committee-view')).toBeNull();
+    expect(screen.queryByTestId('doc-stepper')).toBeNull();
+  });
+
+  it('shows the original while the first member is still speaking, once open kept it', () => {
+    // `open` wrote doc/00-original before any turn settled, and t01 can run
+    // for an hour: the document under review is readable from the start.
+    vi.stubGlobal('fetch', vi.fn((u: string) =>
+      String(u).includes('/view/artifact') ? ok({ text: '# Proposal\n\nold clause\n' }) : new Promise(() => {}),
+    ));
+    show({
+      ...run2,
+      timeline: [],
+      verdict: null,
+      document: { ...DOC, steps: [], final: null },
+    });
+
+    expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
+    expect(screen.getByText('Document — federation-future.md · no edits')).toBeInTheDocument();
+    expect(screen.getByTestId('step-original')).toHaveAttribute('aria-current', 'step');
+    expect(screen.getByTestId('doc-no-edits')).toBeInTheDocument();
+  });
+
+  it('keeps the document off the Metrics tab, which draws only its own section', () => {
+    render(
+      <CommitteeView
+        runId="run-2"
+        data={{ ...run2, timeline: [], verdict: null, document: { ...DOC, steps: [], final: null } }}
+        refetch={noop}
+        variant="metrics"
+      />,
+    );
+    expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
+    expect(screen.queryByTestId('doc-stepper')).toBeNull();
   });
 });
 
@@ -853,12 +902,14 @@ function History({
   intact = true,
   mode = 'unified',
   onOpenTurn = noop,
+  timeline = run2.timeline,
 }: {
   doc?: DocumentBlock;
   start?: StepId;
   intact?: boolean | null;
   mode?: DiffMode;
   onOpenTurn?: (n: number) => void;
+  timeline?: CommitteeData['timeline'];
 }) {
   const [selected, setSelected] = useState<StepId>(start);
   const [diffMode, setDiffMode] = useState<DiffMode>(mode);
@@ -866,7 +917,7 @@ function History({
     <DocumentHistory
       runId="run-2"
       document={doc}
-      timeline={run2.timeline}
+      timeline={timeline}
       intact={intact}
       selected={selected}
       onSelect={setSelected}
@@ -900,19 +951,23 @@ describe('DocumentHistory', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('says snapshots were not captured, and fetches nothing', () => {
+  it('says no snapshot is readable, claiming no cause, and fetches nothing', () => {
     render(<History doc={{ ...DOC, captured: false }} />);
-    expect(screen.getByTestId('doc-not-captured')).toHaveTextContent(
-      'Document snapshots were not captured for this run.',
+    const card = screen.getByTestId('doc-not-captured');
+    expect(card).toHaveTextContent(
+      "No snapshot of this document is readable on the server — not the original's " +
+        "(doc/00-original.md) nor any edit's — so there is nothing to step through.",
     );
+    // A worker can delete doc/ on a new run too; the card must not blame the run's age.
+    expect(card).not.toHaveTextContent('reduced before');
     expect(screen.queryByTestId('doc-stepper')).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('shows the original and says no edit was delegated when there are no steps', async () => {
+  it('shows the original and says no edit was made when there are no steps', async () => {
     render(<History doc={{ ...DOC, steps: [], final: null }} />);
     expect(screen.getByTestId('doc-no-edits')).toHaveTextContent(
-      'No edit has been delegated yet. The original stands as it was.',
+      /^No edit was made\. The original stands as it was\.$/,
     );
     expect(await screen.findByTestId('doc-markdown')).toHaveTextContent('old clause');
     expect(fetchMock).toHaveBeenCalledWith(url('doc/00-original.md'), expect.anything());
@@ -1106,6 +1161,12 @@ describe('DocumentHistory', () => {
     expect(screen.getByTestId('step-verdict')).toHaveTextContent(/^re-check: not recorded$/);
   });
 
+  it('says not recorded for a delivered edit whose re-check is missing, never APPLIED', () => {
+    const doc = { ...DOC, steps: DOC.steps.map((s) => (s.turn === 6 ? { ...s, verified: null } : s)) };
+    render(<History doc={doc} start={6} />);
+    expect(screen.getByTestId('step-verdict')).toHaveTextContent(/^re-check: not recorded$/);
+  });
+
   it('says No changes between these two versions for identical text', async () => {
     render(<History start={9} />);
     expect(await screen.findByTestId('diff-none')).toHaveTextContent(
@@ -1119,10 +1180,13 @@ describe('DocumentHistory', () => {
     expect(screen.getByTestId('step-raised')).toHaveTextContent(
       'raised by Dana Whitfield — Position: defer.',
     );
+    // Who delegated it and who made it, by name: the owner and the junior IC.
     expect(screen.getByTestId('step-delegated')).toHaveTextContent(
-      'delegated: Rewrite §2 "When to reach for it"',
+      'delegated by Maya Okonkwo: Rewrite §2 "When to reach for it"',
     );
-    expect(screen.getByTestId('step-confirmed')).toHaveTextContent('Rewrote §2 into two triggers');
+    expect(screen.getByTestId('step-confirmed')).toHaveTextContent(
+      'Alex Moreau: Rewrote §2 into two triggers',
+    );
     expect(screen.queryByTestId('step-provenance')).toBeNull();
 
     // Announced as what it does, not as a bare "t01".
@@ -1149,7 +1213,7 @@ describe('DocumentHistory', () => {
     expect(screen.queryByTestId('step-provenance')).toBeNull();
     expect(screen.getByTestId('step-raised')).toHaveTextContent('who raised this was not recorded');
     expect(screen.queryByTestId('step-delegated')).toBeNull();
-    expect(screen.getByTestId('step-confirmed')).toHaveTextContent('no turn delivered');
+    expect(screen.getByTestId('step-confirmed')).toHaveTextContent('Alex Moreau: no turn delivered');
     unmount();
 
     // The mark follows `provenance`, not whether a turn happens to be linked.
@@ -1157,6 +1221,31 @@ describe('DocumentHistory', () => {
     render(<History doc={{ ...DOC, steps: unknown }} start={6} />);
     expect(screen.getByTestId('step-delegated')).toBeInTheDocument();
     expect(screen.queryByTestId('step-provenance')).toBeNull();
+  });
+
+  it('falls back to the bare lines when the transcript has no entry for a linked turn', () => {
+    const stray: DocumentBlock = {
+      ...DOC,
+      steps: [{ turn: 30, path: 'doc/t30.md', bytes: 31, delivered: true, verified: true,
+                owner_turn: 29, reviewer_turn: 28, provenance: 'recorded' }],
+    };
+    const { unmount } = render(<History doc={stray} start={30} />);
+    expect(screen.getByTestId('step-delegated')).toHaveTextContent(/^delegated: no action recorded t29$/);
+    expect(screen.getByTestId('step-confirmed')).toHaveTextContent(/^no prose recorded for this turn t30$/);
+    unmount();
+
+    render(<History doc={{ ...stray, steps: [{ ...stray.steps[0], delivered: false }] }} start={30} />);
+    expect(screen.getByTestId('step-confirmed')).toHaveTextContent(/^no turn delivered t30$/);
+  });
+
+  it("pairs a turn settled twice with its last take, the one the step's diff and verdict are", () => {
+    // `view_data` keeps the last reduction per turn; so does the step context.
+    const retake = { ...run2.timeline[2], body: 'Second take: rewrote §2 once more.' };
+    const timeline = [...run2.timeline.slice(0, 3), retake, ...run2.timeline.slice(3)];
+    render(<History start={3} timeline={timeline} />);
+    expect(screen.getByTestId('step-confirmed')).toHaveTextContent(
+      'Alex Moreau: Second take: rewrote §2 once more.',
+    );
   });
 
   // --- Original and Final ---
@@ -1173,8 +1262,45 @@ describe('DocumentHistory', () => {
     expect(await screen.findByTestId('doc-plain')).toHaveTextContent('# Proposal');
   });
 
+  it('renders a .markdown file as markdown too', async () => {
+    render(<History doc={{ ...DOC, name: 'proposal.markdown' }} />);
+    expect(await screen.findByTestId('doc-markdown')).not.toHaveTextContent('# Proposal');
+  });
+
+  it('never loads an image a worker wrote into the document: its alt text stands in', async () => {
+    // Every version after Edit 1 is text a junior worker wrote, and a live
+    // <img> would make the operator's browser fetch whatever src it names.
+    fetchMock.mockImplementation(() =>
+      ok({ text: '# Proposal\n\n![a tracking pixel](https://example.invalid/p.png?run=9)\n' }),
+    );
+    render(<History />);
+    const md = await screen.findByTestId('doc-markdown');
+    expect(md.querySelector('img')).toBeNull();
+    expect(md).toHaveTextContent('a tracking pixel');
+  });
+
+  it('heads the Original step with what it is', () => {
+    render(<History />);
+    expect(screen.getByTestId('original-label')).toHaveTextContent(
+      'Original — as the committee was handed it',
+    );
+    fireEvent.click(screen.getByTestId('step-3'));
+    expect(screen.queryByTestId('original-label')).toBeNull();
+  });
+
+  it('offers the diff layout only where a diff is shown', async () => {
+    render(<History />);
+    expect(screen.queryByTestId('diff-mode-split')).toBeNull(); // Original: one whole version
+    fireEvent.click(screen.getByTestId('step-3'));
+    expect(screen.getByTestId('diff-mode-split')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('step-final'));
+    expect(screen.queryByTestId('diff-mode-split')).toBeNull(); // Final, the whole version
+    fireEvent.click(screen.getByTestId('final-diff-toggle'));
+    expect(screen.getByTestId('diff-mode-split')).toBeInTheDocument();
+  });
+
   it.each([
-    ['in_session', 'Latest so far — the meeting is still in session'],
+    ['in_session', 'Latest so far — no verdict yet (in session, or stopped before the chair ruled)'],
     ['awaiting_ruling', 'Proposed — awaiting your ruling'],
     ['accepted', 'Accepted'],
     ['rejected', 'Rejected'],
@@ -1209,6 +1335,17 @@ describe('DocumentHistory', () => {
     render(<History doc={{ ...DOC, dropped_delegation: { owner_turn: null, action: 'Fold §9 into §8' } }} />);
     expect(screen.getByTestId('doc-dropped')).toHaveTextContent(
       'The turn cap dropped a delegation: Fold §9 into §8',
+    );
+  });
+
+  it('notes a dropped delegation when the cap cut the first one, before any edit', () => {
+    // max_turns=2 and t02 delegating: no step at all, and both lines stay true.
+    render(
+      <History doc={{ ...DOC, steps: [], final: null, dropped_delegation: { owner_turn: 2, action: 'x' } }} />,
+    );
+    expect(screen.getByTestId('doc-no-edits')).toHaveTextContent('No edit was made.');
+    expect(screen.getByTestId('doc-dropped')).toHaveTextContent(
+      'The turn cap dropped a delegation from t02: x',
     );
   });
 
@@ -1255,6 +1392,75 @@ describe('splitRows', () => {
   });
 });
 
+describe('an edit diff opens on what changed', () => {
+  // The shape of a real committee edit: a couple of lines deep in a long
+  // document. Unfolded, a 420px pane opened at the top shows only the title.
+  const LONG = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
+  const rewrite = (n: number, lines: string[]) =>
+    lines.map((l, i) => (i === n - 1 ? `${l}, rewritten` : l));
+  const T03 = rewrite(150, LONG);
+  const LONG_TEXT: Record<string, string> = {
+    'doc/00-original.md': LONG.join('\n'),
+    'doc/t03.md': T03.join('\n'),
+    'doc/t06.md': rewrite(20, T03).join('\n'),
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn((u: string) => ok({ text: LONG_TEXT[pathOf(u)] })));
+  });
+
+  it('folds unchanged lines to three either side of each change, counting from the whole diff', async () => {
+    render(<History start={3} />);
+    const rows = await screen.findByTestId('diff-rows');
+    expect([...rows.children].map((el) => el.textContent)).toEqual([
+      '⋯ 146 unchanged lines',
+      '  line 147', '  line 148', '  line 149',
+      '- line 150',
+      '+ line 150, rewritten',
+      '  line 151', '  line 152', '  line 153',
+      '⋯ 47 unchanged lines',
+    ]);
+    expect(screen.getByTestId('diff-counts')).toHaveTextContent('1 line added, 1 removed');
+  });
+
+  it('expands a fold in place, and folds side by side the same way', async () => {
+    render(<History start={3} />);
+    const rows = await screen.findByTestId('diff-rows');
+    fireEvent.click(within(rows).getByText('⋯ 47 unchanged lines'));
+    expect(rows.children).toHaveLength(9 + 47);
+    expect(rows.firstElementChild).toHaveTextContent('⋯ 146 unchanged lines');
+    expect(rows.lastElementChild).toHaveTextContent('line 200');
+
+    // The same folds, the opened one still open: they are cut before the
+    // rows are paired, so both layouts show the same lines.
+    fireEvent.click(screen.getByTestId('diff-mode-split'));
+    const split = screen.getByTestId('diff-split');
+    expect(within(split).getAllByTestId('diff-fold').map((el) => el.textContent)).toEqual([
+      '⋯ 146 unchanged lines',
+    ]);
+    expect(split.children).toHaveLength(1 + 2 * (3 + 1 + 3 + 47)); // a fold spans both columns
+  });
+
+  it('brings the first change into view as each step opens, with no hand scroll', async () => {
+    const scrolled = stubScroll();
+    render(<History start={3} />);
+    await screen.findByTestId('diff-rows');
+    expect(scrolled.mock.contexts).toHaveLength(1);
+    expect(scrolled.mock.contexts[0]).toHaveTextContent(/^- line 150$/);
+    expect(scrolled.mock.calls).toEqual([[{ block: 'nearest' }]]);
+
+    fireEvent.click(screen.getByTestId('step-next'));
+    await waitFor(() => expect(scrolled.mock.contexts).toHaveLength(2));
+    expect(scrolled.mock.contexts[1]).toHaveTextContent(/^- line 20$/);
+
+    // Back to a step already fetched: no Loading… in between to remount the
+    // diff, and it still opens on its own change, its folds closed.
+    fireEvent.click(screen.getByTestId('step-prev'));
+    expect(scrolled.mock.contexts).toHaveLength(3);
+    expect(scrolled.mock.contexts[2]).toHaveTextContent(/^- line 150$/);
+  });
+});
+
 describe('CommitteeView document stepper', () => {
   const captured = { ...run2, document: DOC };
 
@@ -1265,8 +1471,7 @@ describe('CommitteeView document stepper', () => {
   });
 
   it("opens a step's linked turn in the transcript and brings it on screen", () => {
-    const scrolled = vi.fn();
-    Element.prototype.scrollIntoView = scrolled;
+    const scrolled = stubScroll();
     show(captured);
     fireEvent.click(screen.getByTestId('step-3'));
     fireEvent.click(screen.getByTestId('goto-t02'));
@@ -1274,7 +1479,18 @@ describe('CommitteeView document stepper', () => {
     expect(
       within(screen.getByTestId('entry-2')).getByRole('button', { expanded: true }),
     ).toBeInTheDocument();
-    expect(scrolled).toHaveBeenCalled();
+    // That turn's row, centred -- not the stepper, not merely something.
+    expect(scrolled.mock.contexts).toEqual([screen.getByTestId('entry-2')]);
+    expect(scrolled.mock.calls).toEqual([[{ block: 'center' }]]);
+  });
+
+  it('opens the last take of a turn settled twice, as the step context reads it', () => {
+    const scrolled = stubScroll();
+    const retake = { ...run2.timeline[1], body: 'Second take.' };
+    show({ ...captured, timeline: [...run2.timeline, retake] });
+    fireEvent.click(screen.getByTestId('step-3'));
+    fireEvent.click(screen.getByTestId('goto-t02'));
+    expect(scrolled.mock.contexts).toEqual([screen.getAllByTestId('entry-2')[1]]);
   });
 
   it('switches every diff to side by side, and the choice survives stepping and data ticks', async () => {
@@ -1333,16 +1549,15 @@ describe('CommitteeView document stepper', () => {
   it('clicking a delegated row selects its step, brings the stepper to the top and focuses it', () => {
     // `block: 'nearest'` left the stepper at the viewport's bottom edge with
     // the edit below the fold, and focus on the transcript button.
-    const scrolled = vi.fn();
-    Element.prototype.scrollIntoView = scrolled;
+    const scrolled = stubScroll();
     show(captured);
 
     expect(screen.getByTestId('see-edit-2')).toHaveTextContent('see edit 1'); // the owner's row
     expect(screen.getByTestId('see-edit-3')).toHaveTextContent('see edit 1'); // the junior's row
     expect(screen.getByTestId('see-edit-5')).toHaveTextContent('see edit 2');
     expect(screen.getByTestId('see-edit-9')).toHaveTextContent('see edit 3');
-    expect(screen.queryByTestId('see-edit-1')).toBeNull(); // a reviewer's row
     expect(screen.queryByTestId('see-edit-8')).toBeNull(); // t09's owner is unknown
+    expect(screen.queryByTestId('see-edit-7')).toBeNull(); // and so is who raised it
 
     fireEvent.click(screen.getByTestId('see-edit-5'));
     expect(screen.getByTestId('step-6')).toHaveAttribute('aria-current', 'step');
@@ -1350,6 +1565,25 @@ describe('CommitteeView document stepper', () => {
     expect(scrolled.mock.contexts).toEqual([stepper]);
     expect(scrolled.mock.calls).toEqual([[{ block: 'start' }]]);
     expect(document.activeElement).toBe(stepper);
+  });
+
+  it('links the reviewer who raised an edit back to its step, the way back from "raised by"', () => {
+    stubScroll();
+    show(captured);
+    expect(screen.getByTestId('see-edit-1')).toHaveTextContent('see edit 1'); // raised Edit 1
+    expect(screen.getByTestId('see-edit-4')).toHaveTextContent('see edit 2'); // raised Edit 2
+
+    fireEvent.click(screen.getByTestId('see-edit-4'));
+    expect(screen.getByTestId('step-6')).toHaveAttribute('aria-current', 'step');
+  });
+
+  it('titles the document card with its name and how many edits it went through', () => {
+    const { unmount } = show(captured);
+    expect(screen.getByText('Document — federation-future.md · 3 edits')).toBeInTheDocument();
+    unmount();
+
+    show({ ...captured, document: { ...DOC, steps: DOC.steps.slice(0, 1) } });
+    expect(screen.getByText('Document — federation-future.md · 1 edit')).toBeInTheDocument();
   });
 
   it('links no transcript row to a step when there are no snapshots to show', () => {

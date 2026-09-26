@@ -115,6 +115,50 @@ export function splitRows(rows: DiffRow[]): Array<[DiffRow | null, DiffRow | nul
   return out;
 }
 
+/** Unchanged lines kept either side of a change; the rest of a run folds away. */
+const CONTEXT = 3;
+
+/** A run of unchanged rows folded to one row; `start` indexes the whole diff. */
+export type Fold = { start: number; count: number };
+
+/**
+ * What an edit diff draws: every change with CONTEXT unchanged lines either
+ * side, and each longer unchanged run as one Fold -- unless its `start` is in
+ * `opened`. A committee edit is a few lines deep in a long document, and
+ * unfolded the pane opened on the document's title every time.
+ *
+ * Returns runs of rows between folds, so the side-by-side layout pairs each run
+ * on its own: a fold only ever replaces `same` rows, which pair with
+ * themselves, so both layouts fold the same lines.
+ */
+export function foldRows(rows: DiffRow[], opened: ReadonlySet<number>): Array<DiffRow[] | Fold> {
+  const out: Array<DiffRow[] | Fold> = [];
+  let shown: DiffRow[] = [];
+  for (let i = 0; i < rows.length; ) {
+    let j = i;
+    while (j < rows.length && rows[j].kind === 'same') j++;
+    if (j === i) {
+      shown.push(rows[i++]);
+      continue;
+    }
+    // Unchanged rows i..j-1: CONTEXT after the change before them, CONTEXT
+    // before the change after them, and neither at the document's two ends.
+    const from = i === 0 ? 0 : i + CONTEXT;
+    const to = j === rows.length ? j : j - CONTEXT;
+    if (to > from && !opened.has(from)) {
+      shown.push(...rows.slice(i, from));
+      if (shown.length) out.push(shown);
+      out.push({ start: from, count: to - from });
+      shown = rows.slice(to, j);
+    } else {
+      shown.push(...rows.slice(i, j));
+    }
+    i = j;
+  }
+  if (shown.length) out.push(shown);
+  return out;
+}
+
 /** How every diff on the card is laid out; held by the view, never persisted. */
 export type DiffMode = 'unified' | 'split';
 
@@ -161,7 +205,9 @@ type Copy = { text: string; truncated?: boolean };
 const MAX_ROWS = 5000;
 
 const FINAL_LABEL: Record<Ruling, string> = {
-  in_session: 'Latest so far — the meeting is still in session',
+  // No run state reaches the view, so a stopped meeting and a live one look the
+  // same here; the ProgressBar hedges the same way.
+  in_session: 'Latest so far — no verdict yet (in session, or stopped before the chair ruled)',
   awaiting_ruling: 'Proposed — awaiting your ruling',
   accepted: 'Accepted',
   rejected: 'Rejected',
@@ -187,6 +233,7 @@ const pane: React.CSSProperties = {
   borderRadius: 'var(--radius-sm)',
 };
 const muted: React.CSSProperties = { fontSize: 12.5, color: 'var(--text-muted)', lineHeight: 1.5 };
+const heading: React.CSSProperties = { fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' };
 
 const note = (tone: 'danger' | 'attention' | 'live'): React.CSSProperties => ({
   padding: '8px 12px',
@@ -277,7 +324,9 @@ function StepContext({
   timeline: Entry[];
   onOpenTurn: (n: number) => void;
 }) {
-  const at = (n: number | null) => (n === null ? undefined : timeline.find((e) => e.n === n));
+  // The LAST entry for a turn, as `view_data` keeps the last reduction for it:
+  // a turn settled twice pairs its diff and verdict with the take that made them.
+  const at = (n: number | null) => (n === null ? undefined : timeline.findLast((e) => e.n === n));
   const reviewer = at(step.reviewer_turn);
   const owner = at(step.owner_turn);
   const junior = at(step.turn);
@@ -330,12 +379,14 @@ function StepContext({
       </div>
       {step.owner_turn !== null && (
         <div data-testid="step-delegated" style={line}>
-          delegated: {owner?.action ?? 'no action recorded'}{' '}
+          {owner ? `delegated by ${owner.name}: ` : 'delegated: '}
+          {owner?.action ?? 'no action recorded'}{' '}
           <Goto n={step.owner_turn} onOpenTurn={onOpenTurn} />
           {inferred}
         </div>
       )}
       <div data-testid="step-confirmed" style={line}>
+        {junior ? `${junior.name}: ` : ''}
         {step.delivered ? confirmation || 'no prose recorded for this turn' : 'no turn delivered'}{' '}
         <Goto n={step.turn} onOpenTurn={onOpenTurn} />
       </div>
@@ -343,10 +394,11 @@ function StepContext({
   );
 }
 
-function UnifiedRow({ row }: { row: DiffRow }) {
+function UnifiedRow({ row, ref }: { row: DiffRow; ref?: React.Ref<HTMLDivElement> }) {
   const style = ROW_STYLE[row.kind];
   return (
     <div
+      ref={ref}
       style={{
         background: style.background,
         color: style.color,
@@ -360,10 +412,19 @@ function UnifiedRow({ row }: { row: DiffRow }) {
   );
 }
 
-function SplitCell({ row, side }: { row: DiffRow | null; side: 'left' | 'right' }) {
+function SplitCell({
+  row,
+  side,
+  ref,
+}: {
+  row: DiffRow | null;
+  side: 'left' | 'right';
+  ref?: React.Ref<HTMLDivElement>;
+}) {
   const style = row ? ROW_STYLE[row.kind] : null;
   return (
     <div
+      ref={ref}
       data-testid={`split-${side}`}
       style={{
         background: style ? style.background : 'transparent',
@@ -379,9 +440,37 @@ function SplitCell({ row, side }: { row: DiffRow | null; side: 'left' | 'right' 
   );
 }
 
+function FoldRow({ fold, onOpen }: { fold: Fold; onOpen: (start: number) => void }) {
+  return (
+    <button
+      type="button"
+      data-testid="diff-fold"
+      onClick={() => onOpen(fold.start)}
+      style={{
+        gridColumn: '1 / -1',
+        display: 'block',
+        width: '100%',
+        textAlign: 'left',
+        padding: '0 8px',
+        font: 'inherit',
+        color: 'var(--text-muted)',
+        background: 'var(--wash-subtle)',
+        border: 'none',
+        cursor: 'pointer',
+      }}
+    >
+      {`⋯ ${fold.count} unchanged ${fold.count === 1 ? 'line' : 'lines'}`}
+    </button>
+  );
+}
+
+/** One drawn row: a fold, a unified row, or a side-by-side pair. */
+type Line = Fold | DiffRow | [DiffRow | null, DiffRow | null];
+
 // Memoised on its plain string props: the view re-renders on every data tick
 // and transcript click, and re-diffing unchanged text each time is the
-// expensive part of the card.
+// expensive part of the card. Keyed by the versions it shows, so each step
+// mounts afresh: its folds closed and its first change brought into view.
 const DiffView = memo(function DiffView({
   before,
   after,
@@ -391,6 +480,13 @@ const DiffView = memo(function DiffView({
   after: string;
   mode: DiffMode;
 }) {
+  const [opened, setOpened] = useState<ReadonlySet<number>>(new Set());
+  const first = useRef<HTMLDivElement>(null);
+  // Once per step, and `nearest`: a change already on screen moves nothing.
+  useEffect(() => {
+    first.current?.scrollIntoView?.({ block: 'nearest' });
+  }, []);
+
   const rows = diffLines(before, after);
   const adds = rows.filter((r) => r.kind === 'add').length;
   const dels = rows.filter((r) => r.kind === 'del').length;
@@ -403,10 +499,16 @@ const DiffView = memo(function DiffView({
     );
   }
 
-  // MAX_ROWS caps what reaches the DOM in either layout; the counts above it
-  // always come from the whole diff.
-  const pairs = mode === 'split' ? splitRows(rows) : null;
-  const total = pairs ? pairs.length : rows.length;
+  const open = (start: number) => setOpened((prev) => new Set(prev).add(start));
+  const lines: Line[] = foldRows(rows, opened).flatMap((run): Line[] =>
+    Array.isArray(run) ? (mode === 'split' ? splitRows(run) : run) : [run],
+  );
+  const firstRow = rows.find((r) => r.kind !== 'same');
+  const mark = (row: DiffRow | null) => (row !== null && row === firstRow ? first : undefined);
+
+  // MAX_ROWS caps what reaches the DOM in either layout, a fold counting as one
+  // row; the counts above it always come from the whole diff.
+  const total = lines.length;
   const capped = total > MAX_ROWS && (
     <div
       data-testid="diff-rows-capped"
@@ -416,6 +518,7 @@ const DiffView = memo(function DiffView({
       the whole diff; this pane stops at {MAX_ROWS}.
     </div>
   );
+  const drawn = lines.slice(0, MAX_ROWS);
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -424,22 +527,32 @@ const DiffView = memo(function DiffView({
         <span style={mono}>-</span> is a line only the earlier version has,{' '}
         <span style={mono}>+</span> a line only the later one has.
       </div>
-      {pairs ? (
+      {mode === 'split' ? (
         <div
           data-testid="diff-split"
           style={{ ...pane, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' }}
         >
-          {pairs.slice(0, MAX_ROWS).flatMap(([left, right], i) => [
-            <SplitCell key={`${i}-l`} row={left} side="left" />,
-            <SplitCell key={`${i}-r`} row={right} side="right" />,
-          ])}
+          {drawn.flatMap((line, i) =>
+            Array.isArray(line)
+              ? [
+                  <SplitCell key={`${i}-l`} row={line[0]} side="left" ref={mark(line[0])} />,
+                  <SplitCell key={`${i}-r`} row={line[1]} side="right" ref={mark(line[1])} />,
+                ]
+              : 'start' in line
+                ? [<FoldRow key={i} fold={line} onOpen={open} />]
+                : [],
+          )}
           {capped}
         </div>
       ) : (
         <div data-testid="diff-rows" style={pane}>
-          {rows.slice(0, MAX_ROWS).map((row, i) => (
-            <UnifiedRow key={i} row={row} />
-          ))}
+          {drawn.map((line, i) =>
+            Array.isArray(line) ? null : 'start' in line ? (
+              <FoldRow key={i} fold={line} onOpen={open} />
+            ) : (
+              <UnifiedRow key={i} row={line} ref={mark(line)} />
+            ),
+          )}
           {capped}
         </div>
       )}
@@ -459,9 +572,14 @@ const WholeDocument = memo(function WholeDocument({ name, text }: { name: string
     borderRadius: 'var(--radius-sm)',
     padding: '8px 12px',
   };
+  // No live images. Every version after Edit 1 is text a junior worker wrote,
+  // and the host Markdown passes an <img> src straight through, so a remote src
+  // would make the operator's browser fetch it. A zero-width space after `!`
+  // leaves no image syntax for the parser to find -- the alt text reads as a
+  // link to the src instead -- and changes nothing a reader can see.
   return /\.(md|markdown)$/i.test(name) ? (
     <div data-testid="doc-markdown" style={frame}>
-      <Markdown fontSize={12.5}>{text}</Markdown>
+      <Markdown fontSize={12.5}>{text.replaceAll('![', '!\u200B[')}</Markdown>
     </div>
   ) : (
     <pre
@@ -534,15 +652,8 @@ export default function DocumentHistory({
   const unreadable = versions.find((v) => v.bytes === null);
   const { copies, failures, retry } = useCopies(runId, unreadable ? [] : versions);
 
-  const shell: React.CSSProperties = {
-    background: 'var(--surface-card)',
-    border: '1px solid var(--border-hairline)',
-    borderRadius: 'var(--radius-md)',
-    padding: 16,
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-  };
+  // No card of its own: the view wraps this in its titled Section.
+  const shell: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 12 };
 
   // Card state 1: nothing has named a document yet, so there is no name to
   // print and no digest claim to make.
@@ -614,7 +725,12 @@ export default function DocumentHistory({
           </div>
         )}
         {texts.length === 2 ? (
-          <DiffView before={texts[0].text} after={texts[1].text} mode={diffMode} />
+          <DiffView
+            key={versions.map(cacheKey).join(' ')}
+            before={texts[0].text}
+            after={texts[1].text}
+            mode={diffMode}
+          />
         ) : (
           <WholeDocument name={name} text={texts[0].text} />
         )}
@@ -645,10 +761,13 @@ export default function DocumentHistory({
         </div>
       )}
 
+      {/* No cause claimed: a run from before doc/ existed and a worker that
+          deleted it read the same here. */}
       {!captured ? (
         <div data-testid="doc-not-captured" style={muted}>
-          Document snapshots were not captured for this run. It was reduced before the playbook
-          kept a copy of each version, so there is nothing to step through.
+          No snapshot of this document is readable on the server — not the original's (
+          <code style={mono}>{original.path}</code>) nor any edit's — so there is nothing to step
+          through.
         </div>
       ) : (
         <>
@@ -700,7 +819,8 @@ export default function DocumentHistory({
             </button>
           </div>
 
-          {steps.length > 0 && (
+          {/* Only where a diff is on screen: on a whole version it would change nothing. */}
+          {versions.length === 2 && (
             <div role="group" aria-label="Diff layout" style={{ display: 'flex', gap: 4 }}>
               <button
                 type="button"
@@ -722,9 +842,10 @@ export default function DocumentHistory({
               </button>
             </div>
           )}
+          {/* True whether nothing was delegated or the cap dropped the one that was. */}
           {steps.length === 0 && (
             <div data-testid="doc-no-edits" style={muted}>
-              No edit has been delegated yet. The original stands as it was.
+              No edit was made. The original stands as it was.
             </div>
           )}
           {doc.dropped_delegation && (
@@ -737,12 +858,14 @@ export default function DocumentHistory({
             </div>
           )}
 
+          {current === 'original' && (
+            <div data-testid="original-label" style={heading}>
+              Original — as the committee was handed it
+            </div>
+          )}
           {step && <StepContext step={step} timeline={timeline} onOpenTurn={onOpenTurn} />}
           {current === 'final' && final && (
-            <div
-              data-testid="final-label"
-              style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}
-            >
+            <div data-testid="final-label" style={heading}>
               {FINAL_LABEL[final.ruling]}
               <span style={{ fontWeight: 400, color: 'var(--text-muted)' }}>
                 {final.turn === null
