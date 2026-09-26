@@ -855,12 +855,12 @@ def test_evaluation_payload_states(tmp_path):
     }
     assert list(ok["dimensions"]) == list(ev.DIMENSIONS)
 
-    # Each dimension carries its rationale, clipped to 1000 characters with a closing "…"
-    # (eval.json keeps up to 4000), and whether it was scored under an older definition.
+    # Each dimension carries its whole rationale, clipped at eval.json's own limit with a closing
+    # "…" (a hand-edited file may hold more), and whether it was scored under an older definition.
     long = dict(body, dimensions=dict(body["dimensions"], concern_coverage=dict(
-        body["dimensions"]["concern_coverage"], rationale="r" * 1500)))
+        body["dimensions"]["concern_coverage"], rationale="r" * 4500)))
     eval_json.write_text(json.dumps(long), encoding="utf-8")
-    assert evaluation()["dimensions"]["concern_coverage"]["rationale"] == "r" * 999 + "…"
+    assert evaluation()["dimensions"]["concern_coverage"]["rationale"] == "r" * 3999 + "…"
     older = dict(body, rubric=dict(versions, concision="concision@0", verdict_grounded="verdict_grounded@0"))
     eval_json.write_text(json.dumps(older), encoding="utf-8")
     assert {d: row["stale"] for d, row in evaluation()["dimensions"].items()} == {

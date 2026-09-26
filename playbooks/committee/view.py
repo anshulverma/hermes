@@ -394,8 +394,6 @@ def _size(target: Path) -> int | None:
 
 # --- the evaluation (committee-eval D10, C7) -------------------------------
 
-RATIONALE_COLS = 1000  # a dimension's rationale on the Metrics tab, "…" included
-
 
 def _evaluation(run_id: str) -> dict | None:
     """The run's evaluation as the Metrics tab reads it, or None when there is none.
@@ -480,7 +478,7 @@ def _evaluation(run_id: str) -> dict | None:
                                     if item.get("verified") is True), None)),
                 "calibration": label,
                 # Why the score is what it is; eval.json keeps up to 4000 characters.
-                "rationale": ev.clip(rationale, RATIONALE_COLS)
+                "rationale": ev.clip(rationale, ev.RATIONALE_MAX)
                 if isinstance(rationale := doc.get("rationale"), str) and rationale else None,
                 # Scored under an older definition than today's: show and compare star it.
                 "stale": rubric.get(dim) != current[dim],

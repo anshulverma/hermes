@@ -681,7 +681,7 @@ regular file) as `_size` does, and the ledger through
   - `calibration` is the label for eval.json's own version of a judge dimension, or
     `uncalibrated` when it has none. It is `unknown` for every judge dimension when
     `read_ledger` returns None, and null for a deterministic dimension.
-  - `rationale` is the dimension's rationale clipped to 1000 characters (`RATIONALE_COLS`),
+  - `rationale` is the dimension's rationale clipped to `RATIONALE_MAX` (4000) characters, as eval.json holds it,
     ending `…` when cut, or null when empty or not a string. `stale` is true when eval.json's
     version of the dimension is not today's `dimension_versions()`, which `show` and `compare`
     star. Both extend C7.
