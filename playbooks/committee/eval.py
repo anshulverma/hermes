@@ -18,6 +18,7 @@ Stdlib-only.
 from __future__ import annotations
 
 import difflib
+import errno
 import hashlib
 import json
 import os
@@ -54,7 +55,11 @@ DETERMINISTIC_DIMS = ("efficiency", "concision", "verdict_consistency")
 
 MIN_ANCHORS = 2  # anchored targets a judge dimension needs before it can read calibrated (D8)
 QUOTE_MAX = 300  # a judge quote is clipped to this many characters before it is verified (C3)
+# A shorter quote verifies nothing: "." or "e" is a substring of every text (D6).
+QUOTE_MIN_WORDS, QUOTE_MIN_CHARS = 3, 12
 EVIDENCE_MAX = 5  # evidence items kept per judge dimension; extras are dropped (C3)
+DETAIL_MAX = 20  # concerns and absent_stakeholders kept each in concern_coverage.detail (C3)
+RATIONALE_MAX = 1000  # a judge rationale is clipped to this many characters (C3)
 FENCE_TAG = "hermes-eval"
 
 VERBATIM = (
@@ -1237,8 +1242,11 @@ def judge_goal(inputs: dict) -> str:
 
 # --- D6: parse the judge's answer, and verify every quote against inputs/ ------
 
+# Both fence lines stand alone: a ``` inside a JSON string can never close a
+# fence early and hand the win to a block echoed from the transcript.
 _FENCE_RE = re.compile(
-    r"```[ \t]*" + re.escape(FENCE_TAG) + r"[ \t]*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+    r"^[ \t]*```[ \t]*" + re.escape(FENCE_TAG) + r"[ \t]*\n(.*?)\n[ \t]*```[ \t]*$",
+    re.DOTALL | re.IGNORECASE | re.MULTILINE)
 _WHERE = ("turn", "decision", "header", "original", "revised")
 _ENTRY_TEXT = {"turn": "body", "decision": "chair_prose", "header": "text"}
 
@@ -1246,8 +1254,9 @@ _ENTRY_TEXT = {"turn": "body", "decision": "chair_prose", "header": "text"}
 def parse_answer(answer: str | None) -> dict | None:
     """The last ``hermes-eval`` fence whose body parses as a JSON object, or None.
 
-    Walked in reverse, as research's verdict.parse does: a restated answer wins,
-    and a broken last fence falls back to the one before it.
+    A fence opens on a line holding only ```hermes-eval and closes on a line
+    holding only ```. Walked in reverse, as research's verdict.parse does: a
+    restated answer wins, and a broken last fence falls back to the one before it.
     """
     if not isinstance(answer, str):
         return None
@@ -1266,14 +1275,33 @@ def _collapse(text: str) -> str:
     return " ".join(text.split())
 
 
-def _input_text(inputs: dict, key: str) -> str | None:
-    """The inputs/ file ``inputs[key]`` names, decoded; None when absent. Never the source."""
+def read_snapshot(inputs: dict, digests: dict) -> dict:
+    """The inputs/ files a quote may cite, each read once and checked against measure's digest.
+
+    ``{"entries": dict, "thread" | "original" | "revised": str | None}``. A file
+    that is missing, not a regular file, or whose sha256 is not the one
+    ``digests`` (the eval_target's inputs_digests, by absolute path) records
+    reads as absent, so a copy changed after the re-hash backs no quote.
+    Never the source. Never raises.
+    """
     root = inputs.get("dir") if isinstance(inputs, dict) else None
-    name = inputs.get(key) if isinstance(inputs, dict) else None
-    if not isinstance(root, str) or not isinstance(name, str):
-        return None
-    data = thread.read_regular(Path(root) / name)
-    return None if data is None else data.decode("utf-8", "replace")
+    digests = digests if isinstance(digests, dict) else {}
+    snap: dict = {}
+    for key in ("entries", "thread", "original", "revised"):
+        name = inputs.get(key) if isinstance(inputs, dict) else None
+        data = None
+        if isinstance(root, str) and isinstance(name, str):
+            path = str(Path(root) / name)
+            data = thread.read_regular(path)
+            if data is not None and hashlib.sha256(data).hexdigest() != digests.get(path):
+                data = None
+        snap[key] = None if data is None else data.decode("utf-8", "replace")
+    try:
+        entries = json.loads(snap["entries"] or "null")
+    except (ValueError, RecursionError):
+        entries = None
+    snap["entries"] = entries if isinstance(entries, dict) else {}
+    return snap
 
 
 def _entry_for(entries: object, where: str, turn: int | None) -> dict | None:
@@ -1288,26 +1316,26 @@ def _entry_for(entries: object, where: str, turn: int | None) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
-def _entry_line(inputs: dict, entry: dict, key: str) -> int | None:
-    """The first inputs/thread.md line in the entry's range holding ``key``, else its first line."""
+def _entry_line(text: str | None, entry: dict, key: str) -> int | None:
+    """The first line of thread.md ``text`` in the entry's range holding ``key``, else its first line."""
     start, end = entry.get("line_start"), entry.get("line_end")
-    text = _input_text(inputs, "thread")
     if text is None or not isinstance(start, int) or not isinstance(end, int):
         return None
     found = _find_line(_lines(text), (start, end), lambda line: key in _collapse(line))
     return start if found is None else found
 
 
-def verify_evidence(item: object, entries: dict, inputs: dict) -> dict | None:
-    """One judge evidence item, checked against the snapshot (D6 step 2).
+def verify_evidence(item: object, snap: dict) -> dict | None:
+    """One judge evidence item, checked against the snapshot ``read_snapshot`` read (D6 step 2).
 
-    ``verified`` iff the quote (clipped to QUOTE_MAX, whitespace collapsed,
-    non-empty) is a substring of the place it cites: a turn's body, the chair
-    prose or the header text from ``entries`` (inputs/entries.json), or the whole
-    inputs/ copy for "original"/"revised". ``line`` is the first line holding the
-    quote's first 40 characters (thread.md within the entry's range, falling back
-    to its first line; or the copy), null when unverified or when inputs/ has no
-    thread.md. None for a malformed item, which the caller counts as rejected.
+    ``verified`` iff the quote (clipped to QUOTE_MAX, whitespace collapsed, at
+    least QUOTE_MIN_WORDS words and QUOTE_MIN_CHARS characters) is a substring
+    of the place it cites: a turn's body, the chair prose or the header text
+    from inputs/entries.json, or the whole inputs/ copy for "original"/"revised".
+    ``line`` is the first line holding the quote's first 40 characters
+    (thread.md within the entry's range, falling back to its first line; or the
+    copy), null when unverified or when inputs/ has no thread.md. None for a
+    malformed item, which the caller counts as rejected.
     """
     if not isinstance(item, dict):
         return None
@@ -1318,30 +1346,37 @@ def verify_evidence(item: object, entries: dict, inputs: dict) -> dict | None:
         return None
     quote = _collapse(quote[:QUOTE_MAX])
     out = {"turn": turn, "where": where, "quote": quote, "line": None, "verified": False}
+    if len(quote) < QUOTE_MIN_CHARS or len(quote.split()) < QUOTE_MIN_WORDS:
+        return out
     key = quote[:40]
     if where in ("original", "revised"):
-        text = _input_text(inputs, where)
-        if quote and text is not None and quote in _collapse(text):
+        text = snap.get(where)
+        if text is not None and quote in _collapse(text):
             lines = _lines(text)
             out["verified"] = True
             out["line"] = _find_line(lines, (1, len(lines)), lambda line: key in _collapse(line))
         return out
-    entry = _entry_for(entries, where, turn)
+    entry = _entry_for(snap.get("entries"), where, turn)
     text = entry.get(_ENTRY_TEXT[where]) if entry else None
-    if quote and isinstance(text, str) and quote in _collapse(text):
+    if isinstance(text, str) and quote in _collapse(text):
         out["verified"] = True
-        out["line"] = _entry_line(inputs, entry, key)
+        out["line"] = _entry_line(snap.get("thread"), entry, key)
     return out
 
 
 def concern_cap(score: int | None, metrics: dict) -> int | None:
-    """concern_coverage's cap (D5): at most 3 while a seated reviewer went unheard or unanswered."""
+    """concern_coverage's cap (D5): at most 3 unless every seated reviewer was heard and answered.
+
+    Fails closed: metrics whose ``seats.unheard`` or ``unanswered_reviewer_turns``
+    is missing or not a list cap too, because unknown is never "all heard".
+    """
     if score is None:
         return None
     seats = metrics.get("seats") if isinstance(metrics, dict) else None
     unheard = seats.get("unheard") if isinstance(seats, dict) else None
     unanswered = metrics.get("unanswered_reviewer_turns") if isinstance(metrics, dict) else None
-    return min(score, 3) if unheard or unanswered else score
+    clear = unheard == [] and unanswered == []
+    return score if clear else min(score, 3)
 
 
 def _valid_score(value: object) -> bool:
@@ -1349,24 +1384,58 @@ def _valid_score(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 5
 
 
-def score_judge(parsed: dict | None, inputs: dict, metrics: dict) -> tuple[dict[str, dict], int]:
+def _text(value: object) -> str | None:
+    """A detail text field: a str clipped to QUOTE_MAX, else None."""
+    return value[:QUOTE_MAX] if isinstance(value, str) else None
+
+
+def _turn(value: object) -> int | None:
+    """A detail turn field: an int (never a bool), else None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+_CONCERN_FIELDS = {"member": _text, "concern": _text, "raised_turn": _turn, "answered_turn": _turn}
+_ABSENT_FIELDS = {"who": _text, "turn": _turn, "quote": _text}
+
+
+def _detail(given: object, snap: dict) -> dict:
+    """concern_coverage's ``detail`` (C3): the judge's concerns and absent stakeholders, bounded.
+
+    Only dict items, at most DETAIL_MAX of each, only C3's keys (texts clipped
+    to QUOTE_MAX, turns ints or null). An absent stakeholder's quote is verified
+    against its turn like evidence (it carries ``line`` and ``verified``) but is
+    never evidence: it neither scores nor counts as rejected.
+    """
+    def items(key: str, fields: dict) -> list[dict]:
+        raw = given.get(key) if isinstance(given, dict) else None
+        rows = [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
+        return [{f: clean(r.get(f)) for f, clean in fields.items()} for r in rows[:DETAIL_MAX]]
+
+    absent = []
+    for row in items("absent_stakeholders", _ABSENT_FIELDS):
+        checked = verify_evidence({"where": "turn", "turn": row["turn"], "quote": row["quote"]}, snap)
+        absent.append({**row, "quote": checked["quote"] if checked else row["quote"],
+                       "line": checked["line"] if checked else None,
+                       "verified": bool(checked and checked["verified"])})
+    return {"concerns": items("concerns", _CONCERN_FIELDS), "absent_stakeholders": absent}
+
+
+def score_judge(parsed: dict | None, inputs: dict, digests: dict,
+                metrics: dict) -> tuple[dict[str, dict], int]:
     """The three judge dimensions in C5 shape, and how many evidence items were rejected.
 
-    Evidence is verified against inputs/entries.json and the inputs/ copies,
-    never the source. A score counts only when it is an int 1-5 AND at least one
-    of its quotes verifies; otherwise it is null with an error. At most
-    EVIDENCE_MAX items are read per dimension (extras are dropped, not counted);
-    a malformed item is dropped and counted, an unverified one kept with
-    ``verified: false`` and counted. concern_coverage is capped by
-    ``concern_cap`` and carries the judge's ``concerns`` and
-    ``absent_stakeholders`` unverified under ``detail``. Never raises.
+    Evidence is verified against the inputs/ snapshot, each file read once and
+    checked against ``digests`` (the eval_target's inputs_digests), never the
+    source. ``metrics`` is the eval_target's, never inputs/metrics.json. A
+    score counts only when it is an int 1-5 AND at least one of its quotes
+    verifies; otherwise it is null with an error, an invalid score first. At
+    most EVIDENCE_MAX items are read per dimension (extras are dropped, not
+    counted); a malformed item is dropped and counted, an unverified one kept
+    with ``verified: false`` and counted. A rationale is clipped to
+    RATIONALE_MAX. concern_coverage is capped by ``concern_cap`` and carries
+    ``_detail``. Never raises.
     """
-    try:
-        entries = json.loads(_input_text(inputs, "entries") or "null")
-    except (ValueError, RecursionError):
-        entries = None
-    if not isinstance(entries, dict):
-        entries = {}
+    snap = read_snapshot(inputs, digests)
     rejected = 0
     dims: dict[str, dict] = {}
     for dim in JUDGE_DIMS:
@@ -1378,10 +1447,10 @@ def score_judge(parsed: dict | None, inputs: dict, metrics: dict) -> tuple[dict[
             out["error"] = "missing from the answer"
         else:
             if isinstance(given.get("rationale"), str):
-                out["rationale"] = given["rationale"]
+                out["rationale"] = given["rationale"][:RATIONALE_MAX]
             items = given.get("evidence")
             for item in (items if isinstance(items, list) else [])[:EVIDENCE_MAX]:
-                checked = verify_evidence(item, entries, inputs)
+                checked = verify_evidence(item, snap)
                 if checked is None or not checked["verified"]:
                     rejected += 1
                 if checked is not None:
@@ -1393,10 +1462,7 @@ def score_judge(parsed: dict | None, inputs: dict, metrics: dict) -> tuple[dict[
             else:
                 out["score"] = given["score"]
         if dim == "concern_coverage":
-            detail = {
-                key: given[key] if isinstance(given, dict) and isinstance(given.get(key), list)
-                else [] for key in ("concerns", "absent_stakeholders")
-            }
+            detail = _detail(given, snap)
             capped = concern_cap(out["score"], metrics)
             if capped != out["score"]:
                 detail["capped_from"] = out["score"]
@@ -1410,6 +1476,8 @@ def score_judge(parsed: dict | None, inputs: dict, metrics: dict) -> tuple[dict[
 
 EVAL_JSON_MAX = 256 * 1024
 LEDGER_MAX = 2 * 1024 * 1024
+# evals/<first 8 hex of sha1(source realpath)>-<run id>.json (eval_json_path)
+_EVALS_NAME = re.compile(r"[0-9a-f]{8}-[A-Za-z0-9][A-Za-z0-9._-]*\.json")
 
 
 def eval_json_path(eval_home: str, source_home: str, run_id: str) -> Path:
@@ -1430,26 +1498,32 @@ def eval_json_path(eval_home: str, source_home: str, run_id: str) -> Path:
 def write_eval_json(path: Path, body: dict) -> None:
     """Replace ``path`` with ``body`` atomically: a 0600 temp file, then os.replace.
 
-    The directory is made only by ``config.state_dir``: ``runs/<run>`` in the
-    same-home case (G11: the target may have no ``runs/<run>/`` yet), ``evals``
-    otherwise. So a path anywhere else, a foreign home included, is refused and
-    never written. The file holds the latest evaluation; the ledger keeps them all.
+    Only the two paths ``eval_json_path`` gives: ``runs/<run id>/eval.json``
+    (G11: the target may have no ``runs/<run>/`` yet) and
+    ``evals/<8 hex>-<run id>.json``, under the eval home. Anything else, a
+    foreign home or a ``..`` included, is refused and never written. The
+    directory is made only by ``config.state_dir``, and the temp file sits in
+    it and is fsynced before the replace. The file holds the latest
+    evaluation; the ledger keeps them all.
 
     Raises:
-        ValueError: ``path`` is not ``<eval home>/runs/<run>/<name>`` or
-            ``<eval home>/evals/<name>``.
+        ValueError: ``path`` is not one of those two.
         OSError: the write failed; no temp file is left. judge.reduce turns
             either into an error value.
     """
     path = Path(path)
     parts = path.parent.relative_to(eval_home()).parts
-    if parts != ("evals",) and not (len(parts) == 2 and parts[0] == "runs"):
+    same_home = (len(parts) == 2 and parts[0] == "runs" and RUN_ID.fullmatch(parts[1])
+                 and path.name == "eval.json")
+    if not same_home and not (parts == ("evals",) and _EVALS_NAME.fullmatch(path.name)):
         raise ValueError(f"not an eval.json path under the eval home: {path}")
     directory = config.state_dir(*parts)
     fd, temp = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.")
     try:
         with open(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(body, indent=2, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temp, directory / path.name)
     except BaseException:
         Path(temp).unlink(missing_ok=True)
@@ -1462,36 +1536,53 @@ def ledger_path(home: str) -> Path:
 
 
 def append_ledger(home: str, line: dict) -> None:
-    """Append ``line`` as one canonical JSON line with a single ``os.write``.
+    """Append ``line`` as one canonical JSON line with a single ``os.write``, then fsync.
 
     ``O_APPEND`` lands that one write whole at the end of the file even when
-    two evals append at once. Created 0600; never truncated or rewritten.
+    two evals append at once. When the file does not end in a newline (a
+    crash, a full disk or trailing NULs tore its last line), the same write
+    starts with one, so the torn line never swallows this one. Created 0600,
+    never through a symlink, never truncated or rewritten.
+
+    Raises:
+        OSError: the ledger cannot be opened (a symlink included), or the
+            write was short.
     """
     data = (canonical(line) + "\n").encode("utf-8")
-    fd = os.open(ledger_path(home), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    path = ledger_path(home)
+    fd = os.open(path, os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
-        os.write(fd, data)
+        size = os.fstat(fd).st_size
+        if size and os.pread(fd, 1, size - 1) != b"\n":
+            data = b"\n" + data
+        if os.write(fd, data) != len(data):
+            raise OSError(errno.EIO, f"short write to {path}")
+        os.fsync(fd)
     finally:
         os.close(fd)
 
 
 def read_ledger(path: Path, limit: int | None = None) -> list[dict] | None:
-    """The ledger's JSON-object lines in file order, or None past ``limit`` bytes.
+    """The ledger's JSON-object lines in file order, or None when they cannot be known.
 
-    A missing ledger is ``[]``: nothing is evaluated or anchored yet. Lines that
-    do not parse as a JSON object are skipped. It splits on "\\n" only, because
-    a canonical line may hold a literal U+2028, which ``splitlines`` would cut.
-    It reads through ``thread.read_regular``, so a symlink or a FIFO reads as
-    missing, and it creates nothing.
+    Only a missing ledger is ``[]``: nothing is evaluated or anchored yet. None
+    (unknown) past ``limit`` bytes, and for anything that is not a readable
+    regular file: a symlink, a FIFO, a directory or a permission error, read
+    through ``thread.read_regular``. Lines that do not parse as a JSON object
+    are skipped. It splits on "\\n" only, because a canonical line may hold a
+    literal U+2028, which ``splitlines`` would cut. It creates nothing.
     """
     try:
-        if limit is not None and os.stat(path).st_size > limit:
-            return None
-    except OSError:
+        size = os.lstat(path).st_size
+    except FileNotFoundError:
         return []
+    except OSError:
+        return None
+    if limit is not None and size > limit:
+        return None
     data = thread.read_regular(path)
     if data is None:
-        return []
+        return None
     if limit is not None and len(data) > limit:
         return None
     lines = []
@@ -1593,8 +1684,9 @@ def latest_evals(lines: list[dict]) -> dict[tuple, dict]:
 def calibration(ledger_lines: list[dict]) -> dict[str, str]:
     """``{judge dimension version: label}``, computed from the ledger and never stored (D8).
 
-    A target counts at version V when its latest anchor for that dimension is
-    at V and its latest eval line (``latest_evals``) scored that dimension at V.
+    A target counts at version V when it has an anchor for that dimension at V
+    (the latest at V wins, so an older-version anchor appended later never
+    hides it) and its latest eval line (``latest_evals``) scored that dimension at V.
     A null eval score is no score, so a later failed eval hides an earlier one
     (G6). The label is ``"off (Δn)"`` when any |eval - anchor| >= 2, with n the
     largest; else ``"calibrated"`` with at least MIN_ANCHORS targets; else
@@ -1603,7 +1695,7 @@ def calibration(ledger_lines: list[dict]) -> dict[str, str]:
     """
     lines = [line for line in ledger_lines if isinstance(line, dict)]
     versions = {v for d, v in dimension_versions().items() if d in JUDGE_DIMS}
-    anchors: dict[tuple, tuple[str, int]] = {}
+    anchors: dict[tuple, int] = {}
     for line in lines:
         key = _target_key(line)
         for d, cell in _cells(line):
@@ -1613,13 +1705,14 @@ def calibration(ledger_lines: list[dict]) -> dict[str, str]:
             if line.get("source") == "eval":
                 versions.add(version)
             elif line.get("source") == "anchor" and key is not None and score is not None:
-                anchors[(key, d)] = (version, score)  # the latest anchor per target and dimension wins
+                anchors[(key, d, version)] = score  # the latest per target, dimension AND version
     deltas: dict[str, list[int]] = {v: [] for v in versions}
     for key, line in latest_evals(lines).items():
         for d, cell in _cells(line):
-            score, anchor = _score(cell.get("score")), anchors.get((key, d))
-            if d in JUDGE_DIMS and score is not None and anchor and anchor[0] == cell.get("version"):
-                deltas[anchor[0]].append(abs(score - anchor[1]))
+            version, score = cell.get("version"), _score(cell.get("score"))
+            anchor = anchors.get((key, d, version)) if isinstance(version, str) else None
+            if d in JUDGE_DIMS and score is not None and anchor is not None:
+                deltas[version].append(abs(score - anchor))
     labels = {}
     for version, diffs in deltas.items():
         worst = max(diffs, default=0)
@@ -1686,6 +1779,59 @@ def _target_json(t: Target) -> dict:
             "review_state": t.review_state, "legacy": t.legacy}
 
 
+def _eval_body(run_id: str, et: dict, dims: dict, flags: list, judge: dict) -> dict:
+    """The C5 eval.json body from the eval_target, the six dimensions, the flags and the judge block."""
+    return {
+        "schema": 1,
+        "rubric_version": et["rubric_version"],
+        "rubric": et["rubric"],
+        "target": et["target"],
+        "eval_run": run_id,
+        "evaluated_at": time.time(),
+        "original_source": et["original_source"],
+        "metrics": et["metrics"],
+        "flags": flags,
+        "dimensions": dims,
+        "headline": headline(dims, judge["error"]),
+        "judge": judge,
+    }
+
+
+def _eval_json_for(et: dict) -> Path:
+    """Where the eval of the eval_target's target is written (D7)."""
+    return eval_json_path(eval_home(), et["target"]["home"], et["target"]["run"])
+
+
+def _failed_eval(run: Run, error: str) -> dict:
+    """judge.reduce's fallback: a failed eval, written where it can be, so disk and reduction agree.
+
+    Rebuilt from the eval_target alone: the judge dimensions null with
+    ``error``, the deterministic half and measure's flags kept. eval.json and
+    the ledger line are each tried once, on their own, so a failed ledger write
+    can never leave an "ok" eval.json behind. With a malformed eval_target
+    there is nothing to rebuild from: the minimal body, and no write. Never raises.
+    """
+    judge = {"status": "failed", "evidence_rejected": 0, "cost_usd": None, "tokens": None,
+             "error": error}
+    try:
+        et = _eval_target(run)
+        dims = {d: {"scorer": "judge", "score": None, "rationale": "", "evidence": [],
+                    "error": error} if d in JUDGE_DIMS else et["deterministic"][d]
+                for d in DIMENSIONS}
+        body = _eval_body(run.id, et, dims, list(et["flags"]), judge)
+        path = _eval_json_for(et)
+    except Exception:
+        return {"eval_run": run.id, "judge": judge}
+    writes = (lambda: write_eval_json(path, body),
+              lambda: append_ledger(eval_home(), eval_line(body)))
+    for write in writes:
+        try:
+            write()
+        except Exception:
+            pass
+    return body
+
+
 class CommitteeEvalPlaybook:
     """Score one finished committee run in three phases: ``measure``, ``judge``, ``score`` (D1).
 
@@ -1703,16 +1849,20 @@ class CommitteeEvalPlaybook:
         """One goal-only judge ticket, built from the eval_target reduction alone.
 
         measure and score seed nothing. judge seeds nothing either when measure
-        recorded an error: the run then walks on to score and ends failed. A
-        seed-time ValueError (engine/cli.py cmd_run) would instead strand it
-        ``running``.
+        recorded an error, or when the eval_target is malformed (no inputs): the
+        judge phase then reduces to failed and the run ends failed. A seed-time
+        raise (engine/cli.py cmd_run) would instead strand it ``running``.
         """
         if run.phase != "judge":
             return []
         et = _eval_target(run)
         if not et or et.get("error"):
             return []
-        target = et.get("target") or {}
+        try:
+            goal, target = judge_goal(et["inputs"]), et.get("target") or {}
+            title = f"Score committee run {target.get('run')} on the rubric"
+        except Exception:  # a malformed eval_target seeds nothing, never raises
+            return []
         return [Ticket(
             id=f"{run.id}/judge",
             run_id=run.id,
@@ -1723,8 +1873,8 @@ class CommitteeEvalPlaybook:
             attempts=0,
             payload={
                 "role": "judge",
-                "title": f"Score committee run {target.get('run')} on the rubric",
-                "goal": judge_goal(et["inputs"]),
+                "title": title,
+                "goal": goal,
                 "kind": "judge",
             },
         )]
@@ -1757,11 +1907,8 @@ class CommitteeEvalPlaybook:
         try:
             return self._judge(run, findings)
         except Exception as exc:  # a malformed reduction or a failed write, never a raise
-            return [Reduction(kind="eval", json={
-                "eval_run": run.id,
-                "judge": {"status": "failed",
-                          "error": f"judge reduce: {type(exc).__name__}: {exc}"},
-            })]
+            return [Reduction(kind="eval", json=_failed_eval(
+                run, f"judge reduce: {type(exc).__name__}: {exc}"))]
 
     def _measure(self, run: Run, site) -> dict:
         """Resolve, validate, measure and snapshot the target (D2-D6). Returns the C4 eval_target.
@@ -1824,7 +1971,7 @@ class CommitteeEvalPlaybook:
         answers = [f.json.get("answer") for f in findings or () if isinstance(f.json, dict)]
         answer = next((a for a in reversed(answers) if isinstance(a, str) and a.strip()), None)
         parsed = None if changed else parse_answer(answer)
-        judged, rejected = score_judge(parsed, inputs, metrics)
+        judged, rejected = score_judge(parsed, inputs, et.get("inputs_digests") or {}, metrics)
         flags = list(et["flags"])
         if changed:
             flags.append({"id": "target_changed_during_eval", "turn": None, "line": None,
@@ -1844,29 +1991,15 @@ class CommitteeEvalPlaybook:
         dims = {d: judged[d] if d in JUDGE_DIMS else et["deterministic"][d] for d in DIMENSIONS}
         traces = config.resolve_home() / "runs" / run.id / "traces"
         totals = trace_totals([thread.read_regular(p) for p in sorted(traces.glob("*.jsonl"))])
-        body = {
-            "schema": 1,
-            "rubric_version": et["rubric_version"],
-            "rubric": et["rubric"],
-            "target": et["target"],
-            "eval_run": run.id,
-            "evaluated_at": time.time(),
-            "original_source": et["original_source"],
-            "metrics": metrics,
-            "flags": flags,
-            "dimensions": dims,
-            "headline": headline(dims, error),
-            "judge": {
-                "status": status,
-                "evidence_rejected": rejected,
-                "cost_usd": totals["cost_usd"] if totals["found"] else None,
-                "tokens": totals["tokens"],
-                "error": error,
-            },
-        }
-        home = eval_home()
-        write_eval_json(eval_json_path(home, et["target"]["home"], et["target"]["run"]), body)
-        append_ledger(home, eval_line(body))
+        body = _eval_body(run.id, et, dims, flags, {
+            "status": status,
+            "evidence_rejected": rejected,
+            "cost_usd": totals["cost_usd"] if totals["found"] else None,
+            "tokens": totals["tokens"],
+            "error": error,
+        })
+        write_eval_json(_eval_json_for(et), body)
+        append_ledger(eval_home(), eval_line(body))
         return [Reduction(kind="eval", json=body)]
 
     def next_phase(self, run: Run) -> str | None:
