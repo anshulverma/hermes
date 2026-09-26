@@ -1,6 +1,7 @@
 """The committee's voice rules and the measurement of one turn (voice.py)."""
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -315,6 +316,43 @@ def test_summary_is_null_before_voice_and_percentages_null_on_empty_populations(
     assert only_chair["junior_pct_compliant"] is None
     assert only_chair["reviewer_pct_with_pointer"] is None
     assert only_chair["pct_clean_format"] == 100.0
+
+
+def test_summary_reads_a_number_it_cannot_trust_as_absent():
+    """A hand-edited row never raises out of the view route or eval, and never
+    puts NaN in a payload served with allow_nan=False: a junk count is 0, a
+    junk cap is the default cap, a junk chair number is None."""
+    nan, inf = float("nan"), float("inf")
+    rows = [
+        ("turn", {"role": "tl", "voice": _v("many", cap="x", dashes="x", tells=[1])}),
+        ("turn", {"role": "owner", "voice": _v(nan, first_line_words=inf, bold=True,
+                                                tells={"turn_refs": "x", "unchanged": nan})}),
+        ("turn", {"role": "pm", "voice": _v([1], pointers=10**400, dashes=2.0, bold=1)}),
+        ("turn", {"role": "junior_ic", "voice": _v(12, cap=40,
+                                                    tells={"turn_refs": 2, "unchanged": "x"})}),
+        ("decision", {"voice": _v("x", cap=300, headers=nan, tables=True,
+                                  tells={"turn_refs": nan, "unchanged": 1})}),
+    ]
+    s = voice.summary(rows)
+    json.dumps(s, allow_nan=False)
+    assert s == {
+        "owner_reviewer_median_words": 0.0,
+        "owner_reviewer_pct_within_cap": 100.0,
+        "median_words_by_role": {"tl": 0.0, "owner": 0.0, "pm": 0.0,
+                                 "junior_ic": 12.0, "chair": 0.0},
+        "chair_words": None, "chair_headers": None, "chair_tables": None,
+        "junior_turns": 1,
+        "junior_pct_compliant": 100.0,
+        "pct_clean_format": 80.0,
+        "pct_first_line_le_25": 100.0,
+        "unquoted_dashes": 2,
+        "reviewer_pct_with_pointer": 50.0,
+        "max_turn_refs": 2,
+        "unchanged_mentions_junior_chair": 1,
+        "total_takes": 5,
+        "retakes_by_role": {"tl": 0, "owner": 0, "pm": 0, "junior_ic": 0, "chair": 0},
+        "kept_flagged": 0,
+    }
 
 
 # --- T3: the image grammar and check_images ---------------------------------

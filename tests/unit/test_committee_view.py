@@ -470,6 +470,34 @@ def test_view_data_does_not_raise_on_a_reduction_no_reduce_would_write(run2):
     assert data["verdict"]["checks"] == []
     assert data["verdict"]["dropped_floor_requests"] == []
 
+    # A `voice` dict no reduce would write. json.loads reads NaN, and a string
+    # or a list where a count belongs raised out of voice.summary; NaN sent on
+    # as it was failed the route's strict serialiser. Both were a 500.
+    nan = float("nan")
+    junk = [{"words": "many"}, {"words": nan}, {"words": [1]}, {"cap": "x"},
+            {"tells": [1]}, {"tells": {"turn_refs": "x"}}, {"dashes": "x"}]
+    turns = [_voiced(n, "tl", "Defer it: `a.py:1` for example.") for n in range(1, len(junk) + 2)]
+    for turn, bad in zip(turns, junk):
+        turn.json["voice"].update(bad)
+    for key, value in (("words", "x"), ("headers", nan)):
+        decision = Reduction(kind="decision", json={
+            "verdict": "Approve.", "delivered": True,
+            "voice": {**voice.measure("Approve.", "chair"), key: value},
+        }, phase="decision")
+
+        data = view_data(_run("decision"), turns + [decision])
+
+        json.dumps(data, allow_nan=False)
+        assert data["voice"][f"chair_{key}"] is None, key
+    assert data["verdict"]["voice"] is None  # NaN is never sent on
+    assert data["timeline"][1]["voice"] is None
+    assert data["timeline"][0]["voice"]["words"] == "many"  # junk, but serialisable
+    assert data["voice"]["median_words_by_role"] == {"tl": 5.0, "chair": 1.0}
+    # Finite counts whose sum is not: the summary is left out, never a 500.
+    for turn in turns[-2:]:
+        turn.json["voice"]["dashes"] = 1e308
+    assert view_data(_run("decision"), turns)["voice"] is None
+
 
 # --- the document's versions (doc-diff C3) --------------------------------------
 
@@ -805,6 +833,68 @@ def test_segments_merge_the_masters_image_check_by_position():
         ok=True, name="t09-tl.svg", ref="images/t09-tl.svg")
     image = view_data(_run("t03-tpm"), [drifted])["timeline"][0]["segments"][1]
     assert image["ok"] is False
+
+
+def test_a_mermaid_block_before_a_verified_image_leaves_the_image_verified():
+    # measure records the mermaid block as well, so the image is second in the
+    # recorded list: the position counts every figure, not only file images.
+    doc = _voiced(2, "owner", "Lead.\nFigure: flow\n```mermaid\ngraph TD; A-->B\n```\n"
+                  "Description: two.\n\n![curve](images/t02-owner.svg)\nDescription: a curve.")
+    for image in doc.json["voice"]["images"]:
+        image["ok"] = True  # as check_images records a mermaid block and a passing own file
+    segments = view_data(_run("t03-tpm"), [doc])["timeline"][0]["segments"]
+
+    assert [(s["kind"], s.get("ok")) for s in segments] == [
+        ("text", None), ("mermaid", None), ("image", True)]
+
+
+# Image syntax voice's scan misses, so it stays in a text segment and measure
+# counts no image (no retake), yet react-markdown drew each of the first five
+# as <img src="http://evil.example/...">: a label across lines (twice), a raw
+# tag or an autolink outranking a code span, a backtick in a fence's info
+# string. The last two hide one in a Description: or Figure: line, which the
+# scan never reads.
+_LEAKS = (
+    "Lead.\n![alt\ntext](http://evil.example/a.png)\nDescription: x",
+    "![a](images/t02-owner.svg)![b\n](http://evil.example/b.png)",
+    'Lead <b title="`">![x](http://evil.example/c.png)<b title="`"> end.',
+    "Lead <http://a.example/`>![x](http://evil.example/d.png)<http://c.example/`> end.",
+    "``` x`y\n![x](http://evil.example/f.png)\n```",
+    "Lead.\n![a](images/t02-owner.svg)\nDescription: see ![x](http://evil.example/z.png)",
+    "Figure: ![y](http://evil.example/y.png)\n```mermaid\ngraph TD; A-->B\n```\nDescription: two",
+)
+
+
+@pytest.mark.parametrize("body", _LEAKS)
+def test_no_prose_the_view_sends_carries_image_syntax(body):
+    data = view_data(_run("decision"), [
+        _voiced(2, "owner", body),
+        Reduction(kind="decision", json={"verdict": body, "delivered": True}, phase="decision"),
+    ])
+
+    for segments in (data["timeline"][0]["segments"], data["verdict"]["segments"]):
+        prose = [seg[key] for seg in segments
+                 for key in ("text", "caption", "description") if key in seg]
+        assert not any("![" in p for p in prose)
+        assert any("!\u200b[" in p for p in prose)  # disarmed, as Diff.tsx does, not dropped
+
+
+def test_the_top_level_voice_reads_the_rows_eval_reads():
+    # Turn 1 settled twice and the chair was retaken: the last row per turn
+    # and the latest decision count, as in eval's voice_summary, so the view
+    # and the eval never disagree on one run.
+    chair = lambda text: {"verdict": text, "delivered": True,  # noqa: E731
+                          "voice": voice.measure(text, "chair")}
+    rows = [
+        _voiced(1, "tl", "word " * 10), _voiced(1, "tl", "word " * 100),
+        _voiced(2, "owner", "word " * 20),
+        Reduction(kind="decision", json=chair("Approve it."), phase="decision"),
+        Reduction(kind="decision", json=chair("Defer it to next half."), phase="decision-take2"),
+    ]
+    summary = view_data(_run("decision-take2"), rows)["voice"]
+
+    assert summary == ev.voice_summary([(r.kind, r.json) for r in rows], {})
+    assert summary["median_words_by_role"] == {"tl": 100.0, "owner": 20.0, "chair": 5.0}
 
 
 def test_a_legacy_entry_has_no_voice_and_no_badge(run2):

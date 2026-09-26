@@ -16,6 +16,7 @@ Stdlib-only. Imports turnblock for the action and stance caps, never cast.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import stat
@@ -513,6 +514,19 @@ def _median(values: list) -> float | None:
     return float(statistics.median(values)) if values else None
 
 
+def _num(value: object) -> int | float | None:
+    """``value`` when it is a finite number and not a bool, otherwise None.
+
+    json.loads reads NaN, Infinity and a 400-digit int, and a hand-edited row
+    can hold a string or a list: none may raise out of the view route or eval,
+    or reach a payload served with allow_nan=False.
+    """
+    try:
+        return value if not isinstance(value, bool) and math.isfinite(value) else None
+    except (TypeError, OverflowError):  # not a number; an int too big for a float
+        return None
+
+
 def _takes(doc: dict) -> int:
     t = doc.get("takes")
     return t if isinstance(t, int) and not isinstance(t, bool) and t >= 1 else 1
@@ -540,7 +554,8 @@ def summary(rows: Iterable[tuple[str, dict]]) -> dict | None:
     C = decisions[-1:]
     ALL = OR + J + C
     v = lambda d: d["voice"]  # noqa: E731
-    n = lambda d, key: v(d).get(key) or 0  # noqa: E731
+    n = lambda d, key: _num(v(d).get(key)) or 0  # noqa: E731
+    tells = lambda d: v(d)["tells"] if isinstance(v(d).get("tells"), dict) else {}  # noqa: E731
 
     groups: dict[str, list[dict]] = {}
     for d in OR + J:
@@ -551,11 +566,11 @@ def summary(rows: Iterable[tuple[str, dict]]) -> dict | None:
     return {
         "owner_reviewer_median_words": _median([n(d, "words") for d in OR]),
         "owner_reviewer_pct_within_cap": _pct(
-            sum(1 for d in OR if n(d, "words") <= (v(d).get("cap") or CAPS["reviewer"])), len(OR)),
+            sum(1 for d in OR if n(d, "words") <= (n(d, "cap") or CAPS["reviewer"])), len(OR)),
         "median_words_by_role": {r: _median([n(d, "words") for d in ds]) for r, ds in groups.items()},
-        "chair_words": chair.get("words") if chair else None,
-        "chair_headers": chair.get("headers") if chair else None,
-        "chair_tables": chair.get("tables") if chair else None,
+        "chair_words": _num(chair.get("words")) if chair else None,
+        "chair_headers": _num(chair.get("headers")) if chair else None,
+        "chair_tables": _num(chair.get("tables")) if chair else None,
         "junior_turns": len(J),
         "junior_pct_compliant": _pct(sum(
             1 for d in J
@@ -569,9 +584,9 @@ def summary(rows: Iterable[tuple[str, dict]]) -> dict | None:
             sum(1 for d in OR if n(d, "first_line_words") <= _FIRST_LINE_WORDS), len(OR)),
         "unquoted_dashes": sum(n(d, "dashes") for d in ALL),
         "reviewer_pct_with_pointer": _pct(sum(1 for d in R if n(d, "pointers") > 0), len(R)),
-        "max_turn_refs": max(((v(d).get("tells") or {}).get("turn_refs") or 0 for d in ALL), default=0),
+        "max_turn_refs": max((_num(tells(d).get("turn_refs")) or 0 for d in ALL), default=0),
         "unchanged_mentions_junior_chair": sum(
-            (v(d).get("tells") or {}).get("unchanged") or 0 for d in J + C),
+            _num(tells(d).get("unchanged")) or 0 for d in J + C),
         "total_takes": sum(_takes(d) for d in ALL),
         "retakes_by_role": {r: sum(_takes(d) - 1 for d in ds) for r, ds in groups.items()},
         "kept_flagged": sum(1 for d in ALL if d.get("violations")),

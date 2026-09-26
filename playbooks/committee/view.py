@@ -74,11 +74,14 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
         "document": _document(run, turns, decision_row, lost),
         # committee-eval D10/C7: None until the run is scored from this home.
         "evaluation": _evaluation(run.id),
-        # voice C11 over the kept turn and decision rows; null for a run
+        # voice C11 over the rows eval's voice_summary reads -- the last turn
+        # reduction per number, as `_document` folds them, and the latest
+        # decision -- so the view and the eval agree on a run. Null for a run
         # reduced before voice existed, which the view says in words.
-        "voice": voice.summary(
-            [(r.kind, r.json) for r in reductions if isinstance(r.json, dict)]
-        ),
+        "voice": _serialisable(voice.summary(
+            [("turn", doc) for doc in {_turn_no(r.json): r.json for r in turns}.values()]
+            + ([("decision", decision)] if decision is not None else [])
+        )),
     }
 
 
@@ -200,7 +203,7 @@ def _entry(doc: dict) -> dict:
         "takes": _int(doc.get("takes")),
         "violations": _strings(doc.get("violations")),
         "flags": _strings(doc.get("flags")),
-        "voice": doc.get("voice") if isinstance(doc.get("voice"), dict) else None,
+        "voice": _serialisable(doc.get("voice")),
         "segments": _segments(doc),
     }
 
@@ -214,6 +217,13 @@ def _segments(doc: dict) -> list[dict]:
     is False whenever it is absent: this process never stats a worker's file
     on the master's behalf. Later loops build segments with this, never with
     voice.segments(body) directly.
+
+    No "![" leaves here in prose. Image syntax the scan misses stays in a text
+    segment, where Markdown would fetch it: a label across lines, a raw tag or
+    an autolink outranking a code span, a backtick in a fence's info string.
+    A ``Figure:`` or ``Description:`` line is never scanned at all. So every
+    ``text``, ``caption`` and ``description`` gets a U+200B after the "!", as
+    Diff.tsx does to a document; the view's renderer does it again.
     """
     body = doc.get("body")
     recorded = doc.get("voice") if isinstance(doc.get("voice"), dict) else {}
@@ -229,7 +239,9 @@ def _segments(doc: dict) -> list[dict]:
                 )
                 seg = {**seg, "ok": ok}
             index += 1
-        out.append(seg)
+        out.append({key: value.replace("![", "!\u200b[")
+                    if key in ("text", "caption", "description") else value
+                    for key, value in seg.items()})
     return out
 
 
@@ -307,14 +319,11 @@ def _verdict(decision: dict | None) -> dict | None:
         "dropped_floor_requests": _as_list(decision.get("dropped_floor_requests")),
         "takes": _int(decision.get("takes")),
         "violations": _strings(decision.get("violations")),
-        "voice": decision.get("voice") if isinstance(decision.get("voice"), dict) else None,
-        # The verdict text split like a turn body, every file image refused:
-        # the chair may add none, so none is ever drawn, and Markdown never
-        # receives an image reference to fetch.
-        "segments": [
-            {**seg, "ok": False} if seg["kind"] == "image" else seg
-            for seg in voice.segments(decision.get("verdict") or "")
-        ],
+        "voice": _serialisable(decision.get("voice")),
+        # Split and disarmed like a turn body. No image check is passed in, so
+        # every file image is refused: the chair may add none, so none is
+        # drawn. A chair's mermaid block passes through, and the view draws it.
+        "segments": _segments({"body": decision.get("verdict")}),
         # No `simulation` key. It was a constant `True` -- criterion 8 wants the
         # disclaimer to be independent of whether the chair wrote it, and the
         # view satisfies that by rendering the notice UNCONDITIONALLY, which is
@@ -611,6 +620,18 @@ def _int(value: object) -> int | None:
 def _str(value: object) -> str | None:
     """``value`` when it is a str, otherwise None: an object is a React crash."""
     return value if isinstance(value, str) else None
+
+
+def _serialisable(value: object) -> dict | None:
+    """``value`` when it is a dict the route's allow_nan=False serialiser takes.
+
+    json.loads reads NaN into a hand-edited ``voice``, which sent on as it is
+    turns every poll of the run's page into a 500. None instead: not measured.
+    """
+    try:
+        return value if isinstance(value, dict) and json.dumps(value, allow_nan=False) else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _cap(reductions: list[Reduction]) -> int:
