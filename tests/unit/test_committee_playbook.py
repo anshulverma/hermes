@@ -976,7 +976,10 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
         "closed", "current_role", "current_turn", "dropped_delegation",
         "rechecks", "pre_edit_digest", "artifact_digest", "charge", "artifact",
         "revised", "roster", "max_turns", "ended",
+        "delegation_turn", "dropped_delegation_turn", "answers_turn", "delegated_by_turn",
     }
+    assert s["delegation_turn"] is None and s["dropped_delegation_turn"] is None
+    assert s["answers_turn"] is None and s["delegated_by_turn"] is None
     assert s["turn"] == 1
     assert s["opening"] == list(cast.SENIORITY)
     assert isinstance(s["opening"], list)  # a copy: popping must not touch the cast
@@ -3153,6 +3156,80 @@ def test_next_phase_records_why_the_meeting_stopped():
     _, _, both, _, _, _ = _drive({"t14-owner": {"close": True}}, max_turns=14)
     assert both["closed"] is True and both["turn"] > 14
     assert both["ended"] == "owner closed"
+
+
+def test_next_phase_records_which_turn_each_owner_and_junior_turn_answers():
+    """Provenance is recorded at the mint, not inferred later from turn order."""
+    minted = {}
+
+    def script(phase, s):
+        minted[phase] = (s["answers_turn"], s["delegated_by_turn"])
+        if phase == "t02-owner":
+            return {"delegate": True, "action": "tighten the risk section"}
+        return {}
+
+    _drive(script)
+
+    assert minted["t01-senior_director"] == (None, None)
+    assert minted["t02-owner"] == (1, None)
+    assert minted["t03-junior_ic"] == (None, 2)
+    assert minted["t04-manager"] == (None, None)
+    assert minted["t05-owner"] == (4, None)
+
+
+def test_every_turn_reduction_carries_both_links_null_when_not_applicable():
+    """Always written: an ABSENT key is what marks a pre-change reduction."""
+    pb = _committee()
+    run = _run(phase="t02-owner")
+    s = pb._state(run)
+    s.update(current_role="owner", current_turn=2, opening=[], answers_turn=1)
+
+    owner = pb.reduce(
+        run, "t02-owner",
+        [_finding(run, f"{run.id}/t02-owner", _turn_answer("Conceded.", close="no"))],
+        _NamedSite("local"),
+    )[0]
+    assert owner.json["answers_turn"] == 1
+    assert "delegated_by_turn" in owner.json and owner.json["delegated_by_turn"] is None
+
+    s.update(current_role="manager", current_turn=4, answers_turn=None)
+    reviewer = pb.reduce(
+        run, "t04-manager",
+        [_finding(run, f"{run.id}/t04-manager", _turn_answer("Numbers?", close="no"))],
+        _NamedSite("local"),
+    )[0]
+    assert reviewer.json["answers_turn"] is None
+    assert reviewer.json["delegated_by_turn"] is None
+
+
+def test_a_cap_dropped_delegation_names_the_owner_turn_that_asked_for_it():
+    _, _, capped, _, _, _ = _drive(
+        {"t02-owner": {"delegate": True, "action": "too late"}}, max_turns=2
+    )
+    assert capped["dropped_delegation"] == "too late"
+    assert capped["dropped_delegation_turn"] == 2
+
+    pb = _committee()
+    run = _run(phase="decision")
+    pb._state(run).update(
+        current_role="chair", dropped_delegation="too late", dropped_delegation_turn=2
+    )
+    red = pb.reduce(
+        run, "decision", [_finding(run, f"{run.id}/decision", "Do not approve.")],
+        _NamedSite("local"),
+    )[0]
+    assert red.json["dropped_delegation_turn"] == 2
+
+    quiet = _committee()
+    quiet_run = _run(phase="decision")
+    quiet._state(quiet_run)["current_role"] = "chair"
+    none = quiet.reduce(
+        quiet_run, "decision",
+        [_finding(quiet_run, f"{quiet_run.id}/decision", "Approve.")],
+        _NamedSite("local"),
+    )[0]
+    assert "dropped_delegation_turn" in none.json
+    assert none.json["dropped_delegation_turn"] is None
 
 
 def test_the_decision_reduction_carries_the_ending_and_both_artifact_paths():

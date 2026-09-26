@@ -82,6 +82,7 @@ def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> 
             s["closed"] = True
         if block.get("delegate") and block.get("action"):
             s["delegation"] = block["action"]
+            s["delegation_turn"] = s["current_turn"]
 
 
 def _latest_answer(findings: list[Finding] | None) -> str:
@@ -160,6 +161,9 @@ class CommitteePlaybook:
                 "opening": list(cast.SENIORITY),
                 "queue": [],
                 "delegation": None,
+                # the owner turn that set `delegation`, so the junior turn that
+                # applies it -- or the decision that drops it -- can name it.
+                "delegation_turn": None,
                 "pending_action": None,
                 # "owner", never None: with None the owner-reply rule fires before
                 # the opening round and mints t01-owner -- a reply to an empty thread.
@@ -169,6 +173,13 @@ class CommitteePlaybook:
                 # the turn number reduce() needs; the phase name is never parsed back.
                 "current_turn": 0,
                 "dropped_delegation": None,
+                "dropped_delegation_turn": None,
+                # Provenance of the turn being minted, written on its reduction:
+                # the reviewer turn an owner turn answers, and the owner turn a
+                # junior-IC turn applies. `_turn` resets both on every mint, so
+                # each is an int only on its own kind of turn.
+                "answers_turn": None,
+                "delegated_by_turn": None,
                 "rechecks": [],
                 # the revised copy's sha256 as seed() found it, just before a
                 # junior-IC worker ran; reduce compares against this rather than
@@ -207,9 +218,19 @@ class CommitteePlaybook:
         """
         return run.phase not in (None, "open") and s["current_role"] is None
 
-    def _turn(self, s: dict, role: str) -> str:
-        """Mint the next turn phase for `role` and advance the counter."""
+    def _turn(
+        self, s: dict, role: str, *, answers: int | None = None,
+        delegated_by: int | None = None,
+    ) -> str:
+        """Mint the next turn phase for `role` and advance the counter.
+
+        ``answers`` and ``delegated_by`` are recorded on EVERY mint, so a
+        reviewer turn resets both to None. The view prefers these recorded
+        links to turn order, which is only true of today's ``next_phase``.
+        """
         name = f"t{s['turn']:02d}-{role}"
+        s["answers_turn"] = answers
+        s["delegated_by_turn"] = delegated_by
         # reduce needs NN for the thread heading and must not parse the phase name.
         s["current_turn"] = s["turn"]
         s["turn"] += 1
@@ -232,6 +253,7 @@ class CommitteePlaybook:
             # only reachable when the CAP cut the edit off; reduce("decision")
             # names it in the verdict rather than dropping it silently.
             s["dropped_delegation"] = s["delegation"]
+            s["dropped_delegation_turn"] = s["delegation_turn"]
             s["delegation"] = None
         return "decision"
 
@@ -634,6 +656,11 @@ class CommitteePlaybook:
             "close": bool(block.get("close")),
             "action": block.get("action"),
             "verified": verified,
+            # Always written, null when not applicable: an ABSENT key marks a
+            # reduction from before these existed, which the view places by
+            # turn order instead.
+            "answers_turn": s["answers_turn"],
+            "delegated_by_turn": s["delegated_by_turn"],
             "error": "; ".join(errors) or None,
         })]
 
@@ -705,6 +732,7 @@ class CommitteePlaybook:
             "rechecks": [dict(check) for check in s["rechecks"]],
             "artifact_intact": intact,
             "dropped_delegation": s["dropped_delegation"],
+            "dropped_delegation_turn": s["dropped_delegation_turn"],
             "dropped_floor_requests": list(s["queue"]),
             # Why the meeting stopped. A chair that delivered nothing outranks
             # whatever routed the run here: that IS how this meeting ended, and
@@ -733,13 +761,15 @@ class CommitteePlaybook:
         if s["delegation"] and s["turn"] <= s["max_turns"]:
             s["pending_action"] = s["delegation"]
             s["delegation"] = None  # consumed exactly once, here
-            return self._turn(s, cast.JUNIOR)
+            return self._turn(s, cast.JUNIOR, delegated_by=s["delegation_turn"])
         if s["closed"] or s["turn"] > s["max_turns"]:
             # Mirrors the `or`: an owner that closed is why the meeting stopped,
             # even when the cap would have stopped it on the next hop anyway.
             return self._decision(s, "owner closed" if s["closed"] else "turn cap")
         if s["last_speaker"] != cast.OWNER:
-            return self._turn(s, cast.OWNER)  # the owner answers every reviewer
+            # the owner answers every reviewer; `current_turn` is still that
+            # reviewer's when the argument is evaluated.
+            return self._turn(s, cast.OWNER, answers=s["current_turn"])
         if s["opening"]:
             return self._turn(s, s["opening"].pop(0))
         if s["queue"]:
