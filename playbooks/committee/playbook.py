@@ -925,7 +925,8 @@ class CommitteePlaybook:
         if unusable:
             # D3: the chair's list is final, so one that cannot seat anyone is
             # asked for again before the run falls back; only her last take
-            # falls back. The note is the playbook's, not voice's.
+            # falls back. The note is the playbook's, not voice's, and counts
+            # seats as her block does: the fixed four are never listed in it.
             out = self._discard(
                 run, s, role, answer, metrics, violations, flags, None,
                 extra={"stage": stage, "code": unusable},
@@ -933,8 +934,8 @@ class CommitteePlaybook:
             s["retake"] = (
                 f"Retake {s['take'] + 1} of {voice.MAX_TAKES}. No usable seat list: "
                 f"{selection.fallback_words(unusable)}. End your answer with the "
-                f"```hermes-selection block at column 0, {selection.MIN_REVIEWERS} to "
-                f"{selection.MAX_REVIEWERS} seats."
+                f"```hermes-selection block at column 0, {selection.MIN_REVIEWERS - 2} to "
+                f"{selection.MAX_REVIEWERS - 2} seats besides the fixed four."
             )
             return out
         answer, take, takes, metrics, violations, flags = self._keep(

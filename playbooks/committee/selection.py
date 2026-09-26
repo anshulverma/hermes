@@ -182,10 +182,10 @@ def not_seated(doc: dict | None) -> list[dict]:
     """The stakeholders a selector named but did not seat, cleaned.
 
     An entry without both a stakeholder and a reason (non-blank strings) is
-    dropped. ``represented_by`` is kept as the worker wrote it (stripped);
-    whether it names a seated member is ``resolve``'s question. It is
-    lowercased, and "owner" is no representative: the proposal's owner is not
-    the voice of someone reviewing her proposal.
+    dropped. ``represented_by`` is kept only when, stripped and lowercased, it
+    is a slug, so a 200 KB one never reaches the reduction; whether it names a
+    seated member is ``resolve``'s question. "owner" is no representative: the
+    proposal's owner is not the voice of someone reviewing her proposal.
     """
     out = []
     for entry in _entries(doc, "not_seated"):
@@ -198,7 +198,7 @@ def not_seated(doc: dict | None) -> list[dict]:
         out.append({
             "stakeholder": stakeholder,
             "reason": reason,
-            "represented_by": rep if rep and rep != cast.OWNER else None,
+            "represented_by": rep if SLUG_RE.fullmatch(rep) and rep != cast.OWNER else None,
         })
     return out
 
@@ -211,8 +211,9 @@ def validate(doc: dict | None, library: dict) -> tuple[list[dict], list[dict]]:
     decides it, even an invalid one. A library slug takes ``{**library[slug]}``
     and the worker's fields are ignored. Any other slug is derived and needs a
     title and a name no cast or library persona has (any case); a name with no
-    letter or digit is blank, a nameless seat is named from its title, and a
-    blank stake is the rationale. Every seat needs a rationale.
+    letter or digit is blank, a nameless seat is named from its title (one
+    whose title has none either has no name), and a blank stake is the
+    rationale. Every seat needs a rationale.
     Each seat is a new dict;
     ``nominated_by`` is added later by ``resolve``. Never raises.
     """
@@ -236,6 +237,9 @@ def validate(doc: dict | None, library: dict) -> tuple[list[dict], list[dict]]:
             name = _clip(entry.get("name"), NAME_MAX)
             # combining marks alone render as nothing: blank, so named from the title
             name = name if _name_key(name) else cast.clip(title, NAME_MAX)
+            if not _name_key(name):  # the title renders as nothing too
+                invalid.append(_invalid(role, role, "no name"))
+                continue
             if _name_key(name) in _TAKEN:
                 invalid.append(_invalid(role, role, "name taken"))
                 continue
@@ -453,7 +457,9 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
     A seat's key is its slug (a bad slug's, its raw role lowercased) and a
     note's is its stakeholder lowercased, or the slug of the listed seat it
     names by slug, title or persona name, words in any order (``_keys``), so
-    a seat and a note about it are one entry. Stages are read in order, so the
+    a seat and a note about it are one entry. When several listed seats share
+    that name, the note is about the one its own stage dropped, else the
+    first listed. Stages are read in order, so the
     latest stage wins a key. A note naming a seated seat is dropped: that
     stakeholder is seated. A stage 1-2 seat that did not make the roster is
     dropped by the first later usable list that leaves it out, whose note on
@@ -467,14 +473,20 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
     """
     seated = {seat["role"] for seat in resolved["seated"]}
     taken = set().union(*map(_seat_keys, resolved["seated"]))
-    # every key of every listed seat that is not seated -> its slug, the first
-    # listing winning: one pass, so a note is matched in constant time
+    # every key of every listed seat that is not seated -> {index of the stage
+    # that dropped it (None: none did) -> its slug}, the first listing winning
+    # each: one pass, so a note is matched in constant time
     listed: dict[str, dict] = {}
-    for st in read:
+    names: dict[str, dict] = {}
+    for k, st in enumerate(read):
         for seat in st["seats"]:
-            if seat["role"] not in seated:
-                listed.setdefault(seat["role"], seat)
-    names = {key: slug for slug, seat in reversed(listed.items()) for key in _seat_keys(seat)}
+            slug = seat["role"]
+            if slug in seated or slug in listed:
+                continue
+            listed[slug] = seat
+            by = _dropper(read, k, slug)
+            for key in _seat_keys(seat):
+                names.setdefault(key, {}).setdefault(by, slug)
     found: dict[str, dict] = {}
     notes_by_stage = []
     for i, st in enumerate(read):
@@ -485,7 +497,9 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
             keys = _keys(note["stakeholder"])
             if keys & taken:
                 continue
-            slug = next((names[key] for key in sorted(keys) if key in names), None)
+            named = next((names[key] for key in sorted(keys) if key in names), None)
+            # the seat this stage dropped, else the first listed by that name
+            slug = (named.get(i) or next(iter(named.values()))) if named else None
             key = slug or note["stakeholder"].strip().lower()
             notes[key] = note
             seat = listed.get(slug) if slug else None
@@ -497,7 +511,7 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
         for k, earlier in enumerate(read[:i]):
             for seat in earlier["seats"]:
                 slug = seat["role"]
-                if slug in seated or _dropper(read, k, slug) is not st:
+                if slug in seated or _dropper(read, k, slug) != i:
                     continue
                 note = notes.get(slug)
                 found[slug] = _entry(
@@ -530,10 +544,12 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
     }
 
 
-def _dropper(read: list[dict], k: int, slug: str) -> dict | None:
-    """The first stage after ``read[k]`` with a usable list that leaves ``slug`` out."""
+def _dropper(read: list[dict], k: int, slug: str) -> int | None:
+    """The index of the first stage after ``read[k]`` with a usable list that
+    leaves ``slug`` out, or None."""
     return next(
-        (st for st in read[k + 1:] if st["code"] is None and slug not in st["slugs"]),
+        (j for j in range(k + 1, len(read))
+         if read[j]["code"] is None and slug not in read[j]["slugs"]),
         None,
     )
 

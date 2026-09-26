@@ -1683,6 +1683,16 @@
 	/** A derived seat's marker (decision 12): its name is a selector's words, the slug is not. */
 	var derivedSeat = (role) => `${role} · derived seat`;
 	/**
+	* cast.label: "Name, Title", or the title alone for a seat named from its
+	* title, so a nameless derived seat never reads "Crew Owner, Crew Owner".
+	* Trailing full stops are ignored, and a name ending "…" is the title clipped.
+	*/
+	function seatLabel(name, title) {
+		const bare = (s) => s.replace(/[. ]+$/, "");
+		const stem = bare(name.replace(/…$/, ""));
+		return bare(name) === bare(title) || name.endsWith("…") && stem !== "" && title.startsWith(stem) ? title : `${name}, ${title}`;
+	}
+	/**
 	* Who speaks for a stakeholder nobody seated, or that nobody does. The name
 	* check is exact, so a lookalike name passes it: a derived seat's slug is the defence.
 	*/
@@ -1789,11 +1799,9 @@
 								style: selectionList,
 								children: st.proposed.map((p, j) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", { children: [
 									p.source === "derived" || derived.has(p.role) ? derivedSeat(p.role) : p.role,
-									": ",
-									p.name,
-									",",
+									":",
 									" ",
-									p.title,
+									seatLabel(p.name, p.title),
 									". Why: ",
 									p.rationale
 								] }, j))

@@ -538,6 +538,18 @@ const selectionCount = { fontSize: 11.5, fontStyle: 'italic', color: 'var(--text
 const derivedSeat = (role: string) => `${role} · derived seat`;
 
 /**
+ * cast.label: "Name, Title", or the title alone for a seat named from its
+ * title, so a nameless derived seat never reads "Crew Owner, Crew Owner".
+ * Trailing full stops are ignored, and a name ending "…" is the title clipped.
+ */
+function seatLabel(name: string, title: string): string {
+  const bare = (s: string) => s.replace(/[. ]+$/, '');
+  const stem = bare(name.replace(/…$/, ''));
+  const same = bare(name) === bare(title) || (name.endsWith('…') && stem !== '' && title.startsWith(stem));
+  return same ? title : `${name}, ${title}`;
+}
+
+/**
  * Who speaks for a stakeholder nobody seated, or that nobody does. The name
  * check is exact, so a lookalike name passes it: a derived seat's slug is the defence.
  */
@@ -645,8 +657,8 @@ function SelectionCard({
               >
                 {st.proposed.map((p, j) => (
                   <li key={j}>
-                    {p.source === 'derived' || derived.has(p.role) ? derivedSeat(p.role) : p.role}: {p.name},{' '}
-                    {p.title}. Why: {p.rationale}
+                    {p.source === 'derived' || derived.has(p.role) ? derivedSeat(p.role) : p.role}:{' '}
+                    {seatLabel(p.name, p.title)}. Why: {p.rationale}
                   </li>
                 ))}
               </ul>

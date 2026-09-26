@@ -335,7 +335,8 @@ def test_validate_clips_every_field_and_maps_long_dashes_to_hyphens():
          "ambition": long, "stake": long, "lens": long, "rationale": long},
         {"role": "fleet_ops", "title": "Fleet \u2013 operations \u2014 lead",
          "lens": "uptime \u2014 then cost", "rationale": "owns the pager \u2014 and the budget"},
-        {"role": "dash_ops", "title": "\u2014" * 500, "rationale": "\u2013" * 500},
+        # a letter first: a name and title of dashes alone would be "no name"
+        {"role": "dash_ops", "title": "A" + "\u2014" * 500, "rationale": "\u2013" * 500},
     ]}, cast.LIBRARY)
 
     assert invalid == []
@@ -350,8 +351,8 @@ def test_validate_clips_every_field_and_maps_long_dashes_to_hyphens():
     assert dashed["title"] == dashed["name"] == "Fleet - operations - lead"
     assert dashed["lens"] == "uptime - then cost"
     assert dashed["rationale"] == "owns the pager - and the budget"
-    assert clipped["title"] == "-" * (S.TITLE_MAX - 1) + "\u2026"
-    assert clipped["name"] == "-" * (S.NAME_MAX - 1) + "\u2026"  # the title, cut to NAME_MAX
+    assert clipped["title"] == "A" + "-" * (S.TITLE_MAX - 2) + "\u2026"
+    assert clipped["name"] == "A" + "-" * (S.NAME_MAX - 2) + "\u2026"  # the title, cut to NAME_MAX
     assert clipped["rationale"] == "-" * (S.RATIONALE_MAX - 1) + "\u2026"
     for seat in seats:
         for field, value in seat.items():
@@ -432,6 +433,23 @@ def test_a_nameless_or_invisibly_named_derived_seat_is_named_from_its_title_once
     assert heads == ["You are Crew lead.", f"You are {title}.", "You are Kai Brandt, Crew lead."]
     assert thread._seat(seats[0]) == "- crew_owner: Crew lead. Why: crew_owner carries a risk in this proposal."
     assert cast.label(cast.CAST["owner"]) == "Maya Okonkwo, Staff Engineer & proposal owner"
+
+
+def test_a_derived_seat_whose_name_and_title_render_as_nothing_is_invalid():
+    """Combining marks and variation selectors are printable but render as
+    nothing: a seat whose name and title both have no letter or digit would
+    open its brief "You are ." and head its turns with nothing, so it is
+    invalid ("no name") and never seated. A visible title still names it."""
+    seats, invalid = S.validate({"seats": [
+        _seat("ghost", name="\u0301\u0301", title="\ufe0f\u0301"),
+        _seat("ghost_two", title="\u0301\u0301\u0301"),
+        _seat("crew_owner", name="\u0301", title="Crew lead"),
+    ]}, cast.LIBRARY)
+
+    assert [(i["role"], i["reason"]) for i in invalid] == [
+        ("ghost", "invalid: no name"), ("ghost_two", "invalid: no name")]
+    assert [(s["role"], s["name"], s["title"]) for s in seats] == [
+        ("crew_owner", "Crew lead", "Crew lead")]
 
 
 def test_clip_blanks_characters_above_the_basic_plane():
@@ -1001,6 +1019,48 @@ def test_a_note_naming_a_seat_by_title_or_name_attaches_to_it_or_drops_when_seat
     out = S.resolve(_stages(owner, manager, chair), cast.LIBRARY)
     assert out["considered"][1:] == [
         _considered(lib["staff_ic"]["title"], "staff_ic", "fencing is build cost", "tl")]
+
+
+def test_a_note_naming_a_shared_title_attaches_to_the_seat_its_stage_dropped():
+    """The manager re-slugs the owner's derived sre_a as sre_b, same title, and
+    the chair drops sre_b with a note naming that title: the note is about the
+    seat she dropped, so sre_b gets her reason and representative and sre_a
+    keeps the manager's drop. A note whose stage dropped neither seat is about
+    the first listed."""
+    owner = {"seats": [_derived("sre_a", "SRE Lead")]}
+    manager = {"seats": [_derived("sre_b", "SRE Lead"), _seat("tpm")]}
+    chair = {"seats": [_seat("tpm")], "not_seated": [
+        {"stakeholder": "SRE Lead", "reason": "tpm covers on-call", "represented_by": "tpm"}]}
+
+    out = S.resolve(_stages(owner, manager, chair), cast.LIBRARY)
+
+    assert out["fallback"] is None and out["considered"] == [
+        _considered("SRE Lead", "sre_a", f"dropped by {MANAGER}"),
+        _considered("SRE Lead", "sre_b", "tpm covers on-call", "tpm"),
+    ]
+    # both listed by the owner and both dropped by the manager: the chair's note
+    # is about sre_a, the first listed, and sre_b keeps the manager's drop
+    owner = {"seats": [_derived("sre_a", "SRE Lead"), _derived("sre_b", "SRE Lead")]}
+    manager = {"seats": [_seat("tpm")]}
+    out = S.resolve(_stages(owner, manager, chair), cast.LIBRARY)
+    assert out["considered"] == [
+        _considered("SRE Lead", "sre_a", "tpm covers on-call", "tpm"),
+        _considered("SRE Lead", "sre_b", f"dropped by {MANAGER}"),
+    ]
+
+
+def test_a_note_naming_an_earlier_dropped_seat_by_slug_shows_its_title():
+    """The owner lists staff_ic, the manager drops it and the chair's note names
+    it by slug: the considered entry reads the seat's title, never the raw slug."""
+    owner = {"seats": [_seat("staff_ic")]}
+    manager = {"seats": [_seat("tpm")]}
+    chair = {"seats": [_seat("tpm")], "not_seated": [
+        {"stakeholder": "staff_ic", "reason": "tpm carries the build cost", "represented_by": "tpm"}]}
+
+    out = S.resolve(_stages(owner, manager, chair), cast.LIBRARY)
+
+    assert out["considered"] == [_considered(
+        cast.LIBRARY["staff_ic"]["title"], "staff_ic", "tpm carries the build cost", "tpm")]
 
 
 def test_fallback_words_say_every_code_in_words():

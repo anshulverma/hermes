@@ -3053,7 +3053,7 @@ describe('CommitteeView selection card', () => {
           ...st,
           body: hostile,
           segments: [{ kind: 'text' as const, text: hostile }],
-          proposed: st.proposed.map((p) => ({ ...p, name: hostile, title: hostile, rationale: hostile })),
+          proposed: st.proposed.map((p) => ({ ...p, name: hostile, title: `${hostile} lead`, rationale: hostile })),
           not_seated: st.not_seated?.map((n) => ({
             ...n,
             stakeholder: hostile,
@@ -3073,7 +3073,7 @@ describe('CommitteeView selection card', () => {
 
     for (const n of [1, 2, 3]) {
       const list = within(card).getByTestId(`selection-proposed-${n}`);
-      expect(list).toHaveTextContent(`: ${hostile}, ${hostile}. Why: ${hostile}`);
+      expect(list).toHaveTextContent(`: ${hostile}, ${hostile} lead. Why: ${hostile}`);
       expect(list.querySelector('img, a, strong, script, iframe')).toBeNull();
     }
     const considered = within(card).getByTestId('selection-considered');
@@ -3085,6 +3085,47 @@ describe('CommitteeView selection card', () => {
     // The prose is Markdown, as a turn's is, but it draws no image and runs no script.
     expect(card.querySelector('img, script, iframe')).toBeNull();
     for (const a of card.querySelectorAll('a')) expect(a.getAttribute('href') ?? '').not.toMatch(/^javascript:/i);
+  });
+
+  it('a seat named from its title shows the title once on a stage list, as cast.label does', () => {
+    // validate names a nameless derived seat from its title (clipped with "…"
+    // past NAME_MAX), so "Crew Owner, Crew Owner" would be the reduction's
+    // name and title side by side.
+    const long = 'Crew fleet owner for the federated scheduling layer and every region';
+    const seat = (role: string, name: string, title: string) => ({
+      role, name, title, rationale: 'runs the crews', source: 'derived' as const,
+    });
+    const sel = cardData.selection!;
+    show({
+      ...cardData,
+      selection: {
+        ...sel,
+        stages: sel.stages.map((st) =>
+          st.stage === 1
+            ? {
+                ...st,
+                proposed: [
+                  seat('crew_owner', 'Crew Owner', 'Crew Owner'),
+                  seat('crew_lead', 'Crew Lead.', 'Crew Lead'),
+                  seat('long_ops', `${long.slice(0, 59).trimEnd()}…`, long),
+                  seat('kai_ops', 'Kai Brandt', 'Crew Owner'),
+                ],
+              }
+            : st,
+        ),
+      },
+    });
+
+    expect(
+      within(screen.getByTestId('selection-proposed-1'))
+        .getAllByRole('listitem')
+        .map((li) => li.textContent),
+    ).toEqual([
+      'crew_owner · derived seat: Crew Owner. Why: runs the crews',
+      'crew_lead · derived seat: Crew Lead. Why: runs the crews',
+      `long_ops · derived seat: ${long}. Why: runs the crews`,
+      'kai_ops · derived seat: Kai Brandt, Crew Owner. Why: runs the crews',
+    ]);
   });
 
   it('a derived proposal is marked while selecting and after the chair dropped it', () => {
