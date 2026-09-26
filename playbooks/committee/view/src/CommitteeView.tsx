@@ -496,6 +496,135 @@ function Roster({ roster, legacy }: { roster: Persona[]; legacy: boolean }) {
   );
 }
 
+// --- selection ---------------------------------------------------------------
+//
+// How this committee came to be seated: each selector's words and list, the
+// stakeholders named but not seated and who speaks for them, and why the run
+// fell back when it did. Each seat's reason and nominator are on the roster
+// above; this card is the exchange that produced them. It sits directly under
+// the roster on both layouts, so it is on screen before anyone has spoken.
+// Every string but the stage prose is worker-written plain text; the prose
+// goes through Segments only, as a turn's does.
+
+const STAGE_VERB: Record<number, string> = { 1: 'proposes', 2: 'amends', 3: 'ratifies' };
+
+const selectionNotice = {
+  fontSize: 12,
+  padding: '6px 8px',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--wash-subtle)',
+  border: '1px solid var(--border-hairline)',
+  color: 'var(--status-attention, #e3b341)',
+} as const;
+
+const selectionHeading = { margin: 0, fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' } as const;
+const selectionList = { margin: 0, paddingLeft: 18, fontSize: 12, color: 'var(--text-secondary)' } as const;
+const selectionCount = { fontSize: 11.5, fontStyle: 'italic', color: 'var(--text-muted)' } as const;
+
+/** `slug · derived seat` for a seat the roster says a selector invented (decision 12), else the slug. */
+const seatSlug = (role: string, derived: Set<string>) => (derived.has(role) ? `${role} · derived seat` : role);
+
+function SelectionCard({
+  selection,
+  runId,
+  derived,
+}: {
+  selection: Selection;
+  runId: string;
+  derived: Set<string>;
+}) {
+  const { Badge } = ds();
+  // Only the final reduction settles who was considered. Before it (selecting,
+  // lost) the list is empty because nothing is resolved yet, and "Everyone
+  // considered was seated." would be a confident falsehood.
+  const settled = selection.state === 'seated' || selection.state === 'fallback';
+  const considered = selection.considered_dropped ?? 0;
+  const invalid = selection.invalid_dropped ?? 0;
+  return (
+    <div data-testid="selection-card">
+      <Section title="Selection">
+        {selection.fallback && (
+          <div data-testid="selection-fallback" style={selectionNotice}>
+            Default committee: selection fell back ({selection.fallback})
+          </div>
+        )}
+        {selection.state === 'lost' && (
+          <div data-testid="selection-lost" style={selectionNotice}>
+            Selection stopped: the meeting was lost.
+          </div>
+        )}
+        {selection.stages.map((st, i) => (
+          <div
+            key={i}
+            data-testid={`selection-stage-${st.stage}`}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 6,
+              paddingTop: 8,
+              borderTop: '1px solid var(--border-hairline)',
+            }}
+          >
+            <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+              <h3 style={selectionHeading}>
+                {st.name} ({st.role}) {STAGE_VERB[st.stage] ?? ''}
+              </h3>
+              {/* Exactly as a timeline entry badges its turn. */}
+              {st.badges.map((b) => (
+                <Badge key={b} size="sm" variant="outline" tone={BADGE_TONE[b]}>
+                  {BADGE_LABEL[b] ?? b}
+                </Badge>
+              ))}
+            </div>
+            <Segments segments={st.segments} runId={runId} />
+            {/* The body arrives with its hermes-selection fence stripped, so
+                the list the selector gave is drawn here from the reduction. */}
+            {st.proposed.length > 0 && (
+              <ul
+                data-testid={`selection-proposed-${st.stage}`}
+                aria-label={`Seats ${st.name} listed`}
+                style={selectionList}
+              >
+                {st.proposed.map((p, j) => (
+                  <li key={j}>
+                    {seatSlug(p.role, derived)}: {p.name}, {p.title}. Why: {p.rationale}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {(st.proposed_dropped ?? 0) > 0 && <div style={selectionCount}>{st.proposed_dropped} more not listed.</div>}
+          </div>
+        ))}
+        {settled && (
+          <div
+            data-testid="selection-considered"
+            style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-secondary)' }}
+          >
+            {/* As thread.append_seated says it: "everyone was seated" only when nothing was cut either. */}
+            {selection.considered.length === 0 && considered + invalid === 0 ? (
+              'Everyone considered was seated.'
+            ) : (
+              <>
+                <h3 style={selectionHeading}>Considered, not seated</h3>
+                <ul style={selectionList}>
+                  {selection.considered.map((c, j) => (
+                    <li key={j}>
+                      {c.stakeholder}: {c.reason.replace(/\.$/, '')}
+                      {c.represented_by_name && `. Represented by ${c.represented_by_name}`}
+                    </li>
+                  ))}
+                </ul>
+                {considered > 0 && <div style={selectionCount}>{considered} more considered, not listed.</div>}
+                {invalid > 0 && <div style={selectionCount}>{invalid} more invalid entries, not listed.</div>}
+              </>
+            )}
+          </div>
+        )}
+      </Section>
+    </div>
+  );
+}
+
 // --- timeline ----------------------------------------------------------------
 
 function TimelineEntry({
@@ -505,6 +634,7 @@ function TimelineEntry({
   onToggle,
   edit,
   onSeeEdit,
+  derived,
 }: {
   runId: string;
   entry: Entry;
@@ -513,6 +643,8 @@ function TimelineEntry({
   /** The 1-based edit step this turn delegated or applied, if any. */
   edit?: number;
   onSeeEdit: () => void;
+  /** The speaker's seat is one a selector invented (the roster's `source`). */
+  derived: boolean;
 }) {
   const { Badge } = ds();
   // A payload from before voice carries no segments: its body is all text.
@@ -558,6 +690,11 @@ function TimelineEntry({
           {entry.name}
         </span>
         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{entry.title}</span>
+        {/* A derived seat's name and title are a selector's words: the slug
+            and the marker say whose turn it is, as the roster row does. */}
+        {derived && (
+          <span style={{ ...mono, fontSize: 10, color: 'var(--text-muted)' }}>{entry.role} · derived seat</span>
+        )}
         {entry.badges.map((b) => (
           <Badge
             key={b}
@@ -666,6 +803,7 @@ function Timeline({
   setOpen,
   edits,
   onSeeEdit,
+  derived,
 }: {
   runId: string;
   timeline: Entry[];
@@ -675,6 +813,8 @@ function Timeline({
   /** turn -> [1-based edit number, that step's junior turn], for reviewer, owner and junior rows. */
   edits: Map<number, [number, number]>;
   onSeeEdit: (turn: number) => void;
+  /** Roles whose seat a selector invented. */
+  derived: Set<string>;
 }) {
   const allOpen = timeline.length > 0 && open.size === timeline.length;
 
@@ -708,6 +848,7 @@ function Timeline({
           open={open.has(entry.n)}
           edit={edits.get(entry.n)?.[0]}
           onSeeEdit={() => onSeeEdit(edits.get(entry.n)![1])}
+          derived={derived.has(entry.role)}
           onToggle={() =>
             setOpen((prev) => {
               const next = new Set(prev);
@@ -786,8 +927,18 @@ function MeetingMetrics({ data }: { data: CommitteeData }) {
   // Turns per seat, every seat included; a turn nobody can be named for gets
   // its own row rather than vanishing from the total.
   const seats = [
-    ...data.roster.map((p) => ({ key: p.role, name: p.name, of: (e: Entry) => e.role === p.role })),
-    { key: 'unattributed', name: 'speaker not identified', of: (e: Entry) => e.badges.includes('unattributed') },
+    ...data.roster.map((p) => ({
+      key: p.role,
+      name: p.name,
+      derived: p.source === 'derived',
+      of: (e: Entry) => e.role === p.role,
+    })),
+    {
+      key: 'unattributed',
+      name: 'speaker not identified',
+      derived: false,
+      of: (e: Entry) => e.badges.includes('unattributed'),
+    },
   ]
     .map((s) => ({ ...s, took: turns.filter(s.of) }))
     .filter((s) => s.key !== 'unattributed' || s.took.length > 0);
@@ -832,7 +983,15 @@ function MeetingMetrics({ data }: { data: CommitteeData }) {
           const missed = s.took.filter((e) => !delivered(e)).length;
           return (
             <div key={s.key} data-testid={`turns-${s.key}`} style={row}>
-              <span style={{ width: 130, flex: 'none', color: 'var(--text-primary)' }}>{s.name}</span>
+              <span style={{ width: 130, flex: 'none', color: 'var(--text-primary)' }}>
+                {s.name}
+                {/* A derived seat's name is a selector's words; the slug says whose row it is. */}
+                {s.derived && (
+                  <span style={{ ...mono, display: 'block', fontSize: 10, color: 'var(--text-muted)' }}>
+                    {s.key} · derived seat
+                  </span>
+                )}
+              </span>
               <Bar value={s.took.length} max={most} />
               <span style={{ ...mono, flex: 'none' }}>
                 {s.took.length}
@@ -1126,6 +1285,8 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   const legacy =
     (data.timeline.length > 0 && data.document.name === null) ||
     (data.verdict !== null && data.progress.ended === null);
+  // Seats a selector invented, by role: their rows say so wherever they appear.
+  const derived = new Set(data.roster.filter((p) => p.source === 'derived').map((p) => p.role));
 
   // A step's `tNN` link: open that turn in the transcript and bring it on screen
   // -- its last row, the take the step context reads for a turn settled twice.
@@ -1216,6 +1377,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
       <div data-testid="committee-view" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         <ProgressBar progress={data.progress} legacy={legacy} />
         <Roster roster={data.roster} legacy={legacy} />
+        {data.selection != null && <SelectionCard selection={data.selection} runId={runId} derived={derived} />}
       </div>
     );
   }
@@ -1253,6 +1415,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     >
       <ProgressBar progress={data.progress} legacy={legacy} />
       <Roster roster={data.roster} legacy={legacy} />
+      {data.selection != null && <SelectionCard selection={data.selection} runId={runId} derived={derived} />}
       <Timeline
         runId={runId}
         timeline={data.timeline}
@@ -1260,6 +1423,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
         setOpen={setOpen}
         edits={edits}
         onSeeEdit={seeEdit}
+        derived={derived}
       />
       <Verdict runId={runId} verdict={data.verdict} />
       {history}

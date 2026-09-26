@@ -1648,7 +1648,157 @@
 			})
 		});
 	}
-	function TimelineEntry({ runId, entry, open, onToggle, edit, onSeeEdit }) {
+	var STAGE_VERB = {
+		1: "proposes",
+		2: "amends",
+		3: "ratifies"
+	};
+	var selectionNotice = {
+		fontSize: 12,
+		padding: "6px 8px",
+		borderRadius: "var(--radius-md)",
+		background: "var(--wash-subtle)",
+		border: "1px solid var(--border-hairline)",
+		color: "var(--status-attention, #e3b341)"
+	};
+	var selectionHeading = {
+		margin: 0,
+		fontSize: 13,
+		fontWeight: 600,
+		color: "var(--text-primary)"
+	};
+	var selectionList = {
+		margin: 0,
+		paddingLeft: 18,
+		fontSize: 12,
+		color: "var(--text-secondary)"
+	};
+	var selectionCount = {
+		fontSize: 11.5,
+		fontStyle: "italic",
+		color: "var(--text-muted)"
+	};
+	/** `slug · derived seat` for a seat the roster says a selector invented (decision 12), else the slug. */
+	var seatSlug = (role, derived) => derived.has(role) ? `${role} · derived seat` : role;
+	function SelectionCard({ selection, runId, derived }) {
+		const { Badge } = ds();
+		const settled = selection.state === "seated" || selection.state === "fallback";
+		const considered = selection.considered_dropped ?? 0;
+		const invalid = selection.invalid_dropped ?? 0;
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": "selection-card",
+			children: /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
+				title: "Selection",
+				children: [
+					selection.fallback && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "selection-fallback",
+						style: selectionNotice,
+						children: [
+							"Default committee: selection fell back (",
+							selection.fallback,
+							")"
+						]
+					}),
+					selection.state === "lost" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						"data-testid": "selection-lost",
+						style: selectionNotice,
+						children: "Selection stopped: the meeting was lost."
+					}),
+					selection.stages.map((st, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": `selection-stage-${st.stage}`,
+						style: {
+							display: "flex",
+							flexDirection: "column",
+							gap: 6,
+							paddingTop: 8,
+							borderTop: "1px solid var(--border-hairline)"
+						},
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								style: {
+									display: "flex",
+									gap: 8,
+									alignItems: "baseline",
+									flexWrap: "wrap"
+								},
+								children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("h3", {
+									style: selectionHeading,
+									children: [
+										st.name,
+										" (",
+										st.role,
+										") ",
+										STAGE_VERB[st.stage] ?? ""
+									]
+								}), st.badges.map((b) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Badge, {
+									size: "sm",
+									variant: "outline",
+									tone: BADGE_TONE[b],
+									children: BADGE_LABEL[b] ?? b
+								}, b))]
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Segments, {
+								segments: st.segments,
+								runId
+							}),
+							st.proposed.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+								"data-testid": `selection-proposed-${st.stage}`,
+								"aria-label": `Seats ${st.name} listed`,
+								style: selectionList,
+								children: st.proposed.map((p, j) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", { children: [
+									seatSlug(p.role, derived),
+									": ",
+									p.name,
+									", ",
+									p.title,
+									". Why: ",
+									p.rationale
+								] }, j))
+							}),
+							(st.proposed_dropped ?? 0) > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								style: selectionCount,
+								children: [st.proposed_dropped, " more not listed."]
+							})
+						]
+					}, i)),
+					settled && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						"data-testid": "selection-considered",
+						style: {
+							display: "flex",
+							flexDirection: "column",
+							gap: 4,
+							fontSize: 12,
+							color: "var(--text-secondary)"
+						},
+						children: selection.considered.length === 0 && considered + invalid === 0 ? "Everyone considered was seated." : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("h3", {
+								style: selectionHeading,
+								children: "Considered, not seated"
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("ul", {
+								style: selectionList,
+								children: selection.considered.map((c, j) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("li", { children: [
+									c.stakeholder,
+									": ",
+									c.reason.replace(/\.$/, ""),
+									c.represented_by_name && `. Represented by ${c.represented_by_name}`
+								] }, j))
+							}),
+							considered > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								style: selectionCount,
+								children: [considered, " more considered, not listed."]
+							}),
+							invalid > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+								style: selectionCount,
+								children: [invalid, " more invalid entries, not listed."]
+							})
+						] })
+					})
+				]
+			})
+		});
+	}
+	function TimelineEntry({ runId, entry, open, onToggle, edit, onSeeEdit, derived }) {
 		const { Badge } = ds();
 		const segments = entry.segments ?? (entry.body ? [{
 			kind: "text",
@@ -1716,6 +1866,14 @@
 								color: "var(--text-muted)"
 							},
 							children: entry.title
+						}),
+						derived && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+							style: {
+								...mono,
+								fontSize: 10,
+								color: "var(--text-muted)"
+							},
+							children: [entry.role, " · derived seat"]
 						}),
 						entry.badges.map((b) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Badge, {
 							size: "sm",
@@ -1805,7 +1963,7 @@
 			]
 		});
 	}
-	function Timeline({ runId, timeline, open, setOpen, edits, onSeeEdit }) {
+	function Timeline({ runId, timeline, open, setOpen, edits, onSeeEdit, derived }) {
 		const allOpen = timeline.length > 0 && open.size === timeline.length;
 		const ordered = [...timeline].sort((a, b) => a.n - b.n);
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
@@ -1831,6 +1989,7 @@
 				open: open.has(entry.n),
 				edit: edits.get(entry.n)?.[0],
 				onSeeEdit: () => onSeeEdit(edits.get(entry.n)[1]),
+				derived: derived.has(entry.role),
 				onToggle: () => setOpen((prev) => {
 					const next = new Set(prev);
 					if (next.has(entry.n)) next.delete(entry.n);
@@ -1901,10 +2060,12 @@
 		const seats = [...data.roster.map((p) => ({
 			key: p.role,
 			name: p.name,
+			derived: p.source === "derived",
 			of: (e) => e.role === p.role
 		})), {
 			key: "unattributed",
 			name: "speaker not identified",
+			derived: false,
 			of: (e) => e.badges.includes("unattributed")
 		}].map((s) => ({
 			...s,
@@ -1960,13 +2121,21 @@
 							"data-testid": `turns-${s.key}`,
 							style: row,
 							children: [
-								/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
 									style: {
 										width: 130,
 										flex: "none",
 										color: "var(--text-primary)"
 									},
-									children: s.name
+									children: [s.name, s.derived && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("span", {
+										style: {
+											...mono,
+											display: "block",
+											fontSize: 10,
+											color: "var(--text-muted)"
+										},
+										children: [s.key, " · derived seat"]
+									})]
 								}),
 								/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Bar, {
 									value: s.took.length,
@@ -2311,6 +2480,7 @@
 		const [open, setOpen] = (0, react.useState)(/* @__PURE__ */ new Set());
 		const [diffMode, setDiffMode] = (0, react.useState)("unified");
 		const legacy = data.timeline.length > 0 && data.document.name === null || data.verdict !== null && data.progress.ended === null;
+		const derived = new Set(data.roster.filter((p) => p.source === "derived").map((p) => p.role));
 		const openTurn = (n) => {
 			setOpen((prev) => new Set(prev).add(n));
 			const rows = window.document.querySelectorAll(`[data-testid="entry-${n}"]`);
@@ -2367,13 +2537,21 @@
 				flexDirection: "column",
 				gap: 16
 			},
-			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, {
-				progress: data.progress,
-				legacy
-			}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, {
-				roster: data.roster,
-				legacy
-			})]
+			children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, {
+					progress: data.progress,
+					legacy
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, {
+					roster: data.roster,
+					legacy
+				}),
+				data.selection != null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectionCard, {
+					selection: data.selection,
+					runId,
+					derived
+				})
+			]
 		});
 		const edits = /* @__PURE__ */ new Map();
 		if (data.document.captured) data.document.steps.forEach((step, i) => {
@@ -2403,13 +2581,19 @@
 					roster: data.roster,
 					legacy
 				}),
+				data.selection != null && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SelectionCard, {
+					selection: data.selection,
+					runId,
+					derived
+				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Timeline, {
 					runId,
 					timeline: data.timeline,
 					open,
 					setOpen,
 					edits,
-					onSeeEdit: seeEdit
+					onSeeEdit: seeEdit,
+					derived
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Verdict, {
 					runId,

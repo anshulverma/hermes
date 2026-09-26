@@ -20,6 +20,9 @@ import {
   selectingData,
   seatedData,
   fallbackData,
+  cardData,
+  lostData,
+  seatedWithTurnsData,
 } from '../../../playbooks/committee/view/src/selection.fixture';
 import type { CommitteeData, Entry, Evaluation } from '../../../playbooks/committee/view/src/CommitteeView';
 import DocumentHistory, {
@@ -2729,6 +2732,11 @@ describe('CommitteeView before t01 and the seated roster', () => {
   it('roster rows say why each seat is there and who put it forward', () => {
     const { unmount } = show(seatedData);
 
+    // One labelled list, one item per seat: a screen reader hears "Committee, list, 7 items".
+    expect(
+      within(screen.getByRole('list', { name: 'Committee' })).getAllByRole('listitem').map((li) => li.dataset.testid),
+    ).toEqual(seatedData.roster.map((p) => `roster-${p.role}`));
+
     expect(screen.getByTestId('roster-crew_owner')).toHaveTextContent('Noor Haddad');
     expect(screen.getByTestId('roster-crew_owner')).toHaveTextContent('Owner, team-owned crews');
     expect(screen.getByTestId('roster-why-crew_owner')).toHaveTextContent(
@@ -2807,5 +2815,262 @@ describe('CommitteeView before t01 and the seated roster', () => {
     // The real owner's row carries no such marker, and neither does a library seat.
     expect(screen.getByTestId('roster-owner')).not.toHaveTextContent('derived');
     expect(screen.getByTestId('roster-tpm')).not.toHaveTextContent('derived');
+  });
+});
+
+// --- the Selection card (committee-selection Task 15) --------------------------
+
+describe('CommitteeView selection card', () => {
+  // vitest's jsdom URL has its own createObjectURL; restore, never delete
+  // (deleting exposes Node's, which throws on a jsdom Blob). The mermaid case
+  // assigns vi.fn()s.
+  const realCreate = (URL as any).createObjectURL;
+  const realRevoke = (URL as any).revokeObjectURL;
+  afterEach(() => {
+    (URL as any).createObjectURL = realCreate;
+    (URL as any).revokeObjectURL = realRevoke;
+  });
+
+  /** `b` comes after `a` in document order. */
+  const follows = (a: Element, b: Element) =>
+    Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+  it('the selection card shows each stage with its proposed seats', () => {
+    const { unmount } = show(cardData);
+    const card = screen.getByTestId('selection-card');
+    const listed = (n: number) =>
+      within(within(card).getByTestId(`selection-proposed-${n}`))
+        .getAllByRole('listitem')
+        .map((li) => li.textContent);
+
+    expect(within(card).getByTestId('selection-stage-1')).toHaveTextContent('Maya Okonkwo (owner) proposes');
+    expect(within(card).getByTestId('selection-stage-1')).toHaveTextContent(
+      'Federation lands on the program, the roadmap and one security zone.',
+    );
+    expect(within(card).getByTestId('selection-stage-2')).toHaveTextContent('Ruth Delgado (manager) amends');
+    expect(within(card).getByTestId('selection-stage-3')).toHaveTextContent(
+      'Dana Whitfield (senior_director) ratifies',
+    );
+    expect(listed(1)[1]).toBe('pm: Elena Vargas, Product Manager. Why: owns the roadmap slot it takes');
+    // The derived seat says so beside its slug (orchestrator decision 12).
+    expect(listed(3)).toEqual([
+      'tpm: Sam Iyer, Technical Program Manager. Why: owns the schedule this would move',
+      'staff_ic: Priya Raman, Staff Engineer. Why: carries the on-call cost of a second crew',
+      'zone_owner · derived seat: Lena Brandt, Owner, eu-west security zone. Why: federation crosses her zone boundary',
+    ]);
+    // Under the roster before t01, where it is the last card ...
+    expect(follows(screen.getByTestId('roster-owner'), card)).toBe(true);
+    unmount();
+
+    // ... and from t01 on, still under the roster and above the transcript.
+    show({ ...seatedWithTurnsData, selection: cardData.selection });
+    const populated = screen.getByTestId('selection-card');
+    expect(follows(screen.getByTestId('roster-owner'), populated)).toBe(true);
+    expect(follows(populated, screen.getByTestId('expand-all'))).toBe(true);
+  });
+
+  it('a stage that broke the rules shows the voice flag badge and renders its mermaid figure', async () => {
+    (URL as any).createObjectURL = vi.fn(() => 'blob:selection-1');
+    (URL as any).revokeObjectURL = vi.fn();
+    const real = (window as any).HermesUI;
+    const draw = vi.fn(async () => '<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    (window as any).HermesUI = { ...real, renderMermaid: draw };
+    const sel = cardData.selection!;
+    const flagged = {
+      ...cardData,
+      selection: {
+        ...sel,
+        stages: sel.stages.map((st) =>
+          st.stage === 2
+            ? {
+                ...st,
+                badges: ['voice_flag', 'retaken'],
+                take: 2,
+                takes: 2,
+                violations: ['over_cap'],
+                segments: [
+                  ...st.segments,
+                  {
+                    kind: 'mermaid' as const,
+                    source: 'graph TD; zone-->crew',
+                    caption: 'who carries the cost',
+                    description: 'the zone feeds the crew',
+                  },
+                ],
+              }
+            : st,
+        ),
+      },
+    };
+    const { unmount } = show(flagged);
+    try {
+      const s2 = screen.getByTestId('selection-stage-2');
+
+      expect(within(s2).getByText('broke the ground rules')).toBeInTheDocument();
+      expect(within(s2).getByText('retaken')).toBeInTheDocument();
+      expect(await within(s2).findByAltText('who carries the cost')).toHaveAttribute('src', 'blob:selection-1');
+      expect(draw).toHaveBeenCalledWith('graph TD; zone-->crew');
+      expect(within(screen.getByTestId('selection-stage-1')).queryByText('broke the ground rules')).toBeNull();
+    } finally {
+      // Before afterEach restores the originals: unmounting revokes the blob URL.
+      unmount();
+      (window as any).HermesUI = real;
+    }
+  });
+
+  it('the considered list names who represents each stakeholder, or says everyone was seated', () => {
+    const { unmount } = show(cardData);
+    const items = within(screen.getByTestId('selection-considered')).getAllByRole('listitem');
+
+    // The reason's own full stop is not doubled, and no representative means no sentence.
+    expect(items.map((li) => li.textContent)).toEqual([
+      "Product Manager: the roadmap slot is Sam's call this half. Represented by Sam Iyer",
+      'Legal: no contract or licence question in this proposal',
+    ]);
+    unmount();
+
+    show({ ...cardData, selection: { ...cardData.selection!, considered: [] } });
+    expect(screen.getByTestId('selection-considered')).toHaveTextContent('Everyone considered was seated.');
+    expect(within(screen.getByTestId('selection-considered')).queryAllByRole('listitem')).toHaveLength(0);
+  });
+
+  it('a fallback shows the default committee banner', () => {
+    const { unmount } = show(cardData);
+    expect(screen.queryByTestId('selection-fallback')).toBeNull();
+    unmount();
+
+    show({ ...cardData, selection: { ...cardData.selection!, state: 'fallback', fallback: 'chair_failed' } });
+    expect(screen.getByTestId('selection-fallback')).toHaveTextContent(
+      'Default committee: selection fell back (chair_failed)',
+    );
+  });
+
+  it('a lost selection says the meeting was lost', () => {
+    show(lostData);
+    const card = screen.getByTestId('selection-card');
+
+    expect(within(card).getByTestId('selection-lost')).toHaveTextContent('Selection stopped: the meeting was lost.');
+    // Nobody was seated, so the card says nothing about who was considered.
+    expect(within(card).queryByTestId('selection-considered')).toBeNull();
+    expect(within(card).queryByTestId('selection-fallback')).toBeNull();
+  });
+
+  it("a derived seat's turn counts in the metrics turns per seat", () => {
+    render(<CommitteeView runId="run-2" data={seatedWithTurnsData} refetch={noop} variant="metrics" />);
+    const crew = seatedWithTurnsData.roster.find((p) => p.role === 'crew_owner');
+
+    expect(crew).toBeDefined();
+    expect(screen.getByTestId('turns-crew_owner')).toHaveTextContent(crew!.name);
+    // `/1$/`, not `1`: a turn taken but not delivered would end "1 not delivered".
+    expect(screen.getByTestId('turns-crew_owner')).toHaveTextContent(/1$/);
+    expect(screen.queryByTestId('selection-card')).toBeNull();
+  });
+
+  it("a derived seat is marked on its transcript row and its turns-taken row, even under the owner's name", () => {
+    // From t01 a transcript row and a Metrics row show only the speaker's name
+    // (and title), both a selector's words for a derived seat. The name check
+    // is exact, so "Maya Okonkwo." with a full stop passes it: only the slug
+    // and the marker beside it tell this seat from the owner (decision 12).
+    const copy = { name: 'Maya Okonkwo.', title: 'Staff Engineer & proposal owner.' };
+    const impostor: CommitteeData = {
+      ...seatedWithTurnsData,
+      roster: seatedWithTurnsData.roster.map((p) => (p.role === 'crew_owner' ? { ...p, ...copy } : p)),
+      timeline: seatedWithTurnsData.timeline.map((e) => (e.role === 'crew_owner' ? { ...e, ...copy } : e)),
+    };
+    const { unmount } = show(impostor);
+
+    expect(screen.getByTestId('entry-5')).toHaveTextContent('Maya Okonkwo.');
+    expect(screen.getByTestId('entry-5')).toHaveTextContent('crew_owner · derived seat');
+    for (const n of [1, 2, 3, 4]) expect(screen.getByTestId(`entry-${n}`)).not.toHaveTextContent('derived');
+    // The stage lists mark the seat too, and only that seat.
+    const ratified = within(screen.getByTestId('selection-proposed-3')).getAllByRole('listitem');
+    expect(ratified.map((li) => li.textContent?.split(':')[0])).toEqual([
+      'crew_owner · derived seat',
+      'tpm',
+      'staff_ic',
+    ]);
+    unmount();
+
+    render(<CommitteeView runId="run-2" data={impostor} refetch={noop} variant="metrics" />);
+    expect(screen.getByTestId('turns-crew_owner')).toHaveTextContent('Maya Okonkwo.');
+    expect(screen.getByTestId('turns-crew_owner')).toHaveTextContent('crew_owner · derived seat');
+    expect(screen.getByTestId('turns-crew_owner')).toHaveTextContent(/1$/);
+    for (const role of ['owner', 'senior_director', 'manager', 'tpm']) {
+      expect(screen.getByTestId(`turns-${role}`)).not.toHaveTextContent('derived');
+    }
+  });
+
+  it('the card counts the seats and stakeholders its caps cut, and only when they cut some', () => {
+    const { unmount } = show(cardData);
+    expect(within(screen.getByTestId('selection-card')).queryByText(/not listed/)).toBeNull();
+    unmount();
+
+    const sel = cardData.selection!;
+    const cut = (over: Partial<typeof sel>, dropped = 0) =>
+      show({
+        ...cardData,
+        selection: {
+          ...sel,
+          stages: sel.stages.map((st) => (st.stage === 1 ? { ...st, proposed_dropped: dropped } : st)),
+          ...over,
+        },
+      });
+
+    const second = cut({ considered_dropped: 3, invalid_dropped: 2 }, 4);
+    expect(within(screen.getByTestId('selection-stage-1')).getByText('4 more not listed.')).toBeInTheDocument();
+    expect(within(screen.getByTestId('selection-stage-2')).queryByText(/not listed/)).toBeNull();
+    // The list items stay exactly the entries: a count is not a seat.
+    expect(within(screen.getByTestId('selection-proposed-1')).getAllByRole('listitem')).toHaveLength(3);
+    const considered = screen.getByTestId('selection-considered');
+    expect(within(considered).getAllByRole('listitem')).toHaveLength(2);
+    expect(considered).toHaveTextContent('3 more considered, not listed.');
+    expect(considered).toHaveTextContent('2 more invalid entries, not listed.');
+    second.unmount();
+
+    // Nothing listed but something cut is not "everyone was seated" (thread.append_seated).
+    cut({ considered: [], invalid_dropped: 2 });
+    expect(screen.getByTestId('selection-considered')).not.toHaveTextContent('Everyone considered was seated.');
+    expect(screen.getByTestId('selection-considered')).toHaveTextContent('2 more invalid entries, not listed.');
+    expect(screen.getByTestId('selection-considered')).not.toHaveTextContent('more considered');
+  });
+
+  it('every worker-written string on the card stays plain text, and no image leaves the run', () => {
+    // Seat names, titles and rationales, stakeholders, reasons and a
+    // representative's name are all worker-written (a derived seat names
+    // itself). The stage prose is too, and a reference voice's scan missed
+    // reaches the card undisarmed here, so only Segments stands in its way.
+    const hostile = '<img src=x onerror=alert(1)> ![x](http://evil.test/x.png) [owner](javascript:alert(1)) **bold**';
+    const sel = cardData.selection!;
+    show({
+      ...cardData,
+      selection: {
+        ...sel,
+        stages: sel.stages.map((st) => ({
+          ...st,
+          body: hostile,
+          segments: [{ kind: 'text' as const, text: hostile }],
+          proposed: st.proposed.map((p) => ({ ...p, name: hostile, title: hostile, rationale: hostile })),
+        })),
+        considered: sel.considered.map((c) => ({
+          ...c,
+          stakeholder: hostile,
+          reason: hostile,
+          represented_by_name: c.represented_by_name && hostile,
+        })),
+      },
+    });
+    const card = screen.getByTestId('selection-card');
+
+    for (const n of [1, 2, 3]) {
+      const list = within(card).getByTestId(`selection-proposed-${n}`);
+      expect(list).toHaveTextContent(`: ${hostile}, ${hostile}. Why: ${hostile}`);
+      expect(list.querySelector('img, a, strong, script, iframe')).toBeNull();
+    }
+    const considered = within(card).getByTestId('selection-considered');
+    expect(considered).toHaveTextContent(`${hostile}: ${hostile}. Represented by ${hostile}`);
+    expect(considered.querySelector('img, a, strong, script, iframe')).toBeNull();
+    // The prose is Markdown, as a turn's is, but it draws no image and runs no script.
+    expect(card.querySelector('img, script, iframe')).toBeNull();
+    for (const a of card.querySelectorAll('a')) expect(a.getAttribute('href') ?? '').not.toMatch(/^javascript:/i);
   });
 });
