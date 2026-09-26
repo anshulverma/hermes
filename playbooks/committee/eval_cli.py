@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import os
 import sys
+import textwrap
 from collections import Counter
 from pathlib import Path
 
@@ -32,6 +34,7 @@ MODULES = "HERMES_PLAYBOOK_MODULES"
 PACKAGE = "playbooks.committee"
 NULL = "—"
 QUOTE_COLS = 80
+WRAP_COLS = 100  # show wraps each judge rationale to this width
 STALE_NOTE = "* older definition; re-run `.venv/bin/python -m playbooks.committee.eval_cli run <target>`"
 
 
@@ -149,7 +152,8 @@ def _render(body: dict, home: str, run: str) -> str:
     """show's text for one eval.json body. A wrong shape raises AttributeError, TypeError or KeyError.
 
     Each judge row is labelled at the version its eval scored at, and a row
-    whose version is not the current one is starred.
+    whose version is not the current one is starred. Each judge dimension's
+    rationale follows the table, wrapped. Control characters print as spaces.
     """
     ledger = _ledger()
     labels = ev.calibration(ledger) if ledger is not None else {}
@@ -172,10 +176,15 @@ def _render(body: dict, home: str, run: str) -> str:
              for f in body.get("flags") or [] if isinstance(f, dict)]
     judge = body.get("judge", {})
     error = f" ({_printable(judge['error'])})" if judge.get("error") else ""
+    # Why each judge score is what it is, which the one quote in its row cannot say.
+    why = [textwrap.fill(_printable(text), WRAP_COLS, initial_indent=f"{d}: ", subsequent_indent="  ")
+           for d in ev.JUDGE_DIMS
+           if isinstance(text := (dims.get(d) or {}).get("rationale"), str) and text.strip()]
     return "\n".join([
         f"target: {_label(home, run)}  eval run: {body.get('eval_run')}  rubric: {body.get('rubric_version')}",
         _table(rows),
         *([STALE_NOTE] if stale else []),
+        *why,
         "flags: " + (", ".join(flags) or "none"),
         f"headline: {_printable(body.get('headline', ''))}",
         f"judge: {judge.get('status')}{error}",
@@ -227,17 +236,41 @@ def _compare(rubrics: list[str] | None) -> int:
             marks = anchored.get((key, d), {})
             if version in marks:
                 text += f" (a:{marks[version]})"
-            elif marks and current[d] not in marks:
-                text += " (re-score needed)"
+            elif d in ev.JUDGE_DIMS and marks and current[d] not in marks:
+                text += " (re-score needed)"  # a deterministic anchor never calibrates
             row.append(text)
         rows.append(row)
     labels = ev.calibration(ledger)
     calibration = [labels.get(current[d], "uncalibrated") if d in ev.JUDGE_DIMS else ""
                    for d in ev.DIMENSIONS]
     print(_table([["target", *ev.DIMENSIONS], *sorted(rows), ["calibration", *calibration]]))
+    for note in _discordant(ev.latest_evals(ledger), anchored, current):
+        print(note)
     if stale:
         print(STALE_NOTE)
     return 0
+
+
+def _discordant(latest: dict[tuple, dict], anchored: dict[tuple, dict], current: dict) -> list[str]:
+    """One note per pair of targets your anchors put 2 or more apart that the judge ties or reverses.
+
+    ±1 per target can certify a judge that scores your worst and best run the
+    same. Read over the whole ledger at each judge dimension's current version,
+    like the calibration row.
+    """
+    notes = []
+    for d in ev.JUDGE_DIMS:
+        pairs = []
+        for key, line in latest.items():
+            cell = dict(ev._cells(line)).get(d, {})
+            judged, mine = ev._score(cell.get("score")), anchored.get((key, d), {}).get(current[d])
+            if cell.get("version") == current[d] and judged is not None and mine is not None:
+                pairs.append((_label(key[0], key[1]), judged, mine))
+        for (a, ja, ma), (b, jb, mb) in itertools.combinations(sorted(pairs), 2):
+            if abs(ma - mb) >= 2 and (ja - jb) * (ma - mb) <= 0:
+                verb = "ties" if ja == jb else "reverses"
+                notes.append(f"{d}: judge {verb} {a} and {b}; your anchors differ by {abs(ma - mb)}")
+    return notes
 
 
 def _anchor(run: str, home: str, pairs: list[str], rater: str | None, note: str | None) -> int:

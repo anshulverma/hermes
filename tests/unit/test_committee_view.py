@@ -820,6 +820,7 @@ def test_evaluation_payload_states(tmp_path):
     body = _eval_body(home, RUN_ID, 1789000000.0, versions)
     eval_json.write_text(json.dumps(body), encoding="utf-8")
     ok = evaluation()
+    fresh = {"rationale": "stated", "stale": False}
     assert ok == {
         "state": "ok",
         "rubric_version": ev.rubric_version(versions),
@@ -830,22 +831,35 @@ def test_evaluation_payload_states(tmp_path):
         "dimensions": {
             "verdict_grounded": {"score": 2, "scorer": "judge",
                                  "quote": "Approve with changes.",
-                                 "calibration": "uncalibrated"},
+                                 "calibration": "uncalibrated", **fresh},
             "edits_address_concerns": {"score": None, "scorer": "judge",
-                                       "quote": None, "calibration": "uncalibrated"},
+                                       "quote": None, "calibration": "uncalibrated", **fresh},
             "concern_coverage": {"score": 3, "scorer": "judge",
-                                 "quote": "Fair point.", "calibration": "uncalibrated"},
+                                 "quote": "Fair point.", "calibration": "uncalibrated", **fresh},
             "efficiency": {"score": 3, "scorer": "deterministic",
-                           "quote": "cost_usd=30.3875", "calibration": None},
+                           "quote": "cost_usd=30.3875", "calibration": None, **fresh},
             "concision": {"score": 1, "scorer": "deterministic",
-                          "quote": "words.median_reviewer_owner=825.0", "calibration": None},
+                          "quote": "words.median_reviewer_owner=825.0", "calibration": None,
+                          **fresh},
             "verdict_consistency": {"score": 1, "scorer": "deterministic",
                                     "quote": "flags.verdict_count_mismatch=1",
-                                    "calibration": None},
+                                    "calibration": None, **fresh},
         },
         "flags": ["action_clipped", "verdict_count_mismatch"],
     }
     assert list(ok["dimensions"]) == list(ev.DIMENSIONS)
+
+    # Each dimension carries its rationale, clipped to 1000 characters with a closing "…"
+    # (eval.json keeps up to 4000), and whether it was scored under an older definition.
+    long = dict(body, dimensions=dict(body["dimensions"], concern_coverage=dict(
+        body["dimensions"]["concern_coverage"], rationale="r" * 1500)))
+    eval_json.write_text(json.dumps(long), encoding="utf-8")
+    assert evaluation()["dimensions"]["concern_coverage"]["rationale"] == "r" * 999 + "…"
+    older = dict(body, rubric=dict(versions, concision="concision@0", verdict_grounded="verdict_grounded@0"))
+    eval_json.write_text(json.dumps(older), encoding="utf-8")
+    assert {d: row["stale"] for d, row in evaluation()["dimensions"].items()} == {
+        d: d in ("verdict_grounded", "concision") for d in ev.DIMENSIONS}
+    eval_json.write_text(json.dumps(body), encoding="utf-8")
 
     # Two anchored targets within one calibrate a judge dimension. Neither eval
     # scored edits_address_concerns, so its anchors pair with nothing (G6).
@@ -953,8 +967,8 @@ def test_evaluation_payload_carries_only_what_the_ui_renders(tmp_path):
     from JUDGE_DIMS, never from the file."""
     doc = _eval_body(str(tmp_path.resolve()), RUN_ID, 1789000000.0, ev.dimension_versions())
     dims = doc["dimensions"]
-    dims["verdict_grounded"]["score"] = "high"
-    dims["efficiency"].update(score=True, scorer="judge")
+    dims["verdict_grounded"].update(score="high", rationale={"why": "an object"})
+    dims["efficiency"].update(score=True, scorer="judge", rationale="")
     dims["concision"]["scorer"] = "judge"
     dims["concern_coverage"].update(scorer="deterministic", evidence=[
         {"quote": "one is not True", "verified": 1},
@@ -984,6 +998,9 @@ def test_evaluation_payload_carries_only_what_the_ui_renders(tmp_path):
         d: "judge" if d in ev.JUDGE_DIMS else "deterministic" for d in ev.DIMENSIONS}
     assert rows["concern_coverage"]["quote"] is None
     assert rows["verdict_consistency"]["quote"] == "flags.verdict_count_mismatch=1"
+    assert {d: rows[d]["rationale"] for d in ev.DIMENSIONS} == {
+        **dict.fromkeys(ev.DIMENSIONS, "stated"), "verdict_grounded": None, "efficiency": None}
+    assert all(rows[d]["stale"] is False for d in ev.DIMENSIONS)
 
     doc["evaluated_at"] = 1790000000  # an int is a number too
     (tmp_path / "runs" / RUN_ID / "eval.json").write_text(json.dumps(doc), encoding="utf-8")

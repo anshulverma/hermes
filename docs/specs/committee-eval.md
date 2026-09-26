@@ -57,32 +57,40 @@ writes an anchor or waits for one.
 ```bash
 cd ~/workspace/hermes
 export HERMES_HOME=$HOME/.hermes    # the eval home: run-9 lives here, and the ledger goes here
-# 1. Score both baselines. Each run is one live judge ticket.
-.venv/bin/python -m playbooks.committee.eval_cli run run-9
-.venv/bin/python -m playbooks.committee.eval_cli run run-2 --home /data/users/anshulverma/committee-spin/home
-# 2. Read each transcript against the rubric below, then enter your own scores.
+# 1. Read each transcript against the rubric below, then enter your own scores.
 .venv/bin/python -m playbooks.committee.eval_cli anchor run-9 \
     verdict_grounded=<1-5> edits_address_concerns=<1-5> concern_coverage=<1-5> --rater <you> --note "<why>"
 .venv/bin/python -m playbooks.committee.eval_cli anchor run-2 --home /data/users/anshulverma/committee-spin/home \
     verdict_grounded=<1-5> edits_address_concerns=<1-5> concern_coverage=<1-5> --rater <you>
+# 2. Score both baselines. Each run is one live judge ticket, and prints the judge's scores.
+.venv/bin/python -m playbooks.committee.eval_cli run run-9
+.venv/bin/python -m playbooks.committee.eval_cli run run-2 --home /data/users/anshulverma/committee-spin/home
 # 3. Read the judge against your scores.
 .venv/bin/python -m playbooks.committee.eval_cli compare
 ```
 
-- Steps 1 and 2 can run in either order. An anchor needs only an evaluable run, not an eval.
+- Enter a run's anchors before you see the judge's scores for it: before its `run` output,
+  `show`, `compare` or its Metrics tab. Scores you have already seen pull your own toward them.
+  An anchor needs only an evaluable run, not an eval, so step 1 can always come first.
 - Give run-2's anchor the same `--home` its eval used. The anchor and the eval then share the
   target key (home realpath, run, `created_at`), which is how they are matched.
 - `anchor` accepts any subset of the six ids. Only the three judge dimensions calibrate; an anchor
-  on a deterministic one is recorded and never read.
+  on a deterministic one is recorded and shown in `compare`, and never calibrates anything.
 - Both the evals and the anchors land in the eval home's `evals.jsonl` (`~/.hermes/evals.jsonl`).
   run-9's `eval.json` is `~/.hermes/runs/run-9/eval.json`. run-2's goes to
   `~/.hermes/evals/<8 hex>-run-2.json`, so the committee-spin home gets no write at all.
-- In `compare`, each judge cell shows your score beside the judge's as `(a:N)`, and the closing
+- In `compare`, each cell shows your score beside the judge's as `(a:N)`, and the closing
   `calibration` row labels each judge dimension `calibrated` (both baselines within ±1),
   `off (Δn)` (some target 2 or more apart), or `uncalibrated`.
+- ±1 per target can pass a judge that cannot tell runs apart: one that gives your 3 and your 5
+  both a 4. So under the calibration row, `compare` prints one note per pair of targets your
+  anchors put 2 or more apart that the judge ties or reverses, for example
+  `verdict_grounded: judge ties run-2 and run-9; your anchors differ by 2`.
+- Re-anchoring a target replaces your earlier score at that version: the latest anchor line per
+  (target, dimension, version) wins, in `compare` and in the calibration row.
 - An anchor stays valid while its dimension's version is unchanged. When a later loop bumps a
-  judge dimension, `compare` marks that dimension's new cells `(re-score needed)`. Re-read,
-  re-anchor that dimension, and re-run the eval.
+  judge dimension, `compare` marks that dimension's cells `(re-score needed)` for the targets you
+  anchored only at older versions. Re-read, re-anchor that dimension, and re-run the eval.
 
 ## Phases
 
@@ -563,8 +571,9 @@ only.
     unreadable file, and for a line nested past json's recursion limit (it may be an anchor no
     one can read). Other lines that are not a JSON object are skipped. It creates nothing. The
     view passes `LEDGER_MAX` (2 MB).
-  - A resume that re-reduces judge can append a second line with the same `eval_run`. So
-    `latest_evals` keeps the last line per `eval_run`, then the latest eval line per target key
+  - A resume that re-reduces judge can append a second line with the same `eval_run`, and a
+    recreated queue.db mints the same `eval_run` again for another target. So `latest_evals` keeps
+    the last line per (`eval_run`, target key), then the latest eval line per target key
     (home, run, created_at).
 - **Reductions.** They land on the eval run only; the target gets none.
   - `eval_target` is
@@ -616,9 +625,10 @@ whatever state the run ends in. `playbooks/committee/__init__.py` does not impor
   in table order, with its score (`—` when null), its scorer, its calibration label (judge rows
   only; `unknown` when the ledger cannot be read) and its first verified quote clipped to 80
   chars. Then come the flags (`<id>@tNN`, or none), the headline and the judge status with its
-  error. Every control character (ESC, CR, BEL…) in a quote, a flag id, the headline or the judge
-  error prints as a space, so worker text in a transcript never drives the terminal. It exits 1
-  when the target has no readable eval.json.
+  error. Each judge dimension's rationale follows the table, wrapped to 100 columns, since one
+  quote cannot say why a score is not a 5. Every control character (ESC, CR, BEL…) in a quote, a
+  rationale, a flag id, the headline or the judge error prints as a space, so worker text in a
+  transcript never drives the terminal. It exits 1 when the target has no readable eval.json.
 - **`compare [--rubric R …]`** prints one row per target, from the latest eval lines in the eval
   home's ledger, sorted by label, and exits 1 when the ledger cannot be read.
   - The label is `<run>` for the eval home, and `<parent>/<basename>:<run>` otherwise, for
@@ -627,10 +637,14 @@ whatever state the run ends in. `playbooks/committee/__init__.py` does not impor
     with the footnote
     ``* older definition; re-run `.venv/bin/python -m playbooks.committee.eval_cli run <target>` ``.
     So a concision bump stars only the concision cells.
-  - A judge cell reads `4 (a:3)` when the user's anchor exists at the cell's version, and
-    `4 (re-score needed)` when the anchors are only at other versions.
-  - A `calibration` row closes the table. `--rubric` keeps only the evaluations whose rubric
-    version is one of those given; anchors always count.
+  - A cell reads `4 (a:3)` when the user's anchor exists at the cell's version, deterministic
+    cells included (shown, never calibrated). A judge cell reads `4 (re-score needed)` when the
+    target has anchors for that dimension but none at its current version. A starred cell whose
+    target is anchored at the current version reads `4*` alone: the eval needs re-running, not a
+    re-score.
+  - A `calibration` row closes the table, then the tie-or-reverse notes (see Calibrating the
+    judge). `--rubric` keeps only the evaluations whose rubric version is one of those given;
+    anchors, the calibration row and the notes always read the whole ledger.
 - **`anchor <run> [--home H] <id>=<1-5>... [--rater R] [--note T]`**.
   - It accepts any non-empty subset of the six ids, each with an integer 1 to 5.
   - It exits 2 on an unknown id, any other value, no scores, or a target `validate_target`
@@ -655,7 +669,8 @@ regular file) as `_size` does, and the ledger through
   holds junk inside that breaks the read. No message names an absolute path: an OS error shows
   its `strerror`.
 - Otherwise `{"state": "ok", rubric_version, evaluated_at, headline, judge_status, judge_error,
-  dimensions: {<id>: {score, scorer, quote, calibration}}, flags: [<id>, …]}`, where:
+  dimensions: {<id>: {score, scorer, quote, calibration, rationale, stale}}, flags: [<id>, …]}`,
+  where:
   - each field reaches the UI as the type it renders, or null when the file holds anything
     else: `score` an int (eval's `_score`), `evaluated_at` a finite number (json.loads reads
     `NaN` and `1e999`, which the route's `allow_nan=False` serialiser would turn into a 500 on
@@ -666,6 +681,10 @@ regular file) as `_size` does, and the ledger through
   - `calibration` is the label for eval.json's own version of a judge dimension, or
     `uncalibrated` when it has none. It is `unknown` for every judge dimension when
     `read_ledger` returns None, and null for a deterministic dimension.
+  - `rationale` is the dimension's rationale clipped to 1000 characters (`RATIONALE_COLS`),
+    ending `…` when cut, or null when empty or not a string. `stale` is true when eval.json's
+    version of the dimension is not today's `dimension_versions()`, which `show` and `compare`
+    star. Both extend C7.
   - `judge_error` extends the planning spec's C7 payload. The UI shows the judge's error, and the
     payload otherwise carried none. It is shown as written: judge.reduce writes it in the master.
 
@@ -680,9 +699,11 @@ repeats the turns, delegations, re-checks or prose counts. It has four states:
   `run` would refuse with exit 2): "Not evaluated: a run can be scored once the chair has
   delivered its verdict." No command is offered.
 - ok: the headline, a table (`aria-label="Evaluation scores"`) of dimension, score, scorer and
-  evidence quote, wrapped in full ("no verified quote" when null), the flags (a repeated id shows
-  `×n`), the rubric version, and a badge with the calibration label on each judge dimension not
-  labelled `calibrated`. A null field shows as unknown ("Judge status unknown", "rubric unknown").
+  evidence quote, wrapped in full ("no verified quote" when null), each dimension's rationale
+  under its quote, a `*` on each stale score with the CLI's footnote, the flags (a repeated id
+  shows `×n`), the rubric version, and a badge with the calibration label on each judge dimension
+  not labelled `calibrated`. A null field shows as unknown ("Judge status unknown", "rubric
+  unknown").
 - judge failed, partial or unparseable: the same, with `—` (read as "not scored") for each null
   score and a "Judge <status>" line, with ": <error>" when there is one.
 - error: the message.

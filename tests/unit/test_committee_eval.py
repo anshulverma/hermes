@@ -2262,6 +2262,12 @@ def test_calibration_labels():
     assert ev.calibration(lines + [a2_vg])[vg] == "calibrated"
     # An older-version anchor appended later never hides the current one (keyed by version too).
     assert ev.calibration(lines + [a2_vg, a2_stale])[vg] == "calibrated"
+    # A later anchor at the same (target, dimension, version) replaces the earlier one: the
+    # user's correction counts, never their first try. |4-2| = 2, then |4-4| = 0.
+    fixed = ev.anchor_line(run9, {"verdict_grounded": 2}, versions, "av", "misread")
+    assert ev.calibration(lines + [a2_vg, fixed])[vg] == "off (Δ2)"
+    refixed = ev.anchor_line(run9, {"verdict_grounded": 4}, versions, "av", None)
+    assert ev.calibration(lines + [a2_vg, fixed, refixed])[vg] == "calibrated"
 
     # An eval line at an older version still gets a label for it; deterministic ones never do.
     old = dict(versions, concern_coverage="concern_coverage@0")
@@ -2279,6 +2285,10 @@ def test_calibration_labels():
     assert latest[("/spin/home", "run-2", 2.5)] is resumed
     # ...so concern_coverage now has two targets within ±1 (run-9 |3-3|, run-2 |1-1|).
     assert ev.calibration([e9, e2_old, e2, resumed, a9, a2])[cc] == "calibrated"
+    # A recreated queue.db mints run-10 again, for another target: both targets stay.
+    reused = ev.eval_line(_ledger_body(run2, {"verdict_grounded": 3}, eval_run="run-10"))
+    assert list(ev.latest_evals([e9, reused])) == [
+        ("/h/.hermes", "run-9", 9.5), ("/spin/home", "run-2", 2.5)]
 
 
 def test_eval_json_path_and_ledger_writes(tmp_path, monkeypatch):
@@ -2947,8 +2957,9 @@ def test_anchor_cli(tmp_path, monkeypatch, capsys):
 def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
     """T13: one compare row per target from its latest eval line; stars, anchors, --rubric.
 
-    Anchors show on every dimension, calibration always reads the whole ledger,
-    malformed lines are skipped, and two targets never share a label.
+    Anchors show on every dimension, but only a judge dimension asks for a
+    re-score; calibration always reads the whole ledger, malformed lines are
+    skipped, and two targets never share a label.
     """
     from playbooks.committee import eval_cli
 
@@ -2962,6 +2973,7 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
     assert older["concision"] != current["concision"]
     assert all(older[d] == current[d] for d in E.DIMENSIONS if d != "concision")
     stale_edits = dict(current, edits_address_concerns="edits_address_concerns@0")
+    nine = dict(older, edits_address_concerns="edits_address_concerns@0")  # run-9 predates both bumps
 
     judge = {"verdict_grounded": 2, "edits_address_concerns": 3, "concern_coverage": 3}
     det = {"efficiency": 4, "concision": 1, "verdict_consistency": 5}
@@ -2973,7 +2985,13 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
         E.eval_line(_cli_eval_body(spin, "run-2", 200.0, "run-21", {**judge, **det}, current)),
         E.eval_line(_cli_eval_body(here, "run-9", 50.0, "run-19",
                                    {**judge, **det, "efficiency": 3, "verdict_consistency": 1},
-                                   older)),
+                                   nine)),
+        # Anchored at today's versions: run-9's starred cells need its eval re-run, not a re-score.
+        E.anchor_line({"home": here, "run": "run-9", "created_at": 50.0},
+                      {"edits_address_concerns": 3, "concision": 1}, current, "av", None),
+        # A deterministic anchor at an older version never asks for a re-score.
+        E.anchor_line({"home": spin, "run": "run-2", "created_at": 200.0},
+                      {"concision": 2}, older, "av", None),
         E.anchor_line({"home": here, "run": "run-2", "created_at": 100.0},
                       {"verdict_grounded": 3}, current, "av", None),
         E.anchor_line({"home": spin, "run": "run-2", "created_at": 200.0},
@@ -3011,7 +3029,7 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
     assert rows["target"] == list(E.DIMENSIONS)
     assert rows["run-2"] == ["4 (a:3)", "3", "3 (a:1)", "4 (a:2)", "1", "5"]
     assert rows["spin/home:run-2"] == ["2", "3 (re-score needed)", "3", "4", "1", "5"]
-    assert rows["run-9"] == ["2", "3", "3", "3", "1*", "1"]  # only concision is starred
+    assert rows["run-9"] == ["2", "3*", "3", "3", "1*", "1"]  # only the bumped two are starred
     assert rows["run-5"] == ["—*", "—*", "—*", "—*", "2*", "—*"]
     assert rows["calibration"] == ["uncalibrated", "uncalibrated", "off (Δ2)", "", "", ""]
     assert ("* older definition; re-run "
@@ -3019,7 +3037,7 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
     everything = rows
 
     # --rubric filters the evaluation rows only: anchors and the calibration row stay whole.
-    rows, _ = compare("--rubric", E.rubric_version(older))
+    rows, _ = compare("--rubric", E.rubric_version(nine))
     assert list(rows) == ["target", "run-9", "calibration"]
     assert rows["calibration"] == everything["calibration"]
     rows, out = compare("--rubric", E.rubric_version(current))
@@ -3030,13 +3048,19 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
     assert eval_cli.main(["compare", "--rubric", "bogus"]) == 0
     assert capsys.readouterr().out == f"no evaluations at rubric bogus in {E.ledger_path(here)}\n"
 
+    # A re-anchor at the same version replaces the first: the cell shows the correction.
+    E.append_ledger(here, E.anchor_line({"home": here, "run": "run-2", "created_at": 100.0},
+                                        {"verdict_grounded": 4}, current, "av", "re-read"))
+    rows, _ = compare()
+    assert rows["run-2"][0] == "4 (a:4)"
+
     # run-2 again in the same home, after a queue.db reset: two labels, each suffixed.
     E.append_ledger(here, E.eval_line(_cli_eval_body(here, "run-2", 300.0, "run-30",
                                                      {**judge, **det, "verdict_grounded": 5}, current)))
     rows, _ = compare()
     reused = sorted(label for label in rows if label.startswith("run-2"))
     assert len(reused) == 2 and all(re.fullmatch(r"run-2@[0-9a-f]{6}", label) for label in reused)
-    assert sorted(rows[label][0] for label in reused) == ["4 (a:3)", "5"]
+    assert sorted(rows[label][0] for label in reused) == ["4 (a:4)", "5"]
 
     # An unreadable ledger (a symlink) is exit 1, never an empty table.
     ledger = E.ledger_path(here)
@@ -3044,6 +3068,43 @@ def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
     ledger.symlink_to(tmp_path / "real.jsonl")
     assert eval_cli.main(["compare"]) == 1
     assert f"cannot read {ledger}" in capsys.readouterr().err
+
+
+def test_compare_notes_a_judge_that_cannot_tell_anchored_runs_apart(tmp_path, monkeypatch, capsys):
+    """±1 per target can certify a judge that scores your worst and best run alike. So under
+    the calibration row compare names every pair of targets your anchors put 2 or more apart
+    that the judge ties or reverses; a pair it orders your way, or anchors 1 apart, is fine."""
+    from playbooks.committee import eval_cli
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    here, current = E.eval_home(), E.dimension_versions()
+    targets = {"run-9": 9.0, "run-2": 2.0, "run-5": 5.0}
+
+    def ledger(judged: dict, anchored: dict) -> list[str]:
+        E.ledger_path(here).unlink(missing_ok=True)
+        for run, created_at in targets.items():
+            target = {"home": here, "run": run, "created_at": created_at}
+            E.append_ledger(here, E.eval_line(_cli_eval_body(
+                here, run, created_at, f"e-{run}", judged[run], current)))
+            E.append_ledger(here, E.anchor_line(target, anchored[run], current, "av", None))
+        assert eval_cli.main(["compare"]) == 0
+        out = capsys.readouterr().out.splitlines()
+        return out[out.index(next(line for line in out if line.startswith("calibration"))) + 1:]
+
+    vg = "verdict_grounded"
+    # The judge gives all three a 4; you read run-9 a 3, run-2 a 5 and run-5 a 4. Each is
+    # within ±1, so it reads calibrated, but it cannot tell run-9 from run-2.
+    tied = ledger({r: {vg: 4} for r in targets}, {"run-9": {vg: 3}, "run-2": {vg: 5}, "run-5": {vg: 4}})
+    assert tied == [f"{vg}: judge ties run-2 and run-9; your anchors differ by 2"]
+    # It puts run-9 above run-2, which you put 2 apart the other way (and one off by 2).
+    swapped = ledger({"run-9": {vg: 4}, "run-2": {vg: 3}, "run-5": {vg: 4}},
+                     {"run-9": {vg: 3}, "run-2": {vg: 5}, "run-5": {vg: 4}})
+    assert swapped == [f"{vg}: judge reverses run-2 and run-9; your anchors differ by 2"]
+    # Ordered your way, or anchors under 2 apart: no note.
+    assert ledger({"run-9": {vg: 3}, "run-2": {vg: 5}, "run-5": {vg: 4}},
+                  {"run-9": {vg: 3}, "run-2": {vg: 5}, "run-5": {vg: 4}}) == []
+    assert ledger({r: {vg: 4} for r in targets},
+                  {"run-9": {vg: 4}, "run-2": {vg: 5}, "run-5": {vg: 4}}) == []
 
 
 def test_run_wrapper_and_dry_run(tmp_path, monkeypatch, capsys, eval_cli_home):
@@ -3169,6 +3230,10 @@ def test_show_cli(tmp_path, monkeypatch, capsys):
     dims["efficiency"]["evidence"] = cite(("cost_usd=30.3875", True))
     dims["concision"]["evidence"] = cite(("words.median_reviewer_owner=825.0", True))
     dims["verdict_consistency"]["evidence"] = cite(("rechecks_verified=8", True))
+    why = "The chair gives a date nobody in the thread gave, and one milestone contradicts t14. " * 2
+    dims["verdict_grounded"]["rationale"] = why
+    dims["concern_coverage"]["rationale"] = "Five reviewers never spoke.\nNobody answered t04."
+    dims["efficiency"]["rationale"] = "start 5; cost_usd 30.3875 > 20: -1"  # deterministic: not repeated
     body["flags"] = [{"id": "action_clipped", "turn": 3, "line": 812, "quote": "x"},
                      {"id": "verdict_count_mismatch", "turn": None, "line": 820,
                       "quote": "Seven edits landed.", "claimed": 7, "recorded": 8}]
@@ -3197,6 +3262,16 @@ def test_show_cli(tmp_path, monkeypatch, capsys):
     lines = out.splitlines()
     assert lines[0] == f"target: run-9  eval run: run-12  rubric: {E.rubric_version(versions)}"
     assert eval_cli.STALE_NOTE in lines
+    # Under the table, each judge dimension's rationale, wrapped to 100 columns: why the
+    # score is not a 5. An empty one (edits_address_concerns) prints nothing.
+    notes = lines[lines.index(eval_cli.STALE_NOTE) + 1:lines.index(
+        "flags: action_clipped@t03, verdict_count_mismatch")]
+    assert len(notes) > 2 and all(len(n) <= 100 for n in notes), notes
+    assert notes[0].startswith("verdict_grounded: The chair gives a date")
+    assert [n for n in notes if not n.startswith("  ")] == [
+        notes[0], "concern_coverage: Five reviewers never spoke. Nobody answered t04."]
+    assert " ".join(n.strip() for n in notes) == (
+        f"verdict_grounded: {why.strip()} concern_coverage: Five reviewers never spoke. Nobody answered t04.")
     assert "flags: action_clipped@t03, verdict_count_mismatch" in lines
     assert "headline: weakest: concision 1/5: words.median_reviewer_owner=825.0" in lines
     assert "judge: partial (edits_address_concerns: no verifiable evidence)" in lines

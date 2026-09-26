@@ -1728,14 +1728,16 @@ def _score(value: object) -> int | None:
 def latest_evals(lines: list[dict]) -> dict[tuple, dict]:
     """The latest eval line per target key ``(home, run, created_at)``, in ledger order.
 
-    First the last line per ``eval_run`` (a resumed judge.reduce appends a
-    second one), then the last of those per target.
+    First the last line per (``eval_run``, target key): a resumed judge.reduce
+    appends a second line, and a recreated queue.db mints the same eval_run for
+    another target, which must not hide the first. Then the last of those per target.
     """
-    per_run: dict[str, dict] = {}
+    per_run: dict[tuple, dict] = {}
     for line in lines:
         if isinstance(line, dict) and line.get("source") == "eval" and isinstance(line.get("eval_run"), str):
-            per_run.pop(line["eval_run"], None)  # re-insert, so the order is each run's last line
-            per_run[line["eval_run"]] = line
+            key = (line["eval_run"], _target_key(line))
+            per_run.pop(key, None)  # re-insert, so the order is each run's last line
+            per_run[key] = line
     latest: dict[tuple, dict] = {}
     for line in per_run.values():
         key = _target_key(line)
