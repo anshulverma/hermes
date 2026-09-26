@@ -97,11 +97,38 @@ def _one(raw: str) -> dict:
         if not value:
             continue
         if key in _TEXT:
-            out[key] = value[:_TEXT[key]]
+            out[key] = _clip(value, _TEXT[key])
         elif key in _FLAGS:
             word = value.lower()
             if word in ("yes", "no"):
                 out[key] = word == "yes"
+    return out
+
+
+def _clip(value: str, limit: int) -> str:
+    """At most ``limit`` characters, cut at a word when one is close, ellipsised.
+
+    A backstop: the goal asks for a sentence within the cap. Cut at the last
+    space at or before ``limit - 1`` when that keeps at least half the cap,
+    otherwise mid-token at ``limit - 1``; the ellipsis makes it ``limit`` at most.
+    """
+    if len(value) <= limit:
+        return value
+    cut = value.rfind(" ", 0, limit)
+    if cut >= limit // 2:
+        return value[:cut].rstrip() + "…"
+    return value[: limit - 1] + "…"
+
+
+def lengths(answer: str | None) -> dict:
+    """Raw, unclipped action and stance lengths from the last block; only keys present."""
+    blocks = _BLOCK_RE.findall(answer) if isinstance(answer, str) and answer else []
+    out: dict = {}
+    for line in (blocks[-1].splitlines() if blocks else []):
+        key, sep, value = line.partition(":")
+        key, value = key.strip().lower(), value.strip()
+        if sep and value and key in _TEXT:
+            out[f"{key}_chars"] = len(value)
     return out
 
 
@@ -119,9 +146,9 @@ def strip(answer: str | None) -> str:
 
 # Asked for in prose rather than in the worked example, exactly as `action`
 # is. The example exists to be copied verbatim, and a copied
-# `stance: <one line>` would mint that placeholder as the persona's stance --
-# and a stance, unlike a flag, is rendered back as what the speaker said.
-_STANCE_SENTENCE = "Add a `stance: <one line>` line saying where you now stand and why. "
+# `stance: <20 words or fewer>` would mint that placeholder as the persona's
+# stance -- and a stance, unlike a flag, is rendered back as what the speaker said.
+_STANCE_SENTENCE = "Add a `stance: <20 words or fewer>` line saying where you now stand and why. "
 
 
 def instruction(owner: bool = False) -> str:
@@ -154,9 +181,10 @@ def instruction(owner: bool = False) -> str:
             "delegate: no\n"
             "close: no\n"
             "```\n\n"
-            "Set delegate: yes only with an `action: <one line>` line naming "
-            "the change the junior IC must make -- without one the delegation "
-            "is dropped. close: yes ends the discussion and sends the artifact "
+            "Set delegate: yes only with an `action: <one sentence, 200 "
+            "characters or fewer>` line naming the change the junior IC must "
+            "make; without one the delegation is dropped. close: yes ends the "
+            "discussion and sends the artifact "
             f"to the chair. {_STANCE_SENTENCE}Omit a line you do not mean: an "
             "omitted line is read as unstated, never as yes."
         )

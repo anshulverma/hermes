@@ -124,7 +124,8 @@ def test_an_action_longer_than_the_cap_is_clipped():
     # Pinned literally: cast.py reads ACTION_MAX into the 3600-character goal
     # budget, so a silent change here silently changes what a worker is handed.
     assert T.ACTION_MAX == 200
-    assert len(action) == T.ACTION_MAX
+    assert len(action) <= T.ACTION_MAX
+    assert action.endswith("…")
     assert action.startswith("keep-this ")
 
 
@@ -170,8 +171,41 @@ def test_a_stance_longer_than_the_cap_is_clipped():
     # an action does, so a silent change here silently changes what a worker
     # is handed.
     assert T.STANCE_MAX == 200
-    assert len(stance) == T.STANCE_MAX
+    assert len(stance) <= T.STANCE_MAX
+    assert stance.endswith("…")
     assert stance.startswith("keep-this ")
+
+
+def test_a_long_action_is_cut_at_a_word_near_the_cap():
+    """Six of eight run-9 actions stopped mid-word at exactly 200 characters."""
+    # Spaces sit at 4 + 8k, so index 199 falls inside a word: a word cut
+    # (at the space at 196) and the mid-token fallback give different strings.
+    action = T.parse(_fenced("action: keep " + "wording " * 40))["action"]
+
+    assert len(action) < T.ACTION_MAX
+    assert action.endswith("…")
+    assert action[:-1].split()[-1] == "wording"  # no half word before the ellipsis
+    assert len(action) > T.ACTION_MAX // 2
+
+
+def test_lengths_reports_the_raw_unclipped_action_and_stance():
+    answer = _fenced("action: " + "a" * 230 + "\nstance: holding")
+
+    assert T.lengths(answer) == {"action_chars": 230, "stance_chars": 7}
+    assert T.lengths(_fenced("request_floor: no")) == {}
+    assert T.lengths(None) == {} and T.lengths("no block at all") == {}
+    # the last block wins, as in parse
+    assert T.lengths(_fenced("action: first") + _fenced("action: " + "b" * 12)) == {
+        "action_chars": 12}
+
+
+def test_the_instructions_ask_for_a_sentence_action_and_a_short_stance():
+    owner = T.instruction(owner=True)
+
+    assert "`action: <one sentence, 200 characters or fewer>`" in owner
+    for text in (owner, T.instruction()):
+        assert "`stance: <20 words or fewer>`" in text
+        assert " -- " not in text and "—" not in text
 
 
 # --- turnblock: stripping ------------------------------------------------
