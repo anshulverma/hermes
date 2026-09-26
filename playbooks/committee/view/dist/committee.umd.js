@@ -407,6 +407,28 @@
 		return rows;
 	}
 	/**
+	* The same rows, side by side. A `same` row fills both columns; each run of
+	* removals followed by a run of additions pairs up line by line, the shorter
+	* side padded with an empty cell; a lone run leaves the other column empty.
+	*/
+	function splitRows(rows) {
+		const out = [];
+		let i = 0;
+		while (i < rows.length) {
+			if (rows[i].kind === "same") {
+				out.push([rows[i], rows[i]]);
+				i++;
+				continue;
+			}
+			const dels = [];
+			while (i < rows.length && rows[i].kind === "del") dels.push(rows[i++]);
+			const adds = [];
+			while (i < rows.length && rows[i].kind === "add") adds.push(rows[i++]);
+			for (let k = 0; k < Math.max(dels.length, adds.length); k++) out.push([dels[k] ?? null, adds[k] ?? null]);
+		}
+		return out;
+	}
+	/**
 	* How many diff rows to put in the DOM.
 	*
 	* ponytail: `diffLines` is hard-bounded and fast (415 rows in 1.9 ms on the real
@@ -617,7 +639,22 @@
 			]
 		});
 	}
-	function DiffView({ before, after }) {
+	function SplitCell({ row, side }) {
+		const style = row ? ROW_STYLE[row.kind] : null;
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+			"data-testid": `split-${side}`,
+			style: {
+				background: style ? style.background : "transparent",
+				color: style ? style.color : void 0,
+				padding: "0 8px",
+				whiteSpace: "pre-wrap",
+				wordBreak: "break-word",
+				borderLeft: side === "right" ? "1px solid var(--border-hairline)" : void 0
+			},
+			children: row && style ? `${style.sign} ${row.text}` : ""
+		});
+	}
+	function DiffView({ before, after, mode }) {
 		const rows = diffLines(before, after);
 		const adds = rows.filter((r) => r.kind === "add").length;
 		const dels = rows.filter((r) => r.kind === "del").length;
@@ -625,6 +662,23 @@
 			"data-testid": "diff-none",
 			style: muted,
 			children: "No changes between these two versions."
+		});
+		const pairs = mode === "split" ? splitRows(rows) : null;
+		const total = pairs ? pairs.length : rows.length;
+		const capped = total > MAX_ROWS && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": "diff-rows-capped",
+			style: {
+				gridColumn: "1 / -1",
+				padding: "4px 8px",
+				color: "var(--text-muted)"
+			},
+			children: [
+				"… ",
+				total - MAX_ROWS,
+				" more rows are in the diff and not on screen. The counts above are the whole diff; this pane stops at ",
+				MAX_ROWS,
+				"."
+			]
 		});
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			style: {
@@ -658,23 +712,24 @@
 					}),
 					" a line only the later one has."
 				]
-			}), /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			}), pairs ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				"data-testid": "diff-split",
+				style: {
+					...pane,
+					display: "grid",
+					gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)"
+				},
+				children: [pairs.slice(0, MAX_ROWS).flatMap(([left, right], i) => [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(SplitCell, {
+					row: left,
+					side: "left"
+				}, `${i}-l`), /* @__PURE__ */ (0, react_jsx_runtime.jsx)(SplitCell, {
+					row: right,
+					side: "right"
+				}, `${i}-r`)]), capped]
+			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				"data-testid": "diff-rows",
 				style: pane,
-				children: [rows.slice(0, MAX_ROWS).map((row, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(UnifiedRow, { row }, i)), rows.length > MAX_ROWS && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
-					"data-testid": "diff-rows-capped",
-					style: {
-						padding: "4px 8px",
-						color: "var(--text-muted)"
-					},
-					children: [
-						"… ",
-						rows.length - MAX_ROWS,
-						" more rows are in the diff and not on screen. The counts above are the whole diff; this pane stops at ",
-						MAX_ROWS,
-						"."
-					]
-				})]
+				children: [rows.slice(0, MAX_ROWS).map((row, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(UnifiedRow, { row }, i)), capped]
 			})]
 		});
 	}
@@ -706,7 +761,8 @@
 			children: text
 		});
 	}
-	function DocumentHistory({ runId, document: doc, timeline, intact, legacy, selected, onSelect, onOpenTurn }) {
+	function DocumentHistory({ runId, document: doc, timeline, intact, legacy, selected, onSelect, diffMode, onDiffMode, onOpenTurn }) {
+		const [finalDiff, setFinalDiff] = (0, react.useState)(false);
 		const { name, captured, original, steps, final } = doc;
 		const ids = original ? [
 			"original",
@@ -717,7 +773,7 @@
 		const index = ids.indexOf(current);
 		const step = typeof current === "number" ? steps.find((s) => s.turn === current) ?? null : null;
 		const previous = step ? index > 1 ? steps[index - 2] : original : null;
-		const versions = !name || !captured || !original ? [] : step && previous ? [previous, step] : current === "final" && final ? [final] : [original];
+		const versions = !name || !captured || !original ? [] : step && previous ? [previous, step] : current === "final" && final ? finalDiff ? [original, final] : [final] : [original];
 		const unreadable = versions.find((v) => v.bytes === null);
 		const { copies, failures } = useCopies(runId, unreadable ? [] : versions);
 		const shell = {
@@ -796,7 +852,8 @@
 				children: "The server cut at least one version short at its read cap, so what follows is a prefix and any counts below are not the whole file."
 			}), texts.length === 2 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(DiffView, {
 				before: texts[0].text,
-				after: texts[1].text
+				after: texts[1].text,
+				mode: diffMode
 			}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)(WholeDocument, {
 				name,
 				text: texts[0].text
@@ -876,6 +933,29 @@
 						})
 					]
 				}),
+				steps.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					role: "group",
+					"aria-label": "Diff layout",
+					style: {
+						display: "flex",
+						gap: 4
+					},
+					children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						"data-testid": "diff-mode-unified",
+						"aria-pressed": diffMode === "unified",
+						onClick: () => onDiffMode("unified"),
+						style: chip(diffMode === "unified"),
+						children: "Unified"
+					}), /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+						type: "button",
+						"data-testid": "diff-mode-split",
+						"aria-pressed": diffMode === "split",
+						onClick: () => onDiffMode("split"),
+						style: chip(diffMode === "split"),
+						children: "Side by side"
+					})]
+				}),
 				steps.length === 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					"data-testid": "doc-no-edits",
 					style: muted,
@@ -903,13 +983,25 @@
 						fontWeight: 600,
 						color: "var(--text-primary)"
 					},
-					children: [FINAL_LABEL[final.ruling], /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
-						style: {
-							fontWeight: 400,
-							color: "var(--text-muted)"
-						},
-						children: final.turn === null ? " — no edit applied, so this is the original" : ` — as the last applied edit (${tNN(final.turn)}) left it`
-					})]
+					children: [
+						FINAL_LABEL[final.ruling],
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							style: {
+								fontWeight: 400,
+								color: "var(--text-muted)"
+							},
+							children: final.turn === null ? " — no edit applied, so this is the original" : ` — as the last applied edit (${tNN(final.turn)}) left it`
+						}),
+						" ",
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+							type: "button",
+							"data-testid": "final-diff-toggle",
+							"aria-pressed": finalDiff,
+							onClick: () => setFinalDiff(!finalDiff),
+							style: chip(finalDiff),
+							children: finalDiff ? "Show the final version" : "Show the original → final diff"
+						})
+					]
 				}),
 				body
 			] })]
@@ -1188,7 +1280,7 @@
 			})
 		});
 	}
-	function TimelineEntry({ entry, open, onToggle }) {
+	function TimelineEntry({ entry, open, onToggle, edit, onSeeEdit }) {
 		const { Badge } = ds();
 		const firstLine = entry.body.split("\n").find((l) => l.trim()) ?? "";
 		const noProse = /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
@@ -1283,6 +1375,23 @@
 					},
 					children: ["delegated: ", entry.action]
 				}),
+				edit !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+					type: "button",
+					"data-testid": `see-edit-${entry.n}`,
+					onClick: onSeeEdit,
+					style: {
+						marginTop: 4,
+						marginLeft: 18,
+						padding: "0 6px",
+						fontSize: 11,
+						color: "var(--text-primary)",
+						background: "none",
+						border: "1px solid var(--border-hairline)",
+						borderRadius: "var(--radius-sm)",
+						cursor: "pointer"
+					},
+					children: ["see edit ", edit]
+				}),
 				open ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					style: {
 						marginTop: 6,
@@ -1308,7 +1417,7 @@
 			]
 		});
 	}
-	function Timeline({ timeline, open, setOpen }) {
+	function Timeline({ timeline, open, setOpen, edits, onSeeEdit }) {
 		const allOpen = timeline.length > 0 && open.size === timeline.length;
 		const ordered = [...timeline].sort((a, b) => a.n - b.n);
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
@@ -1331,6 +1440,8 @@
 			}), ordered.map((entry) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TimelineEntry, {
 				entry,
 				open: open.has(entry.n),
+				edit: edits.get(entry.n)?.[0],
+				onSeeEdit: () => onSeeEdit(edits.get(entry.n)[1]),
 				onToggle: () => setOpen((prev) => {
 					const next = new Set(prev);
 					if (next.has(entry.n)) next.delete(entry.n);
@@ -1555,6 +1666,7 @@
 		const { EmptyState } = ds();
 		const [selected, setSelected] = (0, react.useState)("original");
 		const [open, setOpen] = (0, react.useState)(/* @__PURE__ */ new Set());
+		const [diffMode, setDiffMode] = (0, react.useState)("unified");
 		if (data.timeline.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
 			title: "Nothing said yet",
 			description: "The committee view fills in as each member takes the floor.",
@@ -1565,6 +1677,15 @@
 		const openTurn = (n) => {
 			setOpen((prev) => new Set(prev).add(n));
 			window.document.querySelector(`[data-testid="entry-${n}"]`)?.scrollIntoView?.({ block: "center" });
+		};
+		const edits = /* @__PURE__ */ new Map();
+		if (data.document.captured) data.document.steps.forEach((step, i) => {
+			if (step.owner_turn !== null) edits.set(step.owner_turn, [i + 1, step.turn]);
+			edits.set(step.turn, [i + 1, step.turn]);
+		});
+		const seeEdit = (turn) => {
+			setSelected(turn);
+			window.document.querySelector("[data-testid=\"doc-stepper\"]")?.scrollIntoView?.({ block: "nearest" });
 		};
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "committee-view",
@@ -1585,7 +1706,9 @@
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Timeline, {
 					timeline: data.timeline,
 					open,
-					setOpen
+					setOpen,
+					edits,
+					onSeeEdit: seeEdit
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Verdict, {
 					runId,
@@ -1599,6 +1722,8 @@
 					legacy,
 					selected,
 					onSelect: setSelected,
+					diffMode,
+					onDiffMode: setDiffMode,
 					onOpenTurn: openTurn
 				})
 			]

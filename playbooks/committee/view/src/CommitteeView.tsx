@@ -26,7 +26,7 @@
 import { useState } from 'react';
 import { Markdown } from './host';
 import Verdict from './Verdict';
-import DocumentHistory, { type DocumentBlock, type StepId } from './Diff';
+import DocumentHistory, { type DiffMode, type DocumentBlock, type StepId } from './Diff';
 
 // --- the data, exactly as `CommitteePlaybook.view_data` returns it -----------
 
@@ -347,10 +347,15 @@ function TimelineEntry({
   entry,
   open,
   onToggle,
+  edit,
+  onSeeEdit,
 }: {
   entry: Entry;
   open: boolean;
   onToggle: () => void;
+  /** The 1-based edit step this turn delegated or applied, if any. */
+  edit?: number;
+  onSeeEdit: () => void;
 }) {
   const { Badge } = ds();
   const firstLine = entry.body.split('\n').find((l) => l.trim()) ?? '';
@@ -437,6 +442,27 @@ function TimelineEntry({
         </div>
       )}
 
+      {edit !== undefined && (
+        <button
+          type="button"
+          data-testid={`see-edit-${entry.n}`}
+          onClick={onSeeEdit}
+          style={{
+            marginTop: 4,
+            marginLeft: 18,
+            padding: '0 6px',
+            fontSize: 11,
+            color: 'var(--text-primary)',
+            background: 'none',
+            border: '1px solid var(--border-hairline)',
+            borderRadius: 'var(--radius-sm)',
+            cursor: 'pointer',
+          }}
+        >
+          see edit {edit}
+        </button>
+      )}
+
       {open ? (
         <div style={{ marginTop: 6, paddingLeft: 18, color: 'var(--text-muted)' }}>
           {entry.body ? <Markdown fontSize={12}>{entry.body}</Markdown> : noProse}
@@ -464,11 +490,16 @@ function Timeline({
   timeline,
   open,
   setOpen,
+  edits,
+  onSeeEdit,
 }: {
   timeline: Entry[];
   /** Held by the view, so a step's `tNN` link can open an entry from outside. */
   open: Set<number>;
   setOpen: React.Dispatch<React.SetStateAction<Set<number>>>;
+  /** turn -> [1-based edit number, that step's junior turn], for owner and junior rows. */
+  edits: Map<number, [number, number]>;
+  onSeeEdit: (turn: number) => void;
 }) {
   const allOpen = timeline.length > 0 && open.size === timeline.length;
 
@@ -499,6 +530,8 @@ function Timeline({
           key={entry.n}
           entry={entry}
           open={open.has(entry.n)}
+          edit={edits.get(entry.n)?.[0]}
+          onSeeEdit={() => onSeeEdit(edits.get(entry.n)![1])}
           onToggle={() =>
             setOpen((prev) => {
               const next = new Set(prev);
@@ -680,6 +713,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   // the view (PlaybookView keys it on `reloads`) and would throw all of it away.
   const [selected, setSelected] = useState<StepId>('original');
   const [open, setOpen] = useState<Set<number>>(new Set());
+  const [diffMode, setDiffMode] = useState<DiffMode>('unified');
 
   // The timeline alone, NOT `&& roster.length === 0`. `view_data`'s `_roster`
   // walks `cast.CAST`, so it returns all nine rows from the first poll onward
@@ -719,6 +753,21 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     window.document.querySelector(`[data-testid="entry-${n}"]`)?.scrollIntoView?.({ block: 'center' });
   };
 
+  // The other direction: the owner turn that delegated an edit and the junior
+  // turn that applied it both link to its step. Only when there are snapshots
+  // to show -- otherwise the link would land on "not captured".
+  const edits = new Map<number, [number, number]>();
+  if (data.document.captured) {
+    data.document.steps.forEach((step, i) => {
+      if (step.owner_turn !== null) edits.set(step.owner_turn, [i + 1, step.turn]);
+      edits.set(step.turn, [i + 1, step.turn]);
+    });
+  }
+  const seeEdit = (turn: number) => {
+    setSelected(turn);
+    window.document.querySelector('[data-testid="doc-stepper"]')?.scrollIntoView?.({ block: 'nearest' });
+  };
+
   return (
     // No `flex: 1; overflow: auto; padding: 20` here: PlaybookView.tsx already
     // wraps this component in exactly that, and a second scroll container
@@ -729,7 +778,13 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     >
       <ProgressBar progress={data.progress} legacy={legacy} />
       <Roster roster={data.roster} legacy={legacy} />
-      <Timeline timeline={data.timeline} open={open} setOpen={setOpen} />
+      <Timeline
+        timeline={data.timeline}
+        open={open}
+        setOpen={setOpen}
+        edits={edits}
+        onSeeEdit={seeEdit}
+      />
       <Verdict runId={runId} verdict={data.verdict} />
       {/* `intact` as well as the document: the card guarantees the original
           was untouched, and only the verdict knows whether it was. */}
@@ -741,6 +796,8 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
         legacy={legacy}
         selected={selected}
         onSelect={setSelected}
+        diffMode={diffMode}
+        onDiffMode={setDiffMode}
         onOpenTurn={openTurn}
       />
     </div>

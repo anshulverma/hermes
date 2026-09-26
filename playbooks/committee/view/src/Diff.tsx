@@ -90,6 +90,34 @@ export function diffLines(original: string, revised: string): DiffRow[] {
   return rows;
 }
 
+/**
+ * The same rows, side by side. A `same` row fills both columns; each run of
+ * removals followed by a run of additions pairs up line by line, the shorter
+ * side padded with an empty cell; a lone run leaves the other column empty.
+ */
+export function splitRows(rows: DiffRow[]): Array<[DiffRow | null, DiffRow | null]> {
+  const out: Array<[DiffRow | null, DiffRow | null]> = [];
+  let i = 0;
+  while (i < rows.length) {
+    if (rows[i].kind === 'same') {
+      out.push([rows[i], rows[i]]);
+      i++;
+      continue;
+    }
+    const dels: DiffRow[] = [];
+    while (i < rows.length && rows[i].kind === 'del') dels.push(rows[i++]);
+    const adds: DiffRow[] = [];
+    while (i < rows.length && rows[i].kind === 'add') adds.push(rows[i++]);
+    for (let k = 0; k < Math.max(dels.length, adds.length); k++) {
+      out.push([dels[k] ?? null, adds[k] ?? null]);
+    }
+  }
+  return out;
+}
+
+/** How every diff on the card is laid out; held by the view, never persisted. */
+export type DiffMode = 'unified' | 'split';
+
 // --- the data, exactly as `view_data`'s `_document` returns it ---------------
 
 /** A run-relative file under `runs/<id>/`; `bytes` null = not readable on the server. */
@@ -312,7 +340,26 @@ function UnifiedRow({ row }: { row: DiffRow }) {
   );
 }
 
-function DiffView({ before, after }: { before: string; after: string }) {
+function SplitCell({ row, side }: { row: DiffRow | null; side: 'left' | 'right' }) {
+  const style = row ? ROW_STYLE[row.kind] : null;
+  return (
+    <div
+      data-testid={`split-${side}`}
+      style={{
+        background: style ? style.background : 'transparent',
+        color: style ? style.color : undefined,
+        padding: '0 8px',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        borderLeft: side === 'right' ? '1px solid var(--border-hairline)' : undefined,
+      }}
+    >
+      {row && style ? `${style.sign} ${row.text}` : ''}
+    </div>
+  );
+}
+
+function DiffView({ before, after, mode }: { before: string; after: string; mode: DiffMode }) {
   const rows = diffLines(before, after);
   const adds = rows.filter((r) => r.kind === 'add').length;
   const dels = rows.filter((r) => r.kind === 'del').length;
@@ -325,6 +372,20 @@ function DiffView({ before, after }: { before: string; after: string }) {
     );
   }
 
+  // MAX_ROWS caps what reaches the DOM in either layout; the counts above it
+  // always come from the whole diff.
+  const pairs = mode === 'split' ? splitRows(rows) : null;
+  const total = pairs ? pairs.length : rows.length;
+  const capped = total > MAX_ROWS && (
+    <div
+      data-testid="diff-rows-capped"
+      style={{ gridColumn: '1 / -1', padding: '4px 8px', color: 'var(--text-muted)' }}
+    >
+      … {total - MAX_ROWS} more rows are in the diff and not on screen. The counts above are
+      the whole diff; this pane stops at {MAX_ROWS}.
+    </div>
+  );
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div data-testid="diff-counts" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
@@ -332,17 +393,25 @@ function DiffView({ before, after }: { before: string; after: string }) {
         <span style={mono}>-</span> is a line only the earlier version has,{' '}
         <span style={mono}>+</span> a line only the later one has.
       </div>
-      <div data-testid="diff-rows" style={pane}>
-        {rows.slice(0, MAX_ROWS).map((row, i) => (
-          <UnifiedRow key={i} row={row} />
-        ))}
-        {rows.length > MAX_ROWS && (
-          <div data-testid="diff-rows-capped" style={{ padding: '4px 8px', color: 'var(--text-muted)' }}>
-            … {rows.length - MAX_ROWS} more rows are in the diff and not on screen. The counts
-            above are the whole diff; this pane stops at {MAX_ROWS}.
-          </div>
-        )}
-      </div>
+      {pairs ? (
+        <div
+          data-testid="diff-split"
+          style={{ ...pane, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)' }}
+        >
+          {pairs.slice(0, MAX_ROWS).flatMap(([left, right], i) => [
+            <SplitCell key={`${i}-l`} row={left} side="left" />,
+            <SplitCell key={`${i}-r`} row={right} side="right" />,
+          ])}
+          {capped}
+        </div>
+      ) : (
+        <div data-testid="diff-rows" style={pane}>
+          {rows.slice(0, MAX_ROWS).map((row, i) => (
+            <UnifiedRow key={i} row={row} />
+          ))}
+          {capped}
+        </div>
+      )}
     </div>
   );
 }
@@ -378,6 +447,8 @@ export default function DocumentHistory({
   legacy,
   selected,
   onSelect,
+  diffMode,
+  onDiffMode,
   onOpenTurn,
 }: {
   runId: string;
@@ -395,8 +466,13 @@ export default function DocumentHistory({
   legacy?: boolean;
   selected: StepId;
   onSelect: (id: StepId) => void;
+  diffMode: DiffMode;
+  onDiffMode: (mode: DiffMode) => void;
   onOpenTurn: (n: number) => void;
 }) {
+  // Off until asked for. Local, because the card stays mounted while stepping:
+  // it is still on when the reader comes back to Final.
+  const [finalDiff, setFinalDiff] = useState(false);
   const { name, captured, original, steps, final } = doc;
   const ids: StepId[] = original
     ? ['original', ...steps.map((s) => s.turn), ...(final ? (['final'] as const) : [])]
@@ -414,7 +490,9 @@ export default function DocumentHistory({
       : step && previous
         ? [previous, step]
         : current === 'final' && final
-          ? [final]
+          ? finalDiff
+            ? [original, final]
+            : [final]
           : [original];
   // Card state 4 covers EVERY version the step needs, its baseline included:
   // never fetch a file the server already said it cannot read, and never fall
@@ -494,7 +572,7 @@ export default function DocumentHistory({
           </div>
         )}
         {texts.length === 2 ? (
-          <DiffView before={texts[0].text} after={texts[1].text} />
+          <DiffView before={texts[0].text} after={texts[1].text} mode={diffMode} />
         ) : (
           <WholeDocument name={name} text={texts[0].text} />
         )}
@@ -580,6 +658,28 @@ export default function DocumentHistory({
             </button>
           </div>
 
+          {steps.length > 0 && (
+            <div role="group" aria-label="Diff layout" style={{ display: 'flex', gap: 4 }}>
+              <button
+                type="button"
+                data-testid="diff-mode-unified"
+                aria-pressed={diffMode === 'unified'}
+                onClick={() => onDiffMode('unified')}
+                style={chip(diffMode === 'unified')}
+              >
+                Unified
+              </button>
+              <button
+                type="button"
+                data-testid="diff-mode-split"
+                aria-pressed={diffMode === 'split'}
+                onClick={() => onDiffMode('split')}
+                style={chip(diffMode === 'split')}
+              >
+                Side by side
+              </button>
+            </div>
+          )}
           {steps.length === 0 && (
             <div data-testid="doc-no-edits" style={muted}>
               No edit has been delegated yet. The original stands as it was.
@@ -606,7 +706,16 @@ export default function DocumentHistory({
                 {final.turn === null
                   ? ' — no edit applied, so this is the original'
                   : ` — as the last applied edit (${tNN(final.turn)}) left it`}
-              </span>
+              </span>{' '}
+              <button
+                type="button"
+                data-testid="final-diff-toggle"
+                aria-pressed={finalDiff}
+                onClick={() => setFinalDiff(!finalDiff)}
+                style={chip(finalDiff)}
+              >
+                {finalDiff ? 'Show the final version' : 'Show the original → final diff'}
+              </button>
             </div>
           )}
           {body}

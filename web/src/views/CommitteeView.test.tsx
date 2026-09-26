@@ -18,6 +18,9 @@ import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
 import DocumentHistory, {
   diffLines,
+  splitRows,
+  type DiffMode,
+  type DiffRow,
   type DocumentBlock,
   type StepId,
 } from '../../../playbooks/committee/view/src/Diff';
@@ -838,14 +841,17 @@ function History({
   doc = DOC,
   start = 'original',
   intact = true,
+  mode = 'unified',
   onOpenTurn = noop,
 }: {
   doc?: DocumentBlock;
   start?: StepId;
   intact?: boolean | null;
+  mode?: DiffMode;
   onOpenTurn?: (n: number) => void;
 }) {
   const [selected, setSelected] = useState<StepId>(start);
+  const [diffMode, setDiffMode] = useState<DiffMode>(mode);
   return (
     <DocumentHistory
       runId="run-2"
@@ -854,6 +860,8 @@ function History({
       intact={intact}
       selected={selected}
       onSelect={setSelected}
+      diffMode={diffMode}
+      onDiffMode={setDiffMode}
       onOpenTurn={onOpenTurn}
     />
   );
@@ -1153,6 +1161,40 @@ describe('DocumentHistory', () => {
   });
 });
 
+describe('splitRows', () => {
+  it('pairs each removal run with the addition run after it, padding the shorter side', () => {
+    const row = (kind: DiffRow['kind'], text: string): DiffRow => ({ kind, text });
+    const a = row('same', 'a');
+    const b = row('del', 'b');
+    const c = row('del', 'c');
+    const B = row('add', 'B');
+    const d = row('same', 'd');
+    const e = row('add', 'e');
+    const f = row('del', 'f');
+
+    expect(splitRows([a, b, c, B, d, e, f])).toEqual([
+      [a, a],
+      [b, B],
+      [c, null],
+      [d, d],
+      [null, e],
+      [f, null],
+    ]);
+  });
+
+  it('caps side-by-side rows at the same limit, and says so', async () => {
+    const big = Array.from({ length: 6000 }, (_, i) => `line ${i}`).join('\n');
+    vi.stubGlobal('fetch', vi.fn((u: string) =>
+      ok({ text: pathOf(u) === 'doc/00-original.md' ? big : `${big}\nextra` }),
+    ));
+    render(<History start={3} mode="split" />);
+    const split = await screen.findByTestId('diff-split');
+    expect(split.children).toHaveLength(10001); // 5000 rows of two cells, plus the footer
+    expect(screen.getByTestId('diff-rows-capped')).toHaveTextContent('1001 more rows');
+    vi.unstubAllGlobals();
+  });
+});
+
 describe('CommitteeView document stepper', () => {
   const captured = { ...run2, document: DOC };
 
@@ -1173,6 +1215,74 @@ describe('CommitteeView document stepper', () => {
       within(screen.getByTestId('entry-2')).getByRole('button', { expanded: true }),
     ).toBeInTheDocument();
     expect(scrolled).toHaveBeenCalled();
+  });
+
+  it('switches every diff to side by side, and the choice survives stepping and data ticks', async () => {
+    const { rerender } = show(captured);
+    fireEvent.click(screen.getByTestId('step-3'));
+    await screen.findByTestId('diff-rows');
+    fireEvent.click(screen.getByTestId('diff-mode-split'));
+
+    expect(screen.queryByTestId('diff-rows')).toBeNull();
+    const lefts = screen.getAllByTestId('split-left').map((el) => el.textContent);
+    const rights = screen.getAllByTestId('split-right').map((el) => el.textContent);
+    expect(lefts).toContain('- old clause');
+    expect(rights).toContain('+ new clause');
+
+    fireEvent.click(screen.getByTestId('step-6'));
+    expect(await screen.findByTestId('diff-split')).toBeInTheDocument();
+    rerender(
+      <CommitteeView
+        runId="run-2"
+        data={{ ...captured, progress: { ...captured.progress, turn: 21 } }}
+        refetch={noop}
+      />,
+    );
+    expect(screen.getByTestId('diff-split')).toBeInTheDocument();
+    expect(screen.getByTestId('diff-mode-split')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('toggles the original → final diff on Final: off by default, in the chosen layout, kept on return', async () => {
+    show(captured);
+    fireEvent.click(screen.getByTestId('step-final'));
+    expect(screen.getByTestId('final-diff-toggle')).toHaveAttribute('aria-pressed', 'false');
+    expect(await screen.findByTestId('doc-markdown')).toHaveTextContent('new clause');
+
+    fireEvent.click(screen.getByTestId('final-diff-toggle'));
+    const rows = await screen.findByTestId('diff-rows');
+    expect(rows).toHaveTextContent('- old clause');
+    expect(rows).toHaveTextContent('+ new clause');
+
+    fireEvent.click(screen.getByTestId('diff-mode-split'));
+    expect(screen.getByTestId('diff-split')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('step-3'));
+    fireEvent.click(screen.getByTestId('step-final'));
+    expect(screen.getByTestId('final-diff-toggle')).toHaveAttribute('aria-pressed', 'true');
+    expect(await screen.findByTestId('diff-split')).toBeInTheDocument();
+  });
+
+  it('clicking a delegated row selects its step', () => {
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    show(captured);
+
+    expect(screen.getByTestId('see-edit-2')).toHaveTextContent('see edit 1'); // the owner's row
+    expect(screen.getByTestId('see-edit-3')).toHaveTextContent('see edit 1'); // the junior's row
+    expect(screen.getByTestId('see-edit-5')).toHaveTextContent('see edit 2');
+    expect(screen.getByTestId('see-edit-9')).toHaveTextContent('see edit 3');
+    expect(screen.queryByTestId('see-edit-1')).toBeNull(); // a reviewer's row
+    expect(screen.queryByTestId('see-edit-8')).toBeNull(); // t09's owner is unknown
+
+    fireEvent.click(screen.getByTestId('see-edit-5'));
+    expect(screen.getByTestId('step-6')).toHaveAttribute('aria-current', 'step');
+    expect(scrolled).toHaveBeenCalled();
+  });
+
+  it('links no transcript row to a step when there are no snapshots to show', () => {
+    show(run2);
+    expect(screen.queryByTestId('see-edit-2')).toBeNull();
+    expect(screen.queryByTestId('see-edit-3')).toBeNull();
   });
 
   it('keeps the selected step across a data tick', () => {
