@@ -5955,6 +5955,167 @@ def test_a_selectors_long_stance_and_action_force_no_retake():
         ["over_cap", "retake_failed"]]
 
 
+# --- the turn cap grows with the committee (selection D5) -------------------
+
+# The chair seats the first R-2 of these for R reviewers, and the fixed
+# senior_director and manager are the other two. Library and derived seats
+# alternate, so every R from 4 up seats both kinds. Ten seats make R=12.
+_SEAT_POOL = [
+    "security",
+    {"role": "crew_owner", "title": "Engineering Lead, crew owner team",
+     "rationale": "owns a crew the federation layer would schedule work onto"},
+    "sre",
+    {"role": "zone_admin", "title": "Security Zone Administrator",
+     "rationale": "runs the security zones the document says crews must respect"},
+    "privacy",
+    {"role": "fleet_ops", "title": "Fleet Operations Manager",
+     "rationale": "provisions the hosts every federated crew would share"},
+    "partner_owner",
+    {"role": "billing_owner", "title": "Capacity Billing Owner",
+     "rationale": "pays for the cross-team capacity federation would lend out"},
+    "tpm",
+    {"role": "support_lead", "title": "Developer Support Lead",
+     "rationale": "fields the tickets when a federated run fails for a user"},
+]
+
+
+def _slugs(seats):
+    """The slug of each `_selection_answer` seat, library or derived."""
+    return [seat if isinstance(seat, str) else seat["role"] for seat in seats]
+
+
+def _every_stage(answer):
+    """The same answer from all three selectors. The chair's list is the final one."""
+    return {role: answer for role in ("owner", "manager", "senior_director")}
+
+
+def _caps(log):
+    """The `cap` on each selection reduction a `_drive(reductions=log)` run logged."""
+    return [doc["cap"] for _, doc in _logged(log, "selection")]
+
+
+def test_max_turns_unset_resolves_to_two_per_reviewer_plus_sixteen(artifact, monkeypatch):
+    """D5: an unset cap becomes 2R+16 at the final resolve (3 -> 22, 7 -> 30, 12 -> 40).
+
+    Only an int >= 1 in HERMES_COMMITTEE_MAX_TURNS counts as explicit. Junk, an
+    empty value, 0 and -1 count as unset, the same values that fell back to 30
+    before selection existed.
+    """
+    from playbooks.committee import selection
+    from playbooks.committee.playbook import DEFAULT_MAX_TURNS, ENV_MAX_TURNS, _apply_selection
+
+    def opened(value):
+        if value is None:
+            monkeypatch.delenv(ENV_MAX_TURNS, raising=False)
+        else:
+            monkeypatch.setenv(ENV_MAX_TURNS, value)
+        pb = _committee()
+        run = _run(phase="open")
+        pb.seed(run, _NamedSite("local"))
+        return pb._state(run)
+
+    fixed = selection.fixed_seats()
+    security = {**cast.LIBRARY["security"], "role": "security",
+                "rationale": "owns the zones", "nominated_by": "senior_director",
+                "source": "library"}
+    three = {
+        "seated": [fixed["owner"], fixed["senior_director"], fixed["manager"],
+                   security, fixed["junior_ic"]],
+        "reviewers": ["senior_director", "manager", "security"],
+    }
+
+    for value in (None, "soon", "", "0", "-1"):
+        s = opened(value)
+        assert (s["cap_explicit"], s["max_turns"]) == (False, DEFAULT_MAX_TURNS), value
+        _apply_selection(s, three)
+        assert s["max_turns"] == 22, value
+
+    s = opened("5")
+    assert (s["cap_explicit"], s["max_turns"]) == (True, 5)
+    _apply_selection(s, three)
+    assert s["max_turns"] == 5, "an explicit cap was replaced by the formula"
+
+    # Through the real reduce, stages 1-2 carry the provisional 30 and the final
+    # reduction carries the resolved cap, so before t01 the view shows the
+    # master's value.
+    log = []
+    _, _, s, _, _, _ = _drive(lambda phase, st: {}, max_turns=None,
+                              selection=_every_stage(_selection_answer(_SEAT_POOL)),
+                              reductions=log)
+    assert len(s["reviewers"]) == 12 and s["max_turns"] == 40
+    assert _caps(log) == [DEFAULT_MAX_TURNS, DEFAULT_MAX_TURNS, 40]
+
+    # The fallback seats the default seven, and 2 x 7 + 16 is today's 30.
+    log = []
+    _, _, s, _, _, _ = _drive(lambda phase, st: {}, max_turns=None,
+                              selection={"owner": _selection_answer(_SEAT_POOL),
+                                         "manager": _selection_answer(_SEAT_POOL),
+                                         "senior_director": None},
+                              reductions=log)
+    _, final = _logged(log, "selection")[-1]
+    assert final["final"] is True and final["fallback"] == "chair_failed"
+    assert s["reviewers"] == list(cast.SENIORITY)
+    assert s["max_turns"] == final["cap"] == 30
+
+
+def test_every_seated_reviewer_takes_an_opening_turn_when_the_cap_is_unset():
+    """AC5: for R in 3..12 the owner delegates on every reply, so reviewer k
+    opens at turn 3k-2, which is at most 2R+16. The cap never cuts the opening
+    round, and after its last edit (turn 3R) 16-R >= 4 turns are left for the floor."""
+    def delegating(phase, st):
+        if st["current_kind"] == "turn" and st["current_role"] == "owner":
+            return {"delegate": True, "action": "tighten the staffing section"}
+        return {}
+
+    for R in range(3, 13):
+        seats = _SEAT_POOL[: R - 2]
+        log = []
+        _, _, s, seen, sp, ok = _drive(delegating, max_turns=None,
+                                       selection=_every_stage(_selection_answer(seats)),
+                                       reductions=log)
+        reviewers = ["senior_director", "manager", *_slugs(seats)]
+
+        assert s["reviewers"] == reviewers, R
+        assert s["max_turns"] == 2 * R + 16, f"R={R}: cap {s['max_turns']}"
+        assert _caps(log)[-1] == 2 * R + 16, R
+        check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok,
+                         reviewers=s["reviewers"])
+        assert set(reviewers) <= set(sp), f"R={R}: unheard {set(reviewers) - set(sp)}"
+        for k, slug in enumerate(reviewers, 1):
+            assert f"t{3 * k - 2:02d}-{slug}" in seen, (R, k, slug)
+        assert sp.count("junior_ic") == R, R  # every owner reply's edit ran
+        assert s["ended"] == "queue empty", f"R={R}: {s['ended']}"
+        # the last turn minted is the last edit, and the floor still has room
+        assert s["turn"] - 1 == 3 * R and s["max_turns"] - 3 * R == 16 - R >= 4, R
+        if R >= 4:
+            sources = {s["roster"][slug]["source"] for slug in _slugs(seats)}
+            assert sources == {"library", "derived"}, R
+
+
+def test_an_explicit_max_turns_is_used_as_is():
+    """An explicit cap is used as-is even below 3R-2. It cuts the opening round
+    short, and the owner still cannot close while `opening` is non-empty."""
+    def closing(phase, st):
+        if st["current_kind"] == "turn" and st["current_role"] == "owner":
+            return {"close": True}
+        return {}
+
+    log = []
+    _, _, s, seen, sp, ok = _drive(closing, max_turns=20,
+                                   selection=_every_stage(_selection_answer(_SEAT_POOL)),
+                                   reductions=log)
+    check_invariants(s, seen, sp, max_turns=20, delivered=ok, reviewers=s["reviewers"])
+
+    assert len(s["reviewers"]) == 12 and s["cap_explicit"] is True
+    assert s["max_turns"] == 20 < 3 * 12 - 2
+    assert _caps(log) == [20, 20, 20]
+    # Every owner reply closes, so reviewer k opens at turn 2k-1 and ten of them fit.
+    assert [p for p in seen if p.startswith("t")][-1] == "t20-owner"
+    assert s["opening"] == s["reviewers"][10:]
+    assert not set(s["reviewers"][10:]) & set(sp)
+    assert s["closed"] is False and s["ended"] == "turn cap"
+
+
 # --- registration and wiring ---------------------------------------------
 
 

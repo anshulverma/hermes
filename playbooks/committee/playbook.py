@@ -109,16 +109,25 @@ def _apply_selection(s: dict, resolved: dict) -> None:
 
     After ``open`` seats the fixed four, this is the only writer of
     ``roster``, ``reviewers`` and ``opening``, and only ``_reduce_select``
-    calls it, on the chair's kept take. ``resolved`` is the dict
-    ``selection.resolve`` or ``selection.fallback`` returns. All three are
-    built before any is assigned, so a malformed ``resolved`` raises with the
-    state untouched and the caller installs the fallback: ``opening`` is
+    calls it, on the chair's kept take. It also sets ``max_turns`` to
+    2 x reviewers + 16 unless ``cap_explicit`` (D5). ``resolved`` is the dict
+    ``selection.resolve`` or ``selection.fallback`` returns. Everything is
+    built before anything is assigned, so a malformed ``resolved`` raises with
+    the state untouched and the caller installs the fallback: ``opening`` is
     inside ``roster`` before t01 is seeded.
     """
     roster = {seat["role"]: seat for seat in resolved["seated"]}
     reviewers = list(resolved["reviewers"])
+    # D5: an unset cap grows with the committee, two turns per reviewer plus
+    # sixteen (3 -> 22, 7 -> 30, 12 -> 40). When every owner reply delegates,
+    # reviewer k opens at turn 3k-2 and the last edit is turn 3R, which leaves
+    # 16-R >= 4 turns for the floor at R <= 12. An explicit
+    # HERMES_COMMITTEE_MAX_TURNS stays literal, even below 3R-2.
+    cap = s["max_turns"]
+    if not s["cap_explicit"]:
+        cap = 2 * len(reviewers) + 16
     # `opening` a copy: the opening round is popped as it runs, `reviewers` never is
-    s.update(roster=roster, reviewers=reviewers, opening=list(reviewers))
+    s.update(roster=roster, reviewers=reviewers, opening=list(reviewers), max_turns=cap)
 
 
 def _latest_answer(findings: list[Finding] | None) -> str:
@@ -463,13 +472,16 @@ class CommitteePlaybook:
             charge = " ".join(str(g).strip() for g in goals if str(g).strip())
 
             try:
-                max_turns = int(os.environ.get(ENV_MAX_TURNS, DEFAULT_MAX_TURNS))
+                max_turns = int(os.environ.get(ENV_MAX_TURNS, ""))
             except (TypeError, ValueError):
-                max_turns = DEFAULT_MAX_TURNS
+                max_turns = 0
             # `0` and `-5` parse, and mint a committee with no turns at all: the
             # chair rules on an empty thread. That is junk the same way "soon"
-            # is junk, and gets the same answer.
-            if max_turns < 1:
+            # is junk, and gets the same answer: unset. Only an int >= 1 is
+            # explicit, and it is used as-is (selection D5). An unset cap is a
+            # provisional 30 until `_apply_selection` sizes it to the committee.
+            cap_explicit = max_turns >= 1
+            if not cap_explicit:
                 max_turns = DEFAULT_MAX_TURNS
 
             # `clip` rather than a raw slice, so an over-long charge is cut at
@@ -483,6 +495,7 @@ class CommitteePlaybook:
             s["artifact_digest"] = hashlib.sha256(data).hexdigest()
             s["revised"] = str(thread.revised_path(run.id, artifact))
             s["max_turns"] = max_turns
+            s["cap_explicit"] = cap_explicit
             # The fixed four (Q5), as seat records; the chair's ratified list
             # replaces this at the final resolve. Selection runs first.
             s["roster"] = selection.fixed_seats()
