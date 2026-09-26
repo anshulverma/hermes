@@ -82,7 +82,7 @@ RUBRIC = "\n".join((
     f"Evidence: {VERBATIM}.",
 ))
 
-_WALL_WORDS = 120  # C8: a wall is a paragraph over 120 words (voice.WALL_WORDS; D11 imports only RULES and measure)
+_WALL_WORDS = 120  # C8: a wall is a paragraph over 120 words; the one threshold (D11 imports only RULES and measure)
 
 
 def words(text: str) -> int:

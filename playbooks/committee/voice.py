@@ -31,9 +31,8 @@ FILLER: tuple[str, ...] = (
     "let's dive", "delve",
 )
 
-WALL_WORDS = 120  # a paragraph of more words than this is a wall of text (C8)
-
-_PATH_LINE = re.compile(r"[\w./-]+\.\w+:\d+(-\d+)?")
+# The lookbehind starts a match only at a token's first char, so one long token stays linear.
+_PATH_LINE = re.compile(r"(?<![\w./-])[\w./-]+\.\w+:\d+(-\d+)?")
 _SECTION = re.compile(r"§\s?\d+(\.\d+)*|\b[Ss]ection \d+(\.\d+)*")
 _EXAMPLE_PHRASES = ("for example", "e.g.", "for instance", "such as")
 _INLINE_CODE = re.compile(r"`[^`\n]+`")

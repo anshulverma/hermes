@@ -15,6 +15,7 @@ import json
 import re
 import shutil
 import sqlite3
+import time
 import urllib.parse
 from contextlib import closing
 from pathlib import Path
@@ -42,7 +43,6 @@ def test_voice_measure_and_version():
     assert m["words"] == 4 and E.words("a b  c\n\nd") == 4
 
     # A paragraph is a maximal run of non-blank lines; a wall is more than 120 words.
-    assert voice.WALL_WORDS == 120
     assert voice.measure(_w(120))["longest_paragraph_words"] == 120
     assert voice.measure(_w(60) + "\n" + _w(61))["longest_paragraph_words"] == 121
     assert voice.measure(_w(100) + "\n  \n" + _w(21))["longest_paragraph_words"] == 100
@@ -52,6 +52,7 @@ def test_voice_measure_and_version():
     assert voice.measure("file.py:12-14")["pointers"] == 1
     assert voice.measure("§3.2")["pointers"] == 1
     assert voice.measure("line 12 of the file")["pointers"] == 0
+    assert voice.measure("section 1, § 2")["pointers"] == 2
 
     # Examples: 2 phrases + 1 inline span (the one inside the fence is not counted)
     # + 1 fenced block + 1 number with a unit.
@@ -64,6 +65,10 @@ def test_voice_measure_and_version():
     )
     assert ex["examples"] == 5
     assert voice.measure("Plain words only.")["examples"] == 0
+    assert voice.measure("40 qps 3 kb")["examples"] == 0  # units are case-sensitive
+    assert voice.measure("  ```\ncode\n  ```")["examples"] == 1  # an indented fence still fences
+    assert voice.measure("`a\nb`")["examples"] == 0  # inline code never spans lines
+    assert voice.measure("e.g. e.g.")["examples"] == 2  # every occurrence counts
 
     # Filler: C8's 15 phrases in order, each a case-insensitive substring.
     assert voice.FILLER == (
@@ -75,6 +80,7 @@ def test_voice_measure_and_version():
     filler = voice.measure("Great question. That said, I delved in; to be clear, I'd be happy to help.")
     # great question, that said, delve (inside "delved"), to be clear, i'd be happy, happy to
     assert filler["filler_hits"] == 6
+    assert voice.measure("delve delve")["filler_hits"] == 2
 
     # RULES: one line per element, no bold, no long dashes, no heading.
     assert voice.RULES and isinstance(voice.RULES, tuple)
@@ -102,6 +108,7 @@ def test_voice_measure_and_version():
         "example_share": 0.0, "filler_per_turn": 0.0,
     }
     assert E.voice_shares([voice.measure(_w(121)), voice.measure(_w(120))])["walls_share"] == 0.5
+    assert E.voice_shares([{"pointers": True}])["pointer_share"] == 0.0  # a bool is not a number
 
     # The rubric's identity: six dimensions in D5 order, all @1, and the judge anchors.
     assert tuple(E.DIMENSIONS) == E.JUDGE_DIMS + E.DETERMINISTIC_DIMS == (
@@ -111,6 +118,11 @@ def test_voice_measure_and_version():
     assert all(v == f"{k}@1" for k, v in E.DIMENSIONS.items())
     assert (E.MIN_ANCHORS, E.QUOTE_MAX, E.EVIDENCE_MAX, E.FENCE_TAG) == (2, 300, 5, "hermes-eval")
     assert E.VERBATIM in E.RUBRIC and all(d in E.RUBRIC for d in E.JUDGE_DIMS)
+    # D5's run-9 absent-stakeholder note stays out of the judge's rubric (G13).
+    assert "Security" not in E.RUBRIC and "run-9" not in E.RUBRIC
+    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "4cf6cb0f", (
+        "RUBRIC text changed: bump the affected judge dimension's version in DIMENSIONS, then re-pin this hash"
+    )
 
     # A rules swap moves concision's version and the rubric version, and nothing else.
     now = E.dimension_versions()
@@ -127,6 +139,14 @@ def test_voice_measure_and_version():
     ).hexdigest()[:8]
     assert re.fullmatch(r"r[0-9a-f]{8}", E.rubric_version(now))
     assert E.rubric_version(swapped) != E.rubric_version(now)
+
+
+def test_voice_measure_is_linear_on_one_long_token():
+    """measure runs master-side on every take, so a 200 KB unbroken token must not go quadratic."""
+    for token in ("a." * 100_000, "x" * 200_000):
+        start = time.perf_counter()
+        assert voice.measure(token)["pointers"] == 0
+        assert time.perf_counter() - start < 2.0
 
 
 # --- the two real baselines, frozen (tests/data/committee-eval/) -------------
@@ -154,7 +174,8 @@ def build_home(tmp_path: Path, name: str) -> tuple[Path, str]:
     revised/ and snapshot_key still derive from it. Every reduction ``artifact``
     and the thread.md ``Artifact:`` line (same line index, same label form) are
     rewritten to that copy, so pinned line numbers hold and nothing names the
-    real host. Returns ``(home, run_id)``. Call once per ``tmp_path``.
+    real host; a reduction's ``revised`` is rewritten to home/runs/<id>/revised/.
+    Returns ``(home, run_id)``. Call once per ``tmp_path``.
     """
     src = EVAL_FIXTURES / name
     run = json.loads((src / "run.json").read_text(encoding="utf-8"))
@@ -187,6 +208,8 @@ def build_home(tmp_path: Path, name: str) -> tuple[Path, str]:
         doc = json.loads(r["json"])
         if isinstance(doc, dict) and "artifact" in doc:
             doc["artifact"] = str(original)
+            if "revised" in doc:
+                doc["revised"] = str(run_dir / "revised" / original.name)
             r["json"] = json.dumps(doc, ensure_ascii=False)
 
     db = home / "queue.db"
@@ -245,6 +268,9 @@ def test_fixture_homes_build(tmp_path):
         artifacts = [d["artifact"] for d in docs if "artifact" in d]
         assert artifacts == [str(copy)] * len(artifacts)
         assert bool(artifacts) == (name == "run-9")  # run-2's reductions carry no artifact
+        for d in docs:  # no reduction names the real host (tmp_path itself may sit anywhere)
+            text = json.dumps(d, ensure_ascii=False).replace(str(base), "")
+            assert "/.hermes/" not in text and "/data/" not in text, text[:200]
         assert (run_dir / "revised" / "federation-future.md").read_bytes() == (
             src / "revised" / "federation-future.md").read_bytes()
         doc_dir = run_dir / "doc"
