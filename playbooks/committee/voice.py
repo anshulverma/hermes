@@ -38,7 +38,7 @@ _IMAGES = {"owner": 1, "reviewer": 1, "junior_ic": 0, "chair": 0}
 _CAPTION_WORDS = 15
 _DESCRIPTION_WORDS = 40
 _FIRST_LINE_WORDS = 25
-_FILLER_MAX = 1  # two filler phrases send a take back; one is only counted
+_FILLER_MAX = 1  # two STOCK_FILLER phrases send a take back; one is only counted
 # The image records measure keeps (it counts them all, in images_count), and
 # the figures segments(limit=...) draws: one oversized answer must not store or
 # render thousands of them.
@@ -74,17 +74,30 @@ RULES: tuple[str, ...] = (
     "Images: the owner and each reviewer may add one, the junior IC and the chair none. Write a line ![caption](images/<your file>), or a line 'Figure: caption' then a mermaid code block, with a caption of 15 words or fewer; then a line 'Description: what it shows' in 40 words or fewer.",
 )
 
-# Eval's list, verbatim (eval C8).
+# Eval's list, verbatim (eval C8): substrings, counted in tells["filler"] and
+# badged as a tell, never a retake ("that said" is also in "the runbook that
+# said otherwise").
 FILLER = (
     "great question", "it's worth noting", "it is worth noting", "to be clear",
     "let me be clear", "i want to be clear", "at the end of the day", "that said",
     "happy to", "i'd be happy", "in summary", "to summarize", "hope this helps",
     "let's dive", "delve",
 )
+# The hard rule's list: stock filler nobody says in a meeting, matched as whole
+# words in the speaker's own prose (quotes and blockquotes removed, ’ read as
+# '). The longest phrase wins where two overlap, so "I hope this helps" is one.
+STOCK_FILLER = (
+    "great question", "hope this helps", "i hope this helps", "it's worth noting",
+    "it is worth noting", "i'd be happy to help", "happy to help", "let's dive in",
+    "let's dive into", "as an ai",
+)
+_STOCK_FILLER = re.compile(
+    r"\b(?:" + "|".join(map(re.escape, sorted(STOCK_FILLER, key=len, reverse=True))) + r")\b"
+)
 _PREEMPT = ("rather than", "instead of", "would have", "does not mean", "what this buys")
 _EXAMPLE_PHRASES = ("for example", "e.g.", "for instance", "such as")
 _ABBREVIATIONS = frozenset({
-    "e.g.", "i.e.", "vs.", "etc.", "cf.", "sec.", "approx.", "no.",
+    "e.g.", "i.e.", "vs.", "etc.", "cf.", "sec.", "approx.", "no.", "a.m.", "p.m.", "u.s.",
     "jan.", "feb.", "mar.", "apr.", "jun.", "jul.", "aug.", "sep.", "sept.", "oct.",
     "nov.", "dec.",
 })
@@ -92,9 +105,12 @@ _ABBREVIATIONS = frozenset({
 # CommonMark's fences: indented by up to three SPACES (a tab or a no-break
 # space makes an indented code block or a paragraph, not a fence), and a
 # backtick fence's info string holds no backtick. Anything else is prose here
-# because Markdown renders it as prose.
-_FENCE = re.compile(r"^ {0,3}(?:(`{3,})([^`]*)|(~{3,})(.*))$")
-_CLOSER = re.compile(r"^ {0,3}(`{3,}|~{3,})[ \t]*$")
+# because Markdown renders it as prose. The one exception is a lone tab inside
+# a list item whose text starts by column 4 (``_items``): the tab reaches the
+# item's content there, so the fence is one. group(1) is the indent.
+_FENCE = re.compile(r"^( {0,3}|\t)(?:(`{3,})([^`]*)|(~{3,})(.*))$")
+_CLOSER = re.compile(r"^( {0,3}|\t)(`{3,}|~{3,})[ \t]*$")
+_TAB_REACH = 4  # the column a leading tab indents to
 # C3's grammar. The reference-style alternative is optional so CommonMark's
 # shortcut form `![label]` is split out too: Markdown would otherwise resolve
 # it against a `[label]: <url>` line and fetch that url.
@@ -125,12 +141,14 @@ _BOLD = re.compile(
     + r"|(?<![\w/.])__(?![\s_])(?:[^_\n]*\n[^_\n]*|(?=[^_\s]*[^\S\n])[^_\n]*)(?<![\s_])__(?![\w.])"
 )
 _BLOCKQUOTE = re.compile(r"^ {0,3}>")
-_HEADER = re.compile(r"^\s{0,3}#{1,6}\s")
+_HEADER = re.compile(r"^ {0,3}#{1,6}\s")  # a tab-indented "#" is code or text, never a heading
 # A setext underline: a line of "=" or "-" alone, right under a prose line,
 # makes that line an h1 or h2 in Markdown (fullmatch a line).
 _SETEXT = re.compile(r" {0,3}(?:=+|-+)[ \t]*")
 _TABLE = re.compile(r"\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?")  # fullmatch a stripped line
 _BULLET = re.compile(r"^\s*([-*+]|\d+[.)])\s+")
+# A line that opens a list item, as ``_items`` reads it: end() is the column its text starts at.
+_ITEM = re.compile(r" {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]+|$)")
 _NESTED = re.compile(r"^( {2,}|\t)")
 _PATH_LINE = re.compile(r"(?<![\w./-])[\w./-]+\.\w+:\d+(-\d+)?")  # lookbehind: linear on one long token
 _SECTION = re.compile(r"§\s?\d+(\.\d+)*|\b[Ss]ection \d+(\.\d+)*")
@@ -154,9 +172,9 @@ _TELLS = {
         r"(?i)\b(?:I think|I believe|perhaps|might|could potentially|arguably|it seems)\b"
     ),
 }
-# The tells a reader is shown on the turn (``tells`` flag); filler is its own
-# hard rule and preempt is rule 6, measured but not badged.
-_SOFT_TELLS = ("process", "turn_refs", "unchanged", "hedge")
+# The tells a reader is shown on the turn (``tells`` flag), the broad FILLER
+# count among them; preempt is rule 6, measured but not badged.
+_SOFT_TELLS = ("process", "turn_refs", "unchanged", "hedge", "filler")
 _PNG = b"\x89PNG\r\n\x1a\n"
 
 
@@ -180,32 +198,61 @@ def cap_text(role: str) -> str:
 
 # --- the image grammar -----------------------------------------------------
 
+def _items(lines: list[str]) -> list[int]:
+    """Per line, the column where the text of the list item it sits in starts; 0 for none.
+
+    A bullet opens an item; an indented or blank line stays in it; any other
+    line leaves it. A flush-left line Markdown would still fold into the
+    item's paragraph (lazy continuation) is read as leaving it.
+    """
+    out, column = [], 0
+    for line in lines:
+        if m := _ITEM.match(line):
+            column = m.end()
+        elif line[:1] not in ("", " ", "\t"):
+            column = 0
+        out.append(column)
+    return out
+
+
 def _fences(lines: list[str]) -> list[tuple[int, int, str]]:
     """(open, close, info) for every CLOSED fence. An unclosed fence is prose.
 
     A fence closes on the next line of its own marker char, at least as long,
-    and nothing else. ``longest[ch][k]`` is the longest such line at or below
-    line k, so an opener with no closer is skipped without a scan and every
-    scan ends on a closer: each line is looked at a bounded number of times.
+    indented the same way (spaces, or the one tab), and nothing else. A
+    tab-indented opener or closer counts only right under a line of a list
+    item that a tab reaches. ``longest[key][k]`` is the longest closer of that
+    kind at or below line k, so an opener with no closer is skipped without a
+    scan and every scan ends on a closer: each line is looked at a bounded
+    number of times.
     """
-    closers = [(c.group(1)[0], len(c.group(1))) if (c := _CLOSER.match(line)) else ("", 0)
-               for line in lines]
-    longest = {ch: [0] * (len(lines) + 1) for ch in "`~"}
+    items = _items(lines)
+
+    def key_of(m: re.Match, k: int) -> str:
+        """The marker char, plus a tab when tab-indented; "" when the tab reaches no item."""
+        tab = m.group(1) == "\t"
+        if tab and not (k > 0 and 0 < items[k - 1] <= _TAB_REACH):
+            return ""
+        return (m.group(2) or m.group(4))[0] + ("\t" if tab else "")
+
+    closers = [(key_of(c, k), len(c.group(2))) if (c := _CLOSER.match(line)) else ("", 0)
+               for k, line in enumerate(lines)]
+    longest = {key: [0] * (len(lines) + 1) for key in ("`", "~", "`\t", "~\t")}
     for k in range(len(lines) - 1, -1, -1):
-        for ch, below in longest.items():
-            below[k] = max(below[k + 1], closers[k][1] if closers[k][0] == ch else 0)
+        for key, below in longest.items():
+            below[k] = max(below[k + 1], closers[k][1] if closers[k][0] == key else 0)
     out: list[tuple[int, int, str]] = []
     i = 0
     while i < len(lines):
         m = _FENCE.match(lines[i])
-        marker, info = (m.group(1), m.group(2)) if m and m.group(1) else (
-            (m.group(3), m.group(4)) if m else ("", ""))
-        ch, size = (marker[0], len(marker)) if m else ("", 0)
-        if m and longest[ch][i + 1] >= size:
-            j = next(j for j in range(i + 1, len(lines))
-                     if closers[j][0] == ch and closers[j][1] >= size)
-            out.append((i, j, info.strip().lower()))
-            i = j
+        key = key_of(m, i) if m else ""
+        if key:
+            marker, info = (m.group(2), m.group(3)) if m.group(2) else (m.group(4), m.group(5))
+            if longest[key][i + 1] >= len(marker):
+                j = next(j for j in range(i + 1, len(lines))
+                         if closers[j][0] == key and closers[j][1] >= len(marker))
+                out.append((i, j, info.strip().lower()))
+                i = j
         i += 1
     return out
 
@@ -410,18 +457,31 @@ def _unquoted(text: str) -> str:
 
 
 def _ends(token: str) -> bool:
-    """Whether a prose token ends a sentence: a final . ! or ?, past any closing quote or bracket."""
-    token = token.rstrip("\"'”’)]}")
+    """Whether a prose token ends a sentence: a final . ! or ?, past any closing quote or bracket.
+
+    An abbreviation ends none, opening bracket or quote or not: ``(e.g.``.
+    """
+    token = token.rstrip("\"'”’)]}").lstrip("([\"'“‘")
     return token.endswith((".", "!", "?")) and token.lower() not in _ABBREVIATIONS
 
 
 def _setext(prose_lines: list[str]) -> int:
-    """Setext underlines: a ``=`` or ``-`` line right under a plain prose line."""
-    return sum(
-        1 for above, line in zip(prose_lines, prose_lines[1:])
-        if _SETEXT.fullmatch(line) and above.strip() and not _SETEXT.fullmatch(above)
-        and not _BULLET.match(above) and not _HEADER.match(above)
-    )
+    """Setext underlines: a ``=`` or ``-`` line right under a plain prose line.
+
+    Under a bullet or a blockquote line the underline is a thematic break, and
+    under an item's continuation it is one (or an empty item) unless indented
+    to the item's text, where it underlines a heading inside the item.
+    """
+    items = _items(prose_lines)
+    count = 0
+    for k in range(1, len(prose_lines)):
+        above, line = prose_lines[k - 1], prose_lines[k]
+        if (_SETEXT.fullmatch(line) and above.strip() and not _SETEXT.fullmatch(above)
+                and not _BULLET.match(above) and not _HEADER.match(above)
+                and not _BLOCKQUOTE.match(above)
+                and len(line) - len(line.lstrip(" ")) >= items[k - 1]):
+            count += 1
+    return count
 
 
 def measure(body: str, role: str = "reviewer") -> dict:
@@ -451,6 +511,9 @@ def measure(body: str, role: str = "reviewer") -> dict:
     path_line = sum(1 for _ in _PATH_LINE.finditer(body))
     section = sum(1 for _ in _SECTION.finditer(prose))
     own = "\n".join(line for line in quoted.split("\n") if not _BLOCKQUOTE.match(line))
+    stock: dict[str, int] = {}
+    for phrase in _STOCK_FILLER.findall(own.lower().replace("’", "'")):
+        stock[phrase] = stock.get(phrase, 0) + 1
     return {
         "kind": kind(role),
         "words": words,
@@ -489,6 +552,8 @@ def measure(body: str, role: str = "reviewer") -> dict:
         ),
         "tells": tells,
         "filler_hits": sum(tells.values()),
+        # the hard rule's count: each STOCK_FILLER phrase found, in order found
+        "filler_phrases": stock,
         "cap": cap_for(role),
         "rules_version": RULES_VERSION,
     }
@@ -556,9 +621,14 @@ def _image_count(metrics: dict) -> int:
     return max(len(metrics.get("images") or []), _num(metrics.get("images_count")) or 0)
 
 
+def _stock(metrics: dict) -> dict:
+    found = metrics.get("filler_phrases")
+    return found if isinstance(found, dict) else {}
+
+
 def _filler(metrics: dict) -> int:
-    tells = metrics.get("tells")
-    return (_num(tells.get("filler")) or 0) if isinstance(tells, dict) else 0
+    """The stock filler phrases a take holds; the broader tells["filler"] never counts here."""
+    return sum(_num(n) or 0 for n in _stock(metrics).values())
 
 
 def violations(metrics: dict, role: str) -> list[str]:
@@ -620,7 +690,7 @@ def _said(slug: str, m: dict, image: str = "") -> str:
                           else "an image missing or not your own file"),
         "action_too_long": f"action {m.get('action_chars', 0)} characters (max {turnblock.ACTION_MAX})",
         "stance_too_long": f"stance {m.get('stance_chars', 0)} characters (max {turnblock.STANCE_MAX})",
-        "filler": f"{_filler(m)} filler phrases",
+        "filler": f"{_filler(m)} filler phrases: " + ", ".join(f"'{p}'" for p in _stock(m)),
     }.get(slug, slug)
 
 

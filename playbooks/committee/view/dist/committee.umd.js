@@ -82,7 +82,7 @@
 		nested: "nested bullets",
 		too_many_bullets: "too many bullets",
 		too_many_images: "too many images",
-		image_uncaptioned: "an image without its caption or description",
+		image_uncaptioned: "an image caption or description missing or too long",
 		image_missing: "an image missing or not your own file",
 		action_too_long: "an action over 200 characters",
 		stance_too_long: "a stance over its cap",

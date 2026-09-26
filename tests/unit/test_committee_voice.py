@@ -142,24 +142,103 @@ def test_each_tell_pattern_counts_its_narration(kind_, text, n):
 
 def test_two_filler_phrases_force_a_retake_and_one_does_not():
     two = voice.measure("Great question. Defer it: `a.py:1` for example. Hope this helps.")
-    assert two["tells"]["filler"] == 2
+    assert two["filler_phrases"] == {"great question": 1, "hope this helps": 1}
     assert voice.violations(two, "tl") == ["filler"]
     one = voice.measure("Great question. Defer it: `a.py:1` for example.")
     assert voice.violations(one, "tl") == []
+
+
+def test_the_hard_filler_list_is_stock_filler_nobody_says_in_a_meeting():
+    assert voice.STOCK_FILLER == (
+        "great question", "hope this helps", "i hope this helps", "it's worth noting",
+        "it is worth noting", "i'd be happy to help", "happy to help", "let's dive in",
+        "let's dive into", "as an ai",
+    )
+
+
+# Each of these read as two filler phrases, and was sent back, when filler was
+# any FILLER substring anywhere in the prose, quotes included.
+_NOT_FILLER = (
+    "I'd be happy to pair with Ruth on the migration in section 4.",
+    "I want to be clear about the owner: section 3 names none.",
+    "The queue has to be cleared by hand, and the runbook that said otherwise is stale.",
+    "Ruth is unhappy to own the pager, and section 4 never delved into staffing.",
+    "The doc opens with 'To be clear' and closes with 'That said, ship it', section 2.",
+)
+
+
+@pytest.mark.parametrize("text", _NOT_FILLER)
+def test_a_sentence_that_only_contains_a_filler_phrase_is_not_sent_back(text):
+    m = voice.measure(text)
+    assert m["filler_phrases"] == {} and "filler" not in voice.violations(m, "tl")
+    assert m["tells"]["filler"] == 2  # eval's C8 count is unchanged
+
+
+_FILLER_SLOP = (
+    "Great question! Defer it: section 3 names no owner for the migration. Hope this helps.",
+    "Happy to help here. It's worth noting that the retry loop at `engine/dispatch.py:284` "
+    "never backs off.",
+    "Let's dive in. The rollout in section 7 has no rollback, for example for a failed canary. "
+    "I hope this helps!",
+    "As an AI reviewer I would defer: it is worth noting that §6.2 keeps two write paths live.",
+    "I’d be happy to help size it. It’s worth noting that section 15 gives no estimate.",
+)
+
+
+@pytest.mark.parametrize("text", _FILLER_SLOP)
+def test_stock_filler_slop_is_sent_back(text):
+    assert voice.violations(voice.measure(text), "tl") == ["filler"]
+
+
+def test_overlapping_filler_phrases_count_once_and_quoted_ones_not_at_all():
+    assert voice.measure("I'd be happy to help.")["filler_phrases"] == {"i'd be happy to help": 1}
+    assert voice.measure("I hope this helps.")["filler_phrases"] == {"i hope this helps": 1}
+    assert voice.measure("Let's dive into it.")["filler_phrases"] == {"let's dive into": 1}
+    assert voice.violations(voice.measure("I'd be happy to help."), "tl") == []
+    # whole words only
+    assert voice.measure("A great questionnaire; Ruth is unhappy to help-desk it.")[
+        "filler_phrases"] == {}
+    quoted = ('The intro reads "Great question" and the close \'Hope this helps\'.\n'
+              "> Great question. Hope this helps.\n\n"
+              "Defer it: `hope this helps` in `a.py:1`, for example.")
+    m = voice.measure(quoted)
+    assert m["filler_phrases"] == {} and voice.violations(m, "tl") == []
+
+
+def test_the_broader_filler_list_is_counted_and_badged_never_sent_back():
+    m = voice.measure("To be clear, defer it. That said, `a.py:1` for example. In summary, no.")
+    assert m["tells"]["filler"] == 3 and m["filler_phrases"] == {}
+    assert voice.violations(m, "tl") == [] and voice.flags(m, "tl") == ["tells"]
+
+
+def test_the_filler_note_names_the_phrases_found():
+    m = voice.measure("Great question. Defer it. Hope this helps. Great question.")
+    assert m["filler_phrases"] == {"great question": 2, "hope this helps": 1}
+    assert voice.note(m, ["filler"], take=2) == (
+        "Retake 2 of 3. Rules broken: 3 filler phrases: 'great question', 'hope this helps'. "
+        "Say it again within them.")
+    # after an image rule and the word cap, the names still fit the clip whole
+    m = voice.measure("It’s worth noting this. I hope this helps. " + "word " * 160)
+    full = voice.note(m, ["over_cap", "image_missing", "filler"], take=3, image="t02-owner")
+    assert full == (
+        "Retake 3 of 3. Rules broken: an image not at images/t02-owner.svg or .png; "
+        "168 words (cap 150); 2 filler phrases: 'it's worth noting', 'i hope this helps'. "
+        "Say it again within them.")
+    from playbooks.committee import cast
+    assert cast.clip(full, voice.RETAKE_NOTE_MAX) == full
 
 
 def test_narration_and_hedging_are_a_soft_tells_flag_never_a_retake():
     for text in ("I checked it. Defer: `a.py:1` for example.",
                  "As turn 3 said, defer: `a.py:1` for example.",
                  "The original is intact. Defer: `a.py:1` for example.",
-                 "I think we defer: `a.py:1` for example."):
+                 "I think we defer: `a.py:1` for example.",
+                 "Great question: defer, `a.py:1` for example."):
         m = voice.measure(text)
         assert voice.flags(m, "tl") == ["tells"], text
         assert voice.violations(m, "tl") == [], text
-    # one filler phrase or a pre-empting phrase alone is neither
-    for text in ("Great question: defer, `a.py:1` for example.",
-                 "Defer rather than ship: `a.py:1` for example."):
-        assert voice.flags(voice.measure(text), "tl") == [], text
+    # a pre-empting phrase alone is neither: rule 6 is measured, not badged
+    assert voice.flags(voice.measure("Defer rather than ship: `a.py:1` for example."), "tl") == []
 
 
 # What the user asked for (direct replies with code pointers) keeps its first
@@ -224,6 +303,12 @@ def test_sentences_skip_abbreviations_and_quoted_questions():
                  "Waits 3 sec. per host, no. 4 on the list.",
                  "Renamed the 'Why now?' heading.", 'Renamed the "Why now?" heading.'):
         assert voice.measure(text)["sentences"] == 1, text
+    for text in ("Added a rollback step (e.g. drain the canary first) to section 7.",
+                 "Moved the owner line up (i.e. above the risks) in section 2.",
+                 "Added the 9 a.m. freeze window to section 4, and the 5 p.m. one to section 5.",
+                 "Replaced the U.S. region list in section 4 with the three regions Ruth named."):
+        m = voice.measure(text, "junior_ic")
+        assert m["sentences"] == 1 and voice.violations(m, "junior_ic") == [], text
     assert voice.measure("I added the rollback plan")["sentences"] == 1  # V8: no end mark
     assert voice.measure("Owner's call. It's done.")["sentences"] == 2
 
@@ -261,11 +346,45 @@ def test_a_fence_is_indented_by_spaces_only_and_a_backtick_fence_has_no_backtick
     assert voice.measure("   ```\n# x\n   ```  ")["fenced_lines"] == 1
 
 
+def test_a_tab_indented_fence_inside_a_list_item_is_a_fence():
+    # A tab reaches the content of an item whose text starts by column 4, so
+    # Markdown renders this as code inside item 1, not a heading.
+    body = ("Defer it: the retry loop at `engine/dispatch.py:284` never backs off, for example:\n"
+            "1. Add a backoff:\n\t```python\n\t# cap the retries\n\tfor i in range(3):\n"
+            "\t    retry(**opts)\n\t```\n")
+    m = voice.measure(body, "tl")
+    assert (m["headers"], m["bold"], m["fenced_lines"]) == (0, 0, 3)
+    assert m["words"] == 16 and voice.violations(m, "tl") == []
+    # under an item's indented continuation, across a blank line, too
+    assert voice.measure("- a\n  more\n\n\t```\n\t# x\n\t```")["fenced_lines"] == 1
+    assert voice.measure("  - x\n\t```\n\ty\n\t```")["fenced_lines"] == 1
+    # an item whose text starts past column 4 is out of a tab's reach, and a
+    # flush-left line ends the item and the fence with it: both stay prose
+    for body in ("100. x\n\t```\n\tone two\n\t```", "   - x\n\t```\n\tone two\n\t```"):
+        assert voice.measure(body)["fenced_lines"] == 0, body
+    assert voice.measure("- x\n\t```\n# Title\n\t```")["headers"] == 1
+    # a tab-indented fence closes only on a tab-indented closer, and one on
+    # the body's first line is under nothing (never read against the last line)
+    assert voice.measure("- x\n\t```\n# Title\n```")["headers"] == 1
+    assert voice.measure("\t```\n- a\n\t```")["bullets"] == 1
+    # a tab-indented # is never a heading: at the top level it is code or text
+    assert voice.measure("Defer it.\n\t# not a heading")["headers"] == 0
+
+
 def test_a_setext_underline_after_a_prose_line_is_a_header():
     assert voice.measure("Title\n=====\nDefer it.")["headers"] == 1
     assert voice.measure("Title\n---\nDefer it.")["headers"] == 1
     assert voice.measure("Defer it.\n\n---\n\nMore.")["headers"] == 0  # a break, not a heading
     assert voice.measure("- one\n---")["headers"] == 0
+    # Under a blockquote line it is a thematic break, under an item's indented
+    # continuation an empty item or a break (micromark): no heading either way.
+    assert voice.measure("Defer it: section 3 says\n> the owner is TBD\n---\nName one.")[
+        "headers"] == 0
+    assert voice.measure("Defer it, for example:\n- first point\n  continues here\n-\nDone.")[
+        "headers"] == 0
+    assert voice.measure("- first point\n\n  continues here\n---\nDone.")["headers"] == 0
+    # once a flush-left line after a blank line has left the list, it is a heading again
+    assert voice.measure("- first point\n\nTitle\n---\nDefer it.")["headers"] == 1
 
 
 def test_measure_keeps_eight_image_records_and_counts_them_all():
@@ -321,6 +440,11 @@ _CRAFTED = (
     "**a" * 70_000, "> **" * 50_000, "=" * 200_000 + "x", "x\n" + "-" * 200_000 + " x",
     "x\n=\n" * 50_000, "`" * 200_000 + "x`", "```" + "a" * 200_000 + "`",
     "~~~" + "`" * 200_000, "Jan. " * 40_000, "![c](images/x.svg)\n" * 10_000,
+    # the stock filler scan: prefixes of the longest phrases, curly apostrophes
+    "great question " * 14_000, "i'd be happy to " * 12_500, "i hope this help" * 12_500,
+    "it’s worth notin" * 12_500, "’" * 200_000, "as an " * 35_000,
+    # the list items a tab-indented fence and a setext underline look back on
+    "- x\n\t```\n" * 25_000, "- x\n  y\n-\n" * 20_000, "> x\n---\n" * 25_000,
 )
 
 
@@ -374,8 +498,8 @@ def _m(**over):
     ("owner", {"action_chars": turnblock.ACTION_MAX + 1}, "action_too_long"),
     ("owner", {"stance_chars": turnblock.STANCE_MAX + 1}, "stance_too_long"),
     ("tl", {"stance_chars": turnblock.STANCE_MAX + 1}, "stance_too_long"),
-    ("tl", {"tells": {"filler": 2}}, "filler"),
-    ("chair", {"tells": {"filler": 3}}, "filler"),
+    ("tl", {"filler_phrases": {"great question": 2}}, "filler"),
+    ("chair", {"filler_phrases": {"great question": 1, "hope this helps": 2}}, "filler"),
 ])
 def test_each_hard_rule_is_its_own_violation(role, over, slug):
     assert voice.violations(_m(**over), role) == [slug]
@@ -390,8 +514,11 @@ def test_a_compliant_turn_breaks_nothing_and_the_limits_are_inclusive():
     # only the owner and the reviewers are asked for a stance
     assert voice.violations(_m(stance_chars=999), "chair") == []
     assert voice.violations(_m(stance_chars=999), "junior_ic") == []
-    assert voice.violations(_m(tells={"filler": 1}), "tl") == []
-    assert voice.violations(_m(tells=["junk"], images_count="x"), "tl") == []
+    assert voice.violations(_m(filler_phrases={"great question": 1}), "tl") == []
+    # the broader FILLER count is eval's and the tells badge's, never a retake
+    assert voice.violations(_m(tells={"filler": 5}), "tl") == []
+    assert voice.violations(_m(tells=["junk"], images_count="x", filler_phrases="x"), "tl") == []
+    assert voice.violations(_m(filler_phrases={"a": "x", "b": True, "c": None}), "tl") == []
 
 
 def test_a_two_sentence_one_line_junior_report_is_multi_sentence():
@@ -481,7 +608,7 @@ def test_note_phrases_each_slug_image_rules_first():
     assert "an image missing or not your own file" in voice.note(m, ["image_missing"], take=2)
     every = _m(words=400, lines=3, sentences=4, headers=1, bold=2, tables=1,
                nested_bullets=2, bullets=9, images=[{}, {}], action_chars=250, kind="chair",
-               stance_chars=260, tells={"filler": 3})
+               stance_chars=260, filler_phrases={"great question": 2, "hope this helps": 1})
     said = voice.note(every, [
         "over_cap", "multi_line", "multi_sentence", "headers", "bold", "tables", "nested",
         "too_many_bullets", "too_many_images", "image_uncaptioned", "image_missing",
@@ -492,7 +619,7 @@ def test_note_phrases_each_slug_image_rules_first():
                    "a caption over 15 words, a description over 40, or either missing",
                    "an image missing or not your own file",
                    "action 250 characters (max 200)", "stance 260 characters (max 200)",
-                   "3 filler phrases"):
+                   "3 filler phrases: 'great question', 'hope this helps'"):
         assert phrase in said, phrase
     assert len(cast.clip(said, voice.RETAKE_NOTE_MAX)) <= voice.RETAKE_NOTE_MAX
 

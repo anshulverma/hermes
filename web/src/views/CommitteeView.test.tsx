@@ -2502,6 +2502,10 @@ describe('CommitteeView voice', () => {
     expect(violationText(['filler', 'stance_too_long'])).toBe('filler phrases; a stance over its cap');
   });
 
+  it('says an over-long caption or description is what image_uncaptioned also means', () => {
+    expect(violationText(['image_uncaptioned'])).toBe('an image caption or description missing or too long');
+  });
+
   it('badges AI tells with the kinds it found and how often, as plain text', () => {
     show(withVoice({ ...VOICED, badges: ['tells'],
       voice: { words: 212, tells: { process: 2, turn_refs: 1, unchanged: 0, hedge: 3, filler: 0 } } }));

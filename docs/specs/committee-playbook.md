@@ -82,8 +82,9 @@ mid-word. A delegated `action` and a `stance` are cut to 200 (`turnblock.ACTION_
 `turnblock.STANCE_MAX`) by `turnblock._clip`: at the last space before the cap when that keeps at
 least half of it, else mid-word, then `…`. That is a backstop, since the goal asks for one sentence
 within the cap and an owner's action or an owner's or reviewer's stance over it sends the take back
-(`action_too_long`, `stance_too_long`), so only a kept take 3 is ever cut; the raw lengths go on the
-turn's `voice` as `action_chars` and `stance_chars`. The
+(`action_too_long`, `stance_too_long`), so only a take kept while breaking that rule is ever cut:
+take 3, or a held take 1 or 2 kept because its retake delivered nothing (`retake_failed`). The raw
+lengths go on the turn's `voice` as `action_chars` and `stance_chars`. The
 assembled goal is asserted under 3600 in every shape (see "Goal headroom").
 
 ## The turn block
@@ -168,14 +169,20 @@ Description: canary first, then one region, then everywhere.
 `Figure:`/`Description:` lines add no words and break no formatting rule, so a snippet holding
 `# x` or `**kw` is safe. A fence is what CommonMark renders as one: indented by up to three spaces
 (a tab or a no-break space makes it prose), and a backtick fence's info string holds no backtick;
-an unclosed fence is prose. A dash inside a quoted span, from `"` or `“` to the next matching close
+an unclosed fence is prose. The one tab that does indent a fence is a lone tab right under a line
+of a list item whose text starts by column 4 (a bullet, its indented continuation, or a blank line
+inside it), where Markdown reads the fence as the item's own; its closer must be tab-indented too.
+A tab-indented `#` is never a heading. A dash inside a quoted span, from `"` or `“` to the next matching close
 on that line, is not counted: `Ship “a — “b” c” now.` has none. Bold and sentence ends inside a
 double- or single-quoted span are the artifact's, not the speaker's, so neither counts there;
 bold on a `>` blockquote line does not count either, nor does a `**` with a digit on both sides
-(`2**10`). A sentence end skips `e.g.`, `i.e.`, `vs.`, `etc.`, `cf.`, `sec.`, `approx.`, `no.` and
-the month abbreviations (`Jan.` to `Dec.`, `Sept.`), so `Renamed the 'Why now?' heading.` is one
-sentence. A setext underline (a `===` or `---` line right under a prose line) counts as a header,
-because Markdown draws one. `first_line_words` is the first sentence of the first line.
+(`2**10`). A sentence end skips `e.g.`, `i.e.`, `vs.`, `etc.`, `cf.`, `sec.`, `approx.`, `no.`,
+`a.m.`, `p.m.`, `U.S.` and the month abbreviations (`Jan.` to `Dec.`, `Sept.`), past any opening
+bracket or quote (`(e.g.`), so `Renamed the 'Why now?' heading.` is one sentence. A setext
+underline (a `===` or `---` line right under a prose line) counts as a header, because Markdown
+draws one; under a bullet or a `>` blockquote line, or under a list item's continuation unless
+indented to the item's text, Markdown draws a thematic break (or an empty item) instead, and it
+does not count. `first_line_words` is the first sentence of the first line.
 `voice.check_images` is the only IO. A file image is ok only when it is referenced as exactly
 `images/<name>`, named for this speaker's `base`, and is a regular file (not a symlink, not a FIFO)
 of at most 2 MB with PNG or SVG magic, in an images folder that exists and is not a symlink; a
@@ -189,13 +196,22 @@ metrics stay on its reduction under `voice`.
 words, a description over 40, or either missing); `image_missing` (a file image that is not ok,
 and every http, reference-style or shortcut `![label]` image); `action_too_long` (an owner action
 over 200 characters); `stance_too_long` (an owner's or a reviewer's stance over 200 characters);
-`filler` (2 or more `voice.FILLER` phrases, such as "great question" or "hope this helps"; one is
-only counted). `no_pointer`, `no_example`, `dashes`, `long_first_line` (a first sentence over 25
-words), `stance_clipped` (a kept take 3 whose stance was cut to 200) and `tells` are flags: shown,
-never sent back. `tells` is any process narration (`I checked`, `I've reviewed`, `Having read`,
-`Let me`, `I can confirm`), turn number (`turn 5`, `turns 3`, `t04`), unchanged-original narration
-(`the original is intact`, `nothing was modified`) or hedging (`I think`, `I believe`, `perhaps`,
-`might`, `could potentially`, `arguably`, `it seems`); the counts ride on `voice.tells`.
+`filler` (2 or more `voice.STOCK_FILLER` phrases; one is only counted). That list is stock filler
+nobody says in a meeting: `great question`, `hope this helps`, `I hope this helps`, `it's worth
+noting`, `it is worth noting`, `I'd be happy to help`, `happy to help`, `let's dive in`, `let's
+dive into`, `as an AI`. They are matched as whole words, case-insensitively, in the speaker's own
+prose (quoted spans, inline code and `>` lines left out, `’` read as `'`), and where two overlap
+the longer counts once, so `I'd be happy to help` is one phrase and `I'd be happy to pair`, `to be
+cleared` or `unhappy to` are none. The phrases found ride on `voice.filler_phrases` (phrase to
+count). `no_pointer`, `no_example`, `dashes`, `long_first_line` (a first sentence over 25 words),
+`stance_clipped` (a kept take whose stance was cut to 200: take 3, or a held take 1 or 2 kept via
+`retake_failed`) and `tells` are flags: shown, never sent back. `tells` is any process narration
+(`I checked`, `I've reviewed`, `Having read`, `Let me`, `I can confirm`), turn number (`turn 5`,
+`turns 3`, `t04`), unchanged-original narration (`the original is intact`, `nothing was
+modified`), hedging (`I think`, `I believe`, `perhaps`, `might`, `could potentially`, `arguably`,
+`it seems`) or any of eval's broader `voice.FILLER` phrases, counted as substrings anywhere in the
+prose (`to be clear`, `that said`, `in summary`, `delve`, and the stock ones); the counts ride on
+`voice.tells`, and `tells.filler` is the count eval reads.
 
 `reduce` grades each take with `_grade` before any side effect. With violations and fewer than
 `voice.MAX_TAKES` (3) takes so far, `_discard` records it as `kind="take"` and holds it: nothing
@@ -213,9 +229,10 @@ Your last take is in takes/t02-owner-take1.md beside the thread; keep its substa
 
 When the speaker was offered an image, `image_missing` names the one reference that passes (`an
 image not at images/t02-owner.svg or .png`); a speaker offered none (the chair, the junior IC, a
-refused folder) reads `an image missing or not your own file`. Both image rules, the word cap and
-one more count fit the clip whole; a longer list loses its last counts, which the speaker can
-reread for.
+refused folder) reads `an image missing or not your own file`. `filler` names the phrases found:
+`2 filler phrases: 'great question', 'hope this helps'`. Both image rules, the word cap and one
+more count fit the clip whole, and so do an image rule, the word cap and two named filler phrases;
+a longer list loses its last counts, which the speaker can reread for.
 
 | phase | what happens |
 |---|---|
@@ -236,7 +253,8 @@ is never sent back; its `voice` is null.
   pending retake mints `decision-take{k}`, otherwise `ruling`.
 - **A retake that delivers nothing** (its worker failed, or it sent signals only) keeps the held
   take, graded again, with `retake_failed` added; that take is then written, gated, re-checked and
-  snapshotted once. For the chair the held verdict is written to thread.md but routes nothing
+  snapshotted once. Its over-long stance or action is cut as take 3's would be, and the stance
+  flagged `stance_clipped`. For the chair the held verdict is written to thread.md but routes nothing
   (`delivered: false`, `ended: "chair retake failed"`, `needs_human_ticket_ids: []`), and the run
   ends failed.
 - **A fresh process mid-retake** has no meeting in memory, so the meeting is lost: thread.md ends
