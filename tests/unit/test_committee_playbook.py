@@ -792,6 +792,50 @@ def test_every_goal_stays_under_the_budget_at_maximum_size():
             # a retake names the take it replaces; take 1 has none to name
             assert ("your last take is in takes/" in low) is (retake is not None), shape
 
+    # Selection (D7): a derived reviewer with a 24-char slug and every persona
+    # field at its C2 clip limit, each library seat, and the three select
+    # goals, at take 1 and at a retake naming its last take. Their stems are
+    # the real ones (t99-<slug>, sN-<role>), and so is the last-take path.
+    # All of them are in the image-write class.
+    from playbooks.committee import selection
+
+    slug = "d" + "x" * 23
+    assert selection.SLUG_RE.fullmatch(slug) and slug not in cast.LIBRARY
+    fields = ("altitude", "goal", "ambition", "stake", "lens")
+    derived = {"role": slug, "name": "n" * 5000, "title": "t" * 5000, "rationale": "y" * 5000,
+               **{f: "f" * 5000 for f in fields}}
+    listed = [derived] + [{"role": lib, "rationale": "y" * 5000} for lib in cast.LIBRARY]
+    seats, invalid = selection.validate({"seats": listed, "not_seated": []}, cast.LIBRARY)
+    assert invalid == [] and [seat["role"] for seat in seats] == [slug, *cast.LIBRARY]
+    assert (len(seats[0]["name"]), len(seats[0]["title"])) == (
+        selection.NAME_MAX, selection.TITLE_MAX)
+    assert [len(seats[0][f]) for f in fields] == [selection.FIELD_MAX] * len(fields)
+    roster = {**selection.fixed_seats(), **{seat["role"]: seat for seat in seats}}
+    shapes = []
+    for retake in (None, "r" * 5000):
+        for role in (slug, *cast.LIBRARY):
+            base = f"t99-{role}"
+            shapes.append((f"{role} retake={retake is not None}", base, retake, cast.goal(
+                role, charge="c" * 5000, artifact=artifact, thread=thread, revised=revised,
+                action="a" * 5000, image=base, retake=retake,
+                last_take=f"takes/{base}-take2.md", roster=roster,
+            )))
+        for stage, role in enumerate(("owner", "manager", "senior_director"), start=1):
+            base = f"s{stage}-{role}"
+            shapes.append((f"{base} retake={retake is not None}", base, retake, cast.select_goal(
+                role, stage=stage, charge="c" * 5000, artifact=artifact, thread=thread,
+                image=base, retake=retake, last_take=f"takes/{base}-take2.md",
+            )))
+    for shape, base, retake, g in shapes:
+        assert len(g) < cast.GOAL_MAX, f"{shape}: {len(g)}"
+        low = g.lower()
+        assert "the only file you may write is one image" in low, shape
+        assert "images folder beside the thread (not your working directory)" in low, shape
+        assert "write no file at all" not in low, shape
+        assert f"{base}.svg or {base}.png" in g, shape
+        named = f"your last take is in takes/{base}-take2.md beside the thread"
+        assert (named in low) is (retake is not None), shape
+
 
 def _goal(role, **over):
     kw = dict(charge=_CHARGE, artifact=_ARTIFACT, thread=_THREAD, revised=_REVISED,
@@ -890,7 +934,167 @@ def test_the_tpm_and_tl_styles_ask_one_question_at_a_time():
     assert cast.CAST["senior_director"]["altitude"] == "company: three orgs and a year out."
 
 
+# --- the run's own roster and the selection goals (selection D4, D7) --------
+
+
+def _derived_roster(**fields):
+    """The fixed four plus one derived seat, crew_owner, built by selection.validate."""
+    from playbooks.committee import selection
+
+    entry = {
+        "role": "crew_owner",
+        "name": "Noor Haddad",
+        "title": "Crew Scheduling Lead",
+        "lens": "who rebuilds the rota when this slips.",
+        "rationale": "her team runs the rota this proposal changes",
+        **fields,
+    }
+    seats, invalid = selection.validate({"seats": [entry], "not_seated": []}, cast.LIBRARY)
+    assert invalid == [] and [s["role"] for s in seats] == ["crew_owner"]
+    return {**selection.fixed_seats(), "crew_owner": seats[0]}
+
+
+def test_persona_brief_title_and_goal_read_the_run_roster():
+    """A derived seat resolves only through the run's roster; None or {} is CAST."""
+    roster = _derived_roster()
+
+    assert cast.persona("crew_owner", roster) is roster["crew_owner"]
+    assert cast.persona(cast.CHAIR, roster) is roster["senior_director"]
+    assert cast.persona("pm", None) is cast.CAST["pm"]
+    assert cast.persona("pm", {}) is cast.CAST["pm"]  # the state's default before open
+    # CAST has no crew_owner, the roster is not CAST merged in, a typo still stops
+    for role, where in (("crew_owner", None), ("tpm", roster), ("cto", roster)):
+        with pytest.raises(KeyError):
+            cast.persona(role, where)
+
+    brief = cast.brief("crew_owner", roster)
+    assert brief.startswith("You are Noor Haddad, Crew Scheduling Lead.\n")
+    assert "lens: who rebuilds the rota when this slips." in brief
+    assert cast.title("crew_owner", "turn", turn=7, take=2, roster=roster) == (
+        "turn 7 — Noor Haddad (crew_owner) takes the floor (take 2)"
+    )
+    g = _goal("crew_owner", roster=roster, image="t07-crew_owner")
+    assert g.startswith(brief + "\n\n")
+    assert "t07-crew_owner.svg or t07-crew_owner.png" in g
+    assert "Your cap: 150 words." in g  # a derived seat is a reviewer
+    with pytest.raises(KeyError):
+        _goal("crew_owner")
+    # the chair's and the junior's shapes read the roster too
+    renamed = {**roster}
+    for role, name in (("senior_director", "Chair Seat"), (cast.JUNIOR, "Junior Seat")):
+        renamed[role] = {**roster[role], "name": name}
+    for role, name in ((cast.CHAIR, "Chair Seat"), (cast.JUNIOR, "Junior Seat")):
+        assert _goal(role, roster=renamed).startswith(f"You are {name}, "), role
+
+    # Seated with CAST's own personas, every shape is byte-identical to the
+    # roster-less call, which the pins above hold equal to the base branch.
+    seated = dict(cast.CAST)
+    for role in list(cast.CAST) + [cast.CHAIR]:
+        assert cast.brief(role, seated) == cast.brief(role), role
+        assert cast.title(role, "turn", turn=3, roster=seated) == cast.title(role, "turn", turn=3)
+        for over in ({}, {"image": "t03-x"}, {"retake": "Retake 2 of 3."}):
+            assert _goal(role, roster=seated, **over) == _goal(role, **over), (role, over)
+
+
+def test_the_select_title_names_the_stage_and_the_selector():
+    assert cast.title("owner", "select", turn=1) == (
+        "selection 1 — Maya Okonkwo (owner) seats the committee"
+    )
+    assert cast.title("manager", "select", turn=2, take=3) == (
+        "selection 2 — Ruth Delgado (manager) seats the committee (take 3)"
+    )
+    assert cast.title("senior_director", "select", turn=3, roster=_derived_roster()) == (
+        "selection 3 — Dana Whitfield (senior_director) seats the committee"
+    )
+
+
+def test_a_derived_brief_uses_the_derived_style():
+    """The style line is DERIVED_STYLE, never selector text (selection D6)."""
+    assert 0 < len(cast.DERIVED_STYLE) <= 80
+    roster = _derived_roster(style="loud, in **bold**, always")
+
+    assert roster["crew_owner"]["style"] == cast.DERIVED_STYLE
+    assert cast.brief("crew_owner", roster).splitlines()[-1] == f"style: {cast.DERIVED_STYLE}"
+
+
+_DONE_SELECT = "Done when: your answer ends with one hermes-selection block."
+
+
+def _select_goal(stage, **over):
+    role = ("owner", "manager", "senior_director")[stage - 1]
+    kw = dict(stage=stage, charge=_CHARGE, artifact=_ARTIFACT, thread=_THREAD,
+              image=f"s{stage}-{role}")
+    kw.update(over)
+    return cast.select_goal(role, **kw)
+
+
+def test_select_goals_carry_the_stage_duty_the_seat_rule_and_the_block():
+    from playbooks.committee import voice
+
+    duty = {
+        1: "You go first: propose the committee.",
+        2: "Amend the list above yours: keep, add or drop seats.",
+        3: "You ratify: your list is final and the meeting runs with it.",
+    }
+    for stage, role in ((1, "owner"), (2, "manager"), (3, "senior_director")):
+        g = _select_goal(stage)
+
+        assert g.startswith(cast.brief(role) + "\n\n"), stage
+        _labelled(
+            g,
+            f"The charge: {_CHARGE}",
+            f"The artifact under review: {_ARTIFACT}",
+            f"The thread: {_THREAD}",
+        )
+        for other, text in duty.items():
+            assert (text in g) == (other == stage), (stage, other)
+        # stage 1 has no list above it to amend (D2 rule 1)
+        fallback = "If the thread holds no usable list above yours, propose one."
+        assert (fallback in g) == (stage > 1), stage
+        for text in (
+            "You are seating the committee that will review this proposal.",
+            "Pick each seat from the seat library in the thread header, or name a "
+            "stakeholder the document justifies.",
+            "are always seated, so list the 1-10 others, each with a one-line reason.",
+            "under not_seated, with the seated role that represents them.",
+            "holding your full list, never just the changes",
+            # voice's fence reader skips a fence indented under a list item
+            "The ```hermes-selection fence and its closing ``` each start at "
+            "column 0 on their own line, never inside a list item:\n\n"
+            "```hermes-selection\n",
+            'A seat from outside the library also needs a "title"',
+            "Follow the ground rules at the top of the thread; they outrank your "
+            f"style. Your cap: {voice.cap_text(role)}.",
+            f"The only file you may write is one image, s{stage}-{role}.svg or "
+            f"s{stage}-{role}.png, in the images folder beside the thread",
+        ):
+            assert text in g, (stage, text)
+        assert g.endswith(f"\n\n{_DONE_SELECT}"), stage
+        assert "—" not in g and "–" not in g and " -- " not in g, stage
+        assert "hermes-turn" not in g, stage  # never turnblock.instruction()
+        assert "Seat library:" not in g and "Lens:" not in g, stage  # never inlined
+
+        note = "Retake 2 of 3. Your last take broke the ground rules: 212 words (cap 150)."
+        assert f"\n\n{note}\n\n{_DONE_SELECT}" in _select_goal(stage, retake=note)
+        # a retake names the take it replaces in one line under the note, as
+        # voice's goal does; take 1 has none to name
+        kept = f"takes/s{stage}-{role}-take1.md"
+        line = f"Your last take is in {kept} beside the thread; keep its substance."
+        assert f"\n\n{note}\n{line}\n\n{_DONE_SELECT}" in _select_goal(
+            stage, retake=note, last_take=kept)
+        assert "Your last take" not in _select_goal(stage, last_take=kept)
+        long = _select_goal(stage, retake="r" * 5000)
+        assert "r" * voice.RETAKE_NOTE_MAX not in long
+        assert "r" * (voice.RETAKE_NOTE_MAX - 1) in long
+
+    with pytest.raises(KeyError):
+        cast.select_goal(
+            "owner", stage=4, charge=_CHARGE, artifact=_ARTIFACT, thread=_THREAD, image="s4-owner"
+        )
+
+
 # --- thread.md: the transcript ---
+
 
 def test_thread_header_carries_the_charge_the_artifact_the_roster_and_the_rules(tmp_path):
     """write_header lands under HERMES_HOME: charge, artifact, everyone, then the ground rules."""

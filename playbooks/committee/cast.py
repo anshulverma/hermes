@@ -311,6 +311,8 @@ _TITLES = {
     "turn": "turn {n} — {name} ({role}) takes the floor",
     "edit": "turn {n} — {name} ({role}) edits: {action}",
     "decision": "{name} ({role}) delivers the committee decision",
+    # `n` is the selection stage. Payload-only, so the dash stays (voice D2).
+    "select": "selection {n} — {name} ({role}) seats the committee",
 }
 
 # A title is a board card's heading, not the brief: the full action is in the
@@ -318,25 +320,28 @@ _TITLES = {
 _TITLE_ACTION_MAX = 60
 
 
-def persona(role: str) -> dict:
-    """The nine-field persona for a role.
+def persona(role: str, roster: dict | None = None) -> dict:
+    """The persona for a role, from the run's roster or else from ``CAST``.
 
-    The ``chair`` sentinel resolves to the chairing persona, so the decision
+    ``roster`` is the run's own seating, slug -> seat record (selection C3).
+    None or empty means ``CAST``, so a legacy run and every caller that passes
+    no roster read today's nine; a roster is never merged with ``CAST``. The
+    ``chair`` sentinel resolves to the chairing persona, so the decision
     ticket is built with a name and a title rather than with a sentinel. An
     unknown role raises ``KeyError`` -- a typo in a role key should stop a run,
     not silently hand a worker somebody else's brief.
     """
-    return CAST[CHAIR_ROLE if role == CHAIR else role]
+    return (roster or CAST)[CHAIR_ROLE if role == CHAIR else role]
 
 
-def brief(role: str) -> str:
+def brief(role: str, roster: dict | None = None) -> str:
     """The persona block that opens every goal.
 
     Labelled lines rather than sentences: the fields are written as fragments
     ("wants a launch she can tell a story about"), and stitching them into prose
     produces grammar that reads as machine-written.
     """
-    p = persona(role)
+    p = persona(role, roster)
     return (
         f"You are {p['name']}, {p['title']}.\n"
         f"altitude: {p['altitude']}\n"
@@ -349,7 +354,13 @@ def brief(role: str) -> str:
 
 
 def title(
-    role: str, kind: str, *, turn: int, action: str | None = None, take: int = 1
+    role: str,
+    kind: str,
+    *,
+    turn: int,
+    action: str | None = None,
+    take: int = 1,
+    roster: dict | None = None,
 ) -> str:
     """The ticket payload's one-line title, for a turn, an edit or the decision.
 
@@ -364,7 +375,7 @@ def title(
     ``turn`` would title the DECISION ticket "takes the floor".
     """
     text = _TITLES[kind].format(
-        name=persona(role)["name"], role=role, n=turn,
+        name=persona(role, roster)["name"], role=role, n=turn,
         action=clip(action, _TITLE_ACTION_MAX),
     )
     return f"{text} (take {take})" if take > 1 else text
@@ -502,6 +513,17 @@ def clip(text: str | None, limit: int) -> str:
     return line[: limit - 1].rstrip() + "…"
 
 
+def _again(retake: str | None, last_take: str) -> str:
+    """A retake's own paragraph: the clipped note, then the last-take line.
+
+    Empty on take 1, and no last-take line when no take file was kept.
+    """
+    if retake is None:
+        return ""
+    named = f"\n{_LAST_TAKE.format(path=last_take)}" if last_take else ""
+    return f"{clip(retake, _voice.RETAKE_NOTE_MAX)}{named}\n\n"
+
+
 def goal(
     role: str,
     *,
@@ -513,8 +535,12 @@ def goal(
     image: str = "",
     retake: str | None = None,
     last_take: str = "",
+    roster: dict | None = None,
 ) -> str:
     """The whole goal string handed to one worker.
+
+    ``roster`` is the run's own seating, passed through to ``brief``; None is
+    ``CAST`` (selection D4).
 
     Four shapes: the chair's decision, the junior IC's edit, the junior IC's
     report-only retake, and the turn a reviewer or the owner takes. Every shape
@@ -530,14 +556,11 @@ def goal(
     """
     charge = clip(charge, CHARGE_MAX)
     pointer = _RULES_POINTER.format(cap=_voice.cap_text(role))
-    again = ""
-    if retake is not None:
-        named = f"\n{_LAST_TAKE.format(path=last_take)}" if last_take else ""
-        again = f"{clip(retake, _voice.RETAKE_NOTE_MAX)}{named}\n\n"
+    again = _again(retake, last_take)
 
     if role == CHAIR:
         return (
-            f"{brief(CHAIR)}\n\n"
+            f"{brief(CHAIR, roster)}\n\n"
             # The brief above is the senior_director's, and its `style` line --
             # "asks two questions and stops talking" -- is a fine REVIEWER
             # instruction and a terrible chair instruction. `is_done` accepts
@@ -575,7 +598,7 @@ def goal(
         if not str(action or "").strip():
             raise ValueError("a junior_ic goal needs the delegated action")
         head = (
-            f"{brief(JUNIOR)}\n\n"
+            f"{brief(JUNIOR, roster)}\n\n"
             "You support the owner of a proposal under committee review, and "
             "you speak only when the owner delegates something to you.\n\n"
             f"The charge: {charge}\n"
@@ -602,7 +625,7 @@ def goal(
     guardrail = _GUARDRAIL_IMAGE.format(image=image) if image else _GUARDRAIL
     instruction = _turnblock.instruction(owner=role == OWNER).strip()
     return (
-        f"{brief(role)}\n\n"
+        f"{brief(role, roster)}\n\n"
         "You are in a proposal review committee and it is your floor.\n\n"
         f"The charge: {charge}\n"
         f"The artifact under review: {artifact}\n"
@@ -617,4 +640,93 @@ def goal(
         f"{instruction}\n\n"
         f"{again}"
         f"{_DONE_TURN}"
+    )
+
+
+# --- the selection goals (selection D7) --------------------------------------
+#
+# Three stages seat the committee before t01: the owner proposes, her manager
+# amends, the chair ratifies. The seat library is in the thread header, written
+# once at `open`, so a goal names it and never inlines it. No
+# `turnblock.instruction()`: a selector's hermes-turn block is ignored.
+
+_SELECT_FRAMING = (
+    "You are seating the committee that will review this proposal. The "
+    "meeting has not started."
+)
+
+_SELECT_DUTY = {
+    1: "You go first: propose the committee.",
+    2: (
+        "Amend the list above yours: keep, add or drop seats. If the thread "
+        "holds no usable list above yours, propose one."
+    ),
+    3: (
+        "You ratify: your list is final and the meeting runs with it. If the "
+        "thread holds no usable list above yours, propose one."
+    ),
+}
+
+_SEAT_RULE = (
+    "Pick each seat from the seat library in the thread header, or name a "
+    "stakeholder the document justifies. The owner, the senior director, the "
+    "manager and the junior IC are always seated, so list the 1-10 others, "
+    "each with a one-line reason. Name every other stakeholder under "
+    "not_seated, with the seated role that represents them."
+)
+
+# Placeholders, not a worked example: a copied "<slug>" fails SLUG_RE and is
+# recorded as an invalid entry, where a copied real slug would seat someone.
+# The fence reader (voice's) skips a fence indented under a list item, so the
+# goal says where the fence lines go.
+_SELECT_BLOCK = (
+    "End with this block holding your full list, never just the changes. The "
+    "```hermes-selection fence and its closing ``` each start at column 0 on "
+    "their own line, never inside a list item:\n\n"
+    "```hermes-selection\n"
+    '{"seats": [{"role": "<slug>", "rationale": "<why this seat>"}],\n'
+    ' "not_seated": [{"stakeholder": "<who>", "reason": "<why not>", '
+    '"represented_by": "<seated role>"}]}\n'
+    "```\n\n"
+    "A role is a lowercase slug of letters, digits and underscores. A seat "
+    'from outside the library also needs a "title", and may add "name", '
+    '"altitude", "goal", "ambition", "stake" and "lens", one line each.'
+)
+
+_DONE_SELECT = "Done when: your answer ends with one hermes-selection block."
+
+
+def select_goal(
+    role: str,
+    *,
+    stage: int,
+    charge: str,
+    artifact: str,
+    thread: str,
+    image: str,
+    retake: str | None = None,
+    last_take: str = "",
+) -> str:
+    """The goal for selection stage ``stage`` (1-3), handed to a fixed seat.
+
+    D7's order: the brief and the framing, the material, the stage duty, the
+    seat rule, the block, the rules pointer and the image guardrail, the retake
+    note (with the last-take line, as in ``goal``), the Done line. ``image`` is
+    the stage's take-1 phase name (``s1-owner``), the stem of the one image it
+    may write. No ``roster``: the three selectors are fixed seats in ``CAST``.
+    An unknown stage raises ``KeyError``, like an unknown title kind.
+    """
+    return (
+        f"{brief(role)}\n\n"
+        f"{_SELECT_FRAMING}\n\n"
+        f"The charge: {clip(charge, CHARGE_MAX)}\n"
+        f"The artifact under review: {artifact}\n"
+        f"The thread: {thread}\n\n"
+        f"{_SELECT_DUTY[stage]}\n\n"
+        f"{_SEAT_RULE}\n\n"
+        f"{_SELECT_BLOCK}\n\n"
+        f"{_RULES_POINTER.format(cap=_voice.cap_text(role))}\n\n"
+        f"{_GUARDRAIL_IMAGE.format(image=image)}\n\n"
+        f"{_again(retake, last_take)}"
+        f"{_DONE_SELECT}"
     )
