@@ -132,11 +132,13 @@ const DECISION = {
 function seed(): void {
   // The snapshots the playbook writes at `open` and after each junior turn --
   // and nothing at ORIGINAL or REVISED, so a server that still opened a
-  // recorded path would 404 here exactly as it did in the container.
+  // recorded path would 404 here exactly as it did in the container. 0700 and
+  // 0600, as `state_dir` and `write_snapshot` make them: the container has to
+  // read the private files production writes, not world-readable ones.
   rmSync(`${HOME}/runs/${RUN}`, { recursive: true, force: true });
-  mkdirSync(`${HOME}/runs/${RUN}/doc`, { recursive: true });
+  mkdirSync(`${HOME}/runs/${RUN}/doc`, { recursive: true, mode: 0o700 });
   for (const [name, text] of Object.entries(SNAPSHOTS)) {
-    writeFileSync(`${HOME}/runs/${RUN}/doc/${name}`, text);
+    writeFileSync(`${HOME}/runs/${RUN}/doc/${name}`, text, { mode: 0o600 });
   }
 
   const db = new DatabaseSync(`${HOME}/queue.db`);
@@ -284,17 +286,36 @@ test('the committee tab renders the meeting oldest-first', async ({ page }) => {
   await expect(page.locator('[data-testid="verdict-recheck-3"]')).toContainText('APPLIED');
 });
 
-test('the document stepper shows Edit 1 as a diff, served inside the container', async ({ page }) => {
+test('the document stepper walks every version, served inside the container', async ({ page }) => {
   await openCommittee(page);
+  const verdict = page.locator('[data-testid="step-verdict"]');
+  const whole = page.locator('[data-testid="doc-markdown"]');
+
+  // Edit 1: a diff against the original, raised by turn 1's senior director.
   await page.locator('[data-testid="step-3"]').click();
   await expect(page.locator('[data-testid="step-3"]')).toHaveAttribute('aria-current', 'step');
-
   const rows = page.locator('[data-testid="diff-rows"]');
   await expect(rows).toContainText('- Staffing: six engineers for two quarters.');
   await expect(rows).toContainText('+ Staffing: two engineers for two quarters.');
-  await expect(page.locator('[data-testid="step-verdict"]')).toContainText('APPLIED');
+  await expect(verdict).toContainText('APPLIED');
+  await expect(page.locator('[data-testid="step-raised"]')).toContainText('Dana Whitfield');
   await expect(page.locator('[data-testid="step-delegated"]')).toContainText(ACTION_1);
   await expect(page.locator('[data-testid="doc-unreadable"]')).toHaveCount(0);
+
+  // Edit 2 did not apply: t07 is t03's bytes, so there is nothing to diff.
+  await page.locator('[data-testid="step-7"]').click();
+  await expect(page.locator('[data-testid="step-7"]')).toHaveAttribute('aria-current', 'step');
+  await expect(page.locator('[data-testid="diff-none"]')).toBeVisible();
+  await expect(verdict).toContainText('DID NOT APPLY');
+
+  // Final: the whole document as t03 left it, under the pending ruling.
+  await page.locator('[data-testid="step-final"]').click();
+  await expect(page.locator('[data-testid="final-label"]')).toContainText('Proposed — awaiting your ruling');
+  await expect(whole).toContainText('Staffing: two engineers for two quarters.');
+
+  // Original: the whole document as the committee was handed it.
+  await page.locator('[data-testid="step-original"]').click();
+  await expect(whole).toContainText('Staffing: six engineers for two quarters.');
 });
 
 test('one injected script tag, and the host React is the only React', async ({ page }) => {
