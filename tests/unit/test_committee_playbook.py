@@ -5894,6 +5894,67 @@ def test_a_failed_chair_retake_keeps_the_held_list():
     check_invariants(s, seen, sp, delivered=ok, reviewers=s["reviewers"])
 
 
+def test_a_third_violating_selection_take_is_kept_and_flagged():
+    """A stage has MAX_TAKES takes like any phase: a selector who breaks the cap
+    three times has her third take kept, flagged, and the next selector runs.
+    No fourth take is ever minted."""
+    wall = _selection_answer(["security"], prose=_SEAT_PROSE_LONG)
+    log = []
+
+    _, _, s, seen, sp, ok = _drive(
+        {}, selection={**DEFAULT_SELECTION, "owner": [wall, wall, wall]}, reductions=log)
+
+    assert [p for p in seen if p.startswith("s1-")] == [
+        "s1-owner", "s1-owner-take2", "s1-owner-take3"]
+    assert not any(p.endswith("-take4") for p in seen)
+    assert seen[seen.index("s1-owner-take3") + 1] == "s2-manager"
+    assert [(phase, t["take"]) for phase, t in _logged(log, "take")] == [
+        ("s1-owner", 1), ("s1-owner-take2", 2)]
+    [(phase, kept)] = [(p, d) for p, d in _logged(log, "selection") if d["stage"] == 1]
+    assert phase == "s1-owner-take3"
+    assert (kept["take"], kept["takes"], kept["kept"]) == (3, 3, True)
+    assert kept["violations"] == ["over_cap"]
+    assert [p["role"] for p in kept["proposed"]] == ["security"]
+    check_invariants(s, seen, sp, delivered=ok, reviewers=s["reviewers"])
+
+
+def test_a_selectors_long_stance_and_action_force_no_retake():
+    """Selectors are never asked for a hermes-turn block and none is applied to
+    them, so a 250-character stance or action there is no rule of theirs, on
+    take 1 or on a held take graded again. The same block on a meeting turn
+    is still retaken."""
+    signals = _turn_answer(
+        "I seat security; the list is below.", stance="s" * 250, action="a" * 250)
+    site = _NamedSite("local")
+
+    pb = _committee()
+    run = _run()
+    run.id = "committee-select-signals"
+    _at_stage_one(pb, run)
+    [red] = pb.reduce(run, "s1-owner", [_finding(
+        run, f"{run.id}/s1-owner", _selection_answer(["security"], prose=signals.strip()))], site)
+    assert red.kind == "selection"
+    assert (red.json["take"], red.json["takes"], red.json["violations"]) == (1, 1, [])
+    assert pb.next_phase(run) == "s2-manager"
+
+    meeting = _committee()
+    turn = _run(phase="t02-owner")
+    turn.id = "committee-turn-signals"
+    meeting._state(turn).update(current_role="owner", current_turn=2, opening=[], base="t02-owner")
+    [take] = meeting.reduce(turn, "t02-owner", [_finding(turn, f"{turn.id}/t02-owner", signals)], site)
+    assert take.kind == "take"
+    assert take.json["violations"] == ["action_too_long", "stance_too_long"]
+
+    # A held take kept because the retake delivered nothing is graded again.
+    held = _selection_answer(["security"], prose=_turn_answer(
+        _SEAT_PROSE_LONG, stance="s" * 250).strip())
+    log = []
+    _drive({}, selection={**DEFAULT_SELECTION, "owner": [held, None]}, reductions=log)
+    assert [t["violations"] for _, t in _logged(log, "take")] == [["over_cap"]]
+    assert [d["violations"] for _, d in _logged(log, "selection") if d["stage"] == 1] == [
+        ["over_cap", "retake_failed"]]
+
+
 # --- registration and wiring ---------------------------------------------
 
 

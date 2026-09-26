@@ -63,6 +63,9 @@ _FINAL_KEYS = (
     "seated", "reviewers", "considered", "considered_dropped", "invalid_dropped", "fallback",
 )
 
+# voice's rules on the hermes-turn block, which `_reduce_select` never applies
+_TURN_BLOCK_RULES = ("stance_too_long", "action_too_long")
+
 
 def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> None:
     """The gates of spec 5.4, applied to one settled turn.
@@ -860,7 +863,11 @@ class CommitteePlaybook:
         errors: list[str] = []
         role, stage = s["current_role"], s["current_stage"]
         answer = _latest_answer(findings)
-        discard, metrics, violations, flags = self._grade(run, s, role, answer)
+        _, metrics, violations, flags = self._grade(run, s, role, answer)
+        # A selector is never asked for a hermes-turn block and none is applied,
+        # so its stance and action lengths are no rule of hers.
+        violations = [v for v in violations if v not in _TURN_BLOCK_RULES]
+        discard = bool(violations) and s["take"] < voice.MAX_TAKES
         if discard:
             # Before any parse, thread write or `stages` append, so a discarded
             # take's list is never the stage's. `_retake` re-mints the stage off
@@ -872,6 +879,7 @@ class CommitteePlaybook:
         answer, take, takes, metrics, violations, flags = self._keep(
             run, s, role, answer, metrics, violations, flags
         )
+        violations = [v for v in violations if v not in _TURN_BLOCK_RULES]  # a held take regraded
         # Off the answer `_keep` returns: a retake that delivered nothing keeps
         # the held take, which WAS delivered, so stage 3's code comes from its
         # list, never "no_answer".
