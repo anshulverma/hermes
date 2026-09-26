@@ -1346,7 +1346,7 @@ def verify_evidence(item: object, snap: dict) -> dict | None:
         return None
     quote = _collapse(quote[:QUOTE_MAX])
     out = {"turn": turn, "where": where, "quote": quote, "line": None, "verified": False}
-    if len(quote) < QUOTE_MIN_CHARS or len(quote.split()) < QUOTE_MIN_WORDS:
+    if len(quote) < QUOTE_MIN_CHARS or words(quote) < QUOTE_MIN_WORDS:
         return out
     key = quote[:40]
     if where in ("original", "revised"):
