@@ -18,10 +18,16 @@ import re
 import shutil
 import sqlite3
 import statistics
+import subprocess
+import sys
 import time
 import urllib.parse
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from engine.db.migrate import apply_migrations
 from playbooks.committee import eval as E
@@ -1905,3 +1911,310 @@ def test_eval_json_path_and_ledger_writes(tmp_path, monkeypatch):
     size = ledger.stat().st_size
     assert ev.read_ledger(ledger, limit=size) is not None
     assert ev.read_ledger(ledger, limit=size - 1) is None
+
+
+# --- the registered committee-eval playbook (spec D1) ----------------------------
+
+
+def _eval_tree(root):
+    """Every regular file under ``root`` by relative path, minus SQLite's -shm/-wal."""
+    return {
+        str(p.relative_to(root)): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and not p.name.endswith(("-shm", "-wal"))
+    }
+
+
+def _eval_run(phase, reductions=(), run_id="run-100"):
+    """A committee-eval Run snapshot, the shape queue.load_run hands a playbook."""
+    from engine.models import Run
+
+    return Run(id=run_id, playbook="committee-eval", site="local", base_ref="main",
+               config={}, phase=phase, reductions=list(reductions))
+
+
+def _eval_measure(monkeypatch, eval_home, home, target_run):
+    """measure's reduce on (home, target_run), with eval_home as HERMES_HOME."""
+    monkeypatch.setenv("HERMES_HOME", str(eval_home))
+    monkeypatch.setenv(E.ENV_RUN, target_run)
+    monkeypatch.setenv(E.ENV_HOME, str(home))
+    (red,) = E.CommitteeEvalPlaybook().reduce(
+        _eval_run("measure"), "measure", [], SimpleNamespace(name="local"))
+    assert red.kind == "eval_target"
+    assert red.json["error"] is None, red.json["error"]
+    return red
+
+
+@pytest.fixture
+def eval_cli_home(tmp_path, monkeypatch):
+    """An empty eval HERMES_HOME that `hermes run` drives in-process.
+
+    It uses the real local site over a throwaway one-commit repo and the mock
+    agent (no judge ticket is ever dispatched through it here). None of the
+    host's HERMES_* configuration applies, and the master loop never sleeps
+    between cycles.
+    """
+    from engine import dispatch
+
+    for key in [k for k in os.environ if k.startswith("HERMES_")]:
+        monkeypatch.delenv(key)
+    home = tmp_path / "eval-home"
+    home.mkdir()
+    repo = tmp_path / "src"
+    repo.mkdir()
+    git_env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    for cmd in (["git", "init", "-q", "-b", "main"],
+                ["git", "commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(cmd, cwd=repo, check=True, env=git_env)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_REPO", str(repo))
+    monkeypatch.setenv("HERMES_AGENT", "mock")
+    monkeypatch.setenv("HERMES_PLAYBOOK_MODULES", "playbooks.committee")
+    monkeypatch.setattr(dispatch.time, "sleep", lambda seconds: None)
+    return home
+
+
+def test_invalid_target_ends_failed(tmp_path, monkeypatch, eval_cli_home):
+    """T19: every bad target ends the eval run `failed` at `score`, with 0 judge tickets.
+
+    Validation lives in measure's reduce, which never raises, so a bad target
+    can never strand the run `running` the way a seed-time ValueError would
+    (D1). Nothing is written to a source home, to the ledger, or anywhere
+    outside runs/<eval-run>/.
+    """
+    from engine import cli
+
+    for name in ("r9", "r2"):
+        (tmp_path / name).mkdir()
+    r9_home, r9_id = build_home(tmp_path / "r9", "run-9")
+    r2_home, r2_id = build_home(tmp_path / "r2", "run-2")
+    (r2_home / "runs" / r2_id / "thread.md").unlink()  # legacy: its bodies live only there
+    src = sqlite3.connect(str(r9_home / "queue.db"))
+    src.execute(
+        "INSERT INTO runs (id, playbook, site, base_ref, config_json, state, phase,"
+        " created_at, updated_at) VALUES ('run-50', 'committee', 'local', 'main', '{}',"
+        " 'running', 'open', 0, 0)"
+    )
+    src.commit()
+    src.close()
+    nope = tmp_path / "no-such-home"
+    before = {name: _eval_tree(tmp_path / name) for name in ("r9", "r2")}
+
+    cases = [
+        ({}, "HERMES_COMMITTEE_EVAL_RUN is not set"),
+        ({E.ENV_RUN: r9_id, E.ENV_HOME: str(nope)}, f"no queue.db in {os.path.realpath(nope)}"),
+        ({E.ENV_RUN: "run-404", E.ENV_HOME: str(r9_home)}, "run not found: run-404"),
+        # run-1 is the first case's own eval run, in the eval home (no ENV_HOME)
+        ({E.ENV_RUN: "run-1"}, "not a committee run: run-1 (committee-eval)"),
+        ({E.ENV_RUN: "run-50", E.ENV_HOME: str(r9_home)}, "no delivered decision: run-50"),
+        ({E.ENV_RUN: r2_id, E.ENV_HOME: str(r2_home)}, "legacy run without thread.md"),
+    ]
+    eval_runs = []
+    for env, reason in cases:
+        for key in (E.ENV_RUN, E.ENV_HOME):
+            monkeypatch.delenv(key, raising=False)
+        for key, value in env.items():
+            monkeypatch.setenv(key, value)
+        assert cli.main(["run", "committee-eval", "--site", "local", "--wait"]) == 0, reason
+        db = sqlite3.connect(str(eval_cli_home / "queue.db"))
+        try:
+            run_id, state, phase = db.execute(
+                "SELECT id, state, phase FROM runs WHERE playbook='committee-eval'"
+                " ORDER BY rowid DESC LIMIT 1").fetchone()
+            tickets = db.execute(
+                "SELECT COUNT(*) FROM tickets WHERE run_id=?", (run_id,)).fetchone()[0]
+            reductions = [(kind, json.loads(doc)) for kind, doc in db.execute(
+                "SELECT kind, json FROM reductions WHERE run_id=? ORDER BY id", (run_id,))]
+        finally:
+            db.close()
+        eval_runs.append(run_id)
+        assert (state, phase, tickets) == ("failed", "score", 0), reason
+        assert [kind for kind, _ in reductions] == ["eval_target"], reason
+        assert reductions[0][1]["error"] == reason
+    assert eval_runs[0] == "run-1"
+
+    # A site that is neither local nor fan-*: site.load knows none, so a stub on reduce.
+    pb = E.CommitteeEvalPlaybook()
+    monkeypatch.setenv(E.ENV_RUN, r9_id)
+    monkeypatch.setenv(E.ENV_HOME, str(r9_home))
+    ssh = SimpleNamespace(name="ssh")
+    (bad,) = pb.reduce(_eval_run("measure", run_id="run-77"), "measure", [], ssh)
+    assert (bad.kind, bad.json["error"]) == ("eval_target", "site must be local or fan-*: ssh")
+    judge = _eval_run("judge", [bad], run_id="run-77")
+    assert pb.seed(judge, ssh) == []
+    assert pb.reduce(judge, "judge", [], ssh) == []
+    monkeypatch.delenv(E.ENV_RUN)
+    (fan,) = pb.reduce(_eval_run("measure", run_id="run-77"), "measure", [],
+                       SimpleNamespace(name="fan-claude"))
+    assert fan.json["error"] == "HERMES_COMMITTEE_EVAL_RUN is not set"  # fan-* passes the site check
+
+    assert not nope.exists()  # a mistyped home gets no queue.db
+    assert {name: _eval_tree(tmp_path / name) for name in ("r9", "r2")} == before
+    assert not (eval_cli_home / "evals.jsonl").exists()
+    assert not (eval_cli_home / "evals").exists()
+    runs = eval_cli_home / "runs"
+    assert not runs.exists() or {p.name for p in runs.iterdir()} <= set(eval_runs)
+
+
+def test_judge_seed_from_reductions_only(tmp_path, monkeypatch):
+    """T20: with the env unset, a fresh instance seeds, reduces and ends the judge from the database alone.
+
+    That is all `hermes run resume <eval-run> --wait` in a new process has: the
+    eval_target reduction as a reductions row stores it, the judge's findings, and
+    the files under runs/<eval-run>/inputs/.
+    """
+    from engine import contracts
+    from engine.models import Finding, Reduction
+
+    (tmp_path / "r9").mkdir()
+    home, run_id = build_home(tmp_path / "r9", "run-9")
+    measured = _eval_measure(monkeypatch, tmp_path / "eval-home", home, run_id)
+    stored = Reduction(kind="eval_target", json=json.loads(json.dumps(measured.json)),
+                       id=1, run_id="run-100", phase="measure")
+    monkeypatch.delenv(E.ENV_RUN)
+    monkeypatch.delenv(E.ENV_HOME)
+    pb = E.CommitteeEvalPlaybook()
+    local = SimpleNamespace(name="local")
+
+    judge = _eval_run("judge", [stored])
+    (ticket,) = pb.seed(judge, local)
+    assert (ticket.id, ticket.run_id, ticket.phase) == ("run-100/judge", "run-100", "judge")
+    assert (ticket.state, ticket.resource_req, ticket.priority, ticket.attempts) == (
+        "queued", "cpu", 0.0, 0)
+    assert set(ticket.payload) == {"role", "title", "goal", "kind"}
+    assert (ticket.payload["role"], ticket.payload["kind"]) == ("judge", "judge")
+    assert ticket.payload["goal"] == E.judge_goal(stored.json["inputs"])
+    contracts.validate(ticket.payload, pb.payload_schema("judge"))
+    assert pb.seed(replace(judge, phase="measure"), local) == []
+    assert pb.seed(replace(judge, phase="score"), local) == []
+    errored = Reduction(kind="eval_target", json={"target": {"home": None, "run": None},
+                                                  "error": "HERMES_COMMITTEE_EVAL_RUN is not set"})
+    assert pb.seed(_eval_run("judge", [errored]), local) == []
+
+    # The judge quotes inputs/entries.json verbatim (whitespace collapsed, 80 chars).
+    inputs = stored.json["inputs"]
+    entries = json.loads((Path(inputs["dir"]) / inputs["entries"]).read_text(encoding="utf-8"))
+
+    def cite(where, text, turn=None):
+        return [{"turn": turn, "where": where, "quote": " ".join(text.split())[:80]}]
+
+    fence = {
+        "verdict_grounded": {"score": 4, "rationale": "grounded",
+                             "evidence": cite("decision", entries["decision"]["chair_prose"])},
+        "edits_address_concerns": {"score": 3, "rationale": "partly",
+                                   "evidence": cite("turn", entries["turns"]["2"]["body"], 2)},
+        "concern_coverage": {"score": 2, "rationale": "gaps",
+                             "evidence": cite("header", entries["header"]["text"])},
+    }
+    tick = "`" * 3
+    answer = f"Scored.\n\n{tick}{E.FENCE_TAG}\n{json.dumps(fence)}\n{tick}\n"
+    found = [Finding(run_id="run-100", ticket_id="run-100/judge", kind="result",
+                     json={"answer": answer})]
+    (red,) = pb.reduce(judge, "judge", found, local)
+    body = red.json
+    assert red.kind == "eval" and body["judge"]["status"] == "ok", body["judge"]
+    assert (body["schema"], body["eval_run"]) == (1, "run-100")
+    assert (body["target"]["home"], body["target"]["run"]) == (os.path.realpath(home), run_id)
+    assert list(body["dimensions"]) == list(E.DIMENSIONS)
+    assert [body["dimensions"][d]["score"] for d in E.JUDGE_DIMS] == [4, 3, 2]
+    for d in E.JUDGE_DIMS:
+        assert body["dimensions"][d]["evidence"][0]["verified"] is True, d
+    for d in E.DETERMINISTIC_DIMS:
+        assert body["dimensions"][d] == stored.json["deterministic"][d]
+    assert body["flags"] == stored.json["flags"]
+    assert body["headline"].startswith("weakest: concision 1/5: ")  # ties go to D5 order
+    assert (body["judge"]["cost_usd"], body["judge"]["tokens"]) == (None, None)  # no trace
+    path = E.eval_json_path(E.eval_home(), os.path.realpath(home), run_id)
+    assert json.loads(path.read_text(encoding="utf-8")) == body
+    assert pb.is_done(_eval_run("score", [red]))
+    assert not pb.is_done(_eval_run("judge", [red]))
+    assert not pb.is_done(_eval_run("score", [stored]))
+    assert not pb.is_done(_eval_run("score", [Reduction(kind="eval", json={"judge": "ok"})]))
+
+    # A resume re-reduces judge: a second line with the same eval_run (readers keep the last).
+    pb.reduce(judge, "judge", found, local)
+    lines = E.ledger_path(E.eval_home()).read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["eval_run"] for line in lines] == ["run-100", "run-100"]
+
+
+def test_eval_playbook_has_no_view(tmp_path):
+    """T21: committee-eval registers from the package, conforms, and has no view seam.
+
+    With no view_asset/view_data, the server gives its runs the generic tabs, as
+    it does any viewless playbook (D1). No tab is added or hidden for anyone.
+    """
+    from engine import playbook as _playbook
+    from engine.models import Driver
+    from engine.playbook import Playbook
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    pb = _playbook.load("committee-eval")
+    assert isinstance(pb, E.CommitteeEvalPlaybook) and isinstance(pb, Playbook)
+    assert getattr(pb, "view_asset", None) is None
+    assert getattr(pb, "view_data", None) is None
+    assert vars(pb) == {}  # no instance state: resume works in any process
+    assert (pb.name, pb.phases) == ("committee-eval", ["measure", "judge", "score"])
+    assert isinstance(_playbook.load("committee"), CommitteePlaybook)
+    for phase in ("measure", "judge", "score", "anything"):
+        assert pb.payload_schema(phase) == E.PAYLOAD_SCHEMA
+        assert pb.result_schema(phase) == E.RESULT_SCHEMA
+        assert pb.driver(phase) == Driver(command=None, args={}, loop=None)
+    assert E.PAYLOAD_SCHEMA["properties"]["kind"]["enum"] == ["judge"]
+    assert E.RESULT_SCHEMA["additionalProperties"] is True
+    assert pb.verify(None, None, None, None) is True
+    assert [pb.next_phase(_eval_run(p)) for p in pb.phases] == ["judge", "score", None]
+
+    # The package import alone registers it; that is all HERMES_PLAYBOOK_MODULES does.
+    # A subprocess, because this module has already imported eval in-process.
+    workspace = Path(__file__).resolve().parents[2]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("HERMES_")}
+    env.update({"PYTHONPATH": str(workspace), "HERMES_HOME": str(tmp_path)})
+    script = (
+        "import playbooks.committee\n"
+        "from engine import playbook as p\n"
+        "pb = p.load('committee-eval')\n"
+        "print(type(pb).__name__, type(p.load('committee')).__name__,"
+        " hasattr(pb, 'view_asset'), hasattr(pb, 'view_data'))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", script], cwd=workspace, env=env,
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["CommitteeEvalPlaybook", "CommitteePlaybook", "False", "False"]
+
+
+def test_measure_without_thread_or_copies(tmp_path, monkeypatch):
+    """G7: a non-legacy run with no thread.md, original or revised copy is still measured.
+
+    It gets the thread_missing flag, and every line is null. entries.json is built
+    from the reductions, bytes.* are null, and the missing copies' inputs names
+    are None.
+    """
+    (tmp_path / "r9").mkdir()
+    home, run_id = build_home(tmp_path / "r9", "run-9")
+    run_dir = home / "runs" / run_id
+    for gone in (run_dir / "thread.md", run_dir / "revised" / "federation-future.md",
+                 run_dir / "doc" / "00-original.md",
+                 tmp_path / "r9" / "artifact" / "federation-future.md"):
+        gone.unlink()
+    et = _eval_measure(monkeypatch, tmp_path / "eval-home", home, run_id).json
+
+    assert [f for f in et["flags"] if f["id"] == "thread_missing"] == [
+        {"id": "thread_missing", "turn": None, "line": None, "quote": ""}]
+    assert all(f["line"] is None for f in et["flags"])
+    assert all(m["line"] is None for m in et["metrics"]["outside_room_mentions"])
+    assert et["metrics"]["bytes"] == {"original": None, "revised": None}
+    inputs = et["inputs"]
+    assert (inputs["thread"], inputs["original"], inputs["revised"]) == (None, None, None)
+    inputs_dir = Path(inputs["dir"])
+    assert not (inputs_dir / "thread.md").exists()
+    entries = json.loads((inputs_dir / inputs["entries"]).read_text(encoding="utf-8"))
+    assert entries["header"] == {"text": "", "line_start": None, "line_end": None}
+    target = E.load_target(os.path.realpath(home), run_id)
+    assert set(entries["turns"]) == {str(n) for n in target.turns}
+    for n in target.turns:
+        entry = entries["turns"][str(n)]
+        assert entry["body"] == E.body(target, n), n
+        assert (entry["line_start"], entry["line_end"]) == (None, None), n
+    assert entries["decision"]["chair_prose"] == E.chair_prose(target.decision)
+    assert (entries["decision"]["line_start"], entries["decision"]["line_end"]) == (None, None)

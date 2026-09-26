@@ -24,6 +24,7 @@ import os
 import re
 import sqlite3
 import statistics
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -33,6 +34,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from engine import config
+from engine import playbook as _playbook
+from engine.models import Driver, Finding, Reduction, Run, Ticket
 from playbooks.committee import cast, thread, turnblock
 from playbooks.committee.playbook import _SIMULATION
 from playbooks.committee.voice import RULES, measure
@@ -1579,3 +1582,274 @@ def calibration(ledger_lines: list[dict]) -> dict[str, str]:
         labels[version] = (f"off (Δ{worst})" if worst >= 2
                            else "calibrated" if len(diffs) >= MIN_ANCHORS else "uncalibrated")
     return labels
+
+
+# --- the playbook (D1): measure -> judge -> score ----------------------------
+
+PAYLOAD_SCHEMA = {
+    "type": "object",
+    "required": ["role", "title", "goal", "kind"],
+    "additionalProperties": False,
+    "properties": {
+        "role": {"type": "string"},
+        "title": {"type": "string"},
+        "goal": {"type": "string"},
+        "kind": {"type": "string", "enum": ["judge"]},
+    },
+}
+
+RESULT_SCHEMA = {
+    "type": "object",
+    "required": ["answer"],
+    "additionalProperties": True,
+    "properties": {"answer": {"type": "string"}},
+}
+
+# Static. The snapshot next_phase gets carries the PRIOR phase's reductions
+# (engine/queue.py _load_prior_reductions), never the reductions of the phase
+# it is leaving.
+_NEXT = {"measure": "judge", "judge": "score", "score": None}
+
+
+def _eval_target(run: Run) -> dict | None:
+    """The latest ``eval_target`` reduction's json on this snapshot, or None."""
+    for r in reversed(run.reductions or []):
+        if r.kind == "eval_target" and isinstance(r.json, dict):
+            return r.json
+    return None
+
+
+def _changed(digests: dict, base: str | None = None) -> list[str]:
+    """Every recorded file that no longer hashes to its sha256, as a path string.
+
+    ``thread.digest`` is "" for a file that has gone, so a deleted copy counts as
+    changed. A relative key resolves against ``base`` (the inputs directory).
+    """
+    out = []
+    for key, want in sorted(digests.items()):
+        p = Path(key)
+        if base and not p.is_absolute():
+            p = Path(base) / p
+        if thread.digest(p) != want:
+            out.append(str(p))
+    return out
+
+
+def _target_json(t: Target) -> dict:
+    """C5 ``target``. Its (home, run, created_at) is the key the ledger and compare share."""
+    return {"home": t.home, "run": t.run_id, "created_at": t.created_at,
+            "playbook": "committee", "state": t.state,
+            "review_state": t.review_state, "legacy": t.legacy}
+
+
+class CommitteeEvalPlaybook:
+    """Score one finished committee run in three phases: ``measure``, ``judge``, ``score`` (D1).
+
+    No instance state. Everything a later phase needs rides on the eval_target
+    reduction or on a digest-pinned file under runs/<eval-run>/inputs/, so
+    ``hermes run resume <eval-run> --wait`` finishes the run in a fresh process.
+    The environment is read once, in measure's reduce. There is no view seam
+    either, so eval runs get the generic tabs, like any viewless playbook.
+    """
+
+    name = "committee-eval"
+    phases = ["measure", "judge", "score"]
+
+    def seed(self, run: Run, site) -> list[Ticket]:
+        """One goal-only judge ticket, built from the eval_target reduction alone.
+
+        measure and score seed nothing. judge seeds nothing either when measure
+        recorded an error: the run then walks on to score and ends failed. A
+        seed-time ValueError (engine/cli.py cmd_run) would instead strand it
+        ``running``.
+        """
+        if run.phase != "judge":
+            return []
+        et = _eval_target(run)
+        if not et or et.get("error"):
+            return []
+        target = et.get("target") or {}
+        return [Ticket(
+            id=f"{run.id}/judge",
+            run_id=run.id,
+            phase="judge",
+            state="queued",
+            resource_req="cpu",
+            priority=0.0,
+            attempts=0,
+            payload={
+                "role": "judge",
+                "title": f"Score committee run {target.get('run')} on the rubric",
+                "goal": judge_goal(et["inputs"]),
+                "kind": "judge",
+            },
+        )]
+
+    def payload_schema(self, phase: str) -> dict:
+        """C3, for every phase."""
+        return PAYLOAD_SCHEMA
+
+    def result_schema(self, phase: str) -> dict:
+        """``{answer}``, with extra keys allowed: a contract fail is terminal on first sight."""
+        return RESULT_SCHEMA
+
+    def driver(self, phase: str) -> Driver:
+        """Goal-only (C1). How to judge travels in the goal and in inputs/rubric.md."""
+        return Driver(command=None, args={}, loop=None)
+
+    def verify(self, run, ticket, result, site) -> bool:
+        """Always True. A False parks the judge in needs_human and blocks the run.
+
+        The no-trust checks (verbatim quotes, re-hashing) live in judge's reduce.
+        """
+        return True
+
+    def reduce(self, run: Run, phase: str, findings: list[Finding], site) -> list[Reduction]:
+        """Fold one phase. Never raises: engine/dispatch.py _do_reduce has no guard."""
+        if phase == "measure":
+            return [Reduction(kind="eval_target", json=self._measure(run, site))]
+        if phase != "judge":
+            return []
+        try:
+            return self._judge(run, findings)
+        except Exception as exc:  # a malformed reduction or a failed write, never a raise
+            return [Reduction(kind="eval", json={
+                "eval_run": run.id,
+                "judge": {"status": "failed",
+                          "error": f"judge reduce: {type(exc).__name__}: {exc}"},
+            })]
+
+    def _measure(self, run: Run, site) -> dict:
+        """Resolve, validate, measure and snapshot the target (D2-D6). Returns the C4 eval_target.
+
+        This is the only reader of HERMES_COMMITTEE_EVAL_RUN and _HOME. A failure
+        is the value ``{"target": <partial>, "error": reason}``, and a failed
+        validation has written nothing anywhere.
+        """
+        run_id = os.environ.get(ENV_RUN) or None
+        partial = {"home": None, "run": run_id}
+        try:
+            partial["home"] = home = source_home()
+            name = str(getattr(site, "name", ""))
+            if name != "local" and not name.startswith("fan-"):
+                # inputs/ and every judge read live under the eval home, on the master
+                return {"target": partial, "error": f"site must be local or fan-*: {name}"}
+            reason = validate_target(home, run_id)
+            if reason:
+                return {"target": partial, "error": reason}
+            measured = measure_target(home, run_id)
+            t = measured["target"]
+            versions = dimension_versions()
+            version = rubric_version(versions)
+            block = deterministic_block(
+                measured["metrics"], measured["flags"], measured["deterministic"])
+            written = write_inputs(run.id, t, block, versions, version)
+        except Exception as exc:  # reduce never raises
+            return {"target": partial, "error": f"measure failed: {type(exc).__name__}: {exc}"}
+        return {
+            "target": _target_json(t),
+            "legacy": t.legacy,
+            "digests": written["digests"],
+            "inputs_digests": written["inputs_digests"],
+            "inputs": written["inputs"],
+            "rubric": versions,
+            "rubric_version": version,
+            "metrics": measured["metrics"],
+            "flags": measured["flags"],
+            "deterministic": measured["deterministic"],
+            "original_source": t.original_source,
+            "error": None,
+        }
+
+    def _judge(self, run: Run, findings: list[Finding]) -> list[Reduction]:
+        """Re-hash, score and pick a status, then write eval.json and one ledger line (D6, D7).
+
+        It reads only the eval_target reduction, inputs/ and this run's own traces,
+        so a fresh process can re-reduce it. A second reduce appends a second
+        ledger line with the same eval_run, which readers dedupe. Once measure has
+        succeeded, every status writes, so a failed judge keeps the deterministic half.
+        """
+        et = _eval_target(run)
+        if not et or et.get("error"):
+            return []  # is_done then sees only the error, and the run ends failed
+        inputs, metrics = et["inputs"], et["metrics"]
+        # Re-hash first. A run whose sources or copies changed is never scored, so
+        # a quote planted in an inputs/ copy is never even read.
+        changed = (_changed(et.get("digests") or {})
+                   + _changed(et.get("inputs_digests") or {}, inputs.get("dir")))
+        answers = [f.json.get("answer") for f in findings or () if isinstance(f.json, dict)]
+        answer = next((a for a in reversed(answers) if isinstance(a, str) and a.strip()), None)
+        parsed = None if changed else parse_answer(answer)
+        judged, rejected = score_judge(parsed, inputs, metrics)
+        flags = list(et["flags"])
+        if changed:
+            flags.append({"id": "target_changed_during_eval", "turn": None, "line": None,
+                          "quote": "", "paths": changed})
+            status, error = "failed", "target changed during eval: " + ", ".join(changed)
+        elif not findings:
+            status, error = "failed", "the judge returned no result (driver_failed or timeout)"
+        elif parsed is None:
+            status, error = "unparseable", "no parseable hermes-eval fence"
+        else:
+            unscored = [f"{d}: {judged[d]['error']}" for d in JUDGE_DIMS
+                        if judged[d]["score"] is None]
+            status, error = ("partial", "; ".join(unscored)) if unscored else ("ok", None)
+        if status == "failed":
+            for d in JUDGE_DIMS:
+                judged[d]["score"], judged[d]["error"] = None, error
+        dims = {d: judged[d] if d in JUDGE_DIMS else et["deterministic"][d] for d in DIMENSIONS}
+        traces = config.resolve_home() / "runs" / run.id / "traces"
+        totals = trace_totals([thread.read_regular(p) for p in sorted(traces.glob("*.jsonl"))])
+        body = {
+            "schema": 1,
+            "rubric_version": et["rubric_version"],
+            "rubric": et["rubric"],
+            "target": et["target"],
+            "eval_run": run.id,
+            "evaluated_at": time.time(),
+            "original_source": et["original_source"],
+            "metrics": metrics,
+            "flags": flags,
+            "dimensions": dims,
+            "headline": headline(dims, error),
+            "judge": {
+                "status": status,
+                "evidence_rejected": rejected,
+                "cost_usd": totals["cost_usd"] if totals["found"] else None,
+                "tokens": totals["tokens"],
+                "error": error,
+            },
+        }
+        home = eval_home()
+        write_eval_json(eval_json_path(home, et["target"]["home"], et["target"]["run"]), body)
+        append_ledger(home, eval_line(body))
+        return [Reduction(kind="eval", json=body)]
+
+    def next_phase(self, run: Run) -> str | None:
+        """measure -> judge -> score -> None, whatever measure found."""
+        return _NEXT.get(run.phase)
+
+    def is_done(self, run: Run) -> bool:
+        """Done iff the judge's eval says ok, read at the zero-ticket score sentinel.
+
+        At ``score`` the snapshot carries judge's reductions, or measure's when
+        judge recorded none (an error target). It never raises on a malformed one.
+        """
+        return run.phase == "score" and any(
+            r.kind == "eval" and isinstance(r.json, dict)
+            and isinstance(r.json.get("judge"), dict)
+            and r.json["judge"].get("status") == "ok"
+            for r in run.reductions or ()
+        )
+
+
+# `python -m playbooks.committee.eval` imports the package first, which imports this
+# module and registers it. runpy then runs this file a second time as __main__.
+# Only the imported copy registers (engine/playbook.py register is last-write-wins).
+if __name__ != "__main__":
+    _playbook.register("committee-eval", CommitteeEvalPlaybook())
+
+if __name__ == "__main__":
+    from playbooks.committee.eval_cli import main
+
+    sys.exit(main())
