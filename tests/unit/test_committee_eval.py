@@ -442,6 +442,42 @@ def test_thread_parser_and_chair_prose(tmp_path):
         assert "APPLIED" not in prose and _SIMULATION not in prose
 
 
+def test_outside_room_legacy_and_artifact_rules(tmp_path):
+    """D3 rules no baseline pins. outside_room_mentions counts only lines inside turn and
+    decision entries, never the header or a later loop's pre-t01 lines. One turn without
+    ``body`` makes a run legacy. The artifact is the LATEST reduction's."""
+    home, run_id = build_home(tmp_path, "run-9")
+    base = E.load_target(str(home), run_id)
+    text = "\n".join([
+        "# Committee — run-x", "", "Charge: the SRE lead is not in this room.", "",
+        "## selection 1: security is not in this room", "",
+        "## turn 01 — Sam Iyer, Technical Program Manager (tpm)", "",
+        "Security is outside this room, and it owns the key.", "",
+        "## decision — Dana Whitfield, Senior Director of Engineering", "",
+        "On-call is not in this room either.", ""])
+    target = dataclasses.replace(base, thread_text=text, thread=E.parse_thread(text))
+    assert E._outside_room_mentions(target) == [
+        {"line": 9, "quote": "Security is outside this room, and it owns the key."},
+        {"line": 13, "quote": "On-call is not in this room either."}]
+
+    # A run resumed across the body-key upgrade has both kinds of turn: it is legacy.
+    mixed = [("turn", "pending", {"turn": 1}), ("turn", "pending", {"turn": 2, "body": "b"})]
+    assert E._legacy(mixed) is True
+    assert E._legacy([("turn", "pending", {"turn": 2, "body": "b"}), ("take", "pending", {})]) is False
+
+    # An artifact path that changed mid-run: the latest reduction's is read, never the first.
+    moved = {"first": True}
+
+    def patch(kind, doc):
+        if "artifact" in doc and moved.pop("first", False):
+            return {**doc, "artifact": str(tmp_path / "stale" / "federation-future.md")}
+        return None
+
+    _patch_reductions(home, run_id, patch)
+    assert not moved  # the first artifact-carrying reduction was rewritten
+    assert E.load_target(str(home), run_id).artifact == base.artifact
+
+
 def _tree(root) -> dict:
     """Every path under root -> (mode, sha256 or "" for a directory), minus SQLite's -shm/-wal."""
     import hashlib
@@ -1625,6 +1661,12 @@ def test_flag_rules(tmp_path):
              3: junior(3, "Done.", delegated_by_turn=1), 4: junior(4, "Done.")}
     checks = {"rechecks": [{"turn": 3, "action": "a" * 10}, {"turn": 4, "action": "b" * 10}]}
     assert flags(turns, checks) == [("action_clipped", 4, None, None)]
+    # Without delegated_by_turn, the nearest earlier owner turn that was delivered AND
+    # delegated: t11 was never delivered and t12 delegated nothing, so t10's voice decides.
+    turns = {10: owner(10, 230), 11: {**owner(11, 50), "delivered": False},
+             12: {**owner(12, 50), "delegate": False}, 13: junior(13, "Done.")}
+    assert flags(turns, {"rechecks": [{"turn": 13, "action": "c" * 10}]}) == [
+        ("action_clipped", 13, None, None)]
 
     # Two identical wrong sentences get their own lines; one thread.md lacks sorts last.
     text = "\n".join(("# Committee — run-x", "", "## decision — Dana Whitfield", "",
@@ -2421,6 +2463,17 @@ def test_eval_json_path_and_ledger_writes(tmp_path, monkeypatch):
     assert ev.read_ledger(ledger) is None
 
 
+def test_read_ledger_unknown_unless_missing(tmp_path, monkeypatch):
+    """D10: only a missing ledger is []. A path under a regular file (ENOTDIR) is unknown, and
+    so is a ledger that grew past the limit between the size check and the read."""
+    (tmp_path / "file").write_text("x")
+    assert E.read_ledger(tmp_path / "file" / "evals.jsonl") is None
+    ledger = tmp_path / "evals.jsonl"
+    ledger.write_bytes(b'{"source": "eval"}\n')
+    monkeypatch.setattr(E.thread, "read_regular", lambda path: b"\n" * (E.LEDGER_MAX + 1))
+    assert E.read_ledger(ledger, E.LEDGER_MAX) is None
+
+
 def test_read_ledger_nested_past_the_recursion_limit_is_unknown(tmp_path):
     """D10: a line json cannot parse for depth (RecursionError, not ValueError)
     may be an anchor, so the ledger cannot be known: None, never a raise and
@@ -2702,14 +2755,17 @@ def test_judge_reduce_statuses_and_fallbacks(tmp_path, monkeypatch):
     # The judge's cost is its own trace's, under the EVAL run's traces/ (never the target's).
     traces = tmp_path / "eval-home" / "runs" / "run-100" / "traces"
     traces.mkdir()
+    # An infra retry leaves two attempts, so two trace files: the judge's bill is both.
     (traces / "1.jsonl").write_text(json.dumps(
         {"type": "cost-state", "totalCostUSD": 0.5, "modelUsage": {"opus": {"outputTokens": 7}}}) + "\n")
+    (traces / "2.jsonl").write_text(json.dumps(
+        {"type": "cost-state", "totalCostUSD": 0.25, "modelUsage": {"opus": {"outputTokens": 3}}}) + "\n")
 
     body = reduce([said("I could not decide.")])
     assert (body["judge"]["status"], body["judge"]["error"]) == (
         "unparseable", "no parseable hermes-eval fence")
     assert not done(body) and written(body)
-    assert (body["judge"]["cost_usd"], body["judge"]["tokens"]["output"]) == (0.5, 7)
+    assert (body["judge"]["cost_usd"], body["judge"]["tokens"]["output"]) == (0.75, 10)
 
     body = reduce([said(_eval_fence(partial))])
     assert body["judge"]["status"] == "partial" and not done(body) and written(body)
@@ -2946,12 +3002,30 @@ def test_anchor_cli(tmp_path, monkeypatch, capsys):
     assert ledger.stat().st_mode & 0o777 == 0o600
     assert hashlib.sha256(db.read_bytes()).hexdigest() == before, "anchor wrote the target's queue.db"
 
+    # A foreign home named through a symlink (committee-spin's run-2): the anchor is keyed to
+    # that home's realpath and its created_at, never to the eval home, so it pairs with the
+    # eval line for the same target.
+    (tmp_path / "spin").mkdir()
+    spin, spin_run = build_home(tmp_path / "spin", "run-2")
+    (tmp_path / "spin-link").symlink_to(spin, target_is_directory=True)
+    assert eval_cli.main(["anchor", spin_run, "--home", str(tmp_path / "spin-link"),
+                          "verdict_grounded=3"]) == 0
+    with closing(sqlite3.connect(f"file:{spin / 'queue.db'}?mode=ro", uri=True)) as conn:
+        spin_at = conn.execute("SELECT created_at FROM runs WHERE id=?", (spin_run,)).fetchone()[0]
+    target = {"home": os.path.realpath(spin), "run": spin_run, "created_at": spin_at}
+    lines = E.read_ledger(ledger)
+    assert lines[-1]["target"] == target
+    judged = E.eval_line(_cli_eval_body(target["home"], spin_run, spin_at, "run-7",
+                                        {"verdict_grounded": 5}, versions))
+    assert E.calibration(lines + [judged])[versions["verdict_grounded"]] == "off (Δ2)"
+    capsys.readouterr()
+
     # A ledger that cannot be appended to (a symlink) is exit 1, never a traceback.
     ledger.rename(tmp_path / "real.jsonl")
     ledger.symlink_to(tmp_path / "real.jsonl")
     assert eval_cli.main(["anchor", run, "concision=4"]) == 1
     assert f"cannot append to {ledger}" in capsys.readouterr().err
-    assert len(E.read_ledger(tmp_path / "real.jsonl")) == 1
+    assert len(E.read_ledger(tmp_path / "real.jsonl")) == 2
 
 
 def test_ledger_and_compare(tmp_path, monkeypatch, capsys):
@@ -3199,6 +3273,60 @@ def test_run_wrapper_and_dry_run(tmp_path, monkeypatch, capsys, eval_cli_home):
     monkeypatch.setattr(engine_cli, "main", lambda argv: 0)
     assert eval_cli.main(["run", run, "--home", str(home)]) == 1
     assert "no committee-eval run was started" in capsys.readouterr().err
+
+
+class _FenceJudge:
+    """A judge double for the run wrapper: every judge dimension scored 4 on one verbatim
+    quote of the target's chair prose, so the eval ends ok."""
+
+    name = "fence_judge"
+
+    def __init__(self, quote: str):
+        self.quote = quote
+
+    def build_invocation(self, envelope: dict, driver) -> list[str]:
+        return ["true"]
+
+    def parse_result(self, raw: str, envelope: dict):
+        from engine.models import Result
+
+        now = time.time()
+        cite = [{"turn": None, "where": "decision", "quote": self.quote}]
+        fence = {d: {"score": 4, "rationale": "scripted", "evidence": cite} for d in E.JUDGE_DIMS}
+        return Result(outcome="ok", termination_reason="goal_met",
+                      result_ref=f"result://{envelope.get('ticket_id')}", error_summary=None,
+                      started_at=now, ended_at=now, payload={"answer": _eval_fence(fence)},
+                      evidence_ref=None)
+
+    def health_checks(self, host: str, site):
+        from engine.models import Check
+
+        return [Check("agent", True, "fence judge available"), Check("auth", True, "ok")]
+
+
+def test_run_wrapper_exits_0_on_a_scored_eval(tmp_path, monkeypatch, capsys, eval_cli_home):
+    """T31: a judge that scores every dimension ends the eval run done, and `run` exits 0.
+    HERMES_AGENT stays mock (whose echo holds no fence), so only --agent reaching the
+    engine can make it pass."""
+    from engine import agent
+    from playbooks.committee import eval_cli
+
+    home, run = build_home(tmp_path, "run-9")
+    source = os.path.realpath(home)
+    prose = E.chair_prose(E.load_target(source, run).decision)
+    monkeypatch.setitem(agent._REGISTRY, "fence_judge", _FenceJudge(" ".join(prose.split())[:80]))
+    for key in (E.ENV_RUN, E.ENV_HOME, eval_cli.MODULES):
+        monkeypatch.setenv(key, "")  # recorded, so teardown undoes what the wrapper sets
+        monkeypatch.delenv(key)
+    assert os.environ["HERMES_AGENT"] == "mock"
+
+    assert eval_cli.main(["run", run, "--home", str(home), "--agent", "fence_judge"]) == 0
+    out = capsys.readouterr().out
+    assert "eval run run-1: done" in out.splitlines()
+    body = json.loads(E.eval_json_path(str(eval_cli_home), source, run).read_text(encoding="utf-8"))
+    assert (body["eval_run"], body["judge"]["status"]) == ("run-1", "ok")
+    assert [body["dimensions"][d]["score"] for d in E.JUDGE_DIMS] == [4, 4, 4]
+    assert [cells[1] for cells in _cli_rows(out) if cells[0] in E.JUDGE_DIMS] == ["4", "4", "4"]
 
 
 def test_show_cli(tmp_path, monkeypatch, capsys):

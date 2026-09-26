@@ -815,6 +815,12 @@ def test_evaluation_payload_states(tmp_path):
         assert set(out) == {"state", "error"} and out["state"] == "error", content[:20]
         assert why in out["error"]
 
+    # The limit is inclusive: exactly EVAL_JSON_MAX bytes is read, one more is refused.
+    body = json.dumps(_eval_body(home, RUN_ID, 1789000000.0, versions))
+    for extra, state in ((0, "ok"), (1, "error")):
+        eval_json.write_text(body + " " * (ev.EVAL_JSON_MAX - len(body.encode()) + extra), encoding="utf-8")
+        assert evaluation()["state"] == state, extra
+
     # ok, before any ledger exists: every judge dimension uncalibrated, every
     # deterministic one None (G6), rows in D5 order, the first VERIFIED quote.
     body = _eval_body(home, RUN_ID, 1789000000.0, versions)

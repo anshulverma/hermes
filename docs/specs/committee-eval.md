@@ -804,6 +804,17 @@ spec, and compares it against run-9 and run-2.
   - eval.py's only voice import is `from playbooks.committee.voice import RULES, measure`.
   - Build on `words`, `DIMENSIONS`, `JUDGE_DIMS`, `DETERMINISTIC_DIMS`, `dimension_versions(rules)`,
     `rubric_version(versions)`, `compute_metrics(target)` and `calibration(ledger_lines)`.
+  - Quote verification is two calls, never one that reads the disk itself:
+    `read_snapshot(inputs, digests) -> {entries, thread, original, revised}` reads each
+    `inputs/` copy once and treats any whose sha256 is not in `digests` (the eval_target's
+    `inputs_digests`, by absolute path) as absent; then `verify_evidence(item, snap)` checks one
+    item against that snapshot. `score_judge(parsed, inputs, digests, metrics)` does both for a
+    whole answer. A loop that cites a new source (a 1:1 outcome, say) builds its `snap` the same
+    way, e.g. `{"entries": entries, "thread": text, "original": None, "revised": None}`, from
+    digest-checked copies. A `verify_evidence` that reads `inputs/` from disk unchecked would let
+    a judge that edits a copy forge a verified quote.
+  - `target_state(home, run)` is what the re-hash compares beyond the copies. A loop that adds a
+    table the target owns and the judge must not touch adds it there.
   - `metrics["voice"]` is exactly `{n, pointer_share, walls_share, example_share, filler_per_turn}`.
   - `metrics["extra_takes"]` is the `take` reductions plus the losing duplicate `turn` reductions.
   - The fixtures live under `tests/data/committee-eval/{run-9,run-2}/`, and
