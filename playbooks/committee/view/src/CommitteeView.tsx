@@ -763,9 +763,13 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
       edits.set(step.turn, [i + 1, step.turn]);
     });
   }
+  // The stepper to the top of the viewport, so the edit's context and diff
+  // below it are on screen, and focus with it so the arrow keys step from there.
   const seeEdit = (turn: number) => {
     setSelected(turn);
-    window.document.querySelector('[data-testid="doc-stepper"]')?.scrollIntoView?.({ block: 'nearest' });
+    const stepper = window.document.querySelector<HTMLElement>('[data-testid="doc-stepper"]');
+    stepper?.scrollIntoView?.({ block: 'start' });
+    stepper?.focus({ preventScroll: true });
   };
 
   return (

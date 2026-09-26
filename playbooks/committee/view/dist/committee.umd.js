@@ -507,6 +507,7 @@
 		const [copies, setCopies] = (0, react.useState)({});
 		const [failures, setFailures] = (0, react.useState)({});
 		const asked = (0, react.useRef)(/* @__PURE__ */ new Set());
+		const [attempt, setAttempt] = (0, react.useState)(0);
 		const wanted = versions.map(cacheKey).join("\n");
 		(0, react.useEffect)(() => {
 			for (const key of wanted ? wanted.split("\n") : []) {
@@ -520,16 +521,31 @@
 					[key]: err instanceof Error ? err.message : String(err)
 				})));
 			}
-		}, [runId, wanted]);
+		}, [
+			runId,
+			wanted,
+			attempt
+		]);
+		const retry = (key) => {
+			asked.current.delete(key);
+			setFailures((prev) => {
+				const next = { ...prev };
+				delete next[key];
+				return next;
+			});
+			setAttempt((n) => n + 1);
+		};
 		return {
 			copies,
-			failures
+			failures,
+			retry
 		};
 	}
 	function Goto({ n, onOpenTurn }) {
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
 			type: "button",
 			"data-testid": `goto-${tNN(n)}`,
+			"aria-label": `Open ${tNN(n)} in the transcript`,
 			onClick: () => onOpenTurn(n),
 			style: {
 				...mono$1,
@@ -551,6 +567,14 @@
 			color: "var(--text-secondary)",
 			lineHeight: 1.5
 		};
+		const inferred = step.provenance === "inferred" && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [" ", /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+			"data-testid": "step-provenance",
+			style: {
+				...muted,
+				fontSize: 11.5
+			},
+			children: "(inferred from turn order)"
+		})] });
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "step-context",
 			style: {
@@ -569,7 +593,7 @@
 					children: [
 						"re-check:",
 						" ",
-						step.verified === true ? "APPLIED" : step.verified === false ? "DID NOT APPLY" : "re-check not recorded"
+						step.verified === true ? "APPLIED" : step.verified === false ? "DID NOT APPLY" : "not recorded"
 					]
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -583,7 +607,8 @@
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Goto, {
 							n: step.reviewer_turn,
 							onOpenTurn
-						})
+						}),
+						inferred
 					] }) : "who raised this was not recorded"
 				}),
 				step.owner_turn !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -596,7 +621,8 @@
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Goto, {
 							n: step.owner_turn,
 							onOpenTurn
-						})
+						}),
+						inferred
 					]
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -610,14 +636,6 @@
 							onOpenTurn
 						})
 					]
-				}),
-				step.provenance === "inferred" && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
-					"data-testid": "step-provenance",
-					style: {
-						...muted,
-						fontSize: 11.5
-					},
-					children: "(inferred from turn order)"
 				})
 			]
 		});
@@ -654,7 +672,7 @@
 			children: row && style ? `${style.sign} ${row.text}` : ""
 		});
 	}
-	function DiffView({ before, after, mode }) {
+	var DiffView = (0, react.memo)(function DiffView({ before, after, mode }) {
 		const rows = diffLines(before, after);
 		const adds = rows.filter((r) => r.kind === "add").length;
 		const dels = rows.filter((r) => r.kind === "del").length;
@@ -732,9 +750,12 @@
 				children: [rows.slice(0, MAX_ROWS).map((row, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(UnifiedRow, { row }, i)), capped]
 			})]
 		});
-	}
-	/** A whole version: rendered markdown for a markdown file, preformatted otherwise. */
-	function WholeDocument({ name, text }) {
+	});
+	/**
+	* A whole version: rendered markdown for a markdown file, preformatted
+	* otherwise. Memoised like DiffView, so a data tick does not re-parse it.
+	*/
+	var WholeDocument = (0, react.memo)(function WholeDocument({ name, text }) {
 		const frame = {
 			maxHeight: 480,
 			overflow: "auto",
@@ -760,7 +781,7 @@
 			},
 			children: text
 		});
-	}
+	});
 	function DocumentHistory({ runId, document: doc, timeline, intact, legacy, selected, onSelect, diffMode, onDiffMode, onOpenTurn }) {
 		const [finalDiff, setFinalDiff] = (0, react.useState)(false);
 		const { name, captured, original, steps, final } = doc;
@@ -775,7 +796,7 @@
 		const previous = step ? index > 1 ? steps[index - 2] : original : null;
 		const versions = !name || !captured || !original ? [] : step && previous ? [previous, step] : current === "final" && final ? finalDiff ? [original, final] : [final] : [original];
 		const unreadable = versions.find((v) => v.bytes === null);
-		const { copies, failures } = useCopies(runId, unreadable ? [] : versions);
+		const { copies, failures, retry } = useCopies(runId, unreadable ? [] : versions);
 		const shell = {
 			background: "var(--surface-card)",
 			border: "1px solid var(--border-hairline)",
@@ -837,7 +858,15 @@
 					children: failed.path
 				}),
 				": ",
-				failures[cacheKey(failed)]
+				failures[cacheKey(failed)],
+				" ",
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+					type: "button",
+					"data-testid": "doc-retry",
+					onClick: () => retry(cacheKey(failed)),
+					style: chip(false),
+					children: "Retry"
+				})
 			]
 		});
 		else body = /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
@@ -892,13 +921,12 @@
 					"data-testid": "doc-stepper",
 					tabIndex: 0,
 					onKeyDown: (e) => {
-						if (e.key === "ArrowLeft") {
-							e.preventDefault();
-							go(-1);
-						} else if (e.key === "ArrowRight") {
-							e.preventDefault();
-							go(1);
-						}
+						if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+						e.preventDefault();
+						const next = ids[index + (e.key === "ArrowLeft" ? -1 : 1)];
+						if (next === void 0) return;
+						onSelect(next);
+						e.currentTarget.querySelector(`[data-testid="step-${next}"]`)?.focus();
 					},
 					style: {
 						display: "flex",
@@ -999,7 +1027,7 @@
 							"aria-pressed": finalDiff,
 							onClick: () => setFinalDiff(!finalDiff),
 							style: chip(finalDiff),
-							children: finalDiff ? "Show the final version" : "Show the original → final diff"
+							children: "Original → final diff"
 						})
 					]
 				}),
@@ -1685,7 +1713,9 @@
 		});
 		const seeEdit = (turn) => {
 			setSelected(turn);
-			window.document.querySelector("[data-testid=\"doc-stepper\"]")?.scrollIntoView?.({ block: "nearest" });
+			const stepper = window.document.querySelector("[data-testid=\"doc-stepper\"]");
+			stepper?.scrollIntoView?.({ block: "start" });
+			stepper?.focus({ preventScroll: true });
 		};
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": "committee-view",

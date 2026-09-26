@@ -13,7 +13,7 @@
  * data: the view refetches on every reduction.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { Entry } from './CommitteeView';
 import { Markdown, apiGet } from './host';
 
@@ -219,6 +219,8 @@ function useCopies(runId: string, versions: DocVersion[]) {
   const [copies, setCopies] = useState<Record<string, Copy>>({});
   const [failures, setFailures] = useState<Record<string, string>>({});
   const asked = useRef(new Set<string>());
+  // Bumped by `retry`, so the effect runs again with the key no longer asked.
+  const [attempt, setAttempt] = useState(0);
   // The identity of `versions`, which is a new array on every render.
   const wanted = versions.map(cacheKey).join('\n');
 
@@ -236,9 +238,19 @@ function useCopies(runId: string, versions: DocVersion[]) {
           })),
         );
     }
-  }, [runId, wanted]);
+  }, [runId, wanted, attempt]);
 
-  return { copies, failures };
+  const retry = (key: string) => {
+    asked.current.delete(key);
+    setFailures((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    setAttempt((n) => n + 1);
+  };
+
+  return { copies, failures, retry };
 }
 
 function Goto({ n, onOpenTurn }: { n: number; onOpenTurn: (n: number) => void }) {
@@ -246,6 +258,7 @@ function Goto({ n, onOpenTurn }: { n: number; onOpenTurn: (n: number) => void })
     <button
       type="button"
       data-testid={`goto-${tNN(n)}`}
+      aria-label={`Open ${tNN(n)} in the transcript`}
       onClick={() => onOpenTurn(n)}
       style={{ ...mono, ...chip(false), padding: '0 6px', fontSize: 11 }}
     >
@@ -270,6 +283,16 @@ function StepContext({
   const junior = at(step.turn);
   const confirmation = junior?.body.split('\n').find((l) => l.trim()) ?? '';
   const line: React.CSSProperties = { fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5 };
+  // Only who raised it and who delegated it come from turn order; the junior's
+  // own turn is the step itself, so the mark goes on those two lines alone.
+  const inferred = step.provenance === 'inferred' && (
+    <>
+      {' '}
+      <span data-testid="step-provenance" style={{ ...muted, fontSize: 11.5 }}>
+        (inferred from turn order)
+      </span>
+    </>
+  );
 
   return (
     <div data-testid="step-context" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -291,7 +314,7 @@ function StepContext({
           ? 'APPLIED'
           : step.verified === false
             ? 'DID NOT APPLY'
-            : 're-check not recorded'}
+            : 'not recorded'}
       </div>
       <div data-testid="step-raised" style={line}>
         {step.reviewer_turn !== null ? (
@@ -299,6 +322,7 @@ function StepContext({
             raised by {reviewer?.name ?? 'a seat the transcript does not name'}
             {reviewer?.stance ? ` — ${reviewer.stance}` : ''}{' '}
             <Goto n={step.reviewer_turn} onOpenTurn={onOpenTurn} />
+            {inferred}
           </>
         ) : (
           'who raised this was not recorded'
@@ -308,17 +332,13 @@ function StepContext({
         <div data-testid="step-delegated" style={line}>
           delegated: {owner?.action ?? 'no action recorded'}{' '}
           <Goto n={step.owner_turn} onOpenTurn={onOpenTurn} />
+          {inferred}
         </div>
       )}
       <div data-testid="step-confirmed" style={line}>
         {step.delivered ? confirmation || 'no prose recorded for this turn' : 'no turn delivered'}{' '}
         <Goto n={step.turn} onOpenTurn={onOpenTurn} />
       </div>
-      {step.provenance === 'inferred' && (
-        <div data-testid="step-provenance" style={{ ...muted, fontSize: 11.5 }}>
-          (inferred from turn order)
-        </div>
-      )}
     </div>
   );
 }
@@ -359,7 +379,18 @@ function SplitCell({ row, side }: { row: DiffRow | null; side: 'left' | 'right' 
   );
 }
 
-function DiffView({ before, after, mode }: { before: string; after: string; mode: DiffMode }) {
+// Memoised on its plain string props: the view re-renders on every data tick
+// and transcript click, and re-diffing unchanged text each time is the
+// expensive part of the card.
+const DiffView = memo(function DiffView({
+  before,
+  after,
+  mode,
+}: {
+  before: string;
+  after: string;
+  mode: DiffMode;
+}) {
   const rows = diffLines(before, after);
   const adds = rows.filter((r) => r.kind === 'add').length;
   const dels = rows.filter((r) => r.kind === 'del').length;
@@ -414,10 +445,13 @@ function DiffView({ before, after, mode }: { before: string; after: string; mode
       )}
     </div>
   );
-}
+});
 
-/** A whole version: rendered markdown for a markdown file, preformatted otherwise. */
-function WholeDocument({ name, text }: { name: string; text: string }) {
+/**
+ * A whole version: rendered markdown for a markdown file, preformatted
+ * otherwise. Memoised like DiffView, so a data tick does not re-parse it.
+ */
+const WholeDocument = memo(function WholeDocument({ name, text }: { name: string; text: string }) {
   const frame: React.CSSProperties = {
     maxHeight: 480,
     overflow: 'auto',
@@ -437,7 +471,7 @@ function WholeDocument({ name, text }: { name: string; text: string }) {
       {text}
     </pre>
   );
-}
+});
 
 export default function DocumentHistory({
   runId,
@@ -498,7 +532,7 @@ export default function DocumentHistory({
   // never fetch a file the server already said it cannot read, and never fall
   // back to the last readable one.
   const unreadable = versions.find((v) => v.bytes === null);
-  const { copies, failures } = useCopies(runId, unreadable ? [] : versions);
+  const { copies, failures, retry } = useCopies(runId, unreadable ? [] : versions);
 
   const shell: React.CSSProperties = {
     background: 'var(--surface-card)',
@@ -559,7 +593,15 @@ export default function DocumentHistory({
   } else if (failed) {
     body = (
       <div data-testid="doc-error" style={note('danger')}>
-        Could not load <code style={mono}>{failed.path}</code>: {failures[cacheKey(failed)]}
+        Could not load <code style={mono}>{failed.path}</code>: {failures[cacheKey(failed)]}{' '}
+        <button
+          type="button"
+          data-testid="doc-retry"
+          onClick={() => retry(cacheKey(failed))}
+          style={chip(false)}
+        >
+          Retry
+        </button>
       </div>
     );
   } else {
@@ -616,13 +658,13 @@ export default function DocumentHistory({
             data-testid="doc-stepper"
             tabIndex={0}
             onKeyDown={(e) => {
-              if (e.key === 'ArrowLeft') {
-                e.preventDefault();
-                go(-1);
-              } else if (e.key === 'ArrowRight') {
-                e.preventDefault();
-                go(1);
-              }
+              if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+              e.preventDefault();
+              const next = ids[index + (e.key === 'ArrowLeft' ? -1 : 1)];
+              if (next === undefined) return;
+              onSelect(next);
+              // Focus follows the selection, so a screen reader announces the new step.
+              e.currentTarget.querySelector<HTMLElement>(`[data-testid="step-${next}"]`)?.focus();
             }}
             style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}
           >
@@ -714,7 +756,7 @@ export default function DocumentHistory({
                 onClick={() => setFinalDiff(!finalDiff)}
                 style={chip(finalDiff)}
               >
-                {finalDiff ? 'Show the final version' : 'Show the original → final diff'}
+                Original → final diff
               </button>
             </div>
           )}

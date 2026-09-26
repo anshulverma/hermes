@@ -836,6 +836,16 @@ const TEXT: Record<string, string> = {
 const url = (path: string) => `/api/runs/run-2/view/artifact?path=${path}`;
 const pathOf = (u: string) => String(u).split('path=')[1];
 
+/**
+ * Every one of 6000 lines replaced by another: past MAX_CELLS, so 12,000
+ * unified rows but 6000 side-by-side pairs. The cap tests need the two counts
+ * to differ, or they cannot tell which one a cap was computed from.
+ */
+const replacedAll = (u: string) =>
+  ok({
+    text: Array.from({ length: 6000 }, (_, i) => `${pathOf(u) === 'doc/00-original.md' ? 'a' : 'b'}${i}`).join('\n'),
+  });
+
 /** The view's own wiring, minus the rest of the view: it holds the selection. */
 function History({
   doc = DOC,
@@ -943,6 +953,23 @@ describe('DocumentHistory', () => {
     expect(await screen.findByTestId('doc-error')).toHaveTextContent('Could not load doc/t03.md: gone');
   });
 
+  it('retries a failed version on request, rather than until a reload', async () => {
+    let fails = 1;
+    fetchMock.mockImplementation((u: string) =>
+      pathOf(u) === 'doc/t03.md' && fails-- > 0
+        ? Promise.resolve({ ok: false, status: 502, json: () => Promise.resolve({ detail: 'busy' }) })
+        : ok({ text: TEXT[pathOf(u)] }),
+    );
+    render(<History start={3} />);
+    const error = await screen.findByTestId('doc-error');
+    fireEvent.click(within(error).getByTestId('doc-retry'));
+
+    expect(await screen.findByTestId('diff-rows')).toHaveTextContent('+ new clause');
+    expect(fetchMock.mock.calls.filter(([u]) => pathOf(u) === 'doc/t03.md')).toHaveLength(2);
+    // Only the failed version is fetched again; the baseline stays cached.
+    expect(fetchMock.mock.calls.filter(([u]) => pathOf(u) === 'doc/00-original.md')).toHaveLength(1);
+  });
+
   it('warns when the server cut a version short at its read cap', async () => {
     fetchMock.mockImplementation((u: string) =>
       ok({ text: TEXT[pathOf(u)], truncated: pathOf(u) === 'doc/t03.md' }),
@@ -989,8 +1016,11 @@ describe('DocumentHistory', () => {
     expect(screen.getByTestId('step-3')).toHaveAttribute('aria-current', 'step');
     fireEvent.keyDown(screen.getByTestId('doc-stepper'), { key: 'ArrowRight' });
     expect(screen.getByTestId('step-6')).toHaveAttribute('aria-current', 'step');
-    fireEvent.keyDown(screen.getByTestId('doc-stepper'), { key: 'ArrowLeft' });
+    // Focus follows the selection, so a screen reader announces the new step.
+    expect(document.activeElement).toBe(screen.getByTestId('step-6'));
+    fireEvent.keyDown(screen.getByTestId('step-6'), { key: 'ArrowLeft' });
     expect(screen.getByTestId('step-3')).toHaveAttribute('aria-current', 'step');
+    expect(document.activeElement).toBe(screen.getByTestId('step-3'));
     fireEvent.click(screen.getByTestId('step-prev'));
     expect(screen.getByTestId('step-original')).toHaveAttribute('aria-current', 'step');
   });
@@ -1020,6 +1050,21 @@ describe('DocumentHistory', () => {
     expect(fetchMock).toHaveBeenCalledWith(url('doc/t03.md'), expect.anything());
     expect(fetchMock).toHaveBeenCalledWith(url('doc/t06.md'), expect.anything());
     expect(fetchMock).not.toHaveBeenCalledWith(url('doc/t09.md'), expect.anything());
+  });
+
+  it('fetches through the host apiGet, carrying the bearer token', async () => {
+    // Every other stepper test accepts any fetch options, so a bare fetch
+    // would stay green and 401 on every non-loopback bind.
+    setToken('remote-typed-token');
+    try {
+      render(<History />);
+      await screen.findByTestId('doc-markdown');
+      expect(fetchMock).toHaveBeenCalledWith(url('doc/00-original.md'), {
+        headers: { Authorization: 'Bearer remote-typed-token' },
+      });
+    } finally {
+      clearToken();
+    }
   });
 
   it('caches by path and size, and fetches a version again when its size changes', async () => {
@@ -1053,9 +1098,12 @@ describe('DocumentHistory', () => {
     render(<History start={6} />);
     expect(await screen.findByTestId('diff-rows')).toHaveTextContent('+ extra clause');
     expect(screen.getByTestId('step-verdict')).toHaveTextContent('DID NOT APPLY');
+    // Delivered but did not apply: the junior's prose still stands. Keyed on
+    // `verified` instead of `delivered`, this would say "no turn delivered".
+    expect(screen.getByTestId('step-confirmed')).toHaveTextContent('Rewrote §14.1');
 
     fireEvent.click(screen.getByTestId('step-9'));
-    expect(screen.getByTestId('step-verdict')).toHaveTextContent('re-check not recorded');
+    expect(screen.getByTestId('step-verdict')).toHaveTextContent(/^re-check: not recorded$/);
   });
 
   it('says No changes between these two versions for identical text', async () => {
@@ -1077,6 +1125,8 @@ describe('DocumentHistory', () => {
     expect(screen.getByTestId('step-confirmed')).toHaveTextContent('Rewrote §2 into two triggers');
     expect(screen.queryByTestId('step-provenance')).toBeNull();
 
+    // Announced as what it does, not as a bare "t01".
+    expect(screen.getByTestId('goto-t01')).toHaveAccessibleName('Open t01 in the transcript');
     fireEvent.click(screen.getByTestId('goto-t01'));
     fireEvent.click(screen.getByTestId('goto-t02'));
     fireEvent.click(screen.getByTestId('goto-t03'));
@@ -1084,14 +1134,29 @@ describe('DocumentHistory', () => {
   });
 
   it('says a link was inferred from turn order, and when who raised it was not recorded', () => {
-    render(<History start={6} />);
-    expect(screen.getByTestId('step-provenance')).toHaveTextContent('(inferred from turn order)');
-    expect(screen.getByTestId('step-raised')).toHaveTextContent('raised by Ruth Delgado');
+    const { unmount } = render(<History start={6} />);
+    // On the two lines turn order inferred, not under the junior's own turn,
+    // which is the one line here that is certain.
+    const raised = screen.getByTestId('step-raised');
+    const delegated = screen.getByTestId('step-delegated');
+    expect(raised).toHaveTextContent('raised by Ruth Delgado');
+    expect(within(raised).getByTestId('step-provenance')).toHaveTextContent('(inferred from turn order)');
+    expect(within(delegated).getByTestId('step-provenance')).toHaveTextContent('(inferred from turn order)');
+    expect(screen.getAllByTestId('step-provenance')).toHaveLength(2);
 
+    // Unknown provenance is not inferred: it says nothing was recorded instead.
     fireEvent.click(screen.getByTestId('step-9'));
+    expect(screen.queryByTestId('step-provenance')).toBeNull();
     expect(screen.getByTestId('step-raised')).toHaveTextContent('who raised this was not recorded');
     expect(screen.queryByTestId('step-delegated')).toBeNull();
     expect(screen.getByTestId('step-confirmed')).toHaveTextContent('no turn delivered');
+    unmount();
+
+    // The mark follows `provenance`, not whether a turn happens to be linked.
+    const unknown = DOC.steps.map((s) => (s.turn === 6 ? { ...s, provenance: 'unknown' as const } : s));
+    render(<History doc={{ ...DOC, steps: unknown }} start={6} />);
+    expect(screen.getByTestId('step-delegated')).toBeInTheDocument();
+    expect(screen.queryByTestId('step-provenance')).toBeNull();
   });
 
   // --- Original and Final ---
@@ -1149,15 +1214,12 @@ describe('DocumentHistory', () => {
 
   it('caps how many rows reach the DOM, and says it did', async () => {
     // `diffLines` is hard-bounded and fast; the RENDER is what does not scale.
-    const big = Array.from({ length: 6000 }, (_, i) => `line ${i}`).join('\n');
-    fetchMock.mockImplementation((u: string) =>
-      ok({ text: pathOf(u) === 'doc/00-original.md' ? big : `${big}\nextra` }),
-    );
+    fetchMock.mockImplementation(replacedAll);
     render(<History start={3} />);
     const rows = await screen.findByTestId('diff-rows');
     expect(rows.children).toHaveLength(5001); // 5000 rows plus the footer
-    expect(screen.getByTestId('diff-rows-capped')).toHaveTextContent('1001 more rows');
-    expect(screen.getByTestId('diff-counts')).toHaveTextContent('1 line added');
+    expect(screen.getByTestId('diff-rows-capped')).toHaveTextContent('… 7000 more rows');
+    expect(screen.getByTestId('diff-counts')).toHaveTextContent('6000 lines added, 6000 removed');
   });
 });
 
@@ -1182,15 +1244,13 @@ describe('splitRows', () => {
     ]);
   });
 
-  it('caps side-by-side rows at the same limit, and says so', async () => {
-    const big = Array.from({ length: 6000 }, (_, i) => `line ${i}`).join('\n');
-    vi.stubGlobal('fetch', vi.fn((u: string) =>
-      ok({ text: pathOf(u) === 'doc/00-original.md' ? big : `${big}\nextra` }),
-    ));
+  it('caps side-by-side rows at the same limit, counting pairs rather than lines', async () => {
+    // The fixture the unified cap test says "7000 more rows" of.
+    vi.stubGlobal('fetch', vi.fn(replacedAll));
     render(<History start={3} mode="split" />);
     const split = await screen.findByTestId('diff-split');
     expect(split.children).toHaveLength(10001); // 5000 rows of two cells, plus the footer
-    expect(screen.getByTestId('diff-rows-capped')).toHaveTextContent('1001 more rows');
+    expect(screen.getByTestId('diff-rows-capped')).toHaveTextContent('… 1000 more rows');
     vi.unstubAllGlobals();
   });
 });
@@ -1228,6 +1288,8 @@ describe('CommitteeView document stepper', () => {
     const rights = screen.getAllByTestId('split-right').map((el) => el.textContent);
     expect(lefts).toContain('- old clause');
     expect(rights).toContain('+ new clause');
+    // Side by side means the replacement sits beside what it replaced.
+    expect(lefts.indexOf('- old clause')).toBe(rights.indexOf('+ new clause'));
 
     fireEvent.click(screen.getByTestId('step-6'));
     expect(await screen.findByTestId('diff-split')).toBeInTheDocument();
@@ -1245,10 +1307,16 @@ describe('CommitteeView document stepper', () => {
   it('toggles the original → final diff on Final: off by default, in the chosen layout, kept on return', async () => {
     show(captured);
     fireEvent.click(screen.getByTestId('step-final'));
-    expect(screen.getByTestId('final-diff-toggle')).toHaveAttribute('aria-pressed', 'false');
+    // One fixed label; aria-pressed carries the state. A label that swaps as
+    // well reads "Show the final version, pressed".
+    const toggle = screen.getByTestId('final-diff-toggle');
+    expect(toggle).toHaveAccessibleName('Original → final diff');
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
     expect(await screen.findByTestId('doc-markdown')).toHaveTextContent('new clause');
 
-    fireEvent.click(screen.getByTestId('final-diff-toggle'));
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    expect(toggle).toHaveAccessibleName('Original → final diff');
     const rows = await screen.findByTestId('diff-rows');
     expect(rows).toHaveTextContent('- old clause');
     expect(rows).toHaveTextContent('+ new clause');
@@ -1262,7 +1330,9 @@ describe('CommitteeView document stepper', () => {
     expect(await screen.findByTestId('diff-split')).toBeInTheDocument();
   });
 
-  it('clicking a delegated row selects its step', () => {
+  it('clicking a delegated row selects its step, brings the stepper to the top and focuses it', () => {
+    // `block: 'nearest'` left the stepper at the viewport's bottom edge with
+    // the edit below the fold, and focus on the transcript button.
     const scrolled = vi.fn();
     Element.prototype.scrollIntoView = scrolled;
     show(captured);
@@ -1276,7 +1346,10 @@ describe('CommitteeView document stepper', () => {
 
     fireEvent.click(screen.getByTestId('see-edit-5'));
     expect(screen.getByTestId('step-6')).toHaveAttribute('aria-current', 'step');
-    expect(scrolled).toHaveBeenCalled();
+    const stepper = screen.getByTestId('doc-stepper');
+    expect(scrolled.mock.contexts).toEqual([stepper]);
+    expect(scrolled.mock.calls).toEqual([[{ block: 'start' }]]);
+    expect(document.activeElement).toBe(stepper);
   });
 
   it('links no transcript row to a step when there are no snapshots to show', () => {
