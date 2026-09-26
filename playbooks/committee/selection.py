@@ -6,11 +6,14 @@ fenced block tagged ``hermes-selection`` holding a JSON object, the convention
 ``playbooks/research/verdict.py`` established: present and parseable, or
 absent. The block is never added to ``turnblock.KEYS``; it is its own channel.
 
-A block is a fence as Markdown renders it, found by voice's own fence reader:
-the opener and the closer each stand on their own line. So a block quoted in
-prose, indented as code or echoed inside another fence is text, and never
-replaces the list above it; and every block parse reads is one voice's measure
-leaves out of the word count.
+A block is found by voice's own fence reader: the opener and the closer each
+stand on their own line, indented at most three spaces. So a block quoted in
+prose, opened mid-line, indented four spaces or echoed inside another fence is
+text and cannot replace the list above it, and every block parse reads is one
+voice's measure leaves out of the word count. The reader is line-based, not a
+Markdown renderer: a tab-indented fence under a list item, a thematic break or
+setext underline read as a list opener, or an HTML comment or div wrapper can
+still let text Markdown shows as code count as a block (voice's to fix).
 
 Everything in the block is worker text, so nothing in it is trusted. ``parse``
 keeps only the keys this module defines, ``validate`` checks every seat against
@@ -24,7 +27,11 @@ worker said about it; a derived seat gets clipped fields and
 list is final and the fixed four are always seated. Everyone else a selector
 named is recorded as considered, with a reason and, when one is seated, a
 representative. A chair list that cannot seat anyone falls back to today's
-seven reviewers (``fallback``), and nothing here raises on a parsed list.
+seven reviewers (``fallback``), and nothing here raises on a parsed list. The
+record stays bounded however long the block: each stage's first INVALID_MAX
+invalid entries and the first CONSIDERED_MAX considered are kept, and the
+result counts the rest as ``invalid_dropped`` and ``considered_dropped``, so
+nothing vanishes silently.
 
 Pure and stdlib-only. It imports cast and voice, and neither imports it.
 """
@@ -64,6 +71,11 @@ RATIONALE_MAX = 200
 STAKEHOLDER_MAX = 80
 REASON_MAX = 200
 
+# How much of a long list reaches the reduction and thread.md: a 200 KB block
+# must not write thousands of entries. What is cut is counted, never silent.
+INVALID_MAX = 20  # per stage
+CONSIDERED_MAX = 40
+
 # The only keys that survive parse. Anything else a worker writes (nominated_by,
 # style, source, ...) is dropped: those are the master's to decide.
 _SEAT_KEYS = (
@@ -76,6 +88,11 @@ _FIELDS = ("altitude", "goal", "ambition", "stake", "lens")
 
 # Voice's rule 5: no en or em dash in anything a worker reads back.
 _DASHES = str.maketrans({"\u2013": "-", "\u2014": "-"})
+
+# Printable characters that render as nothing: the Hangul fillers, the blank
+# Braille cell and the combining grapheme joiner. The zero-width ones are
+# already unprintable.
+_INVISIBLE = frozenset("\u115f\u1160\u3164\uffa0\u2800\u034f")
 
 
 def _blocks(lines: list[str]) -> list[tuple[int, int]]:
@@ -106,7 +123,9 @@ def parse(answer: str | None) -> tuple[dict | None, str | None]:
         return None, "no_block"
     for start, end in reversed(blocks):
         try:
-            doc = json.loads("\n".join(lines[start + 1:end]))
+            # strict=False: splitlines also breaks on U+2028, U+2029 and U+0085,
+            # so a raw one inside a JSON string comes back as a raw newline
+            doc = json.loads("\n".join(lines[start + 1:end]), strict=False)
         except (ValueError, RecursionError):  # nesting past the limit is a RecursionError
             continue
         if isinstance(doc, dict):
@@ -168,8 +187,8 @@ def validate(doc: dict | None, library: dict) -> tuple[list[dict], list[dict]]:
     seats: list[dict] = []
     invalid: list[dict] = []
     seen: set[str] = set()
-    # ponytail: no cap on entries, so the output grows linearly with the block;
-    # cap the list here if a live selector ever sends thousands.
+    # No cap here, so the output grows linearly with the block; resolve records
+    # at most INVALID_MAX invalid entries per stage and counts the rest.
     for entry in _entries(doc, "seats"):
         role = entry.get("role")
         if not isinstance(role, str) or not SLUG_RE.fullmatch(role):
@@ -214,14 +233,15 @@ def _clip(value: object, limit: int) -> str:
     """Worker text as one clean line of at most ``limit`` characters.
 
     A non-string is "" (unsaid, never its repr). Every character that is not
-    printable (a control, NUL, a lone surrogate, a bidi override) becomes a
-    space, so the text is safe in a goal's argv, a UTF-8 file and the view;
+    printable (a control, NUL, a lone surrogate, a bidi override) or renders
+    as nothing (``_INVISIBLE``) becomes a space, so the text is safe in a
+    goal's argv, a UTF-8 file and the view, and invisible text is blank;
     en/em dashes become "-"; then ``cast.clip`` collapses whitespace and cuts.
     "" means blank.
     """
     if not isinstance(value, str):
         return ""
-    clean = "".join(c if c.isprintable() else " " for c in value)
+    clean = "".join(c if c.isprintable() and c not in _INVISIBLE else " " for c in value)
     return cast.clip(clean.translate(_DASHES), limit)
 
 
@@ -283,10 +303,12 @@ def resolve(stages: list[dict], library: dict) -> dict:
     list that cannot seat anyone gives ``fallback(code)``, with an undelivered
     chair reported as ``chair_failed``.
 
-    Returns ``{seated, reviewers, considered, fallback}``: ``seated`` is the
-    owner, the reviewers in opening order, then the junior IC. Deterministic,
-    and linear in the lists' length: ``validate`` keeps no cap on entries, so
-    the reviewers are cut to MAX_REVIEWERS here and the rest are considered.
+    Returns ``{seated, reviewers, considered, considered_dropped,
+    invalid_dropped, fallback}``: ``seated`` is the owner, the reviewers in
+    opening order, then the junior IC; the two counts are what the caps cut
+    (``_considered``). Deterministic, and linear in the lists' length:
+    ``validate`` keeps no cap on entries, so the reviewers are cut to
+    MAX_REVIEWERS here and the rest are considered.
     """
     chair = next((st for st in reversed(stages) if st.get("stage") == 3), None)
     code = chair.get("code") if chair else "no_answer"
@@ -294,7 +316,7 @@ def resolve(stages: list[dict], library: dict) -> dict:
         out = fallback("chair_failed" if code == "no_answer" else code)
         try:
             earlier = [_read(st, library) for st in stages if st.get("stage") != 3]
-            out["considered"] = _considered(earlier, out, [])
+            out.update(_considered(earlier, out, []))
         except Exception:
             out["considered"] = []  # the default committee never waits on its footnotes
         return out
@@ -313,9 +335,11 @@ def resolve(stages: list[dict], library: dict) -> dict:
         ],
         "reviewers": ["senior_director", "manager", *(seat["role"] for seat in chosen)],
         "considered": [],
+        "considered_dropped": 0,
+        "invalid_dropped": 0,
         "fallback": None,
     }
-    out["considered"] = _considered(read, out, ratified["seats"][room:])
+    out.update(_considered(read, out, ratified["seats"][room:]))
     return out
 
 
@@ -342,12 +366,14 @@ def fallback(code: str) -> dict:
         "seated": [fixed["owner"], *reviewers, fixed["junior_ic"]],
         "reviewers": list(cast.SENIORITY),
         "considered": [],
+        "considered_dropped": 0,
+        "invalid_dropped": 0,
         "fallback": code,
     }
 
 
 def _read(stage: dict, library: dict) -> dict:
-    """One kept stage, validated: its seats, invalid entries and notes."""
+    """One kept stage, validated: its seats, first INVALID_MAX invalid entries and notes."""
     doc = stage.get("doc")
     seats, invalid = validate(doc, library)
     return {
@@ -356,12 +382,13 @@ def _read(stage: dict, library: dict) -> dict:
         "code": stage.get("code"),
         "seats": seats,
         "slugs": {seat["role"] for seat in seats},
-        "invalid": invalid,
+        "invalid": invalid[:INVALID_MAX],
+        "invalid_dropped": max(0, len(invalid) - INVALID_MAX),
         "notes": not_seated(doc),
     }
 
 
-def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> list[dict]:
+def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> dict:
     """Everyone named and not seated, one entry per key (D2 rules 4 and 6).
 
     A seat's key is its slug (a bad slug's, its raw role lowercased) and a
@@ -371,6 +398,10 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> list[
     the same key gives the reason. No entry whose key is a seated slug
     survives, and a representative must be seated, except that an overflow
     seat always names one.
+
+    Returns ``{considered, considered_dropped, invalid_dropped}``: the first
+    CONSIDERED_MAX entries in that order, how many more there were, and how
+    many invalid entries ``_read`` cut, summed over the stages read.
     """
     seated = {seat["role"] for seat in resolved["seated"]}
     found: dict[str, dict] = {}
@@ -416,7 +447,12 @@ def _considered(read: list[dict], resolved: dict, overflow: list[dict]) -> list[
             seat["title"], seat["role"], f"over the {MAX_REVIEWERS}-seat bound",
             _rep(note.get("represented_by"), seated) or "senior_director",
         )
-    return [entry for key, entry in found.items() if key not in seated]
+    kept = [entry for key, entry in found.items() if key not in seated]
+    return {
+        "considered": kept[:CONSIDERED_MAX],
+        "considered_dropped": max(0, len(kept) - CONSIDERED_MAX),
+        "invalid_dropped": sum(st["invalid_dropped"] for st in read),
+    }
 
 
 def _dropper(read: list[dict], k: int, slug: str) -> dict | None:

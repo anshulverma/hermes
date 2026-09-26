@@ -82,6 +82,12 @@ def test_parse_keeps_the_last_fence_that_parses_to_an_object():
     # a ``` inside a JSON string is not a closing fence line
     ticks = {"seats": [_seat("sre", rationale="it pages at 3 a.m. ``` every week")]}
     assert S.parse(_answer(first, ticks))[0]["seats"] == ticks["seats"]
+    # a raw U+2028, U+2029 or U+0085 inside a JSON string splits the line for
+    # splitlines, not for JSON: the later block still parses and wins
+    raw = '{"seats": [{"role": "sre", "rationale": "pages\u2028at\u20293\x85a.m."}]}'
+    doc, code = S.parse(_answer(first, raw))
+    assert code is None and [s["role"] for s in doc["seats"]] == ["sre"]
+    assert S.validate(doc, cast.LIBRARY)[0][0]["rationale"] == "pages at 3 a.m."
 
 
 def test_parse_reports_no_block_and_unparseable():
@@ -101,6 +107,8 @@ def test_parse_reports_no_block_and_unparseable():
         f"See ```{S.FENCE_TAG}\n{{}}\n```",
         f"```{S.FENCE_TAG}\n{{}}",
         f"````\n```{S.FENCE_TAG}\n{{}}\n```\n````",
+        f"```{S.FENCE_TAG}x\n{{}}\n```",  # the info string is the tag, whole
+        f"```{S.FENCE_TAG} extra\n{{}}\n```",
     ):
         assert S.parse(prose) == (None, "no_block"), prose
     for fence in (
@@ -320,6 +328,7 @@ def test_validate_clips_every_field_and_maps_long_dashes_to_hyphens():
     assert dashed["lens"] == "uptime - then cost"
     assert dashed["rationale"] == "owns the pager - and the budget"
     assert clipped["title"] == "-" * (S.TITLE_MAX - 1) + "\u2026"
+    assert clipped["name"] == "-" * (S.NAME_MAX - 1) + "\u2026"  # the title, cut to NAME_MAX
     assert clipped["rationale"] == "-" * (S.RATIONALE_MAX - 1) + "\u2026"
     for seat in seats:
         for field, value in seat.items():
@@ -340,6 +349,19 @@ def test_validate_clips_every_field_and_maps_long_dashes_to_hyphens():
     assert [i["reason"] for i in invalid] == ["invalid: no title", "invalid: no rationale"]
     assert all(v.isprintable() for v in seats[0].values())
     json.dumps(seats, ensure_ascii=False).encode("utf-8")  # no lone surrogate left
+    # printable characters that render as nothing (the Hangul fillers, the
+    # blank Braille cell, the combining grapheme joiner) are blank too
+    ghosts = "\u3164\u2800\u115f\u1160\uffa0\u034f"
+    seats, invalid = S.validate({"seats": [
+        {"role": "crew_owner", "title": ghosts, "rationale": "x"},
+        {"role": "fleet_ops", "title": "Fleet", "rationale": ghosts},
+        {"role": "pager", "title": f"Pager{ghosts}lead", "name": ghosts, "rationale": "x"},
+    ]}, cast.LIBRARY)
+    assert [i["reason"] for i in invalid] == ["invalid: no title", "invalid: no rationale"]
+    assert [(s["name"], s["title"]) for s in seats] == [("Pager lead", "Pager lead")]
+    assert S.not_seated({"not_seated": [
+        {"stakeholder": ghosts, "reason": "r"}, {"stakeholder": "Legal", "reason": ghosts},
+    ]}) == []
 
 
 def test_validate_gives_a_derived_seat_the_derived_style_and_drops_worker_extras():
@@ -470,8 +492,11 @@ def test_resolve_takes_the_chairs_list_as_authoritative():
 
     out = S.resolve(stages, cast.LIBRARY)
 
-    assert set(out) == {"seated", "reviewers", "considered", "fallback"}
+    assert set(out) == {
+        "seated", "reviewers", "considered", "considered_dropped", "invalid_dropped", "fallback",
+    }
     assert out["fallback"] is None
+    assert out["considered_dropped"] == out["invalid_dropped"] == 0
     assert out["reviewers"] == ["senior_director", "manager", "privacy", "tl", "crew_owner"]
     assert _roles(out["seated"]) == [
         "owner", "senior_director", "manager", "privacy", "tl", "crew_owner", "junior_ic",
@@ -601,15 +626,18 @@ def test_resolve_cuts_an_overflow_to_twelve_and_names_a_seated_representative():
     seated = set(_roles(out["seated"]))
     assert all(c["represented_by"] in seated for c in out["considered"])
 
-    # 20 000 valid seats on every stage: twelve seated, the rest considered,
-    # and no pairwise work (a list scan per seat would take minutes here)
+    # 20 000 valid seats on every stage: twelve seated, the first 40 of the
+    # rest considered and the others counted, and no pairwise work (a list
+    # scan per seat would take minutes here)
     many = {"seats": [_derived(f"d{i}", f"Lead {i}") for i in range(20_000)]}
     stages = _stages(many, many, many)
     start = time.perf_counter()
     out = S.resolve(stages, cast.LIBRARY)
     assert time.perf_counter() - start < 2.0
     assert out["reviewers"] == ["senior_director", "manager", *(f"d{i}" for i in range(10))]
-    assert len(out["considered"]) == 20_000 - 10
+    assert S.CONSIDERED_MAX == 40
+    assert _roles(out["considered"]) == [f"d{i}" for i in range(10, 50)]
+    assert out["considered_dropped"] == 20_000 - 10 - 40
     assert {c["represented_by"] for c in out["considered"]} == {"senior_director"}
     assert S.resolve(stages, cast.LIBRARY) == out  # the same lists, the same committee
 
@@ -733,6 +761,38 @@ def test_resolve_matches_considered_entries_on_their_keys():
     ]
 
 
+def test_resolve_caps_the_invalid_and_considered_lists():
+    """A block of any size writes a bounded record to the reduction and the
+    thread: each stage keeps its first 20 invalid entries and the committee
+    its first 40 considered, in the usual order, and the result counts what
+    was cut, so nothing vanishes silently."""
+    assert (S.INVALID_MAX, S.CONSIDERED_MAX) == (20, 40)
+    bad = [_seat(f"Bad{i}") for i in range(25)]
+    notes = [{"stakeholder": f"Note {i}", "reason": "later"} for i in range(60)]
+
+    # the chair's 25 bad slugs: the first 20 are considered, 5 are counted
+    out = S.resolve(_stages(None, None, {"seats": [_seat("tl"), *bad]}), cast.LIBRARY)
+    assert out["fallback"] is None and out["reviewers"][2:] == ["tl"]
+    assert [c["stakeholder"] for c in out["considered"]] == [f"Bad{i}" for i in range(20)]
+    assert (out["invalid_dropped"], out["considered_dropped"]) == (5, 0)
+
+    # the chair's 60 notes: the first 40 are considered, 20 are counted
+    out = S.resolve(_stages(None, None, {"seats": [_seat("tl")], "not_seated": notes}),
+                    cast.LIBRARY)
+    assert [c["stakeholder"] for c in out["considered"]] == [f"Note {i}" for i in range(40)]
+    assert (out["invalid_dropped"], out["considered_dropped"]) == (0, 20)
+
+    # a fallback caps the earlier stages' record the same way: 20 invalid
+    # entries and 20 notes fill the 40; 5 invalid per stage and 40 more are counted
+    owner = {"seats": bad, "not_seated": notes}
+    out = S.resolve(_stages(owner, owner, None), cast.LIBRARY)
+    assert out["seated"] == S.fallback("chair_failed")["seated"]
+    assert [c["stakeholder"] for c in out["considered"]] == [
+        *(f"Bad{i}" for i in range(20)), *(f"Note {i}" for i in range(20)),
+    ]
+    assert (out["invalid_dropped"], out["considered_dropped"]) == (10, 40)
+
+
 def test_resolve_nulls_a_representative_who_is_not_seated():
     """Outside the overflow rule a representative must be a seated slug; an
     unseated one, a sentinel or a non-string becomes null."""
@@ -769,6 +829,7 @@ def test_fallback_never_raises_and_is_the_default_committee(monkeypatch):
         out = S.fallback(code)
 
         assert out["fallback"] == code and out["considered"] == []
+        assert out["considered_dropped"] == out["invalid_dropped"] == 0
         assert out["reviewers"] == list(cast.SENIORITY)
         assert _roles(out["seated"]) == list(cast.CAST)
         for seat in out["seated"]:
