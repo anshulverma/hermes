@@ -915,7 +915,7 @@ def test_eval_scores_scripted_run(eval_home, source_repo, artifact, local_site, 
 
     assert _target_rows(conn, target) == rows
     after = _tree(run_dir)
-    assert after.pop("eval.json") == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert after.pop("eval.json")[0] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert after == files
 
 
@@ -960,10 +960,10 @@ def test_eval_detects_source_write(eval_home, source_repo, artifact, local_site,
     """T24: a judge that writes what it was told only to read is caught.
 
     It writes once into the SOURCE (the target's thread.md), and once into its
-    own inputs/ copy (entries.json, the file its quotes are verified against,
-    where a planted line could forge a "verified" quote). Either way,
-    judge.reduce's re-hash flags target_changed_during_eval, nulls the judge
-    scores and fails the eval run, whatever the judge's answer said.
+    own inputs/ copy (entries.json, the file its quotes are verified against):
+    tampering with the copy is detected too. Either way, judge.reduce's re-hash
+    flags target_changed_during_eval, nulls the judge scores and fails the eval
+    run, whatever the judge's answer said.
     """
     conn = eval_home
     target = _committee_target(conn, local_site, "committee-20260925-000024", monkeypatch)
@@ -1226,10 +1226,15 @@ def _target_rows(conn, run_id):
     return {name: conn.execute(sql, (run_id,)).fetchall() for name, sql in queries.items()}
 
 
-def _tree(root: Path) -> dict[str, str]:
-    """{relative path: sha256} of every regular file under ``root``."""
-    return {
-        str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in sorted(root.rglob("*"))
-        if p.is_file()
-    }
+def _tree(root: Path) -> dict[str, tuple]:
+    """{relative path: (sha256, st_mode, st_mtime_ns, st_ino)} of every entry under ``root``.
+
+    Directories and symlinks too (sha256 None), from lstat: an eval that adds an
+    empty directory, or rewrites a file with the same bytes, still shows.
+    """
+    tree = {}
+    for p in sorted(root.rglob("*")):
+        info = p.lstat()
+        digest = hashlib.sha256(p.read_bytes()).hexdigest() if p.is_file() and not p.is_symlink() else None
+        tree[str(p.relative_to(root))] = (digest, info.st_mode, info.st_mtime_ns, info.st_ino)
+    return tree
