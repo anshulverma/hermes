@@ -1425,3 +1425,322 @@ def test_verdict_count_words_and_every_match(tmp_path):
     assert claims(both, 8) == [(7, 8, both), (6, 8, both)]
     assert claims("Seven edits landed.\n\nEight edits landed.", 8) == [(7, 8, "Seven edits landed.")]
     assert claims("The edits landed. Several edits were made.", 8) == []
+
+
+# --- D6: the judge's snapshot, goal, answer and evidence ---------------------
+
+JUDGE_QUOTE = "The rollback plan is missing"
+OPEN_METRICS = {"seats": {"unheard": []}, "unanswered_reviewer_turns": []}
+
+
+def _judge_inputs(tmp_path: Path) -> dict:
+    """A hand-made inputs/: one turn, a header and a decision; no thread.md, no copies."""
+    d = tmp_path / "inputs"
+    d.mkdir()
+    entries = {
+        "header": {"text": "# Committee — run-x", "line_start": None, "line_end": None},
+        "turns": {"1": {"role": "tpm", "body": JUDGE_QUOTE + ", so I cannot approve yet.",
+                        "line_start": None, "line_end": None}},
+        "decision": {"chair_prose": "Approve with changes.", "line_start": None, "line_end": None},
+    }
+    (d / "entries.json").write_text(json.dumps(entries), encoding="utf-8")
+    return {"dir": str(d), "thread": None, "entries": "entries.json", "original": None,
+            "revised": None, "doc": None, "metrics": "metrics.json", "rubric": "rubric.md"}
+
+
+def _judge_dim(score, *evidence) -> dict:
+    """One judge dimension as the fence carries it: one verbatim turn-1 quote by default."""
+    return {"score": score, "rationale": "because",
+            "evidence": list(evidence) or [{"turn": 1, "where": "turn", "quote": JUDGE_QUOTE}]}
+
+
+def _eval_fence(obj) -> str:
+    return "```" + E.FENCE_TAG + "\n" + json.dumps(obj) + "\n```"
+
+
+def test_judge_goal_under_budget():
+    """T8: the goal fits cast.GOAL_MAX with a 300-char inputs dir, names only what exists, never inlines the rubric."""
+    from playbooks.committee import cast
+
+    long_dir = "/" + "d" * 299
+    full = {"dir": long_dir, "thread": "thread.md", "entries": "entries.json",
+            "original": "original.md", "revised": "revised.md",
+            "doc": ["doc/t03.md", "doc/t06.md"], "metrics": "metrics.json", "rubric": "rubric.md"}
+    goal = E.judge_goal(full)
+    assert len(long_dir) == 300 and len(goal) <= cast.GOAL_MAX
+    assert goal.startswith("You are the judge") and goal.count(long_dir) == 1
+    # In order: the dir, the files in it, read only, the quote rule, the output contract.
+    marks = [long_dir, "thread.md", "entries.json", "original.md", "revised.md", "doc/",
+             "metrics.json", "rubric.md", "read only: write, edit or create nothing",
+             E.VERBATIM, "```" + E.FENCE_TAG]
+    at = [goal.index(m) for m in marks]
+    assert at == sorted(at), list(zip(marks, at))
+    for piece in (*E.JUDGE_DIMS, '"score"', "1-5", '"rationale"', '"evidence"', '"turn"',
+                  '"where"', '"quote"', '"decision"', '"header"', '"original"', '"revised"',
+                  "at most 5 evidence items", "at most 300 characters"):
+        assert piece in goal, piece
+    # The rubric is named, never inlined.
+    assert E.RUBRIC not in goal and "asserts things nobody said" not in goal
+
+    # Absent inputs are never named; the judge is told the copies are unavailable.
+    bare = E.judge_goal({**full, "thread": None, "original": None, "revised": None, "doc": None})
+    assert len(bare) <= cast.GOAL_MAX and bare.count(long_dir) == 1
+    for gone in ("thread.md", "original.md", "revised.md", "doc/"):
+        assert gone not in bare, gone
+    assert bare.count("unavailable") == 2
+
+    # rubric.md: the version, one line per dimension version, a blank line, RUBRIC (G3).
+    versions = E.dimension_versions()
+    version = E.rubric_version(versions)
+    text = E.rubric_text(versions, version)
+    lines = text.split("\n")
+    assert lines[0] == f"rubric_version: {version}"
+    assert lines[1:7] == [f"{dim}: {v}" for dim, v in versions.items()]
+    assert lines[7] == "" and "\n".join(lines[8:]) == E.RUBRIC + "\n"
+    assert E.VERBATIM in text and E.VERBATIM in goal
+
+
+# T9 pins the parser, and the score rules score_judge enforces on a parsed answer, against
+# the hand-made inputs (so every quote verifies and only the score can fail).
+def test_parse_judge_answer(tmp_path):
+    """T9: the last fence that parses wins; only an int 1-5 is a score; no parsing fence is None."""
+    good = {dim: _judge_dim(4) for dim in E.JUDGE_DIMS}
+    assert E.parse_answer("Scores below.\n\n" + _eval_fence(good) + "\n") == good
+    first = {**good, "verdict_grounded": _judge_dim(2)}
+    assert E.parse_answer(_eval_fence(first) + "\nOn reflection:\n" + _eval_fence(good)) == good
+    # A broken last fence, or one that is not an object, falls back to the one before it.
+    assert E.parse_answer(_eval_fence(first) + "\n```hermes-eval\n{not json\n```\n") == first
+    assert E.parse_answer(_eval_fence(first) + "\n```hermes-eval\n[1, 2]\n```") == first
+    assert E.parse_answer("```json\n" + json.dumps(good) + "\n```") is None  # another tag
+    for nothing in (None, "", 42, "no fence at all", "```hermes-eval\n{oops\n```"):
+        assert E.parse_answer(nothing) is None, nothing
+
+    inputs = _judge_inputs(tmp_path)
+    dims, rejected = E.score_judge(E.parse_answer(_eval_fence(good)), inputs, OPEN_METRICS)
+    assert list(dims) == list(E.JUDGE_DIMS) and rejected == 0
+    for dim in E.JUDGE_DIMS:
+        assert (dims[dim]["scorer"], dims[dim]["score"], dims[dim]["error"]) == ("judge", 4, None)
+        assert dims[dim]["rationale"] == "because"
+        assert dims[dim]["evidence"] == [
+            {"turn": 1, "where": "turn", "quote": JUDGE_QUOTE, "line": None, "verified": True}]
+    assert dims["concern_coverage"]["detail"] == {"concerns": [], "absent_stakeholders": []}
+    assert "detail" not in dims["verdict_grounded"] and "detail" not in dims["edits_address_concerns"]
+
+    # Only an int 1-5 is a score: not a str, a float (even 4.0), a bool, 0, 6 or null.
+    for bad in ("4", 4.5, 4.0, True, False, 0, 6, -1, None):
+        dims, _ = E.score_judge({**good, "verdict_grounded": _judge_dim(bad)}, inputs, OPEN_METRICS)
+        assert dims["verdict_grounded"]["score"] is None, bad
+        assert dims["verdict_grounded"]["error"] == "score is not an integer 1-5", bad
+        assert dims["verdict_grounded"]["evidence"][0]["verified"] is True
+        assert dims["edits_address_concerns"]["score"] == 4
+    for edge in (1, 5):
+        dims, _ = E.score_judge({**good, "verdict_grounded": _judge_dim(edge)}, inputs, OPEN_METRICS)
+        assert dims["verdict_grounded"]["score"] == edge
+
+    # A dimension that is absent, or not an object, is null.
+    dims, _ = E.score_judge({"verdict_grounded": "5", "concern_coverage": _judge_dim(4)},
+                            inputs, OPEN_METRICS)
+    assert dims["verdict_grounded"]["error"] == "missing from the answer"
+    assert dims["edits_address_concerns"]["error"] == "missing from the answer"
+    assert dims["verdict_grounded"]["score"] is dims["edits_address_concerns"]["score"] is None
+    assert dims["concern_coverage"]["score"] == 4
+
+    # At most 5 evidence items: the extras are dropped, never read and never counted.
+    seven = [{"turn": 1, "where": "turn", "quote": JUDGE_QUOTE}] * 5 + [
+        {"turn": 1, "where": "turn", "quote": "an invented line"}] * 2
+    dims, rejected = E.score_judge({**good, "verdict_grounded": _judge_dim(3, *seven)},
+                                   inputs, OPEN_METRICS)
+    assert len(dims["verdict_grounded"]["evidence"]) == 5 and rejected == 0
+
+    # No parseable fence: every judge dimension is null, and nothing was rejected.
+    dims, rejected = E.score_judge(None, inputs, OPEN_METRICS)
+    assert rejected == 0 and list(dims) == list(E.JUDGE_DIMS)
+    for dim in E.JUDGE_DIMS:
+        assert dims[dim]["score"] is None and dims[dim]["evidence"] == []
+        assert dims[dim]["error"] == "no parseable hermes-eval fence"
+
+
+def test_concern_coverage_cap(tmp_path):
+    """T28: an unheard seat or an unanswered reviewer turn caps concern_coverage at 3; a 2 stays 2."""
+    unheard = {"seats": {"unheard": ["security"]}, "unanswered_reviewer_turns": []}
+    unanswered = {"seats": {"unheard": []}, "unanswered_reviewer_turns": [7]}
+    assert E.concern_cap(5, OPEN_METRICS) == 5
+    assert E.concern_cap(5, unheard) == 3
+    assert E.concern_cap(5, unanswered) == 3
+    assert E.concern_cap(4, {**unheard, "unanswered_reviewer_turns": [7]}) == 3
+    assert E.concern_cap(2, unheard) == 2 and E.concern_cap(3, unanswered) == 3
+    assert E.concern_cap(None, unheard) is None
+    assert E.concern_cap(5, {}) == 5  # never raises on a short metrics dict
+
+    inputs = _judge_inputs(tmp_path)
+    concerns = [{"member": "tpm", "concern": "rollback", "raised_turn": 1, "answered_turn": None}]
+    answer = {dim: _judge_dim(5) for dim in E.JUDGE_DIMS}
+    # concerns ride along unverified; a non-list absent_stakeholders is stored as [].
+    answer["concern_coverage"] = {**_judge_dim(5), "concerns": concerns,
+                                  "absent_stakeholders": "Security"}
+    for metrics in (unheard, unanswered):
+        dims, _ = E.score_judge(answer, inputs, metrics)
+        cc = dims["concern_coverage"]
+        assert (cc["score"], cc["error"]) == (3, None)
+        assert cc["detail"] == {"concerns": concerns, "absent_stakeholders": [], "capped_from": 5}
+        # Only concern_coverage is capped.
+        assert dims["verdict_grounded"]["score"] == dims["edits_address_concerns"]["score"] == 5
+    dims, _ = E.score_judge(answer, inputs, OPEN_METRICS)
+    assert dims["concern_coverage"]["score"] == 5
+    assert "capped_from" not in dims["concern_coverage"]["detail"]
+    answer["concern_coverage"]["score"] = 2
+    dims, _ = E.score_judge(answer, inputs, unheard)
+    assert dims["concern_coverage"]["score"] == 2
+    assert "capped_from" not in dims["concern_coverage"]["detail"]
+
+
+def test_evidence_verification(tmp_path, monkeypatch):
+    """T10: quotes verify against inputs/ only, with their line; invented, footer and malformed ones never do."""
+    import dataclasses
+    import stat
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "eval"))
+    home, run_id = build_home(tmp_path, "run-9")
+    m = E.measure_target(str(home), run_id)
+    target = m["target"]
+    block = E.deterministic_block(m["metrics"], m["flags"], m["deterministic"])
+    versions = E.dimension_versions()
+    version = E.rubric_version(versions)
+    out = E.write_inputs("run-99", target, block, versions, version)
+
+    # The snapshot: C2 names relative to dir, every file 0600, each pinned by sha256.
+    inputs = out["inputs"]
+    root = (tmp_path / "eval").resolve() / "runs" / "run-99" / "inputs"
+    assert inputs == {"dir": str(root), "thread": "thread.md", "entries": "entries.json",
+                      "original": "original.md", "revised": "revised.md",
+                      "doc": [f"doc/t{n:02d}.md" for n in range(3, 25, 3)],
+                      "metrics": "metrics.json", "rubric": "rubric.md"}
+    written = sorted(p for p in root.rglob("*") if p.is_file())
+    assert len(written) == 14
+    assert all(stat.S_IMODE(p.stat().st_mode) == 0o600 for p in written)
+    assert out["inputs_digests"] == {
+        str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in written}
+    sources = [target.thread_path, target.original_path, target.revised_path,
+               *(s["path"] for s in target.steps)]
+    assert out["digests"] == {
+        p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in sources}
+    assert (root / "thread.md").read_bytes() == Path(target.thread_path).read_bytes()
+    assert (root / "original.md").read_bytes() == target.original
+    assert (root / "revised.md").read_bytes() == target.revised
+    assert (root / "doc" / "t24.md").read_bytes() == target.steps[-1]["data"]
+    assert (root / "metrics.json").read_text(encoding="utf-8") == block
+    assert (root / "rubric.md").read_text(encoding="utf-8") == E.rubric_text(versions, version)
+
+    # entries.json: D3 bodies, chair prose only, and thread.md's line ranges.
+    entries = json.loads((root / "entries.json").read_text(encoding="utf-8"))
+    assert entries == E.build_entries(target)
+    assert list(entries["turns"]) == [str(n) for n in range(1, 25)]
+    assert entries["turns"]["1"]["role"] == "senior_director"
+    assert entries["turns"]["1"]["body"] == E.body(target, 1)
+    assert entries["turns"]["1"]["line_start"] == 19
+    for n, t in target.thread["turns"].items():
+        got = entries["turns"][str(n)]
+        assert (got["line_start"], got["line_end"]) == (t["line_start"], t["line_end"]), n
+    assert entries["decision"]["chair_prose"] == E.chair_prose(target.decision)
+    assert entries["decision"]["line_start"] == 752
+    assert entries["header"]["text"].startswith("# Committee — run-9")
+
+    # Every source changes after the snapshot. Verification never reads them again.
+    for p in sources:
+        Path(p).write_bytes(b"rewritten after the snapshot\n")
+
+    def ev(**item):
+        return E.verify_evidence(item, entries, inputs)
+
+    def ok(where, quote, line, turn=None):
+        return {"turn": turn, "where": where, "quote": quote, "line": line, "verified": True}
+
+    t1 = "A good design and a fundable one are different bars"
+    assert ev(turn=1, where="turn", quote=t1) == ok("turn", t1, 21, turn=1)
+    # Whitespace collapses. These first 40 characters span two lines, so line is the heading.
+    assert ev(turn=1, where="turn", quote="why we paid for this.\n\n  Here") == ok(
+        "turn", "why we paid for this. Here", 19, turn=1)
+    seven = "and flagged every gap. Seven edits landed"
+    assert ev(turn=None, where="decision", quote=seven) == ok("decision", seven, 820)
+    charge = "Decide whether Hermes should fund the federation layer now"
+    assert ev(turn=None, where="header", quote=charge) == ok("header", charge, 3)
+    crews = "different teams own different crews"
+    gate = "A trigger alone does not fund federation."
+    assert ev(turn=None, where="original", quote=crews) == ok("original", crews, 46)
+    assert ev(turn=None, where="revised", quote=gate) == ok("revised", gate, 50)
+
+    def rejected(**item):
+        got = ev(**item)
+        return got["verified"] is False and got["line"] is None
+
+    assert rejected(turn=1, where="turn", quote=t1 + " and nobody said this")  # invented
+    assert rejected(turn=2, where="turn", quote=t1)      # the right words, the wrong turn
+    assert rejected(turn=None, where="turn", quote=t1)   # a turn quote needs its turn
+    assert rejected(turn=99, where="turn", quote=t1)
+    # The re-check footer is not the chair's prose, so it backs nothing.
+    assert rejected(turn=None, where="decision", quote="re-check of turn 03 (junior_ic): APPLIED")
+    assert rejected(turn=None, where="revised", quote=crews)
+    assert rejected(turn=None, where="original", quote=gate)
+    assert rejected(turn=None, where="revised", quote="rewritten after the snapshot")
+    assert rejected(turn=1, where="turn", quote="  \n ")  # empty is in everything: never evidence
+    # Clipped to 300 before it is verified.
+    long = entries["turns"]["1"]["body"][:400]
+    got = ev(turn=1, where="turn", quote=long)
+    assert got["verified"] is True and got["quote"] == " ".join(long[:300].split())
+    for bad in ("a quote", ["x"], None, {"where": "turn", "turn": 1}, {"turn": 1, "quote": t1},
+                {"where": "thread", "turn": 1, "quote": t1},
+                {"where": "metric", "turn": None, "quote": t1},
+                {"where": "turn", "turn": "1", "quote": t1},
+                {"where": "turn", "turn": True, "quote": t1},
+                {"where": "turn", "turn": 1.0, "quote": t1},
+                {"where": "turn", "turn": 1, "quote": ["x"]}):
+        assert E.verify_evidence(bad, entries, inputs) is None, bad
+
+    # score_judge reads inputs/entries.json from disk and counts every rejection.
+    answer = {
+        "verdict_grounded": {"score": 4, "rationale": "grounded", "evidence": [
+            {"turn": None, "where": "decision", "quote": seven},
+            {"turn": None, "where": "decision",
+             "quote": "The committee unanimously approved full funding."}]},
+        "edits_address_concerns": {"score": 3, "rationale": "partly", "evidence": [
+            {"turn": None, "where": "revised", "quote": gate}]},
+        "concern_coverage": {"score": 4, "rationale": "invented", "evidence": [
+            {"turn": 1, "where": "turn", "quote": "Security signed off on everything."},
+            "not an item"]},
+    }
+    dims, n_rejected = E.score_judge(answer, inputs, m["metrics"])
+    assert n_rejected == 3  # the two invented quotes and the malformed item
+    assert dims["verdict_grounded"]["score"] == 4
+    assert [e["verified"] for e in dims["verdict_grounded"]["evidence"]] == [True, False]
+    assert dims["edits_address_concerns"]["score"] == 3
+    cc = dims["concern_coverage"]
+    assert (cc["score"], cc["error"]) == (None, "no verifiable evidence")
+    assert [e["verified"] for e in cc["evidence"]] == [False]  # the malformed item is not kept
+    # A line planted in inputs/entries.json verifies: the copy is what counts, which is
+    # why judge.reduce re-hashes every inputs/ file (Task 9).
+    planted = json.loads((root / "entries.json").read_text(encoding="utf-8"))
+    planted["decision"]["chair_prose"] += "\nThe committee unanimously approved full funding."
+    (root / "entries.json").write_text(json.dumps(planted), encoding="utf-8")
+    dims, n_rejected = E.score_judge(answer, inputs, m["metrics"])
+    assert [e["verified"] for e in dims["verdict_grounded"]["evidence"]] == [True, True]
+    assert n_rejected == 2
+
+    # No thread.md and no copies: entries come from the reductions, every line is null.
+    bare = dataclasses.replace(target, thread=None, thread_text=None,
+                               original=None, revised=None, steps=[])
+    out2 = E.write_inputs("run-98", bare, block, versions, version)
+    inputs2 = out2["inputs"]
+    root2 = Path(inputs2["dir"])
+    assert [inputs2[k] for k in ("thread", "original", "revised", "doc")] == [None] * 4
+    assert out2["digests"] == {}
+    assert sorted(p.name for p in root2.iterdir()) == ["entries.json", "metrics.json", "rubric.md"]
+    e2 = json.loads((root2 / "entries.json").read_text(encoding="utf-8"))
+    assert e2["header"] == {"text": "", "line_start": None, "line_end": None}
+    assert all((t["line_start"], t["line_end"]) == (None, None) for t in e2["turns"].values())
+    assert (e2["decision"]["line_start"], e2["decision"]["line_end"]) == (None, None)
+    assert e2["turns"]["1"]["body"] == entries["turns"]["1"]["body"]
+    assert E.verify_evidence({"turn": 1, "where": "turn", "quote": t1}, e2, inputs2) == ok(
+        "turn", t1, None, turn=1)
+    assert E.verify_evidence({"turn": None, "where": "original", "quote": crews},
+                             e2, inputs2)["verified"] is False
+    assert E.judge_goal(inputs2).count("unavailable") == 2

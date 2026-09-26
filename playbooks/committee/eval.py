@@ -1033,3 +1033,325 @@ def measure_target(home: str, run_id: str) -> dict:
     flags = compute_flags(target, metrics)
     return {"target": target, "metrics": metrics, "flags": flags,
             "deterministic": score_deterministic(metrics, flags)}
+
+
+# --- D6: the judge's pinned snapshot, and its goal ----------------------------
+
+
+def build_entries(target: Target) -> dict:
+    """inputs/entries.json: every turn, the header and the chair's prose, with their lines.
+
+    Bodies follow D3 (the reduction's ``body``; the thread entry on a legacy run),
+    and the decision is chair prose only, so the re-check footer can never back a
+    quote. With no thread.md every line is null and the header text is "" (G3).
+    Turn keys are strings, so the dict round-trips through JSON unchanged.
+    """
+    parsed = target.thread or {}
+    spans = parsed.get("turns") or {}
+    header = parsed.get("header") or {}
+    decision = parsed.get("decision") or {}
+    turns = {}
+    for n in sorted(target.turns):
+        entry = spans.get(n) or {}
+        turns[str(n)] = {
+            "role": target.turns[n].get("role") or entry.get("role"),
+            "body": body(target, n),
+            "line_start": entry.get("line_start"),
+            "line_end": entry.get("line_end"),
+        }
+    return {
+        "header": {"text": header.get("text") or "", "line_start": header.get("line_start"),
+                   "line_end": header.get("line_end")},
+        "turns": turns,
+        "decision": {"chair_prose": chair_prose(target.decision),
+                     "line_start": decision.get("line_start"),
+                     "line_end": decision.get("line_end")},
+    }
+
+
+def rubric_text(versions: dict[str, str], version: str) -> str:
+    """inputs/rubric.md: the rubric version, one line per dimension version, a blank line, RUBRIC (G3)."""
+    head = [f"rubric_version: {version}", *(f"{dim}: {v}" for dim, v in versions.items())]
+    return "\n".join([*head, "", RUBRIC]) + "\n"
+
+
+def _write_private(path: Path, data: bytes) -> str:
+    """Write ``data`` to ``path`` as a 0600 file, following no symlink; return its sha256."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with open(fd, "wb") as handle:
+        os.fchmod(handle.fileno(), 0o600)  # an existing file keeps its old mode through O_TRUNC
+        handle.write(data)
+    return hashlib.sha256(data).hexdigest()
+
+
+def write_inputs(eval_run_id: str, target: Target, block: str,
+                 versions: dict[str, str], version: str) -> dict:
+    """Snapshot everything the judge reads into ``<eval home>/runs/<eval_run_id>/inputs/``.
+
+    The judge quotes these copies and judge.reduce verifies against them alone,
+    so a source that moves later cannot move a score. ``digests`` pins each
+    source file (by the bytes copied) and ``inputs_digests`` each file written
+    here; judge.reduce re-hashes both (D6). Every file is 0600, and directories
+    are made only by ``config.state_dir`` in the eval home: nothing is written to
+    the source home. ``inputs`` names are relative to ``dir``, None when absent.
+
+    Raises:
+        OSError: the eval home cannot be written. measure.reduce turns that into
+            an eval_target error.
+    """
+    root = config.state_dir("runs", eval_run_id, "inputs")
+    ext = Path(thread.snapshot_key(target.artifact, None)).suffix
+    names: dict = dict.fromkeys(
+        ("thread", "entries", "original", "revised", "doc", "metrics", "rubric"))
+    digests: dict[str, str] = {}
+    inputs_digests: dict[str, str] = {}
+
+    def put(name: str, data: bytes, source: str | None = None) -> str:
+        path = root / name
+        inputs_digests[str(path)] = _write_private(path, data)
+        if source is not None:
+            digests[source] = inputs_digests[str(path)]
+        return name
+
+    # The raw bytes, re-read: Target keeps only the decoded text, and a re-encode
+    # of text decoded with errors="replace" would not hash to the source's digest.
+    raw = thread.read_regular(target.thread_path) if target.thread_text is not None else None
+    if raw is not None:
+        names["thread"] = put("thread.md", raw, target.thread_path)
+    entries = json.dumps(build_entries(target), ensure_ascii=False, indent=1)
+    names["entries"] = put("entries.json", entries.encode("utf-8"))
+    if target.original is not None:
+        names["original"] = put("original" + ext, target.original, target.original_path)
+    if target.revised is not None:
+        names["revised"] = put("revised" + ext, target.revised, target.revised_path)
+    steps = [s for s in target.steps if s.get("data") is not None]
+    if steps:
+        config.state_dir("runs", eval_run_id, "inputs", "doc")
+        names["doc"] = [put("doc/" + Path(s["key"]).name, s["data"], s["path"]) for s in steps]
+    names["metrics"] = put("metrics.json", block.encode("utf-8"))
+    names["rubric"] = put("rubric.md", rubric_text(versions, version).encode("utf-8"))
+    return {"inputs": {"dir": str(root), **names}, "digests": digests,
+            "inputs_digests": inputs_digests}
+
+
+_GOAL_ROLE = (
+    "You are the judge of one finished committee review. Score it on three "
+    "dimensions from the files below, and back every score with quotes."
+)
+
+# C3's output contract, from the constants, so the fence tag and limits have one source.
+_GOAL_CONTRACT = (
+    f"Done when: your answer ends with one ```{FENCE_TAG} fenced block holding one JSON "
+    f"object with the keys {', '.join(JUDGE_DIMS)}. Each key maps to "
+    '{"score": <an integer 1-5>, "rationale": "<why>", "evidence": [{"turn": <the turn '
+    'number, or null>, "where": "turn" | "decision" | "header" | "original" | "revised", '
+    '"quote": "<verbatim>"}]}, '
+    f"with at most {EVIDENCE_MAX} evidence items per dimension and each quote at most "
+    f"{QUOTE_MAX} characters. concern_coverage may also carry "
+    '"concerns": [{"member": "<seat>", "concern": "<what>", "raised_turn": <n>, '
+    '"answered_turn": <n or null>}] and "absent_stakeholders": [{"who": "<function>", '
+    '"turn": <n>, "quote": "<verbatim>"}].'
+)
+
+
+def judge_goal(inputs: dict) -> str:
+    """The judge's whole goal. At most cast.GOAL_MAX for an inputs dir of 300 chars (T8).
+
+    It names the inputs directory once, then the files in it (an absent copy is
+    called unavailable, never named), the read-only rule, the verbatim-quote rule
+    and the C3 output contract. The rubric is never inlined: rubric.md holds it.
+    """
+    files = []
+    if inputs.get("thread"):
+        files.append(f"{inputs['thread']} (the transcript)")
+    files.append(f"{inputs['entries']} (every turn, the header and the chair's prose, "
+                 "each with its line range)")
+    files.append(f"{inputs['original']} (the document the committee was handed)"
+                 if inputs.get("original") else "no original copy (unavailable)")
+    files.append(f"{inputs['revised']} (the document after the delegated edits)"
+                 if inputs.get("revised") else "no revised copy (unavailable: judge the edits "
+                 "from the delegations and the junior_ic reports)")
+    if inputs.get("doc"):
+        files.append("doc/ (the document after each edit, one file per junior_ic turn)")
+    files.append(f"{inputs['metrics']} (the record's counts, including seats, "
+                 "unanswered_reviewer_turns and outside_room_mentions)")
+    files.append(f"{inputs['rubric']} (how to score each dimension: read it first)")
+    return "\n\n".join((
+        _GOAL_ROLE,
+        f"The inputs directory: {inputs['dir']}\nIn it: " + "; ".join(files) + ".",
+        "This is read only: write, edit or create nothing.",
+        f"Quote rule: {VERBATIM}. A \"decision\" quote comes from the chair's prose, "
+        "never from the re-check lines under it.",
+        _GOAL_CONTRACT,
+    ))
+
+
+# --- D6: parse the judge's answer, and verify every quote against inputs/ ------
+
+_FENCE_RE = re.compile(
+    r"```[ \t]*" + re.escape(FENCE_TAG) + r"[ \t]*\n(.*?)\n?```", re.DOTALL | re.IGNORECASE)
+_WHERE = ("turn", "decision", "header", "original", "revised")
+_ENTRY_TEXT = {"turn": "body", "decision": "chair_prose", "header": "text"}
+
+
+def parse_answer(answer: str | None) -> dict | None:
+    """The last ``hermes-eval`` fence whose body parses as a JSON object, or None.
+
+    Walked in reverse, as research's verdict.parse does: a restated answer wins,
+    and a broken last fence falls back to the one before it.
+    """
+    if not isinstance(answer, str):
+        return None
+    for raw in reversed(_FENCE_RE.findall(answer)):
+        try:
+            doc = json.loads(raw)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(doc, dict):
+            return doc
+    return None
+
+
+def _collapse(text: str) -> str:
+    """Whitespace collapsed to single spaces: how a quote and its place are compared."""
+    return " ".join(text.split())
+
+
+def _input_text(inputs: dict, key: str) -> str | None:
+    """The inputs/ file ``inputs[key]`` names, decoded; None when absent. Never the source."""
+    root = inputs.get("dir") if isinstance(inputs, dict) else None
+    name = inputs.get(key) if isinstance(inputs, dict) else None
+    if not isinstance(root, str) or not isinstance(name, str):
+        return None
+    data = thread.read_regular(Path(root) / name)
+    return None if data is None else data.decode("utf-8", "replace")
+
+
+def _entry_for(entries: object, where: str, turn: int | None) -> dict | None:
+    """The entries.json place an item cites: a turn by number, the decision or the header."""
+    if not isinstance(entries, dict):
+        return None
+    if where == "turn":
+        turns = entries.get("turns")
+        entry = turns.get(str(turn)) if isinstance(turns, dict) and turn is not None else None
+    else:
+        entry = entries.get(where)
+    return entry if isinstance(entry, dict) else None
+
+
+def _entry_line(inputs: dict, entry: dict, key: str) -> int | None:
+    """The first inputs/thread.md line in the entry's range holding ``key``, else its first line."""
+    start, end = entry.get("line_start"), entry.get("line_end")
+    text = _input_text(inputs, "thread")
+    if text is None or not isinstance(start, int) or not isinstance(end, int):
+        return None
+    found = _find_line(text.splitlines(), (start, end), lambda line: key in _collapse(line))
+    return start if found is None else found
+
+
+def verify_evidence(item: object, entries: dict, inputs: dict) -> dict | None:
+    """One judge evidence item, checked against the snapshot (D6 step 2).
+
+    ``verified`` iff the quote (clipped to QUOTE_MAX, whitespace collapsed,
+    non-empty) is a substring of the place it cites: a turn's body, the chair
+    prose or the header text from ``entries`` (inputs/entries.json), or the whole
+    inputs/ copy for "original"/"revised". ``line`` is the first line holding the
+    quote's first 40 characters (thread.md within the entry's range, falling back
+    to its first line; or the copy), null when unverified or when inputs/ has no
+    thread.md. None for a malformed item, which the caller counts as rejected.
+    """
+    if not isinstance(item, dict):
+        return None
+    where, quote, turn = item.get("where"), item.get("quote"), item.get("turn")
+    if where not in _WHERE or not isinstance(quote, str):
+        return None
+    if turn is not None and (not isinstance(turn, int) or isinstance(turn, bool)):
+        return None
+    quote = _collapse(quote[:QUOTE_MAX])
+    out = {"turn": turn, "where": where, "quote": quote, "line": None, "verified": False}
+    key = quote[:40]
+    if where in ("original", "revised"):
+        text = _input_text(inputs, where)
+        if quote and text is not None and quote in _collapse(text):
+            lines = text.splitlines()
+            out["verified"] = True
+            out["line"] = _find_line(lines, (1, len(lines)), lambda line: key in _collapse(line))
+        return out
+    entry = _entry_for(entries, where, turn)
+    text = entry.get(_ENTRY_TEXT[where]) if entry else None
+    if quote and isinstance(text, str) and quote in _collapse(text):
+        out["verified"] = True
+        out["line"] = _entry_line(inputs, entry, key)
+    return out
+
+
+def concern_cap(score: int | None, metrics: dict) -> int | None:
+    """concern_coverage's cap (D5): at most 3 while a seated reviewer went unheard or unanswered."""
+    if score is None:
+        return None
+    seats = metrics.get("seats") if isinstance(metrics, dict) else None
+    unheard = seats.get("unheard") if isinstance(seats, dict) else None
+    unanswered = metrics.get("unanswered_reviewer_turns") if isinstance(metrics, dict) else None
+    return min(score, 3) if unheard or unanswered else score
+
+
+def _valid_score(value: object) -> bool:
+    """C3: an int 1-5. A bool is not a score, and neither is 4.0 or "4"."""
+    return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 5
+
+
+def score_judge(parsed: dict | None, inputs: dict, metrics: dict) -> tuple[dict[str, dict], int]:
+    """The three judge dimensions in C5 shape, and how many evidence items were rejected.
+
+    Evidence is verified against inputs/entries.json and the inputs/ copies,
+    never the source. A score counts only when it is an int 1-5 AND at least one
+    of its quotes verifies; otherwise it is null with an error. At most
+    EVIDENCE_MAX items are read per dimension (extras are dropped, not counted);
+    a malformed item is dropped and counted, an unverified one kept with
+    ``verified: false`` and counted. concern_coverage is capped by
+    ``concern_cap`` and carries the judge's ``concerns`` and
+    ``absent_stakeholders`` unverified under ``detail``. Never raises.
+    """
+    try:
+        entries = json.loads(_input_text(inputs, "entries") or "null")
+    except (ValueError, RecursionError):
+        entries = None
+    if not isinstance(entries, dict):
+        entries = {}
+    rejected = 0
+    dims: dict[str, dict] = {}
+    for dim in JUDGE_DIMS:
+        given = parsed.get(dim) if isinstance(parsed, dict) else None
+        out = {"scorer": "judge", "score": None, "rationale": "", "evidence": [], "error": None}
+        if not isinstance(parsed, dict):
+            out["error"] = "no parseable hermes-eval fence"
+        elif not isinstance(given, dict):
+            out["error"] = "missing from the answer"
+        else:
+            if isinstance(given.get("rationale"), str):
+                out["rationale"] = given["rationale"]
+            items = given.get("evidence")
+            for item in (items if isinstance(items, list) else [])[:EVIDENCE_MAX]:
+                checked = verify_evidence(item, entries, inputs)
+                if checked is None or not checked["verified"]:
+                    rejected += 1
+                if checked is not None:
+                    out["evidence"].append(checked)
+            if not _valid_score(given.get("score")):
+                out["error"] = "score is not an integer 1-5"
+            elif not any(e["verified"] for e in out["evidence"]):
+                out["error"] = "no verifiable evidence"
+            else:
+                out["score"] = given["score"]
+        if dim == "concern_coverage":
+            detail = {
+                key: given[key] if isinstance(given, dict) and isinstance(given.get(key), list)
+                else [] for key in ("concerns", "absent_stakeholders")
+            }
+            capped = concern_cap(out["score"], metrics)
+            if capped != out["score"]:
+                detail["capped_from"] = out["score"]
+                out["score"] = capped
+            out["detail"] = detail
+        dims[dim] = out
+    return dims, rejected
