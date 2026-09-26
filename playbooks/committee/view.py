@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import stat
 from pathlib import Path
 
@@ -208,6 +209,13 @@ def _entry(doc: dict) -> dict:
     }
 
 
+# One oversized answer must not cost a view request seconds and gigabytes, nor
+# the browser thousands of drawn figures: past these the body is shown as text.
+_SEGMENT_BODY_MAX = 64 * 1024  # characters
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_DISARMED = "!\u200b["  # "![" with a zero-width space: Markdown draws no image
+
+
 def _segments(doc: dict) -> list[dict]:
     """The body as voice.segments splits it, each image's ``ok`` merged in.
 
@@ -215,21 +223,31 @@ def _segments(doc: dict) -> list[dict]:
     position over the same ordered list of images (mermaid included) that
     ``measure`` recorded, and only onto the reference it was recorded for. It
     is False whenever it is absent: this process never stats a worker's file
-    on the master's behalf. Later loops build segments with this, never with
-    voice.segments(body) directly.
+    on the master's behalf. A passing image also carries the ``sha256`` the
+    master recorded, so the server serves those bytes and no later overwrite.
+    Later loops build segments with this, never with voice.segments(body)
+    directly.
+
+    At most ``voice.IMAGE_RECORDS`` figures: from the line holding the next
+    one, the rest of the body is one text segment. A body over
+    ``_SEGMENT_BODY_MAX`` characters is one text segment, never split.
 
     No "![" leaves here in prose. Image syntax the scan misses stays in a text
     segment, where Markdown would fetch it: a label across lines, a raw tag or
-    an autolink outranking a code span, a backtick in a fence's info string.
-    A ``Figure:`` or ``Description:`` line is never scanned at all. So every
-    ``text``, ``caption`` and ``description`` gets a U+200B after the "!", as
-    Diff.tsx does to a document; the view's renderer does it again.
+    an autolink outranking a code span. A ``Figure:`` or ``Description:`` line
+    is never scanned at all. So every ``text``, ``caption`` and ``description``
+    gets a U+200B after the "!", as Diff.tsx does to a document; the view's
+    renderer does it again.
     """
-    body = doc.get("body")
+    body = doc.get("body") if isinstance(doc.get("body"), str) else ""
     recorded = doc.get("voice") if isinstance(doc.get("voice"), dict) else {}
     checked = recorded.get("images") if isinstance(recorded.get("images"), list) else []
+    if len(body) > _SEGMENT_BODY_MAX:
+        split = [{"kind": "text", "text": body.strip()}] if body.strip() else []
+    else:
+        split = voice.segments(body, limit=voice.IMAGE_RECORDS)
     out, index = [], 0
-    for seg in voice.segments(body if isinstance(body, str) else ""):
+    for seg in split:
         if seg["kind"] in ("image", "mermaid"):
             if seg["kind"] == "image":
                 got = checked[index] if index < len(checked) else None
@@ -238,11 +256,29 @@ def _segments(doc: dict) -> list[dict]:
                     == ("image", seg["name"], seg["ref"])
                 )
                 seg = {**seg, "ok": ok}
+                sha = got.get("sha256") if ok else None
+                if isinstance(sha, str) and _SHA256.fullmatch(sha):
+                    seg["sha256"] = sha
             index += 1
-        out.append({key: value.replace("![", "!\u200b[")
+        out.append({key: value.replace("![", _DISARMED)
                     if key in ("text", "caption", "description") else value
                     for key, value in seg.items()})
     return out
+
+
+def _as_text(seg: dict) -> dict:
+    """A mermaid segment as a text segment: its caption, source and description, fenced.
+
+    The fence is longer than any backtick run in the source, so no line of it
+    can close the block early.
+    """
+    source = seg.get("source") or ""
+    runs = [len(run) for run in re.findall(r"`+", source)]
+    fence = "`" * max(3, max(runs, default=0) + 1)
+    lines = [f"Figure: {seg['caption']}"] if seg.get("caption") else []
+    lines += [fence, source, fence]
+    lines += [f"Description: {seg['description']}"] if seg.get("description") else []
+    return {"kind": "text", "text": "\n".join(lines).replace("![", _DISARMED)}
 
 
 def _badges(doc: dict, *, attributed: bool) -> list[str]:
@@ -280,12 +316,13 @@ def _badges(doc: dict, *, attributed: bool) -> list[str]:
     if doc.get("error"):
         badges.append("error")
     # voice C10: the rules a kept take broke, whether it was retaken, and the
-    # two soft flags a reader scans for.
+    # three soft flags a reader scans for (``tells``: narration, turn numbers,
+    # the unchanged original or hedging; the counts ride on ``voice.tells``).
     if _strings(doc.get("violations")):
         badges.append("voice_flag")
     if (_int(doc.get("takes")) or 1) > 1:
         badges.append("retaken")
-    for flag in ("no_pointer", "no_example"):
+    for flag in ("no_pointer", "no_example", "tells"):
         if flag in _strings(doc.get("flags")):
             badges.append(flag)
     return badges
@@ -322,8 +359,11 @@ def _verdict(decision: dict | None) -> dict | None:
         "voice": _serialisable(decision.get("voice")),
         # Split and disarmed like a turn body. No image check is passed in, so
         # every file image is refused: the chair may add none, so none is
-        # drawn. A chair's mermaid block passes through, and the view draws it.
-        "segments": _segments({"body": decision.get("verdict")}),
+        # drawn. Nor is a diagram: a chair's mermaid block (a kept take 3 can
+        # carry one) would draw a fake "accepted" tile above the real buttons,
+        # so it is shown as its source, fenced, in a text segment.
+        "segments": [_as_text(seg) if seg["kind"] == "mermaid" else seg
+                     for seg in _segments({"body": decision.get("verdict")})],
         # No `simulation` key. It was a constant `True` -- criterion 8 wants the
         # disclaimer to be independent of whether the chair wrote it, and the
         # view satisfies that by rendering the notice UNCONDITIONALLY, which is

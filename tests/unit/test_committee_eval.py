@@ -95,10 +95,12 @@ def test_voice_measure_and_version():
     assert filler["filler_hits"] == 6
     assert voice.measure("delve delve")["filler_hits"] == 2
 
-    # RULES: one line per element, no bold, no long dashes, no heading.
+    # RULES: one line per element, no bold, no long dashes, no heading; one blank
+    # element ends the numbered list, and it is the only empty one.
     assert voice.RULES and isinstance(voice.RULES, tuple)
+    assert [rule for rule in voice.RULES if not rule.strip()] == [""]
     for rule in voice.RULES:
-        assert isinstance(rule, str) and rule.strip()
+        assert isinstance(rule, str)
         assert "**" not in rule and "\u2013" not in rule and "\u2014" not in rule
         assert "\n" not in rule and not rule.startswith("#")
 
@@ -1091,13 +1093,15 @@ RUN9_STEPS = [
 RUN9_TOTAL = {"lines_added": 87, "lines_removed": 28}
 # Golden (C5): what C8 gives on the fixtures. filler_per_turn moved off 0.0 when
 # committee-voice made filler_hits sum every tell (process, turn refs, unchanged,
-# preempt, filler), not the filler phrases alone.
+# preempt, filler), not the filler phrases alone, and moved again (2.75 -> 2.8125,
+# 6.1429 -> 7.7143) when the tells learned hedging and more narration.
 RUN9_VOICE = {"n": 16, "pointer_share": 0.9375, "walls_share": 0.625,
-              "example_share": 0.875, "filler_per_turn": 2.75}
+              "example_share": 0.875, "filler_per_turn": 2.8125}
 RUN2_VOICE = {"n": 14, "pointer_share": 0.9286, "walls_share": 0.7143,
-              "example_share": 1.0, "filler_per_turn": 6.1429}
+              "example_share": 1.0, "filler_per_turn": 7.7143}
 # voice C11 over the fixtures: pre-voice runs, so every turn is measured from its
-# D3 body and nothing was retaken.
+# D3 body and nothing was retaken. first_line_words counts the first sentence, so
+# pct_first_line_le_25 reads 100.0 and 85.7 (it read 18.8 and 50.0 by first line).
 RUN9_VOICE_SUMMARY = {
     "owner_reviewer_median_words": 825.0, "owner_reviewer_pct_within_cap": 0.0,
     "median_words_by_role": {
@@ -1107,7 +1111,7 @@ RUN9_VOICE_SUMMARY = {
     },
     "chair_words": 1518, "chair_headers": 7, "chair_tables": 1,
     "junior_turns": 8, "junior_pct_compliant": 0.0,
-    "pct_clean_format": 4.0, "pct_first_line_le_25": 18.8, "unquoted_dashes": 13,
+    "pct_clean_format": 4.0, "pct_first_line_le_25": 100.0, "unquoted_dashes": 13,
     "reviewer_pct_with_pointer": 87.5, "max_turn_refs": 4, "unchanged_mentions_junior_chair": 9,
     "total_takes": 25,
     "retakes_by_role": {
@@ -1125,7 +1129,7 @@ RUN2_VOICE_SUMMARY = {
     },
     "chair_words": 1934, "chair_headers": 9, "chair_tables": 1,
     "junior_turns": 6, "junior_pct_compliant": 0.0,
-    "pct_clean_format": 28.6, "pct_first_line_le_25": 50.0, "unquoted_dashes": 298,
+    "pct_clean_format": 28.6, "pct_first_line_le_25": 85.7, "unquoted_dashes": 298,
     "reviewer_pct_with_pointer": 85.7, "max_turn_refs": 10, "unchanged_mentions_junior_chair": 0,
     "total_takes": 21,
     "retakes_by_role": {

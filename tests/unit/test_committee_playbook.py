@@ -191,6 +191,15 @@ def test_a_long_action_is_cut_at_a_word_near_the_cap():
     assert T.parse(_fenced("action: " + "a" * 200))["action"] == "a" * 200
 
 
+def test_the_word_cut_keeps_at_least_half_the_cap():
+    # A space at exactly half the cap is a word cut; one before it would keep
+    # too little, so the cut falls mid-token at the cap instead.
+    half = T.parse(_fenced("stance: " + "a" * 100 + " " + "b" * 150))["stance"]
+    assert half == "a" * 100 + "…"
+    short = T.parse(_fenced("stance: " + "a" * 99 + " " + "b" * 150))["stance"]
+    assert short == ("a" * 99 + " " + "b" * 150)[:T.STANCE_MAX - 1] + "…"
+
+
 def test_lengths_reports_the_raw_unclipped_action_and_stance():
     answer = _fenced("action: " + "a" * 230 + "\nstance: holding")
 
@@ -3959,7 +3968,8 @@ def test_the_third_take_is_kept_verbatim_and_flagged():
     assert doc.kind == "turn"
     assert (doc.json["take"], doc.json["takes"], doc.json["kept"]) == (3, 3, True)
     assert doc.json["violations"] == ["over_cap", "bold"]
-    assert doc.json["flags"] == ["no_pointer", "no_example", "long_first_line"]
+    # the first sentence, "**Bold** claim.", is short: no long_first_line
+    assert doc.json["flags"] == ["no_pointer", "no_example"]
     assert doc.json["body"] == turnblock.strip(answer)
     assert turnblock.strip(answer) in thread.path(run.id).read_text()
     assert s["held"] is None and s["retake"] is None

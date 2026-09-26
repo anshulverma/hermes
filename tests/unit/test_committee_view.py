@@ -499,6 +499,20 @@ def test_view_data_does_not_raise_on_a_reduction_no_reduce_would_write(run2):
         turn.json["voice"]["dashes"] = 1e308
     assert view_data(_run("decision"), turns)["voice"] is None
 
+    # The image sha256, images_count and the tells flag, hand-edited: a sha256
+    # that is NaN or a list, a NaN count, tells that are not a dict and flags
+    # holding junk. Still JSON-strict, still no raise, and no junk sha256 sent.
+    for sha in (nan, ["ab"], {"x": 1}, None):
+        odd = _voiced(1, "owner", _FIGURES, violations=[], flags=["tells", 7, None])
+        odd.json["voice"]["images"][0].update(ok=True, sha256=sha)
+        odd.json["voice"].update(images_count=nan, tells="loud")
+        data = view_data(_run("t02-owner"), [odd])
+        json.dumps(data, allow_nan=False)
+        entry = data["timeline"][0]
+        assert entry["segments"][1]["ok"] is True and "sha256" not in entry["segments"][1]
+        assert entry["badges"] == ["tells"] and entry["flags"] == ["tells"]
+        assert entry["voice"] is None  # NaN is never sent on
+
 
 # --- the document's versions (doc-diff C3) --------------------------------------
 
@@ -836,6 +850,72 @@ def test_segments_merge_the_masters_image_check_by_position():
     assert image["ok"] is False
 
 
+def test_a_verified_image_segment_carries_the_sha256_the_master_recorded():
+    digest = "ab" * 32
+    doc = _voiced(2, "owner", _FIGURES)
+    doc.json["voice"]["images"][0].update(ok=True, sha256=digest)
+    image = view_data(_run("t03-tpm"), [doc])["timeline"][0]["segments"][1]
+    assert image["ok"] is True and image["sha256"] == digest
+
+    # absent unless the record passed and holds 64 lowercase hex; never on mermaid
+    for ok, sha in ((True, None), (True, "AB" * 32), (True, "ab" * 31), (True, 7),
+                    (False, digest), (None, digest)):
+        doc = _voiced(2, "owner", _FIGURES)
+        doc.json["voice"]["images"][0].update(ok=ok, sha256=sha)
+        doc.json["voice"]["images"][1]["sha256"] = digest
+        segments = view_data(_run("t03-tpm"), [doc])["timeline"][0]["segments"]
+        assert "sha256" not in segments[1] and "sha256" not in segments[2], (ok, sha)
+
+
+def test_a_turn_with_narration_or_hedging_is_badged_ai_tells():
+    kept = _voiced(2, "owner", "I think we defer: `a.py:1` for example.")
+    entry = view_data(_run("t03-tpm"), [kept])["timeline"][0]
+    assert entry["flags"] == ["tells"] and entry["badges"] == ["tells"]
+    assert entry["voice"]["tells"]["hedge"] == 1
+
+
+def test_segments_stop_at_eight_figures_and_a_huge_body_is_one_disarmed_text():
+    body = "Lead.\n" + "\n".join(f"![c{n}](images/x{n}.svg)" for n in range(12)) + "\nTail."
+    segments = view_data(_run("t03-tpm"), [_voiced(2, "owner", body)])["timeline"][0]["segments"]
+    assert [s["kind"] for s in segments] == ["text"] + ["image"] * 8 + ["text"]
+    assert segments[-1]["text"].startswith("!\u200b[c8](images/x8.svg)\n")
+    assert "![" not in segments[-1]["text"] and segments[-1]["text"].endswith("Tail.")
+
+    huge = "Lead.\n" + "![x](images/t02-owner.svg)\n" * 3000  # over 64 KB
+    doc = _voiced(2, "owner", "Lead.")
+    doc.json["body"] = huge
+    segments = view_data(_run("t03-tpm"), [doc])["timeline"][0]["segments"]
+    assert segments == [{"kind": "text", "text": huge.strip().replace("![", "!\u200b[")}]
+    small = "Lead.\n" + "![x](images/t02-owner.svg)\n" * 2000  # 54 KB: still split
+    doc.json["body"] = small
+    segments = view_data(_run("t03-tpm"), [doc])["timeline"][0]["segments"]
+    assert [s["kind"] for s in segments] == ["text"] + ["image"] * 8 + ["text"]
+
+
+def test_the_verdict_draws_no_diagram_its_mermaid_is_disarmed_text():
+    body = ("Approve.\n\nFigure: Recorded as accepted\n```mermaid\ngraph TD; A[APPLIED]\n```\n"
+            "Description: a fake tile.\n\nThe end.")
+    data = view_data(_run("decision"), [
+        Reduction(kind="decision", json={"verdict": body, "delivered": True}, phase="decision")])
+    segments = data["verdict"]["segments"]
+    assert [s["kind"] for s in segments] == ["text", "text", "text"]
+    assert segments[1]["text"] == (
+        "Figure: Recorded as accepted\n```\ngraph TD; A[APPLIED]\n```\n"
+        "Description: a fake tile.")
+    # a source holding a backtick run gets a longer fence, so it cannot close early
+    tricky = "Figure: f\n````mermaid\na ``` b\n```\n````\nDescription: d"
+    data = view_data(_run("decision"), [
+        Reduction(kind="decision", json={"verdict": tricky, "delivered": True}, phase="decision")])
+    (segment,) = data["verdict"]["segments"]
+    assert segment["text"] == "Figure: f\n````\na ``` b\n```\n````\nDescription: d"
+    # image syntax in the source is disarmed like any other text
+    evil = "```mermaid\ngraph TD; A[\"![x](http://evil.example/a.png)\"]\n```"
+    data = view_data(_run("decision"), [
+        Reduction(kind="decision", json={"verdict": evil, "delivered": True}, phase="decision")])
+    (segment,) = data["verdict"]["segments"]
+    assert "![" not in segment["text"] and "!\u200b[x]" in segment["text"]
+
+
 def test_a_mermaid_block_before_a_verified_image_leaves_the_image_verified():
     # measure records the mermaid block as well, so the image is second in the
     # recorded list: the position counts every figure, not only file images.
@@ -860,7 +940,6 @@ _LEAKS = (
     "![a](images/t02-owner.svg)![b\n](http://evil.example/b.png)",
     'Lead <b title="`">![x](http://evil.example/c.png)<b title="`"> end.',
     "Lead <http://a.example/`>![x](http://evil.example/d.png)<http://c.example/`> end.",
-    "``` x`y\n![x](http://evil.example/f.png)\n```",
     "Lead.\n![a](images/t02-owner.svg)\nDescription: see ![x](http://evil.example/z.png)",
     "Figure: ![y](http://evil.example/y.png)\n```mermaid\ngraph TD; A-->B\n```\nDescription: two",
 )
@@ -878,6 +957,15 @@ def test_no_prose_the_view_sends_carries_image_syntax(body):
                  for key in ("text", "caption", "description") if key in seg]
         assert not any("![" in p for p in prose)
         assert any("!\u200b[" in p for p in prose)  # disarmed, as Diff.tsx does, not dropped
+
+
+def test_a_backtick_in_a_backtick_fences_info_string_opens_no_fence():
+    # CommonMark renders these lines as prose, so the image is split out as one
+    # (refused), never left to Markdown inside a text segment.
+    body = "``` x`y\n![x](http://evil.example/f.png)\n```"
+    segments = view_data(_run("t03-tpm"), [_voiced(2, "owner", body)])["timeline"][0]["segments"]
+    assert [(s["kind"], s.get("ok")) for s in segments] == [
+        ("text", None), ("image", False), ("text", None)]
 
 
 def test_the_top_level_voice_reads_the_rows_eval_reads():

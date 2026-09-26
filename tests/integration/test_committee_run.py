@@ -403,14 +403,21 @@ class ScriptedCommitteeAgent:
                 or envelope.get("phase") in self.owner_phases
             )
             return _wrap(
-                "Fair point; here is where I land on it.",
+                f"{OWNER_PROSE} The fix belongs in `engine/dispatch.py:284`.",
                 self.owner_block if speaking else OWNER_QUIET,
             )
         block = (
             FLOOR_REVIEWER if envelope.get("phase") in self.floor_phases
             else QUIET_REVIEWER
         )
-        return _wrap(f"Reading this as {payload.get('title', role)}.", block)
+        # Two sentences and a backticked path:line, as the rules ask: a rule
+        # that wrongly sent two sentences back (multi_sentence is the junior
+        # IC's alone) would retake every turn and move every phase list here.
+        return _wrap(
+            f"{REVIEWER_PROSE} {payload.get('title', role)}. "
+            "The risk sits at `engine/dispatch.py:284`.",
+            block,
+        )
 
 
 # --- tests -----------------------------------------------------------------
