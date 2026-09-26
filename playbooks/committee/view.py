@@ -363,14 +363,17 @@ def _dropped(decision: Reduction | None) -> dict | None:
 def _size(target: Path) -> int | None:
     """The size of the regular file at ``target``, or None for anything else.
 
-    ``lstat``: the route refuses a symlink, so a size here for one would
-    promise a read that then fails. None, not 0 -- a zero-byte version is real.
+    ``lstat`` at every level the route opens without following a symlink --
+    ``runs/<id>/``, ``doc/`` and the file -- so a size here never promises a
+    read the route then refuses. None, not 0 -- a zero-byte version is real.
     """
     try:
-        info = os.lstat(target)
+        run_dir, doc, info = (os.lstat(p) for p in (target.parent.parent, target.parent, target))
     except OSError:
         return None
-    return info.st_size if stat.S_ISREG(info.st_mode) else None
+    if stat.S_ISDIR(run_dir.st_mode) and stat.S_ISDIR(doc.st_mode) and stat.S_ISREG(info.st_mode):
+        return info.st_size
+    return None
 
 
 # --- odds and ends ---------------------------------------------------------

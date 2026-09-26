@@ -529,6 +529,24 @@ def test_a_zero_byte_version_is_sized_zero_not_missing(run2):
     assert document["captured"] is True
 
 
+@pytest.mark.parametrize("level", ["doc", "run"])
+def test_a_symlinked_directory_sizes_nothing_as_the_route_serves_nothing(
+    run2, tmp_path, level
+):
+    """The route opens ``runs/<id>/`` and ``doc/`` without following a symlink,
+    so a size for a file behind one would promise a read that then fails."""
+    thread.write_snapshot(RUN_ID, "doc/00-original.md", b"o" * 11000)
+    run_dir = tmp_path / "runs" / RUN_ID
+    moved = run_dir / "doc" if level == "doc" else run_dir
+    moved.rename(tmp_path / "elsewhere")
+    moved.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+
+    document = view_data(_run("decision"), run2)["document"]
+
+    assert document["original"]["bytes"] is None
+    assert document["captured"] is False
+
+
 def test_steps_ascend_by_turn_and_a_turn_settled_twice_keeps_its_last_reduction(run2):
     retake = Reduction(kind="turn", json=dict(run2[2].json, verified=False))  # t03 again
     shuffled = list(reversed(run2[:-1])) + [retake, run2[-1]]
