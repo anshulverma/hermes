@@ -2766,6 +2766,7 @@ def test_state_starts_at_turn_one_with_the_opening_round_loaded():
         "planned": False, "pending_one_on_ones": [], "one_on_one": None,
         "one_on_ones_done": [], "dropped_one_on_ones": [],
         "delegation_origin": None, "origin_one_on_one": None,
+        "one_on_ones_met": [],  # FIX_T7: the members of each done seq, for the footer
     }
     assert set(s) == set(one_on_one) | {
         "turn", "opening", "queue", "delegation", "pending_action", "last_speaker",
@@ -3706,13 +3707,18 @@ def test_undelivered_plan_records_no_plan_delivered(monkeypatch):
     from engine import contracts
     from playbooks.committee import thread
 
-    pb, run, s = _at_plan()
+    pb, run, s = _at_plan(budget=5)
+    s.update(charge="Ship the rollback plan?", artifact="/abs/rfc.md")
     ticket = pb.seed(run, _NamedSite("local"))[0]
     assert ticket.id == f"{run.id}/p01-owner"
     assert (ticket.payload["role"], ticket.payload["kind"], ticket.payload["action"]) == (
         "owner", "plan", None)
     assert ticket.payload["title"] == f"{cast.persona('owner')['name']} (owner) plans the 1:1s"
-    assert "meet_1" in ticket.payload["goal"] and len(ticket.payload["goal"]) < cast.GOAL_MAX
+    goal = ticket.payload["goal"]
+    assert "meet_1" in goal and len(goal) < cast.GOAL_MAX
+    assert str(thread.path(run.id)) in goal
+    assert "The charge: Ship the rollback plan?" in goal
+    assert "The artifact under review: /abs/rfc.md" in goal
     contracts.validate(ticket.payload, pb.payload_schema("p01-owner"))
 
     red = pb.reduce(run, "p01-owner", [], _NamedSite("local"))
@@ -3722,7 +3728,7 @@ def test_undelivered_plan_records_no_plan_delivered(monkeypatch):
     assert (doc["take"], doc["takes"], doc["kept"], doc["voice"]) == (1, 1, True, None)
     assert (doc["violations"], doc["flags"]) == ([], [])
     assert doc["one_on_ones_scheduled"] == [] and doc["one_on_ones_dropped"] == []
-    assert doc["one_on_one_budget"] == 16 and doc["error"] is None
+    assert doc["one_on_one_budget"] == 5 and doc["error"] is None
     assert not {"cap", "artifact", "revised", "role", "turn", "needs_human_ticket_ids"} & set(doc)
     assert "_(no up-front 1:1s: no plan delivered)_" in thread.path(run.id).read_text(
         encoding="utf-8")
@@ -3780,6 +3786,32 @@ def test_plan_with_no_valid_pairs_falls_back():
     assert [drop["reason"] for drop in doc["one_on_ones_dropped"]] == ["unknown role"]
     assert pb.next_phase(run) == "t01-senior_director"
 
+    # the plan entry gets the scheduled pairs, the drops and the run's own
+    # roster: a derived seat is named through it, never through cast.CAST
+    pb, run, s = _at_plan()
+    s["roster"] = _one_on_one_roster()
+    # the same run id all test long: read only what this plan appends
+    start = len(thread.path(run.id).read_text(encoding="utf-8"))
+    answer = _answer({"meet_1": "manager crew_owner: rota", "meet_2": "owner nobody: x"})
+    doc = pb.reduce(run, "p01-owner", [_finding(run, f"{run.id}/p01-owner", answer)],
+                    _NamedSite("local"))[0].json
+    text = thread.path(run.id).read_text(encoding="utf-8")[start:]
+    assert doc["error"] is None
+    assert "## 1:1 plan:" in text and ": rota" in text
+    assert "no up-front 1:1s" not in text
+    assert "- dropped: owner nobody: x (unknown role)" in text
+
+    # the body is the prose alone, and an empty finding is no plan delivered
+    pb, run, s = _at_plan()
+    answer = _answer({"_prose": "Two 1:1s first.", "meet_1": "owner tpm: cost"})
+    doc = pb.reduce(run, "p01-owner", [_finding(run, f"{run.id}/p01-owner", answer)],
+                    _NamedSite("local"))[0].json
+    assert doc["body"] == "Two 1:1s first."
+    pb, run, s = _at_plan()
+    doc = pb.reduce(run, "p01-owner", [_finding(run, f"{run.id}/p01-owner", "")],
+                    _NamedSite("local"))[0].json
+    assert doc["delivered"] is False and doc["fallback"] == "no plan delivered"
+
 
 def test_plan_lines_are_validated_with_reasons():
     """C4: a plan line is dropped with the first reason that applies, in order,
@@ -3795,6 +3827,15 @@ def test_plan_lines_are_validated_with_reasons():
     assert reasons("manager manager: x", "owner junior_ic: x") == ["same member", "junior_ic"]
     assert reasons("owner tpm: first", "Owner, TPM: again") == ["duplicate"]
     assert reasons("owner tpm: a", "manager pm: b", "owner tl: c", budget=5) == ["budget"]
+    # a line dropped for budget still counts for duplicate, which outranks budget
+    assert reasons("owner tpm: a", "manager pm: b", "Manager, PM: c", budget=3) == [
+        "budget", "duplicate"]
+    # the boundary: a pair fits when the budget left is exactly its need
+    assert reasons("owner tpm: a", budget=2) == []
+    assert reasons("owner tpm: a", "manager pm: b", "owner tl: c", budget=4) == ["budget"]
+    # an absent meet_N is skipped, never the end of the plan
+    _, out = _plan({"meet_2": "owner tpm: x", "meet_3": "manager pm: y"})
+    assert [pair["members"] for pair in out["scheduled"]] == [["tpm", "owner"], ["pm", "manager"]]
 
     # a drop keeps its line as written, and its members once they parse
     s, out = _plan(_plan_block("manager tpm rollback", "tpm pm: x"))
@@ -3849,7 +3890,7 @@ def test_plan_lines_are_validated_with_reasons():
 def test_plan_is_exempt_from_retakes():
     """D8 Plan: graded for the record with every file image refused, even its
     own valid images/p01-owner.svg, and kept at take 1 whatever it broke."""
-    from playbooks.committee import thread
+    from playbooks.committee import thread, voice
 
     pb, run, s = _at_plan()
     (thread.images_dir(run.id) / "p01-owner.svg").write_bytes(b"<svg></svg>")
@@ -3864,10 +3905,21 @@ def test_plan_is_exempt_from_retakes():
     assert (doc["take"], doc["takes"], doc["kept"], doc["delivered"]) == (1, 1, True, True)
     assert {"over_cap", "image_missing"} <= set(doc["violations"])
     assert doc["voice"]["images"][0]["ok"] is False
+    # voice's flags ride on the record too, never emptied by the exemption
+    assert doc["flags"] and doc["flags"] == voice.flags(doc["voice"], "owner")
     assert [pair["members"] for pair in doc["one_on_ones_scheduled"]] == [["tpm", "manager"]]
     assert s["retake"] is None and s["held"] is None
     nxt = pb.next_phase(run)
     assert "-take" not in nxt and nxt != "p01-owner"
+
+    # a pending s3 retake is the same stage said again: it outranks the plan
+    pb = _committee()
+    run = _run(phase="s3-senior_director")
+    s = pb._state(run)
+    s.update(current_role=cast.CHAIR_ROLE, current_kind="select", base="s3-senior_director",
+             retake="too long", one_on_one_budget=16, roster=_default_roster())
+    assert pb.next_phase(run) == "s3-senior_director-take2"
+    assert s["planned"] is False
 
 
 # --- the four transport-path methods (spec §5.6) ---------------------------
@@ -7947,13 +7999,16 @@ def test_reduce_one_on_one_writes_file_outcome_and_one_kept_reduction():
     pb, run, s, seen, sp, ok = _drive_plan(
         {"meet_1": "owner tpm: rollback plan"},
         {
+            # the guest's `agreed`/`still_open` are not hers to state (host only)
             "o01-tpm": {"_prose": "Rollback needs a named owner before launch.",
-                        "aligned": False},
+                        "aligned": False, "agreed": "tpm owns the rollback plan"},
             "o02-owner": {"_prose": "I will own rollback and write the drill.",
-                          "aligned": True, "agreed": "Maya owns the rollback plan"},
-            "o03-tpm": {"_prose": "With an owner named, I am aligned.", "aligned": True},
-            "o04-owner": {"_prose": "Then only the drill date is left.", "aligned": True,
+                          "aligned": True, "agreed": "Maya owns the rollback plan",
                           "still_open": "the rollback drill date"},
+            "o03-tpm": {"_prose": "With an owner named, I am aligned.", "aligned": True,
+                        "agreed": "nothing is left", "still_open": "the launch date"},
+            # states neither, so the host's earlier values stand
+            "o04-owner": {"_prose": "Then only the drill date is left.", "aligned": True},
         },
     )
 
@@ -7974,12 +8029,14 @@ def test_reduce_one_on_one_writes_file_outcome_and_one_kept_reduction():
         "owner", ["tpm", "owner"], "rollback plan")
     assert first["ended"] is None and first["outcome"] is None and first["agreed"] is None
     assert docs[1]["agreed"] == "Maya owns the rollback plan"
+    assert docs[2]["agreed"] is None and docs[2]["still_open"] is None
     assert (last["ended"], last["delegated_action"]) == ("aligned", None)
     assert last["outcome"] == {"aligned": True, "agreed": "Maya owns the rollback plan",
                                "still_open": "the rollback drill date"}
     assert (last["one_on_one_budget"], last["one_on_one_used"]) == (16, 4)
     assert last["body"] == "Then only the drill date is left."
     assert last["voice"]["words"] == 7
+    assert last["flags"] and last["flags"] == voice.flags(last["voice"], "owner")
 
     private = thread.one_on_one_path(run.id, seq=1, members=["tpm", "owner"]).read_text(
         encoding="utf-8")
@@ -8125,6 +8182,34 @@ def test_undelivered_exchange_ends_the_one_on_one_not_aligned():
     held = [r.kind for r in run.reductions if r.json.get("needs_human_ticket_ids")]
     assert held == ["decision"]
 
+    # Both members once said yes, but the 1:1 ended undelivered before the
+    # host's turn tested it: the outcome follows `ended`, not the flags.
+    start = len(thread.path(run.id).read_text(encoding="utf-8"))  # same run id: new text only
+    _, run, _, _, _, _ = _drive_plan(
+        {"meet_1": "owner tpm: rollback plan"},
+        {"o01-tpm": {"aligned": False}, "o02-owner": {"aligned": True},
+         "o03-tpm": {"aligned": True}, "o04-owner": {"_ok": False}},
+    )
+    last = _exchanges(run)[-1].json
+    assert last["ended"] == "not delivered" and last["outcome"]["aligned"] is False
+    assert "## 1:1 1: Maya Okonkwo ↔ Sam Iyer (not aligned)" in thread.path(
+        run.id).read_text(encoding="utf-8")[start:]
+
+    # A signals-only exchange is delivered: its body is the signals-only note,
+    # never the NO_TURN stub of an exchange with no finding.
+    from playbooks.committee.playbook import _SIGNALS_ONLY
+
+    _, run, s, _, _, _ = _drive_plan(
+        {"meet_1": "owner tl: api freeze"},
+        {"o01-tl": {"_prose": "", "aligned": True}, "o02-owner": {"aligned": True}},
+    )
+    docs = [r.json for r in _exchanges(run)]
+    assert docs[0]["body"] == _SIGNALS_ONLY and docs[0]["delivered"] is True
+    private = thread.one_on_one_path(run.id, seq=1, members=["tl", "owner"]).read_text(
+        encoding="utf-8")
+    assert f"## exchange 1: {_seat_heading(s['roster'], 'tl')}\n\n{_SIGNALS_ONLY}\n" in private
+    assert thread.NO_TURN not in private
+
 
 def test_budget_is_reserved_for_scheduled_pairs():
     """D5: scheduling reserves two exchanges per pair, so every scheduled pair
@@ -8145,18 +8230,40 @@ def test_budget_is_reserved_for_scheduled_pairs():
     assert s["one_on_ones_done"] == [1, 2]
     check_invariants(s, seen, sp, delivered=ok)
 
+    # Two left after a round is another round; at four the exchange cap, not
+    # the spent budget, is why it ended.
+    _, run, s, _, _, _ = _drive_plan({"meet_1": "owner tl: api freeze"}, budget=4)
+    assert [(r.json["exchange"], r.json["ended"]) for r in _exchanges(run)] == [
+        (1, None), (2, None), (3, None), (4, "exchange cap")]
+    assert s["one_on_one_used"] == 4
 
-def test_derived_seat_can_be_a_one_on_one_guest():
+
+def test_derived_seat_can_be_a_one_on_one_guest(o_phase_spy):
     """AC16 (unit): a derived seat and a library seat, planned as guests, meet
-    under the names selection gave them, in the private file and the outcome."""
+    under the names selection gave them, in the private file and the outcome,
+    and each exchange's ticket names its 1:1, its file and whom a seat speaks for."""
     from playbooks.committee import thread
 
+    # the derived seat also speaks for a stakeholder left unseated
+    crew = _CREW_ANSWER.replace('"not_seated": []', (
+        '"not_seated": [{"stakeholder": "Night shift crews", "reason": "Noor runs them", '
+        '"represented_by": "crew_owner"}]'))
     pb, run, s, seen, sp, ok = _drive_plan(
         {"meet_1": "owner crew_owner: crew handover", "meet_2": "manager security: zone review"},
         {name: {"aligned": True}
          for name in ("o01-crew_owner", "o02-owner", "o03-security", "o04-manager")},
-        selection=CREW_SELECTION,
+        selection={role: crew for role in CREW_SELECTION},
     )
+
+    guest, host = (o_phase_spy["tickets"][p].payload for p in ("o01-crew_owner", "o02-owner"))
+    assert guest["title"] == "1:1 1 · exchange 1 — Noor Haddad (crew_owner) with Maya Okonkwo"
+    assert str(thread.one_on_one_path(run.id, seq=1, members=["crew_owner", "owner"])) in (
+        guest["goal"])
+    for text in ("exchange 1 of at most 4", "with Maya Okonkwo, who hosts it", "crew handover",
+                 "You also speak for: Night shift crews"):
+        assert text in guest["goal"], text
+    assert "which you host" in host["goal"] and "exchange 2 of at most 4" in host["goal"]
+    assert "You also speak for:" not in host["goal"]
 
     assert "crew_owner" not in cast.CAST and "security" not in cast.CAST
     names = {role: seat["name"] for role, seat in s["roster"].items()}
@@ -8174,6 +8281,63 @@ def test_derived_seat_can_be_a_one_on_one_guest():
     # a name lookup that skipped the roster would have raised into `error`
     assert [r.json["error"] for r in _exchanges(run)] == [None] * 4
     assert seen[seen.index("o04-manager") + 1] == f"t01-{s['reviewers'][0]}"
+
+
+def test_a_one_on_one_file_that_cannot_be_written_never_stops_the_meeting(monkeypatch, tmp_path):
+    """FIX_T5: seed and reduce never raise over the private file (a raise out
+    of seed kills the master and leaves the run `running` with no ticket). A
+    file planted at runs/<id>/one-on-ones gets the folder refused: every
+    exchange, the host's closing one included, still gets its one ticket naming
+    the file, and reduce records the refusal under `error`. A failed file or
+    outcome write is recorded the same way. Each time the 1:1 ends and the
+    meeting goes on."""
+    from playbooks.committee import thread
+
+    site = _NamedSite("local")
+    pb, run, s = _at_plan()
+    answer = _answer({"meet_1": "owner tpm: rollback plan"})
+    pb.reduce(run, "p01-owner", [_finding(run, f"{run.id}/p01-owner", answer)], site)
+    planted = thread.path(run.id).parent / "one-on-ones"
+    planted.write_text("not a folder\n", encoding="utf-8")
+    for phase in ("o01-tpm", "o02-owner"):
+        run.phase = pb.next_phase(run)
+        assert run.phase == phase
+        tickets = pb.seed(run, site)
+        assert len(tickets) == 1, phase
+        assert str(planted / "01-tpm-owner.md") in tickets[0].payload["goal"], phase
+        answer = _answer({"aligned": True})
+        doc = pb.reduce(run, phase, [_finding(run, f"{run.id}/{phase}", answer)], site)[0].json
+        assert doc["error"].startswith("one-on-one file:"), (phase, doc["error"])
+    assert (doc["final"], doc["ended"]) == (True, "aligned")
+    assert pb.next_phase(run) == "t01-senior_director"
+
+    # the same folder, a manager's pause and her closing exchange (D6)
+    _, crun, cs, cseen, csp, cok = _drive({
+        "t03-manager": {"align": "tpm pm: rollout order"},
+        "o01-tpm": _ALIGNED, "o02-pm": _ALIGNED,
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+    check_invariants(cs, cseen, csp, delivered=cok)
+    close = _reduced(crun)["o03-manager"].json
+    assert close["closing"] is True and close["final"] is True
+    assert all(r.json["error"].startswith("one-on-one file:") for r in _exchanges(crun))
+    assert cs["one_on_ones_done"] == [1]
+
+    # a file write or an outcome write that fails
+    for name, want in (("append_one_on_one", ["one-on-one file: disk full"] * 2),
+                       ("append_one_on_one_outcome", [None, "thread: disk full"])):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / name))
+
+        def boom(*args, **kwargs):
+            raise OSError("disk full")
+
+        with monkeypatch.context() as m:
+            m.setattr(thread, name, boom)
+            _, drun, ds, dseen, _, _ = _drive_plan(
+                {"meet_1": "owner tpm: rollback plan"},
+                {"o01-tpm": _ALIGNED, "o02-owner": _ALIGNED})
+        assert [r.json["error"] for r in _exchanges(drun)] == want, name
+        assert ds["one_on_ones_done"] == [1], name
+        assert dseen[dseen.index("o02-owner") + 1] == f"t01-{ds['reviewers'][0]}", name
 
 
 # --- 1:1 retakes: voice's rules on o-phases (one-on-ones D8, AC15) -----------
@@ -8285,6 +8449,10 @@ def test_one_on_one_retake_consumes_no_budget_and_never_repeats_a_name(o_phase_s
          red[p].json["take"], red[p].json["takes"])
         for p in ("o01-tpm-take2", "o02-owner", "o03-tpm", "o04-owner-take2")
     ] == [(1, 1, 1, 2, 2), (1, 2, 2, 1, 1), (2, 1, 3, 1, 1), (2, 2, 4, 2, 2)]
+    # a discarded take carries its own 1:1's seq and exchange, not the run's counters
+    assert (red["o04-owner"].json["seq"], red["o04-owner"].json["exchange"]) == (2, 2)
+    # a kept take 2 that is not the held take keeps its own voice flags
+    assert red["o01-tpm-take2"].json["flags"] == ["no_pointer", "no_example"]
     # the same current_turn under two bases: two names, so two ticket ids
     assert turn_at["t02-owner-take2"] == turn_at["o04-owner-take2"] == 2
     retake = o_phase_spy["tickets"]["o04-owner-take2"]
@@ -8292,6 +8460,37 @@ def test_one_on_one_retake_consumes_no_budget_and_never_repeats_a_name(o_phase_s
     # the retake's worker is told which take this is, and why
     assert retake.payload["title"].endswith("(take 2)")
     assert "Retake 2 of 3." in retake.payload["goal"]
+    # ... and where the take it keeps and fixes was banked
+    assert "takes/o04-owner-take1.md" in retake.payload["goal"]
+
+    # A take 2 that breaks the rules again is asked a third time, and voice
+    # keeps take 3 flagged: one exchange, one unit of the budget, and only
+    # take 3 reaches the 1:1 file.
+    from playbooks.committee import thread
+
+    _, run3, s3, seen3, _, _ = _drive({
+        "p01-owner": _RETAKE_PLAN,
+        "o01-tpm": {"_prose": _long_exchange("ask-one")},
+        "o01-tpm-take2": {"_prose": _long_exchange("ask-two")},
+        "o01-tpm-take3": {"_prose": _long_exchange("ask-three"), "aligned": True},
+        "o02-owner": {"aligned": True},
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    i = seen3.index("o01-tpm")
+    assert seen3[i:i + 4] == ["o01-tpm", "o01-tpm-take2", "o01-tpm-take3", "o02-owner"]
+    red3 = _reduced(run3)
+    assert red3["o01-tpm-take2"].kind == "take"
+    kept = red3["o01-tpm-take3"]
+    assert kept.kind == "one_on_one"
+    assert (kept.json["take"], kept.json["takes"], kept.json["exchange"],
+            kept.json["one_on_one_used"]) == (3, 3, 1, 1)
+    assert "over_cap" in kept.json["violations"]
+    assert "retake_failed" not in kept.json["violations"]
+    private = thread.one_on_one_path(run3.id, seq=1, members=["tpm", cast.OWNER]).read_text(
+        encoding="utf-8")
+    assert private.count("ask-three:") == 1
+    assert "ask-one:" not in private and "ask-two:" not in private
+    assert s3["one_on_ones_done"] == [1]
 
 
 def test_discarded_take_changes_no_state(o_phase_spy):
@@ -8315,6 +8514,9 @@ def test_discarded_take_changes_no_state(o_phase_spy):
         doc = red[phase].json
         assert (doc["seq"], doc["exchange"], doc["phase"], doc["turn"]) == (
             1, exchange, phase, None)
+        assert doc["role"] == ("tpm" if phase == "o01-tpm" else cast.OWNER)
+        if phase == "o01-tpm":
+            assert doc["flags"] == ["no_pointer", "no_example", "long_first_line"]
         assert doc["kept"] is False and "over_cap" in doc["violations"]
         assert not {"cap", "artifact", "revised", "needs_human_ticket_ids"} & set(doc)
         before, after = o_phase_spy["states"][phase]
@@ -8424,6 +8626,8 @@ def test_failed_exchange_retake_keeps_the_held_take():
     }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
 
     red = _reduced(run)
+    # the discarded take names its own 1:1 (seq 1), not the latest one scheduled (2)
+    assert (red["o01-tpm"].json["seq"], red["o01-tpm"].json["exchange"]) == (1, 1)
     for seq, guest, tag, host_turn in ((1, "tpm", "held-one", "o02-owner"),
                                        (2, "staff_ic", "held-two", "o04-owner")):
         phase = f"o{2 * seq - 1:02d}-{guest}-take2"
@@ -8442,6 +8646,25 @@ def test_failed_exchange_retake_keeps_the_held_take():
         assert (final["final"], final["ended"], final["outcome"]["aligned"]) == (
             True, "aligned", True)
     assert s["one_on_one_used"] == 4 and s["one_on_ones_done"] == [1, 2]
+
+    # A guest who breaks the rules on all three takes: voice keeps take 3 with
+    # its violations and asks no fourth time, and the retakes cost no budget.
+    _, run, s, seen, _, _ = _drive({
+        "p01-owner": {**_RETAKE_PLAN, "meet_2": "owner staff_ic: cost"},
+        "o01-tpm": {"aligned": True},
+        "o02-owner": {"aligned": True},
+        "o03-staff_ic": {"_prose": _long_exchange("cap-one"), "aligned": True},
+        "o03-staff_ic-take2": {"_prose": _long_exchange("cap-two"), "aligned": True},
+        "o03-staff_ic-take3": {"_prose": _long_exchange("cap-three"), "aligned": True},
+        "o04-owner": {"aligned": True},
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    kept = _reduced(run)["o03-staff_ic-take3"]
+    assert kept.kind == "one_on_one"
+    assert kept.json["violations"] == ["over_cap"]
+    assert (kept.json["take"], kept.json["takes"]) == (3, 3)
+    assert "o03-staff_ic-take4" not in seen
+    assert s["one_on_one_used"] == 4
 
 
 # --- 1:1s: the mid-review pause (one-on-ones D3, D4, C4, C6) ----------------
@@ -8514,6 +8737,7 @@ def test_owner_close_does_not_cancel_a_managers_pause():
     # turn, and the owner answers it with a close.
     _, _, s, seen, sp, ok = _drive({
         "t03-manager": {"request_floor": True},
+        "t05-tpm": {"request_floor": True},
         "t15-manager": {"align": "tpm manager: rollout order"},
         "t16-owner": {"close": True},
         "o01-tpm": _ALIGNED, "o02-manager": _ALIGNED,
@@ -8523,6 +8747,8 @@ def test_owner_close_does_not_cancel_a_managers_pause():
     assert seen[-5:] == ["t15-manager", "t16-owner", "o01-tpm", "o02-manager", "decision"]
     assert (s["closed"], s["ended"], s["one_on_ones_done"]) == (True, "owner closed", [1])
     assert s["dropped_one_on_ones"] == []
+    # the close (D3 item 10) outranks the floor queue (item 11): tpm never spoke again
+    assert s["queue"] == ["tpm"]
 
     # The owner's own align on her closing turn runs too.
     _, _, own, own_seen, own_sp, own_ok = _drive({
@@ -8551,6 +8777,7 @@ def test_align_is_validated_with_reasons():
     for role, text, budget, pending, reason in [
         ("tpm", "tpm manager: order", 1, (), "one-on-ones off"),  # off outranks the caller
         ("tpm", "tpm manager: order", 16, (), "not owner or manager"),
+        ("tpm", "tpm manager order", 16, (), "not owner or manager"),  # outranks malformed
         (cast.JUNIOR, "tpm manager: order", 16, (), "not owner or manager"),
         (cast.MANAGER, "tpm manager order", 16, (), "malformed"),  # no colon
         (cast.MANAGER, "tpm, pm, tl: order", 16, (), "malformed"),  # three roles
@@ -8558,7 +8785,9 @@ def test_align_is_validated_with_reasons():
         (cast.MANAGER, "tpm manager:", 16, (), "no topic"),
         (cast.OWNER, "chair tpm: order", 16, (), "unknown role"),  # the sentinel is no seat
         (cast.OWNER, "security tpm: order", 16, (), "unknown role"),  # not seated here
+        (cast.OWNER, "security security: x", 16, (), "unknown role"),  # before same member
         (cast.OWNER, "tpm TPM: order", 16, (), "same member"),
+        (cast.OWNER, "junior_ic junior_ic: x", 16, (), "same member"),  # before junior_ic
         (cast.OWNER, "junior_ic tpm: order", 16, (), "junior_ic"),
         (cast.OWNER, "owner tl: again", 3, (held,), "duplicate"),  # outranks budget
         (cast.OWNER, "owner pm: cost", 3, (held,), "budget"),  # free 3 - 2 = 1 < 2
@@ -8574,6 +8803,13 @@ def test_align_is_validated_with_reasons():
     assert gate(cast.OWNER, "Owner, PM: cost", 3, (held,))[1]["dropped"][0]["members"] == [
         "owner", "pm"]
     assert gate(cast.MANAGER, "tpm manager order")[1]["dropped"][0]["members"] is None
+    # a scheduled topic is clipped to TOPIC_MAX
+    assert gate(cast.MANAGER, "tpm manager: " + "t" * 180)[1]["scheduled"][0]["topic"] == (
+        cast.clip("t" * 180, cast.TOPIC_MAX))
+    # the owner calls a pair her manager hosts: the caller is not the host
+    made = gate(cast.OWNER, "tpm manager: order")[1]["scheduled"][0]
+    assert (made["called_by"], made["host"], made["members"]) == (
+        "owner", "manager", ["tpm", "manager"])
 
     # A turn that delivered nothing asks for nothing.
     s = _committee()._state(_run())
@@ -8645,12 +8881,21 @@ def test_align_is_offered_only_to_the_owner_and_manager():
         assert "align:" not in pb.seed(run, site)[0].payload["goal"], budget  # the chair
         assert carries == offered, (budget, carries)
 
+    # the offer reads the configured budget, not what is left of it
+    pb = _committee()
+    run = _run()
+    s = pb._state(run)
+    s.update(one_on_one_budget=16, one_on_one_used=16)
+    run.phase = pb._turn(s, cast.OWNER)
+    assert "align:" in pb.seed(run, site)[0].payload["goal"]
+
 
 def test_turn_cap_drops_pending_one_on_ones_as_meeting_ended():
     """D3 item 7: only the cap drops a pending pair, as `meeting ended`. The
     decision reduction lists every drop; the footer names the pairs that never
     met for budget or because the meeting ended."""
     from playbooks.committee import thread
+    from playbooks.committee.playbook import _SIMULATION
 
     pb, run, s, seen, _, _ = _drive({
         "t01-senior_director": {"align": "tpm pm: order"},
@@ -8681,6 +8926,36 @@ def test_turn_cap_drops_pending_one_on_ones_as_meeting_ended():
     assert footer in red.json["verdict"]
     assert footer in thread.path(run.id).read_text(encoding="utf-8")
     assert "not owner or manager" not in red.json["verdict"]
+    # the footer is the last fact, directly above the simulation disclaimer
+    assert footer + "\n\n" + _SIMULATION in red.json["verdict"]
+
+
+def test_a_pair_that_met_is_never_listed_as_never_met():
+    """FIX_T7: the verdict footer names the pairs that never met. A pair that
+    met in 1:1 1 and asked again once the budget ran out did meet: its
+    `budget` drop stays in `dropped_one_on_ones`, but the footer names only
+    the pair that never met."""
+    from playbooks.committee.playbook import _SIMULATION
+
+    pb, run, s, seen, _, _ = _drive({
+        "p01-owner": {"meet_1": "owner tpm: rollback plan"},
+        "o01-tpm": _ALIGNED, "o02-owner": _ALIGNED,
+        "t02-owner": {"align": "tpm owner: the drill date"},
+        "t04-owner": {"align": "owner pm: launch scope"},
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=3)
+
+    assert s["one_on_ones_done"] == [1] and s["one_on_one_used"] == 2
+    assert [(d["members"], d["reason"]) for d in s["dropped_one_on_ones"]] == [
+        (["tpm", "owner"], "budget"), (["owner", "pm"], "budget")]
+    red = pb.reduce(
+        run, "decision",
+        [_finding(run, f"{run.id}/decision", "Defer it: the drill date is still open.")],
+        _NamedSite("local"),
+    )[0]
+    assert red.json["dropped_one_on_ones"] == s["dropped_one_on_ones"]
+    assert ("- dropped_one_on_ones (they never met): owner ↔ pm (budget)\n\n" + _SIMULATION
+            in red.json["verdict"])
+    assert "tpm ↔ owner" not in red.json["verdict"]
 
 
 # --- 1:1s: the caller's closing exchange (D6) -------------------------------

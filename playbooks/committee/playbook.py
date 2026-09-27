@@ -245,6 +245,9 @@ def _apply_plan(s: dict, block: dict, *, delivered: bool) -> dict:
     if not delivered:
         out["fallback"] = "no plan delivered"
         return out
+    # C4: a duplicate repeats a pending pair or an earlier line that passed the
+    # role checks, scheduled or dropped for `budget` (duplicate outranks budget)
+    seen: list[set] = []
     for n in range(1, UPFRONT_MAX + 1):
         text = block.get(f"meet_{n}")
         if text is None:
@@ -266,9 +269,11 @@ def _apply_plan(s: dict, block: dict, *, delivered: bool) -> dict:
                 reason = "same member"
             elif guest == cast.JUNIOR:
                 reason = "junior_ic"
-            elif any({host, guest} == set(p["members"]) for p in s["pending_one_on_ones"]):
+            elif ({host, guest} in seen
+                  or any({host, guest} == set(p["members"]) for p in s["pending_one_on_ones"])):
                 reason = "duplicate"
             else:
+                seen.append({host, guest})
                 pair = {
                     "seq": s["one_on_one_seq"] + 1, "origin": "upfront",
                     "called_by": cast.OWNER, "host": host, "members": [guest, host],
@@ -369,6 +374,7 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
             "still_open": one["still_open"],
         }
         s["one_on_ones_done"].append(one["seq"])
+        s["one_on_ones_met"].append(sorted(one["members"]))
         s["one_on_one"] = None
     return {
         "aligned": aligned,
@@ -569,6 +575,7 @@ class CommitteePlaybook:
                 "pending_one_on_ones": [],  # scheduled pairs, FIFO
                 "one_on_one": None,         # the 1:1 in progress
                 "one_on_ones_done": [],     # seqs that finished
+                "one_on_ones_met": [],      # their sorted members, for the verdict footer
                 "dropped_one_on_ones": [],  # every drop of every reason, in order
                 "delegation_origin": None,  # the seq whose 1:1 set `delegation`
                 "origin_one_on_one": None,  # that seq, on the junior turn it mints
@@ -878,6 +885,15 @@ class CommitteePlaybook:
             closing = one["closing"]
             other = None if closing else next(m for m in one["members"] if m != role)
             exchange = None if closing else one["exchange"]
+            # A planted one-on-ones/ file or symlink is refused (`_plain_dir`);
+            # seed must not raise, so the worker still gets the path and
+            # reduce's append records the refusal under `error`.
+            try:
+                file = str(thread.one_on_one_path(run.id, seq=one["seq"], members=one["members"]))
+            except (OSError, ValueError):
+                first, second = one["members"]
+                file = str(thread.path(run.id).parent / "one-on-ones"
+                           / f"{one['seq']:02d}-{first}-{second}.md")
             return [Ticket(
                 id=f"{run.id}/{phase}",
                 run_id=run.id,
@@ -898,8 +914,7 @@ class CommitteePlaybook:
                         charge=s["charge"],
                         artifact=s["artifact"],
                         thread=str(thread.path(run.id)),
-                        file=str(thread.one_on_one_path(
-                            run.id, seq=one["seq"], members=one["members"])),
+                        file=file,
                         other=other,
                         members=list(one["members"]),
                         topic=one["topic"],
@@ -1809,13 +1824,15 @@ class CommitteePlaybook:
             )
         never_met = [
             drop for drop in s["dropped_one_on_ones"]
-            if drop["reason"] in ("budget", "meeting ended")
+            if drop["reason"] == "meeting ended"
+            or (drop["reason"] == "budget" and sorted(drop["members"]) not in s["one_on_ones_met"])
         ]
         if never_met:
             # Symmetric with dropped_floor_requests: a 1:1 the budget or the end
             # of the meeting stopped is a fact about this committee's output.
             # Refused asks (a reviewer's align, a bad line) are not: they sit on
-            # their turn reductions and in `dropped_one_on_ones` below.
+            # their turn reductions and in `dropped_one_on_ones` below. Nor is a
+            # repeat ask the budget refused for a pair that did meet.
             parts.append(
                 "- dropped_one_on_ones (they never met): "
                 + ", ".join(
