@@ -3073,7 +3073,8 @@ def _kept(phases):
     return out
 
 
-def check_invariants(s, seen, speakers, max_turns=30, delivered=None, reviewers=None):
+def check_invariants(s, seen, speakers, max_turns=30, delivered=None, reviewers=None,
+                     one_on_one_budget=0):
     """Every property the model asserted on every run it drove.
 
     `reviewers` is the run's own reviewer list (pass `s["reviewers"]` on a
@@ -3091,8 +3092,26 @@ def check_invariants(s, seen, speakers, max_turns=30, delivered=None, reviewers=
     # (retakes `oNN-<role>-takeK` included) leave `seen` here.
     onums = [int(p[1:3]) for p in seen if _O_PHASE.match(p) and "-take" not in p]
     assert onums == list(range(1, len(onums) + 1)), f"oNN not 1, 2, 3...: {onums}"
-    assert len(onums) == s["one_on_one_used"] <= s["one_on_one_budget"], (
-        onums, s["one_on_one_used"], s["one_on_one_budget"])
+    # `one_on_one_budget` is the budget the caller drove with; 0 (not given)
+    # reads the state's, so every existing caller keeps working. With the line
+    # above, oNN are unique, strictly increasing and never past it.
+    budget = one_on_one_budget or s["one_on_one_budget"]
+    assert s["one_on_one_budget"] == budget, ("the budget moved", s["one_on_one_budget"], budget)
+    assert len(onums) == s["one_on_one_used"] <= budget, (
+        onums, s["one_on_one_used"], budget)
+    # The meeting is over, so no 1:1 is in flight or waiting, and every seq a
+    # pair was given met or was dropped, exactly once (`meeting ended` is the
+    # only drop that carries a seq: a refused line is never given one).
+    assert s["one_on_one"] is None and s["pending_one_on_ones"] == [], (
+        s["one_on_one"], s["pending_one_on_ones"])
+    settled = sorted(s["one_on_ones_done"] + [
+        drop["seq"] for drop in s["dropped_one_on_ones"] if drop["seq"] is not None])
+    assert settled == list(range(1, s["one_on_one_seq"] + 1)), (
+        f"seqs 1..{s['one_on_one_seq']} were scheduled, met or dropped: {settled}")
+    # A 1:1's edit is minted before anything else (D3 item 6, D7), so only a
+    # meeting delegation can reach `_decision` and be dropped by the cap.
+    assert not (s["dropped_delegation"] and s["delegation_origin"] is not None), (
+        "the cap dropped a 1:1's delegation", s["delegation_origin"])
     seen = [p for p in seen if not _O_PHASE.match(p)]
     # The plan is not a meeting turn (D2): minted at most once, then out of
     # every NN, kept-take and reply check below.
@@ -3424,20 +3443,108 @@ def _fuzz_answer(r):
     return kind, [wall, _selection_answer(seats) if kind == "violating" else None]
 
 
-def _fuzz_drive(r, max_turns, drawn):
-    """Drive one fuzz run: the drawn selector answers, then random meeting blocks from `r`.
+# One-on-ones: every fuzz run also draws a 1:1 budget (0 and 1 are off, C1), the
+# owner's plan, owner and manager `align` asks, and every exchange's block. The
+# plan and every o-phase go through the real seed and reduce inside `_drive`.
+_FUZZ_BUDGETS = range(21)
+_FUZZ_TOPICS = ("rollback plan", "cost", "rollout order", "who runs the crews")
+# Lines the plan gate drops: malformed, no topic, the `chair` sentinel, owner as
+# guest, both members the owner, a junior_ic guest, and a host who is neither
+# the owner nor the manager.
+_FUZZ_JUNK = (
+    "no pair here", "owner tpm:", "chair tpm: scope", "manager owner: scope",
+    "owner owner: scope", "owner junior_ic: tests", "tpm pm: rollout order",
+)
 
-    Returns (state, seen, speakers, delivered, log, at_t01). `log` holds every
-    s-phase reduction. `at_t01` is snapshotted at t01, where next_phase has
-    popped exactly one reviewer, so `[current_role, *opening]` is the opening
-    round as the chair's reduce installed it; `_drive` returns only after the
-    meeting has drained `opening`.
+
+def _fuzz_pair(r, s, hosts=None):
+    """One `<role> <role>: <topic>` line from this run's own seats, or junk.
+
+    `hosts` fixes the first role (a plan line names its host first); None draws
+    both roles from the roster plus the `chair` sentinel, as an `align` may.
+    The gates may still drop a drawn line (same member, duplicate, budget).
     """
-    at_t01, log = [], []
+    if r.random() < 0.2:
+        return r.choice(_FUZZ_JUNK)
+    seats = [*s["roster"], "chair"]
+    first = r.choice(hosts) if hosts else r.choice(seats)
+    return f"{first} {r.choice(seats)}: {r.choice(_FUZZ_TOPICS)}"
+
+
+def _fuzz_plan(r, s, kind):
+    """The owner's plan block: 1-3 drawn lines, junk lines (one maybe on
+    `meet_4`, which the parser drops), prose only, or undelivered."""
+    if kind == "undelivered":
+        return {"_ok": False}
+    if kind == "empty":
+        return {}
+    lines = range(1, r.randint(1, 3) + 1)
+    if kind == "junk":
+        block = {f"meet_{n}": r.choice(_FUZZ_JUNK) for n in lines}
+        if r.random() < 0.3:
+            block["meet_4"] = "owner tpm: scope"
+        return block
+    return {f"meet_{n}": _fuzz_pair(r, s, (cast.OWNER, cast.MANAGER)) for n in lines}
+
+
+def _fuzz_exchange(r, s):
+    """One 1:1 exchange's block, retakes and closing exchanges included.
+
+    Undelivered, over voice's word cap or carrying a file image (the real
+    reduce retakes both, up to take 3), a member's `aligned`, the host's
+    outcome, and the owner's delegation (yes with an action, or a withdrawal).
+    """
+    if r.random() < 0.08:
+        return {"_ok": False}
+    oo, role = s["one_on_one"], s["current_role"]
+    block = {}
+    roll = r.random()
+    if roll < 0.08:
+        block["_prose"] = _long_exchange(s["base"])
+    elif roll < 0.16:
+        block["_prose"] = (f"The flow is drawn below.\n\n![c](images/{s['base']}.svg)\n"
+                           "Description: the rollback steps in order.")
+    if role in oo["members"] and not oo["closing"]:
+        block["aligned"] = r.random() < 0.6
+    if role == oo["host"]:
+        if r.random() < 0.6:
+            block["agreed"] = r.choice(_FUZZ_TOPICS)
+        if r.random() < 0.3:
+            block["still_open"] = r.choice(_FUZZ_TOPICS)
+    if role == cast.OWNER and r.random() < 0.3:
+        block["delegate"] = r.random() < 0.85
+        if block["delegate"]:
+            block["action"] = "Add a rollback section."
+    return block
+
+
+def _fuzz_drive(r, max_turns, drawn, budget, plan):
+    """Drive one fuzz run from `r`: the drawn selector answers, then the owner's
+    plan, every 1:1 exchange and random meeting blocks.
+
+    Returns (run, state, seen, speakers, delivered, log, opened). `log` holds
+    every s-phase reduction; the plan's and every o-phase's are on
+    `run.reductions`. `plan[0]` is set to the kind of plan drawn (None while
+    1:1s are off). `opened` is snapshotted at the first reviewer turn, where
+    next_phase has popped exactly one reviewer, so `[current_role, *opening]`
+    is the opening round as the chair's reduce installed it (a 1:1's junior
+    edit may take t01 before it); `_drive` returns only after the meeting has
+    drained `opening`, and `opened` stays empty if no reviewer ever spoke.
+    """
+    from playbooks.committee import voice
+
+    opened, log = [], []
 
     def script(phase, s):
-        if phase.startswith("t01-"):
-            at_t01.extend([s["current_role"], *s["opening"]])
+        kind = s["current_kind"]
+        if kind == "plan":
+            plan[0] = r.choice(("valid", "junk", "empty", "undelivered"))
+            return _fuzz_plan(r, s, plan[0])
+        if kind in ("one_on_one", "one_on_one_close"):
+            return _fuzz_exchange(r, s)
+        meeting = kind == "turn" and s["current_role"] != cast.JUNIOR
+        if meeting and not opened:
+            opened.extend([s["current_role"], *s["opening"]])
         block = {}
         if r.random() < 0.35:
             block["request_floor"] = True
@@ -3448,12 +3555,18 @@ def _fuzz_drive(r, max_turns, drawn):
             block["close"] = True
         if r.random() < 0.10:
             block["_ok"] = False
+        if meeting and s["current_role"] in (cast.OWNER, cast.MANAGER) and r.random() < 0.25:
+            block["align"] = _fuzz_pair(r, s)
+        if meeting and "_ok" not in block and s["take"] < voice.MAX_TAKES and r.random() < 0.08:
+            # voice's marker: a delivered take reduce discards (never take 3,
+            # which voice keeps flagged, and never the junior's report-only turn)
+            block["_retake"] = True
         return block
 
-    _, _, s, seen, sp, ok = _drive(
-        script, max_turns=max_turns,
+    _, run, s, seen, sp, ok = _drive(
+        script, max_turns=max_turns, one_on_one_budget=budget,
         selection={role: answer for role, (_, answer) in drawn.items()}, reductions=log)
-    return s, seen, sp, ok, log, at_t01
+    return run, s, seen, sp, ok, log, opened
 
 
 def test_every_three_turn_prefix_of_the_block_vocabulary_holds():
@@ -3474,25 +3587,52 @@ def test_every_three_turn_prefix_of_the_block_vocabulary_holds():
     assert checked == 125
 
 
-def test_seeded_fuzz_over_random_blocks_and_random_caps(monkeypatch):
+def test_seeded_fuzz_over_random_blocks_and_random_caps(monkeypatch, tmp_path):
     """500 seeded random runs, every invariant on every run.
 
     Each run opens with a random answer from each selector (valid, junk,
     overflow, reserved-only, missing, violating, violating then undelivered,
-    a flood past the record caps) and a random cap (1..31, or unset), all
-    through the real reduce. On every run the fixed four are seated (AC2), the
-    committee has 3-12 reviewers (AC3), the opening round is exactly the
-    ratified reviewers, the cap holds, each stage retakes under its own name,
-    and no phase repeats, retakes included (AC7). A ticket id is
-    `<run>/<phase>`, so no ticket id repeats either. The final selection
-    reduction carries the committee the state runs, with no error (resolve
-    never raised); its considered list is capped and counted, never names a
-    seated role, and names only seated representatives; and every seat's
-    worst-case goal fits GOAL_MAX. The first runs replay identically, and
-    CAST and LIBRARY come out unchanged.
+    a flood past the record caps), a random cap (1..31, or unset) and a random
+    1:1 budget (0..20), all through the real reduce. The owner's plan is
+    valid, junk, empty or undelivered; the owner and the manager ask for
+    pauses with `align`; exchanges say `aligned`, delegate, go undelivered or
+    break voice's rules (over the word cap, a file image); meeting turns are
+    retaken; all in the same run. On every run the fixed four are seated
+    (AC2), the committee has 3-12 reviewers (AC3), the opening round is
+    exactly the ratified reviewers, the cap holds (an unset one grows by one
+    per 1:1 edit, D7), each stage retakes under its own name, and no phase
+    repeats, retakes included (AC7). A ticket id is `<run>/<phase>`, so no
+    ticket id repeats either. Every 1:1 invariant of one-on-ones AC4 holds,
+    and no discarded take changes the state beyond what voice's `_discard`
+    owns (gap 4). The final selection reduction carries the committee the
+    state runs, with no error (resolve never raised); its considered list is
+    capped and counted, never names a seated role, and names only seated
+    representatives; and every seat's worst-case goal fits GOAL_MAX. The
+    first runs replay identically, and CAST and LIBRARY come out unchanged.
     """
-    from playbooks.committee import selection
+    import copy
 
+    from playbooks.committee import selection
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    real_reduce = CommitteePlaybook.reduce
+
+    def reduce(self, run, phase, findings, site):
+        # Gap 4, on every real reduce (selection, plan, every o-phase take): a
+        # discarded take moves only what `_discard` owns, the held take, the
+        # retake note and the kept take the retake names (voice); `take`
+        # itself moves only in next_phase.
+        before = copy.deepcopy(self._state_by_run[run.id])
+        out = real_reduce(self, run, phase, findings, site)
+        if any(red.kind == "take" for red in out):
+            after = self._state_by_run[run.id]
+            moved = sorted(key for key in before.keys() | after.keys()
+                           if key not in ("held", "retake", "last_take")
+                           and before.get(key) != after.get(key))
+            assert not moved, f"the discarded take {phase} changed {moved}"
+        return out
+
+    monkeypatch.setattr(CommitteePlaybook, "reduce", reduce)
     # the budget test's worst case: over-long charge, action and note, deep paths
     deep = "/home/anshulverma/.hermes/runs/committee-20260918-000000/" + "d" * 100
     paths = dict(artifact=f"{deep}/proposal-under-review.md", thread=f"{deep}/thread.md",
@@ -3503,11 +3643,16 @@ def test_seeded_fuzz_over_random_blocks_and_random_caps(monkeypatch):
     fixed = {"owner", "senior_director", "manager", "junior_ic"}
     hit, runs = set(), []
     for iteration in range(_FUZZ_RUNS):
+        # `_drive` always uses the same run id: a home per run keeps each run's
+        # thread.md and 1:1 files its own (the replay below reuses it)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / f"run{iteration}"))
         max_turns = rng.choice(_FUZZ_CAPS)
+        budget = rng.choice(_FUZZ_BUDGETS)
         drawn = {role: _fuzz_answer(rng) for role in _FUZZ_SELECTORS}
         kinds = {role: kind for role, (kind, _) in drawn.items()}
+        plan = [None]
         try:
-            s, seen, sp, ok, log, at_t01 = _fuzz_drive(rng, max_turns, drawn)
+            run, s, seen, sp, ok, log, opened = _fuzz_drive(rng, max_turns, drawn, budget, plan)
             assert len(seen) == len(set(seen)), f"a phase repeated: {seen}"
             for stage, role in enumerate(_FUZZ_SELECTORS, 1):
                 base = f"s{stage}-{role}"
@@ -3523,12 +3668,29 @@ def test_seeded_fuzz_over_random_blocks_and_random_caps(monkeypatch):
             assert [p for p in seen if p.startswith("decision")] == ["decision"]
             assert fixed <= set(s["roster"]), f"a fixed seat is missing: {list(s['roster'])}"
             assert 3 <= len(s["reviewers"]) <= 12, f"{len(s['reviewers'])} reviewers"
-            assert at_t01 == s["reviewers"], f"opening at t01 {at_t01} != {s['reviewers']}"
-            assert set(at_t01) <= set(s["roster"]), f"an unseated opener in {at_t01}"
-            cap = 2 * len(s["reviewers"]) + 16 if max_turns is None else max_turns
-            assert s["max_turns"] == cap, f"cap {s['max_turns']}, want {cap}"
+            # nobody was popped if no reviewer ever spoke: the round is intact
+            opening = opened or list(s["opening"])
+            assert opening == s["reviewers"], f"opening round {opening} != {s['reviewers']}"
+            assert set(opening) <= set(s["roster"]), f"an unseated opener in {opening}"
+            kept = [red.json for red in run.reductions if red.kind == "one_on_one"]
+            edits = sum(1 for d in kept if d["final"] and d["delegated_action"])
+            cap = 2 * len(s["reviewers"]) + 16 + edits if max_turns is None else max_turns
+            assert s["max_turns"] == cap, f"cap {s['max_turns']}, want {cap} ({edits} 1:1 edits)"
             check_invariants(s, seen, sp, max_turns=cap, delivered=ok,
-                             reviewers=s["reviewers"])
+                             reviewers=s["reviewers"], one_on_one_budget=budget)
+            # Per 1:1, from its kept reductions: check_invariants sees phase
+            # names, and an oNN's seq is only on its reduction. One kept
+            # reduction per minted exchange; member exchanges count 1..n <= 4,
+            # at most one closing exchange, and only the last one is final.
+            assert len(kept) == s["one_on_one_used"], (len(kept), s["one_on_one_used"])
+            assert sorted({d["seq"] for d in kept}) == sorted(s["one_on_ones_done"]), (
+                sorted({d["seq"] for d in kept}), s["one_on_ones_done"])
+            for seq in s["one_on_ones_done"]:
+                mine = [d for d in kept if d["seq"] == seq]
+                talk = [d["exchange"] for d in mine if not d["closing"]]
+                assert talk == list(range(1, len(talk) + 1)) and len(talk) <= 4, (seq, talk)
+                assert sum(1 for d in mine if d["closing"]) <= 1, f"1:1 {seq} closed twice"
+                assert [d["final"] for d in mine] == [False] * (len(mine) - 1) + [True], seq
 
             # One final selection reduction, carrying the committee the state
             # runs, with no error: resolve never raised.
@@ -3577,9 +3739,10 @@ def test_seeded_fuzz_over_random_blocks_and_random_caps(monkeypatch):
                     assert len(g) < cast.GOAL_MAX, f"{role} retake={bool(retake)}: {len(g)}"
         except AssertionError as exc:
             raise AssertionError(
-                f"seed-iter {iteration} max_turns={max_turns} selectors={kinds}: {exc}"
+                f"seed-iter {iteration} max_turns={max_turns} budget={budget} "
+                f"plan={plan[0]} selectors={kinds}: {exc}"
             ) from exc
-        runs.append((seen, [red.json for _, red in log]))
+        runs.append((seen, [red.json for _, red in log], [red.json for red in run.reductions]))
         hit.add("unset cap" if max_turns is None else "explicit cap")
         hit.add(f"{len(s['reviewers'])} reviewers")
         hit.add(f"fallback {final['fallback']}")
@@ -3591,22 +3754,45 @@ def test_seeded_fuzz_over_random_blocks_and_random_caps(monkeypatch):
             hit.add("considered capped")
         if final["invalid_dropped"]:
             hit.add("invalid capped")
+        if any(p.startswith("t") and "-take" in p for p in seen):
+            hit.add("turn retake")
+        plans = [red.json for red in run.reductions if red.kind == "one_on_one_plan"]
+        hit.update(f"plan: {d['fallback']}" for d in plans if d["fallback"])
+        hit.update(f"{d['origin']} 1:1" for d in kept if d["final"])
+        hit.update(f"ended: {d['ended']}" for d in kept if d["final"])
+        hit.update(f"dropped: {d['reason']}" for d in s["dropped_one_on_ones"])
+        if any(d["closing"] for d in kept):
+            hit.add("closing exchange")
+        if any("retake_failed" in d["violations"] for d in kept):
+            hit.add("retake_failed")
+        if any(red.kind == "take" for red in run.reductions):
+            hit.add("1:1 retake")  # the plan is exempt, so every banked take is an o-phase's
+        if edits:
+            hit.add("1:1 edit")
 
     # Not vacuous: every path this fuzz exists for was driven at least once. A
     # fallback seats five "default" nominees, and "derived" is a derived seat.
     assert {"unset cap", "explicit cap", "derived", "default", "3 reviewers",
             "12 reviewers", "select retake", "considered capped", "invalid capped",
             "fallback None", "fallback chair_failed", "fallback no_block",
-            "fallback unparseable", "fallback too_few"} <= hit, sorted(hit)
+            "fallback unparseable", "fallback too_few", "turn retake",
+            "plan: no plan delivered", "plan: no valid pairs", "upfront 1:1", "pause 1:1",
+            "ended: aligned", "ended: exchange cap", "ended: budget", "ended: not delivered",
+            "closing exchange", "retake_failed", "1:1 retake", "1:1 edit",
+            "dropped: budget", "dropped: meeting ended", "dropped: one-on-ones off",
+            "dropped: unknown role", "dropped: malformed"} <= hit, sorted(hit)
     # Deterministic: the first runs, drawn again from the seed, are the same
-    # runs, and no run left a mark on the cast's shared personas.
+    # runs (the plan and every 1:1 exchange included), and no run left a mark
+    # on the cast's shared personas.
     replay = random.Random(_FUZZ_SEED)
     for iteration in range(_FUZZ_REPLAY):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / f"run{iteration}"))
         max_turns = replay.choice(_FUZZ_CAPS)
+        budget = replay.choice(_FUZZ_BUDGETS)
         drawn = {role: _fuzz_answer(replay) for role in _FUZZ_SELECTORS}
-        _, seen, _, _, log, _ = _fuzz_drive(replay, max_turns, drawn)
-        assert (seen, [red.json for _, red in log]) == runs[iteration], \
-            f"seed-iter {iteration} ran differently when replayed from the seed"
+        run, _, seen, _, _, log, _ = _fuzz_drive(replay, max_turns, drawn, budget, [None])
+        assert (seen, [red.json for _, red in log], [red.json for red in run.reductions]) == (
+            runs[iteration]), f"seed-iter {iteration} ran differently when replayed from the seed"
     assert json.dumps([cast.CAST, cast.LIBRARY], sort_keys=True) == pristine
 
 
