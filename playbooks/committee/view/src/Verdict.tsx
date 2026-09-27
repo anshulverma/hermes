@@ -17,6 +17,15 @@
 import { useEffect, useState } from 'react';
 import { apiGet, apiPost } from './host';
 import { Segments, violationText, type Segment } from './Voice';
+import type { OneOnOne } from './CommitteeView';
+
+/** One `dropped_one_on_ones` entry, as the decision reduction records it (C3). */
+export type OneOnOneDrop = {
+  seq: number | null;
+  text: string;
+  members: string[] | null;
+  reason: string;
+};
 
 export type VerdictData = {
   text: string;
@@ -24,6 +33,8 @@ export type VerdictData = {
   artifact_intact: boolean | null;
   dropped_delegation: string | null;
   dropped_floor_requests: string[];
+  /** Every 1:1 drop, of every reason; absent on a run that predates 1:1s. */
+  dropped_one_on_ones?: OneOnOneDrop[];
   /** voice: how many takes the chair needed, and the rules its kept take broke. */
   takes?: number | null;
   violations?: string[];
@@ -56,6 +67,26 @@ const note = (tone: 'ok' | 'danger' | 'attention' | 'muted'): React.CSSPropertie
   background: tone === 'muted' ? 'var(--wash-subtle)' : `var(--status-${tone}-tint)`,
   border: `1px solid ${tone === 'muted' ? 'var(--border-hairline)' : `var(--status-${tone}-edge)`}`,
 });
+
+/**
+ * The drops the verdict footer lists (playbook `_decision`): a pair the budget
+ * or the end of the meeting stopped, unless that pair met in another 1:1. The
+ * rest (a malformed line, an unknown role, a duplicate) were refused when they
+ * were asked for, so no 1:1 was ever owed. Met is the footer's
+ * `one_on_ones_met`: a finished 1:1 in which both members spoke, so one that
+ * ended 'not delivered' counts only once it reached exchange 3.
+ */
+function neverMet(drops: OneOnOneDrop[], oneOnOnes: OneOnOne[]): OneOnOneDrop[] {
+  const pair = (roles: string[]) => [...roles].sort().join(' ');
+  const met = new Set(
+    oneOnOnes
+      .filter((g) => g.ended !== null && (g.ended !== 'not delivered' || g.exchanges.some((x) => (x.exchange ?? 0) >= 3)))
+      .map((g) => pair(g.members.map((m) => m.role))),
+  );
+  return drops.filter(
+    (d) => (d.reason === 'budget' || d.reason === 'meeting ended') && !(d.members && met.has(pair(d.members))),
+  );
+}
 
 function Rechecks({ checks }: { checks: VerdictData['checks'] }) {
   if (checks.length === 0) {
@@ -245,9 +276,15 @@ function Stamp({ runId }: { runId: string }) {
 export default function Verdict({
   runId,
   verdict,
+  oneOnOnes = [],
+  derived = new Set(),
 }: {
   runId: string;
   verdict: VerdictData | null;
+  /** view_data's `one_on_ones`: which pairs met, so a repeat ask cut off is not "never met". */
+  oneOnOnes?: OneOnOne[];
+  /** Roles whose seat a selector invented, marked where a drop names them. */
+  derived?: Set<string>;
 }) {
   if (!verdict) {
     return (
@@ -262,6 +299,8 @@ export default function Verdict({
 
   const takes = verdict.takes ?? 1;
   const broke = verdict.violations ?? [];
+  const unmet = neverMet(verdict.dropped_one_on_ones ?? [], oneOnOnes);
+  const seat = (role: string) => (derived.has(role) ? `${role} · derived seat` : role);
 
   return (
     <div style={card}>
@@ -309,6 +348,15 @@ export default function Verdict({
         <div data-testid="dropped-floor-requests" style={note('attention')}>
           <strong>Dropped floor requests</strong> — the review ended before their turn came:{' '}
           {verdict.dropped_floor_requests.join(', ')}
+        </div>
+      )}
+
+      {/* Roles, not names, as the note above prints them: the card has no roster. */}
+      {unmet.length > 0 && (
+        <div data-testid="dropped-one-on-ones" style={note('attention')}>
+          <strong>1:1s that never met</strong> — the review ended or ran out of 1:1 exchanges
+          first:{' '}
+          {unmet.map((d) => `${d.members ? d.members.map(seat).join(' ↔ ') : d.text} (${d.reason})`).join(', ')}
         </div>
       )}
 

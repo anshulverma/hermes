@@ -866,6 +866,8 @@ function OneOnOneGroup({
   open,
   onToggle,
   derived,
+  edit,
+  onSeeEdit,
 }: {
   g: OneOnOne;
   runId: string;
@@ -873,6 +875,9 @@ function OneOnOneGroup({
   onToggle: () => void;
   /** Roles whose seat a selector invented. */
   derived: Set<string>;
+  /** The 1-based edit step this 1:1's delegation became; undefined when it delegated none. */
+  edit?: number;
+  onSeeEdit: () => void;
 }) {
   const { Badge } = ds();
   return (
@@ -914,6 +919,28 @@ function OneOnOneGroup({
           <div key={line}>{line}</div>
         ))}
       </div>
+
+      {/* The way back from the stepper, as a transcript row's `see-edit-${n}`. */}
+      {edit !== undefined && (
+        <button
+          type="button"
+          data-testid={`see-edit-one-on-one-${g.seq}`}
+          onClick={onSeeEdit}
+          style={{
+            marginTop: 4,
+            marginLeft: 18,
+            padding: '0 6px',
+            fontSize: 11,
+            color: 'var(--text-primary)',
+            background: 'none',
+            border: '1px solid var(--border-hairline)',
+            borderRadius: 'var(--radius-sm)',
+            cursor: 'pointer',
+          }}
+        >
+          see edit {edit}
+        </button>
+      )}
 
       {open && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6, paddingLeft: 18 }}>
@@ -1251,6 +1278,23 @@ function voiceValue(value: VoiceSummary[string] | undefined): string {
   return String(value);
 }
 
+/**
+ * The Metrics '1:1s' line. It is never hidden: a run whose 1:1s were off, or
+ * one that predates them, says which rather than dropping the section. It
+ * names no seat, so it needs no derived-seat marker.
+ */
+function oneOnOneCount(data: CommitteeData): string {
+  const tally = data.progress.one_on_one ?? null;
+  if (tally === null) return '1:1s not recorded for this run';
+  // A 1:1 needs two exchanges, so a budget of one is off too.
+  if (tally.budget < 2) return '1:1s were off for this run';
+  const groups = data.one_on_ones ?? [];
+  // Finished means a final reduction, which is what `ended` carries (eval's `count`).
+  const finished = groups.filter((g) => g.ended !== null).length;
+  const aligned = groups.filter((g) => g.aligned === true).length;
+  return `${finished} 1:1s · ${tally.used} of ${tally.budget} exchanges · ${aligned} aligned`;
+}
+
 function MeetingMetrics({ data, derived }: { data: CommitteeData; derived: Set<string> }) {
   const turns = [...data.timeline].sort((a, b) => a.n - b.n);
   const delivered = (e: Entry) => !e.badges.includes('no_turn');
@@ -1307,7 +1351,10 @@ function MeetingMetrics({ data, derived }: { data: CommitteeData; derived: Set<s
     <div data-testid="committee-metrics" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {!over && (
         <div data-testid="metrics-partial" style={quiet}>
-          Through turn {turns[turns.length - 1].n}; no verdict yet.
+          {/* No turn yet while the up-front 1:1s run, and turns[-1] would throw. */}
+          {turns.length > 0
+            ? `Through turn ${turns[turns.length - 1].n}; no verdict yet.`
+            : 'Before the first turn; no verdict yet.'}
         </div>
       )}
 
@@ -1351,6 +1398,12 @@ function MeetingMetrics({ data, derived }: { data: CommitteeData; derived: Set<s
             Cut off by the turn cap: {data.verdict.dropped_delegation}
           </div>
         )}
+      </Section>
+
+      <Section title="1:1s">
+        <div data-testid="one-on-one-count" style={quiet}>
+          {oneOnOneCount(data)}
+        </div>
       </Section>
 
       <Section title="Floor requests">
@@ -1611,6 +1664,12 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   // Which 1:1 groups are open. Held here beside `open`, so a link from
   // elsewhere in the view can open one.
   const [openGroups, setOpenGroups] = useState<Set<number>>(new Set());
+  // A step's 1:1 link: open that group and bring it on screen, as openTurn does
+  // for a turn. Above every return: the one <DocumentHistory> takes it.
+  const openOneOnOne = (seq: number) => {
+    setOpenGroups((prev) => new Set(prev).add(seq));
+    window.document.querySelector(`[data-testid="one-on-one-${seq}"]`)?.scrollIntoView?.({ block: 'center' });
+  };
 
   // A run captured before this view existed. Its reductions predate `body`,
   // `stance`, `ended`, `artifact` and `revised`, so `view_data` returns those
@@ -1627,12 +1686,32 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
 
   // Every 1:1 in seq order. A payload from before 1:1s has no key at all.
   const oneOnOnes = [...(data.one_on_ones ?? [])].sort((a, b) => a.seq - b.seq);
+  // seq -> [1-based edit number, that step's junior turn], for a 1:1 whose
+  // owner delegated. Up here beside `group`, not in the edits block below:
+  // the pre-t01 layout returns above that block and still calls `group`.
+  // Captured only, like `edits`, or the link lands on "not captured". The
+  // group's link calls `seeEdit`, declared below the pre-t01 return: the
+  // button exists only once a step does, which needs a junior turn, so that
+  // return has been passed by the time anyone clicks it.
+  const oneOnOneEdits = new Map<number, [number, number]>();
+  if (data.document.captured) {
+    data.document.steps.forEach((step, i) => {
+      if (typeof step.origin_one_on_one === 'number') {
+        oneOnOneEdits.set(step.origin_one_on_one, [i + 1, step.turn]);
+      }
+    });
+  }
   const group = (g: OneOnOne) => (
     <OneOnOneGroup
       key={`oneonone-${g.seq}`}
       g={g}
       runId={runId}
       open={openGroups.has(g.seq)}
+      edit={oneOnOneEdits.get(g.seq)?.[0]}
+      onSeeEdit={() => {
+        const e = oneOnOneEdits.get(g.seq);
+        if (e) seeEdit(e[1]);
+      }}
       onToggle={() =>
         setOpenGroups((prev) => {
           const next = new Set(prev);
@@ -1678,9 +1757,19 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
         onDiffMode={setDiffMode}
         onOpenTurn={openTurn}
         derived={derived}
+        oneOnOnes={oneOnOnes}
+        onOpenOneOnOne={openOneOnOne}
       />
     </Section>
   );
+
+  // Before t01 only: during the up-front 1:1s the '1:1s' section is the news,
+  // so the Metrics tab counts them instead of saying nothing was said. With a
+  // turn, the run falls through to the metrics branch below (the counts plus
+  // the EvaluationBlock). With no turn and no 1:1 it reaches the empty state.
+  if (variant === 'metrics' && data.timeline.length === 0 && oneOnOnes.length > 0) {
+    return <MeetingMetrics data={data} derived={derived} />;
+  }
 
   // An empty timeline, NOT `&& roster.length === 0`: `view_data` always sends
   // roster rows (the fixed four while a committee is being seated), so a
@@ -1794,7 +1883,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
         oneOnOnes={oneOnOnes}
         group={group}
       />
-      <Verdict runId={runId} verdict={data.verdict} />
+      <Verdict runId={runId} verdict={data.verdict} oneOnOnes={oneOnOnes} derived={derived} />
       {history}
     </div>
   );

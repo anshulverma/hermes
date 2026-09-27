@@ -262,6 +262,19 @@
 		background: tone === "muted" ? "var(--wash-subtle)" : `var(--status-${tone}-tint)`,
 		border: `1px solid ${tone === "muted" ? "var(--border-hairline)" : `var(--status-${tone}-edge)`}`
 	});
+	/**
+	* The drops the verdict footer lists (playbook `_decision`): a pair the budget
+	* or the end of the meeting stopped, unless that pair met in another 1:1. The
+	* rest (a malformed line, an unknown role, a duplicate) were refused when they
+	* were asked for, so no 1:1 was ever owed. Met is the footer's
+	* `one_on_ones_met`: a finished 1:1 in which both members spoke, so one that
+	* ended 'not delivered' counts only once it reached exchange 3.
+	*/
+	function neverMet(drops, oneOnOnes) {
+		const pair = (roles) => [...roles].sort().join(" ");
+		const met = new Set(oneOnOnes.filter((g) => g.ended !== null && (g.ended !== "not delivered" || g.exchanges.some((x) => (x.exchange ?? 0) >= 3))).map((g) => pair(g.members.map((m) => m.role))));
+		return drops.filter((d) => (d.reason === "budget" || d.reason === "meeting ended") && !(d.members && met.has(pair(d.members))));
+	}
 	function Rechecks({ checks }) {
 		if (checks.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 			"data-testid": "rechecks-none",
@@ -444,7 +457,7 @@
 			]
 		});
 	}
-	function Verdict({ runId, verdict }) {
+	function Verdict({ runId, verdict, oneOnOnes = [], derived = /* @__PURE__ */ new Set() }) {
 		if (!verdict) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 			style: card,
 			children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
@@ -455,6 +468,8 @@
 		});
 		const takes = verdict.takes ?? 1;
 		const broke = verdict.violations ?? [];
+		const unmet = neverMet(verdict.dropped_one_on_ones ?? [], oneOnOnes);
+		const seat = (role) => derived.has(role) ? `${role} · derived seat` : role;
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			style: card,
 			children: [
@@ -499,6 +514,16 @@
 						" — the review ended before their turn came:",
 						" ",
 						verdict.dropped_floor_requests.join(", ")
+					]
+				}),
+				unmet.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+					"data-testid": "dropped-one-on-ones",
+					style: note$1("attention"),
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("strong", { children: "1:1s that never met" }),
+						" — the review ended or ran out of 1:1 exchanges first:",
+						" ",
+						unmet.map((d) => `${d.members ? d.members.map(seat).join(" ↔ ") : d.text} (${d.reason})`).join(", ")
 					]
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("details", {
@@ -807,12 +832,15 @@
 		});
 	}
 	/** Who raised it, who delegated it, what the junior said, what the re-check found. */
-	function StepContext({ step, timeline, onOpenTurn, derived }) {
+	function StepContext({ step, timeline, onOpenTurn, derived, oneOnOnes, onOpenOneOnOne }) {
 		const at = (n) => n === null ? void 0 : timeline.findLast((e) => e.n === n);
 		const reviewer = at(step.reviewer_turn);
 		const owner = at(step.owner_turn);
 		const junior = at(step.turn);
 		const confirmation = junior?.body.split("\n").find((l) => l.trim()) ?? "";
+		const oneOnOneSeq = typeof step.origin_one_on_one === "number" ? step.origin_one_on_one : null;
+		const oneOnOne = oneOnOnes.find((g) => g.seq === oneOnOneSeq);
+		const member = (p) => derived?.has(p.role) ? `${p.name} (${p.role} · derived seat)` : p.name;
 		const line = {
 			fontSize: 12.5,
 			color: "var(--text-secondary)",
@@ -847,7 +875,41 @@
 						step.verified === true ? "APPLIED" : step.verified === false ? "DID NOT APPLY" : "not recorded"
 					]
 				}),
-				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+				oneOnOneSeq !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "step-raised",
+						style: line,
+						children: [
+							"raised in 1:1",
+							" ",
+							oneOnOne ? `${member(oneOnOne.members[0])} ↔ ${member(oneOnOne.members[1])}` : oneOnOneSeq,
+							" ",
+							/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+								type: "button",
+								"data-testid": `goto-one-on-one-${oneOnOneSeq}`,
+								"aria-label": `Open 1:1 ${oneOnOneSeq} in the transcript`,
+								onClick: () => onOpenOneOnOne(oneOnOneSeq),
+								style: {
+									...mono$1,
+									...chip(false),
+									padding: "0 6px",
+									fontSize: 11
+								},
+								children: ["1:1 ", oneOnOneSeq]
+							})
+						]
+					}),
+					oneOnOne && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "step-why",
+						style: line,
+						children: ["why: ", oneOnOne.topic]
+					}),
+					/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						"data-testid": "step-delegated",
+						style: line,
+						children: ["delegated: ", oneOnOne?.delegated_action ?? "no action recorded"]
+					})
+				] }) : /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					"data-testid": "step-raised",
 					style: line,
 					children: step.reviewer_turn !== null ? /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react_jsx_runtime.Fragment, { children: [
@@ -862,8 +924,7 @@
 						}),
 						inferred
 					] }) : "who raised this was not recorded"
-				}),
-				step.owner_turn !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				}), step.owner_turn !== null && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "step-delegated",
 					style: line,
 					children: [
@@ -876,7 +937,7 @@
 						}),
 						inferred
 					]
-				}),
+				})] }),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "step-confirmed",
 					style: line,
@@ -1077,7 +1138,7 @@
 			children: text
 		});
 	});
-	function DocumentHistory({ runId, document: doc, timeline, intact, legacy, selected, onSelect, diffMode, onDiffMode, onOpenTurn, derived }) {
+	function DocumentHistory({ runId, document: doc, timeline, intact, legacy, selected, onSelect, diffMode, onDiffMode, onOpenTurn, derived, oneOnOnes, onOpenOneOnOne }) {
 		const [finalDiff, setFinalDiff] = (0, react.useState)(false);
 		const { name, captured, original, steps, final } = doc;
 		const ids = original ? [
@@ -1306,7 +1367,9 @@
 					step,
 					timeline,
 					onOpenTurn,
-					derived
+					derived,
+					oneOnOnes,
+					onOpenOneOnOne
 				}),
 				current === "final" && final && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 					"data-testid": "final-label",
@@ -1941,7 +2004,7 @@
 		if (lines.length > 0) return lines;
 		return [`no outcome recorded: ${g.exchanges.some((x) => x.closing && !x.delivered) ? "the host's closing exchange was not delivered" : g.ended}`];
 	}
-	function OneOnOneGroup({ g, runId, open, onToggle, derived }) {
+	function OneOnOneGroup({ g, runId, open, onToggle, derived, edit, onSeeEdit }) {
 		const { Badge } = ds();
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": `one-on-one-${g.seq}`,
@@ -2003,6 +2066,23 @@
 						color: "var(--text-secondary)"
 					},
 					children: outcomeLines(g).map((line) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: line }, line))
+				}),
+				edit !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+					type: "button",
+					"data-testid": `see-edit-one-on-one-${g.seq}`,
+					onClick: onSeeEdit,
+					style: {
+						marginTop: 4,
+						marginLeft: 18,
+						padding: "0 6px",
+						fontSize: 11,
+						color: "var(--text-primary)",
+						background: "none",
+						border: "1px solid var(--border-hairline)",
+						borderRadius: "var(--radius-sm)",
+						cursor: "pointer"
+					},
+					children: ["see edit ", edit]
 				}),
 				open && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					style: {
@@ -2317,6 +2397,20 @@
 		if (typeof value === "object") return Object.entries(value).map(([role, n]) => `${role} ${n ?? "—"}`).join(", ");
 		return String(value);
 	}
+	/**
+	* The Metrics '1:1s' line. It is never hidden: a run whose 1:1s were off, or
+	* one that predates them, says which rather than dropping the section. It
+	* names no seat, so it needs no derived-seat marker.
+	*/
+	function oneOnOneCount(data) {
+		const tally = data.progress.one_on_one ?? null;
+		if (tally === null) return "1:1s not recorded for this run";
+		if (tally.budget < 2) return "1:1s were off for this run";
+		const groups = data.one_on_ones ?? [];
+		const finished = groups.filter((g) => g.ended !== null).length;
+		const aligned = groups.filter((g) => g.aligned === true).length;
+		return `${finished} 1:1s · ${tally.used} of ${tally.budget} exchanges · ${aligned} aligned`;
+	}
 	function MeetingMetrics({ data, derived }) {
 		const turns = [...data.timeline].sort((a, b) => a.n - b.n);
 		const delivered = (e) => !e.badges.includes("no_turn");
@@ -2369,14 +2463,10 @@
 				gap: 16
 			},
 			children: [
-				!over && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+				!over && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
 					"data-testid": "metrics-partial",
 					style: quiet,
-					children: [
-						"Through turn ",
-						turns[turns.length - 1].n,
-						"; no verdict yet."
-					]
+					children: turns.length > 0 ? `Through turn ${turns[turns.length - 1].n}; no verdict yet.` : "Before the first turn; no verdict yet."
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
 					title: "Turns taken",
@@ -2436,6 +2526,14 @@
 							children: ["Cut off by the turn cap: ", data.verdict.dropped_delegation]
 						})
 					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
+					title: "1:1s",
+					children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+						"data-testid": "one-on-one-count",
+						style: quiet,
+						children: oneOnOneCount(data)
+					})
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
 					title: "Floor requests",
@@ -2746,13 +2844,26 @@
 		const [open, setOpen] = (0, react.useState)(/* @__PURE__ */ new Set());
 		const [diffMode, setDiffMode] = (0, react.useState)("unified");
 		const [openGroups, setOpenGroups] = (0, react.useState)(/* @__PURE__ */ new Set());
+		const openOneOnOne = (seq) => {
+			setOpenGroups((prev) => new Set(prev).add(seq));
+			window.document.querySelector(`[data-testid="one-on-one-${seq}"]`)?.scrollIntoView?.({ block: "center" });
+		};
 		const legacy = data.timeline.length > 0 && data.document.name === null || data.verdict !== null && data.progress.ended === null;
 		const derived = new Set(data.roster.filter((p) => p.source === "derived").map((p) => p.role));
 		const oneOnOnes = [...data.one_on_ones ?? []].sort((a, b) => a.seq - b.seq);
+		const oneOnOneEdits = /* @__PURE__ */ new Map();
+		if (data.document.captured) data.document.steps.forEach((step, i) => {
+			if (typeof step.origin_one_on_one === "number") oneOnOneEdits.set(step.origin_one_on_one, [i + 1, step.turn]);
+		});
 		const group = (g) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OneOnOneGroup, {
 			g,
 			runId,
 			open: openGroups.has(g.seq),
+			edit: oneOnOneEdits.get(g.seq)?.[0],
+			onSeeEdit: () => {
+				const e = oneOnOneEdits.get(g.seq);
+				if (e) seeEdit(e[1]);
+			},
 			onToggle: () => setOpenGroups((prev) => {
 				const next = new Set(prev);
 				if (next.has(g.seq)) next.delete(g.seq);
@@ -2780,8 +2891,14 @@
 				diffMode,
 				onDiffMode: setDiffMode,
 				onOpenTurn: openTurn,
-				derived
+				derived,
+				oneOnOnes,
+				onOpenOneOnOne: openOneOnOne
 			})
+		});
+		if (variant === "metrics" && data.timeline.length === 0 && oneOnOnes.length > 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)(MeetingMetrics, {
+			data,
+			derived
 		});
 		if (data.timeline.length === 0 && (data.selection == null && oneOnOnes.length === 0 || variant === "metrics")) {
 			const empty = /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
@@ -2897,7 +3014,9 @@
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Verdict, {
 					runId,
-					verdict: data.verdict
+					verdict: data.verdict,
+					oneOnOnes,
+					derived
 				}),
 				history
 			]

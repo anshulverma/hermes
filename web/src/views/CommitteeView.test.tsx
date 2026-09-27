@@ -16,7 +16,14 @@ import { setToken, clearToken } from '../api/auth';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
-import { oneOnOneRun, pausedRun, upfrontRun } from '../../../playbooks/committee/view/src/oneOnOne.fixture';
+import {
+  oneOnOneRun,
+  pausedRun,
+  upfrontRun,
+  metricsOneOnOnes,
+  metricsBeforeT01,
+  editFromOneOnOne,
+} from '../../../playbooks/committee/view/src/oneOnOne.fixture';
 import {
   selectingData,
   seatedData,
@@ -981,6 +988,8 @@ function History({
       diffMode={diffMode}
       onDiffMode={setDiffMode}
       onOpenTurn={onOpenTurn}
+      oneOnOnes={[]}
+      onOpenOneOnOne={noop}
     />
   );
 }
@@ -3488,8 +3497,11 @@ describe('CommitteeView one-on-ones', () => {
     rerender(<CommitteeView runId="run-2" data={{ ...upfrontRun, selection: null }} refetch={noop} />);
     expect(screen.queryByText('Nothing said yet')).toBeNull();
     expect(screen.getByTestId('one-on-one-outcome-1')).toHaveTextContent('Agreed: Maya owns the relay through week 6');
-    // The Metrics tab keeps its empty state until t01.
+    // The Metrics tab counts the up-front 1:1s; with no 1:1 either, it keeps its empty state.
     rerender(<CommitteeView runId="run-2" data={upfrontRun} refetch={noop} variant="metrics" />);
+    expect(screen.queryByText('Nothing said yet')).toBeNull();
+    expect(screen.getByTestId('one-on-one-count')).toHaveTextContent('1 1:1s · 2 of 16 exchanges · 1 aligned');
+    rerender(<CommitteeView runId="run-2" data={{ ...upfrontRun, one_on_ones: [] }} refetch={noop} variant="metrics" />);
     expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
   });
 
@@ -3499,5 +3511,142 @@ describe('CommitteeView one-on-ones', () => {
     expect(container.querySelector('[data-testid^="one-on-one-"]')).toBeNull();
     expect(screen.queryByTestId('paused-for-one-on-ones')).toBeNull();
     expect(screen.queryByText('in a 1:1')).toBeNull();
+  });
+});
+
+// --- 1:1s: the Metrics line, the verdict's never-met pairs, the 1:1 edit step ---
+
+describe('CommitteeView 1:1s on the Metrics tab', () => {
+  const metrics = (data: typeof run2) =>
+    render(<CommitteeView runId="run-2" data={data} refetch={noop} variant="metrics" />);
+
+  it('counts finished 1:1s, exchanges against the budget, and the aligned ones', () => {
+    metrics(metricsOneOnOnes);
+
+    expect(screen.getByTestId('one-on-one-count')).toHaveTextContent(
+      '2 1:1s · 6 of 16 exchanges · 1 aligned',
+    );
+    // A run with turns still reaches eval's Metrics branch, evaluation block included.
+    expect(screen.getByTestId('evaluation-empty')).toBeInTheDocument();
+  });
+
+  it('says 1:1s were off when the budget cannot hold one', () => {
+    // 1, not 0: a 1:1 needs two exchanges, so a budget of one is off too.
+    metrics({ ...midRun, progress: { ...midRun.progress, one_on_one: { used: 0, budget: 1 } } });
+
+    expect(screen.getByTestId('one-on-one-count')).toHaveTextContent('1:1s were off for this run');
+  });
+
+  it('counts the up-front 1:1s before the first turn instead of saying nothing was said', () => {
+    metrics(metricsBeforeT01);
+
+    expect(screen.queryByText('Nothing said yet')).toBeNull();
+    // An unfinished 1:1 is not counted: K is the groups with an `ended`.
+    expect(screen.getByTestId('one-on-one-count')).toHaveTextContent(
+      '0 1:1s · 1 of 16 exchanges · 0 aligned',
+    );
+    expect(screen.getByTestId('metrics-partial')).toHaveTextContent(
+      'Before the first turn; no verdict yet.',
+    );
+  });
+
+  it('says 1:1s were not recorded on a run that predates them', () => {
+    metrics(run2);
+
+    expect(screen.getByTestId('one-on-one-count')).toHaveTextContent(
+      '1:1s not recorded for this run',
+    );
+  });
+});
+
+describe('Verdict 1:1s that never met', () => {
+  it('names the pairs the budget or the meeting ending stopped, and no other drop', () => {
+    const drops = [
+      { seq: null, text: 'tl staff_ic: cost', members: ['tl', 'staff_ic'], reason: 'budget' },
+      { seq: 4, text: 'pm manager: scope', members: ['pm', 'manager'], reason: 'meeting ended' },
+      { seq: null, text: 'tl tpm: order', members: ['tl', 'tpm'], reason: 'duplicate' },
+      { seq: null, text: 'tpm: order', members: null, reason: 'malformed' },
+    ];
+    const { unmount } = render(
+      <Verdict runId="run-2" verdict={{ ...VERDICT, dropped_one_on_ones: drops }} />,
+    );
+    const note = screen.getByTestId('dropped-one-on-ones');
+
+    expect(note).toHaveTextContent('tl ↔ staff_ic (budget), pm ↔ manager (meeting ended)');
+    expect(note).not.toHaveTextContent('duplicate');
+    expect(note).not.toHaveTextContent('malformed');
+    unmount();
+
+    // As the footer lists them: a pair that met in another 1:1 never "never met",
+    // and one whose 1:1 ended 'not delivered' met only if both members spoke.
+    const [, withPm, tlAndStaff] = oneOnOneRun.one_on_ones!;
+    const unheard = { ...withPm, ended: 'not delivered', exchanges: withPm.exchanges.slice(0, 2) };
+    const { unmount: unmountMet } = render(
+      <Verdict
+        runId="run-2"
+        verdict={{ ...VERDICT, dropped_one_on_ones: drops }}
+        oneOnOnes={[tlAndStaff, unheard]}
+        derived={new Set(['pm'])}
+      />,
+    );
+    expect(screen.getByTestId('dropped-one-on-ones')).toHaveTextContent(
+      /first: pm · derived seat ↔ manager \(meeting ended\)$/,
+    );
+    unmountMet();
+    const spoke = { ...unheard, exchanges: withPm.exchanges.slice(0, 3) };
+    const { unmount: unmountSpoke } = render(
+      <Verdict runId="run-2" verdict={{ ...VERDICT, dropped_one_on_ones: drops }} oneOnOnes={[tlAndStaff, spoke]} />,
+    );
+    expect(screen.queryByTestId('dropped-one-on-ones')).toBeNull();
+    unmountSpoke();
+
+    // A pair the playbook refused on the spot is not a pair that never met.
+    render(<Verdict runId="run-2" verdict={{ ...VERDICT, dropped_one_on_ones: drops.slice(2) }} />);
+    expect(screen.queryByTestId('dropped-one-on-ones')).toBeNull();
+  });
+});
+
+describe('CommitteeView 1:1 edits', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn((u: string) =>
+      String(u).includes('/view/artifact') ? ok({ text: TEXT[pathOf(u)] }) : new Promise(() => {}),
+    ));
+  });
+
+  it('links an edit from a 1:1 to its 1:1, and the 1:1 back to its edit', () => {
+    const scrolled = stubScroll();
+    show(editFromOneOnOne);
+
+    // The step says where the edit came from: the 1:1, not a meeting turn.
+    fireEvent.click(screen.getByTestId('step-3'));
+    expect(screen.getByTestId('step-raised')).toHaveTextContent(
+      'raised in 1:1 Sam Iyer ↔ Maya Okonkwo',
+    );
+    expect(screen.getByTestId('step-why')).toHaveTextContent('why: when to reach for federation');
+    expect(screen.getByTestId('step-delegated')).toHaveTextContent(
+      'delegated: Rewrite §2 "When to reach for it"',
+    );
+    expect(screen.queryByTestId('step-provenance')).toBeNull();
+    expect(screen.queryByTestId('goto-t02')).toBeNull();
+
+    // Step to 1:1: the link opens the collapsed group and brings it on screen.
+    expect(within(screen.getByTestId('one-on-one-2')).queryByText(/nobody can measure/)).toBeNull();
+    fireEvent.click(screen.getByTestId('goto-one-on-one-2'));
+    const group = screen.getByTestId('one-on-one-2');
+    expect(within(group).getByText(/nobody can measure/)).toBeInTheDocument();
+    expect(scrolled.mock.contexts).toContain(group);
+    expect(scrolled.mock.calls).toContainEqual([{ block: 'center' }]);
+
+    // 1:1 to step: the group links to its edit, numbered as the stepper numbers it.
+    fireEvent.click(screen.getByTestId('step-original'));
+    expect(screen.getByTestId('see-edit-one-on-one-2')).toHaveTextContent('see edit 1');
+    expect(screen.queryByTestId('see-edit-one-on-one-1')).toBeNull();
+    fireEvent.click(screen.getByTestId('see-edit-one-on-one-2'));
+    expect(screen.getByTestId('step-3')).toHaveAttribute('aria-current', 'step');
+
+    // The meeting delegation beside it keeps doc-diff's links; t02 delegated nothing.
+    expect(screen.getByTestId('see-edit-5')).toHaveTextContent('see edit 2');
+    expect(screen.getByTestId('see-edit-3')).toHaveTextContent('see edit 1');
+    expect(screen.queryByTestId('see-edit-2')).toBeNull();
   });
 });

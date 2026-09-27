@@ -14,7 +14,7 @@
  */
 
 import { memo, useEffect, useRef, useState } from 'react';
-import type { Entry } from './CommitteeView';
+import type { Entry, OneOnOne } from './CommitteeView';
 import { Markdown, apiGet } from './host';
 
 /** One rendered line of a unified diff. */
@@ -174,6 +174,12 @@ export type DocStep = DocVersion & {
   owner_turn: number | null;
   reviewer_turn: number | null;
   provenance: 'recorded' | 'inferred' | 'unknown';
+  /**
+   * The seq of the 1:1 whose owner delegated this edit; null or absent for a
+   * meeting delegation. When set, `provenance` is "recorded" and both turn
+   * links are null: the edit was raised and delegated in that 1:1.
+   */
+  origin_one_on_one?: number | null;
 };
 
 export type Ruling = 'in_session' | 'awaiting_ruling' | 'accepted' | 'rejected' | 'no_ruling';
@@ -320,11 +326,16 @@ function StepContext({
   timeline,
   onOpenTurn,
   derived,
+  oneOnOnes,
+  onOpenOneOnOne,
 }: {
   step: DocStep;
   timeline: Entry[];
   onOpenTurn: (n: number) => void;
   derived?: Set<string>;
+  /** Host, members, topic and delegated action are read from here by seq, never copied into steps. */
+  oneOnOnes: OneOnOne[];
+  onOpenOneOnOne: (seq: number) => void;
 }) {
   // The LAST entry for a turn, as `view_data` keeps the last reduction for it:
   // a turn settled twice pairs its diff and verdict with the take that made them.
@@ -333,6 +344,13 @@ function StepContext({
   const owner = at(step.owner_turn);
   const junior = at(step.turn);
   const confirmation = junior?.body.split('\n').find((l) => l.trim()) ?? '';
+  // An edit from a 1:1 was raised and delegated there, not on a meeting turn.
+  // Checked before the turn links, which are both null on such a step.
+  const oneOnOneSeq = typeof step.origin_one_on_one === 'number' ? step.origin_one_on_one : null;
+  const oneOnOne = oneOnOnes.find((g) => g.seq === oneOnOneSeq);
+  // A derived seat's name is a selector's words; the slug says whose seat it is.
+  const member = (p: OneOnOne['members'][number]) =>
+    derived?.has(p.role) ? `${p.name} (${p.role} · derived seat)` : p.name;
   const line: React.CSSProperties = { fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.5 };
   // Only who raised it and who delegated it come from turn order; the junior's
   // own turn is the step itself, so the mark goes on those two lines alone.
@@ -367,27 +385,55 @@ function StepContext({
             ? 'DID NOT APPLY'
             : 'not recorded'}
       </div>
-      <div data-testid="step-raised" style={line}>
-        {step.reviewer_turn !== null ? (
-          <>
-            raised by {reviewer?.name ?? 'a seat the transcript does not name'}
-            {/* A derived seat's name is a selector's words; the slug says whose turn it was. */}
-            {reviewer && derived?.has(reviewer.role) && ` (${reviewer.role} · derived seat)`}
-            {reviewer?.stance ? ` — ${reviewer.stance}` : ''}{' '}
-            <Goto n={step.reviewer_turn} onOpenTurn={onOpenTurn} />
-            {inferred}
-          </>
-        ) : (
-          'who raised this was not recorded'
-        )}
-      </div>
-      {step.owner_turn !== null && (
-        <div data-testid="step-delegated" style={line}>
-          {owner ? `delegated by ${owner.name}: ` : 'delegated: '}
-          {owner?.action ?? 'no action recorded'}{' '}
-          <Goto n={step.owner_turn} onOpenTurn={onOpenTurn} />
-          {inferred}
-        </div>
+      {oneOnOneSeq !== null ? (
+        <>
+          <div data-testid="step-raised" style={line}>
+            raised in 1:1{' '}
+            {oneOnOne ? `${member(oneOnOne.members[0])} ↔ ${member(oneOnOne.members[1])}` : oneOnOneSeq}{' '}
+            <button
+              type="button"
+              data-testid={`goto-one-on-one-${oneOnOneSeq}`}
+              aria-label={`Open 1:1 ${oneOnOneSeq} in the transcript`}
+              onClick={() => onOpenOneOnOne(oneOnOneSeq)}
+              style={{ ...mono, ...chip(false), padding: '0 6px', fontSize: 11 }}
+            >
+              1:1 {oneOnOneSeq}
+            </button>
+          </div>
+          {oneOnOne && (
+            <div data-testid="step-why" style={line}>
+              why: {oneOnOne.topic}
+            </div>
+          )}
+          <div data-testid="step-delegated" style={line}>
+            delegated: {oneOnOne?.delegated_action ?? 'no action recorded'}
+          </div>
+        </>
+      ) : (
+        <>
+          <div data-testid="step-raised" style={line}>
+            {step.reviewer_turn !== null ? (
+              <>
+                raised by {reviewer?.name ?? 'a seat the transcript does not name'}
+                {/* A derived seat's name is a selector's words; the slug says whose turn it was. */}
+                {reviewer && derived?.has(reviewer.role) && ` (${reviewer.role} · derived seat)`}
+                {reviewer?.stance ? ` — ${reviewer.stance}` : ''}{' '}
+                <Goto n={step.reviewer_turn} onOpenTurn={onOpenTurn} />
+                {inferred}
+              </>
+            ) : (
+              'who raised this was not recorded'
+            )}
+          </div>
+          {step.owner_turn !== null && (
+            <div data-testid="step-delegated" style={line}>
+              {owner ? `delegated by ${owner.name}: ` : 'delegated: '}
+              {owner?.action ?? 'no action recorded'}{' '}
+              <Goto n={step.owner_turn} onOpenTurn={onOpenTurn} />
+              {inferred}
+            </div>
+          )}
+        </>
       )}
       <div data-testid="step-confirmed" style={line}>
         {junior ? `${junior.name}: ` : ''}
@@ -607,6 +653,8 @@ export default function DocumentHistory({
   onDiffMode,
   onOpenTurn,
   derived,
+  oneOnOnes,
+  onOpenOneOnOne,
 }: {
   runId: string;
   document: DocumentBlock;
@@ -628,6 +676,10 @@ export default function DocumentHistory({
   onOpenTurn: (n: number) => void;
   /** Roles whose seat a selector invented (the roster's `source`). */
   derived?: Set<string>;
+  /** view_data's `one_on_ones`, read by seq for a step that came out of a 1:1. */
+  oneOnOnes: OneOnOne[];
+  /** A step's 1:1 link: open that group in the transcript and bring it on screen. */
+  onOpenOneOnOne: (seq: number) => void;
 }) {
   // Off until asked for. Local, because the card stays mounted while stepping:
   // it is still on when the reader comes back to Final.
@@ -870,7 +922,16 @@ export default function DocumentHistory({
               Original — as the committee was handed it
             </div>
           )}
-          {step && <StepContext step={step} timeline={timeline} onOpenTurn={onOpenTurn} derived={derived} />}
+          {step && (
+            <StepContext
+              step={step}
+              timeline={timeline}
+              onOpenTurn={onOpenTurn}
+              derived={derived}
+              oneOnOnes={oneOnOnes}
+              onOpenOneOnOne={onOpenOneOnOne}
+            />
+          )}
           {current === 'final' && final && (
             <div data-testid="final-label" style={heading}>
               {FINAL_LABEL[final.ruling]}

@@ -198,3 +198,126 @@ export const upfrontRun: CommitteeData = {
   selection: { state: 'seated', stages: [], fallback: null, considered: [] },
   one_on_ones: [withTpm],
 };
+
+// --- the Metrics '1:1s' line, and an edit that came out of a 1:1 -------------
+
+/** Up-front 1:1 1: the staff IC and the owner aligned in one round. */
+const settledUpfront: OneOnOne = {
+  seq: 1,
+  origin: 'upfront',
+  called_by: 'owner',
+  after_turn: 0,
+  host: OWNER,
+  members: [person('staff_ic'), OWNER],
+  topic: 'cost of the first phase',
+  exchanges: [
+    exchange(1, 'staff_ic', 'I can live with it if the first phase is capped at one quarter.', { aligned: true }),
+    exchange(2, 'owner', 'One quarter, and the proposal will say so.', { aligned: true }),
+  ],
+  ended: 'aligned',
+  aligned: true,
+  agreed: 'The first phase is capped at one quarter.',
+  still_open: null,
+  delegated_action: null,
+};
+
+/** The pause the manager called at t04: four exchanges, and the pm never came round. */
+const stalledPause: OneOnOne = {
+  seq: 2,
+  origin: 'pause',
+  called_by: 'manager',
+  after_turn: 6,
+  host: MANAGER,
+  members: [person('pm'), MANAGER],
+  topic: 'scope of the first launch',
+  exchanges: [
+    exchange(1, 'pm', 'The first launch needs the batch path or nobody adopts it.', { aligned: false }),
+    exchange(2, 'manager', 'Batch doubles the work. Can the first launch ship without it?'),
+    exchange(3, 'pm', 'Not for the two teams that asked for this.', { aligned: false }),
+    exchange(4, 'manager', 'Then it goes back to the room as open.'),
+  ],
+  ended: 'exchange cap',
+  aligned: false,
+  agreed: null,
+  still_open: 'Whether the first launch includes the batch path.',
+  delegated_action: null,
+};
+
+/** A pause the owner called at t02: she and the TPM aligned, and her delegation became t03. */
+const aligningPause: OneOnOne = {
+  seq: 2,
+  origin: 'pause',
+  called_by: 'owner',
+  after_turn: 2,
+  host: OWNER,
+  members: [person('tpm'), OWNER],
+  topic: 'when to reach for federation',
+  exchanges: [
+    exchange(1, 'tpm', 'Nobody can plan against a trigger nobody can measure.', { aligned: true }),
+    exchange(2, 'owner', 'Agreed. Each trigger in §2 becomes a threshold read off hermes status.', { aligned: true }),
+  ],
+  ended: 'aligned',
+  aligned: true,
+  agreed: 'The §2 triggers become measurable thresholds with a named declarer.',
+  still_open: null,
+  delegated_action:
+    'Rewrite §2 "When to reach for it" so each trigger is a measurable threshold with a named declarer',
+};
+
+/** midRun with both 1:1s behind it: 2 finished, 1 aligned, 6 of 16 exchanges spent. */
+export const metricsOneOnOnes: CommitteeData = {
+  ...midRun,
+  progress: { ...midRun.progress, one_on_one: { used: 6, budget: 16 } },
+  one_on_ones: [settledUpfront, stalledPause],
+};
+
+/** Before t01: no turn yet, and up-front 1:1 1 has kept its first exchange. */
+export const metricsBeforeT01: CommitteeData = {
+  ...run2,
+  roster: run2.roster.map((p) => ({ ...p, state: 'idle', stance: null })),
+  progress: {
+    turn: 0, cap: 30, holder: null, queue: [], ended: null, one_on_one: { used: 1, budget: 16 },
+  },
+  timeline: [],
+  verdict: null,
+  document: {
+    name: null, captured: false, original: null, steps: [], final: null, dropped_delegation: null,
+  },
+  one_on_ones: [
+    {
+      ...settledUpfront,
+      exchanges: settledUpfront.exchanges.slice(0, 1),
+      ended: null,
+      aligned: null,
+      agreed: null,
+    },
+  ],
+};
+
+/**
+ * midRun, except that the owner's t02 reply delegated nothing and her 1:1 with
+ * the TPM did. t03 applied that edit (step 1, attributed to 1:1 2), and t06
+ * applied her t05 meeting delegation (step 2), so the two kinds of step sit
+ * side by side in one stepper.
+ */
+export const editFromOneOnOne: CommitteeData = {
+  ...midRun,
+  timeline: midRun.timeline.map((e) =>
+    e.n === 2 ? { ...e, action: null, badges: e.badges.filter((b) => b !== 'delegate') } : e,
+  ),
+  progress: { ...midRun.progress, one_on_one: { used: 4, budget: 16 } },
+  one_on_ones: [settledUpfront, aligningPause],
+  document: {
+    name: 'federation-future.md',
+    captured: true,
+    original: { path: 'doc/00-original.md', bytes: 30 },
+    steps: [
+      { turn: 3, path: 'doc/t03.md', bytes: 31, delivered: true, verified: true,
+        owner_turn: null, reviewer_turn: null, provenance: 'recorded', origin_one_on_one: 2 },
+      { turn: 6, path: 'doc/t06.md', bytes: 45, delivered: true, verified: true,
+        owner_turn: 5, reviewer_turn: 4, provenance: 'recorded', origin_one_on_one: null },
+    ],
+    final: { path: 'doc/t06.md', turn: 6, bytes: 45, ruling: 'in_session' },
+    dropped_delegation: null,
+  },
+};
