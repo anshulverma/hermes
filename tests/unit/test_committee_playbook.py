@@ -8964,20 +8964,24 @@ def test_a_pair_that_met_is_never_listed_as_never_met():
 @pytest.fixture
 def closing_spy(monkeypatch):
     """What the REAL reduce returned, in order, plus the payload the real seed
-    builds for each closing exchange just before it is reduced.
+    builds for each o-phase just before it is reduced: every one by phase
+    (`payloads`) and the closing exchanges' in order (`closing`).
 
     A spy, never a double. `_drive` seeds each o-phase itself but keeps no
-    ticket; this spy seeds the closing exchange again just before its reduce
-    (seed is pure for this kind), to keep the payload for the assertions.
+    ticket; this spy seeds the o-phase again just before its reduce (seed is
+    pure for these kinds), to keep the payload for the assertions.
     """
     from playbooks.committee.playbook import CommitteePlaybook
 
-    out = {"reductions": [], "closing": []}
+    out = {"reductions": [], "closing": [], "payloads": {}}
     real = CommitteePlaybook.reduce
 
     def spy(self, run, phase, findings, site):
-        if self._state(run)["current_kind"] == "one_on_one_close":
-            out["closing"].append(self.seed(run, site)[0].payload)
+        kind = self._state(run)["current_kind"]
+        if kind in ("one_on_one", "one_on_one_close"):
+            out["payloads"][phase] = self.seed(run, site)[0].payload
+        if kind == "one_on_one_close":
+            out["closing"].append(out["payloads"][phase])
         got = real(self, run, phase, findings, site)
         out["reductions"].extend(got)
         return got
@@ -8995,6 +8999,7 @@ def _drive_closing(monkeypatch, tmp_path, spy, name, script, budget=16):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / name))
     spy["reductions"].clear()
     spy["closing"].clear()
+    spy["payloads"].clear()
     _, run, s, seen, _, _ = _drive(
         script, selection=DEFAULT_SELECTION, one_on_one_budget=budget
     )
@@ -9060,7 +9065,15 @@ def test_pair_without_owner_or_manager_gets_the_callers_closing_exchange(
     assert first["title"] == f"1:1 1 — {name['manager']} (manager) records the outcome"
     assert again["title"] == first["title"] + " (take 2)"
     assert "called this 1:1 between" in first["goal"] and str(path) in first["goal"]
+    assert f"You called this 1:1 between {name['tpm']} and {name['tl']}." in first["goal"]
     assert "write no file at all" in first["goal"] and "Retake 2 of 3" in again["goal"]
+    # each member exchange's own ticket: kind, title, and which exchange it is
+    p = closing_spy["payloads"]
+    assert p["o01-tpm"]["kind"] == "one_on_one"
+    assert p["o01-tpm"]["title"] == f"1:1 1 · exchange 1 — {name['tpm']} (tpm) with {name['tl']}"
+    assert "This is exchange 1 of at most 4." in p["o01-tpm"]["goal"]
+    assert "so do not read it" in p["o01-tpm"]["goal"]
+    assert p["o02-tl"]["title"] == f"1:1 1 · exchange 2 — {name['tl']} (tl) with {name['tpm']}"
     one = path.read_text(encoding="utf-8")
     assert "## exchange 1: " in one and "## exchange 2: " in one
     assert one.count("## outcome: ") == 1 and f"## outcome: {name['manager']}, " in one
@@ -9103,7 +9116,7 @@ def test_pair_without_owner_or_manager_gets_the_callers_closing_exchange(
     assert "_(no outcome recorded: not delivered)_" in text
 
     # The owner calls the same pair from her reply. The caller closes, so she does.
-    _, s, seen, red = _drive_closing(monkeypatch, tmp_path, closing_spy, "owner", {
+    run, s, seen, red = _drive_closing(monkeypatch, tmp_path, closing_spy, "owner", {
         "t02-owner": _ALIGN_TWO_OTHERS,
         "o01-tpm": {"aligned": True},
         "o02-tl": {"aligned": True},
@@ -9113,6 +9126,18 @@ def test_pair_without_owner_or_manager_gets_the_callers_closing_exchange(
     close = _one_on_one_docs(red)[-1]
     assert (close["speaker"], close["host"], close["called_by"], close["closing"]) == (
         "owner", "owner", "owner", True)
+    # her closing exchange was delivered but stated neither `agreed` nor `still_open`
+    assert "_(no outcome recorded: aligned)_" in thread.path(run.id).read_text(encoding="utf-8")
+
+    # A pair the manager is in: she hosts as a member, so none of her
+    # exchanges is a closing one.
+    _, _, seen, _ = _drive_closing(monkeypatch, tmp_path, closing_spy, "member-host", {
+        "t03-manager": {"align": "tpm manager: rollout order"},
+    })
+    kinds = {phase: payload["kind"] for phase, payload in closing_spy["payloads"].items()
+             if phase.endswith("-manager")}
+    assert kinds and set(kinds.values()) == {"one_on_one"}, kinds
+    assert closing_spy["closing"] == []
 
 
 def test_closing_exchange_reserve_keeps_used_within_budget(monkeypatch, tmp_path, closing_spy):
