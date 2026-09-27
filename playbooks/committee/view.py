@@ -58,19 +58,30 @@ def view_data(run: Run, reductions: list[Reduction]) -> dict:
     # Every name on screen resolves through the run's own seats (selection D4).
     seats = _seats(run, reductions)
     holder, queue, spoken = _floor(run, turns, decision, seats)
+    # one-on-ones C8/D10: every 1:1, the pause, and who is in a 1:1 right now.
+    ones, paused, busy = _one_on_ones(
+        run, reductions, seats, over=decision_row is not None or lost
+    )
+    if busy:
+        holder = None  # nobody holds the floor while a 1:1 sits
     stances = _stances(turns, seats)
 
     return {
         "kind": "committee",
-        "roster": _roster(spoken, holder, queue, stances, seats),
+        "roster": _in_one_on_one(_roster(spoken, holder, queue, stances, seats), busy),
         "progress": {
             "turn": _turn_no(turns[-1].json) if turns else 0,
             "cap": _cap(reductions),
             "holder": holder,
             "queue": queue,
             "ended": (decision or {}).get("ended"),
+            "paused": paused,
+            "one_on_one": _one_on_one_use(reductions),
         },
         "timeline": [_entry(r.json, seats) for r in turns],
+        # Apart from `timeline`, which stays kind == "turn": `_floor`, the
+        # turns-per-seat metric and the prose metric never see a 1:1.
+        "one_on_ones": ones,
         # No top-level `stances` block: `_stances` feeds `_roster`, which is the
         # only surface that renders a stance. The payload key was typed, fixtured
         # and asserted on both sides of the seam, and read by nothing.
@@ -375,6 +386,12 @@ def _verdict(decision: dict | None) -> dict | None:
         "artifact_intact": decision.get("artifact_intact"),
         "dropped_delegation": decision.get("dropped_delegation"),
         "dropped_floor_requests": _as_list(decision.get("dropped_floor_requests")),
+        # one-on-ones C6: every pair that never met, whatever the reason. The
+        # card names the `budget` and `meeting ended` ones, as the footer does.
+        "dropped_one_on_ones": [
+            dict(d) for d in _as_list(decision.get("dropped_one_on_ones"))
+            if isinstance(d, dict)
+        ],
         "takes": _int(decision.get("takes")),
         "violations": _strings(decision.get("violations")),
         "voice": _serialisable(decision.get("voice")),
@@ -563,6 +580,152 @@ def _count(value: object) -> int:
     return max(0, _int(value) or 0)
 
 
+# --- the 1:1s (one-on-ones C8, D10) ----------------------------------------
+
+def _one_on_ones(
+    run: Run, reductions: list[Reduction], seats: dict, *, over: bool
+) -> tuple[list[dict], dict | None, set[str]]:
+    """Every 1:1, the pause in progress, and who is in a 1:1 right now.
+
+    Built from reductions alone, the way ``_floor`` replays ``request_floor``.
+    Every ``one_on_one`` reduction is a kept take, and they are grouped by
+    ``seq``. The pending pairs are the seqs the plan and turn reductions record
+    under ``one_on_ones_scheduled``, minus every seq with a ``final``
+    reduction. The private 1:1 file is never read.
+
+    ``over`` (a decision or a ``lost`` reduction exists) and the chair's phases
+    end any pause. Those are the only ways a scheduled pair is dropped after its
+    seq exists (``meeting ended``, set in ``_decision``). Every other drop
+    happens in ``reduce`` before a seq is assigned, so this replay is exact.
+    """
+    # Imported here rather than at module scope: playbook.py imports this
+    # module, so importing it back at module scope would be a cycle.
+    from playbooks.committee.playbook import DECISION_PHASES
+
+    groups: dict[int, list[dict]] = {}
+    scheduled: dict[int, dict] = {}
+    for reduction in reductions:
+        doc = reduction.json if isinstance(reduction.json, dict) else {}
+        if reduction.kind == "one_on_one" and _int(doc.get("seq")) is not None:
+            groups.setdefault(doc["seq"], []).append(doc)
+        elif reduction.kind in ("one_on_one_plan", "turn"):
+            for pair in _as_list(doc.get("one_on_ones_scheduled")):
+                if isinstance(pair, dict) and _int(pair.get("seq")) is not None:
+                    scheduled.setdefault(pair["seq"], pair)
+
+    entries = [_one_on_one(seq, groups[seq], seats) for seq in sorted(groups)]
+    done = {seq for seq, docs in groups.items() if any(d.get("final") is True for d in docs)}
+    pending = [seq for seq in sorted(scheduled) if seq not in done]
+    if over or run.phase in DECISION_PHASES or not pending:
+        return entries, None, set()
+
+    # 1:1s run one at a time, so at most one pending seq has a kept exchange.
+    # None of them yet means the view lags one phase: '1:1s next'.
+    current, busy = None, set()
+    seq = next((s for s in pending if s in groups), None)
+    if seq is not None:
+        last = groups[seq][-1]
+        if last.get("ended") is None:
+            # A member exchange is running: the one after the latest kept one.
+            kept = [x for d in groups[seq] if d.get("closing") is not True
+                    and (x := _int(d.get("exchange"))) is not None]
+            current = {"seq": seq, "exchange": (kept[-1] if kept else 0) + 1}
+            busy = {m for m in _as_list(last.get("members")) if isinstance(m, str)}
+        else:
+            # The members are done and the host's closing exchange is running.
+            current = {"seq": seq, "exchange": None}
+            busy = {last["host"]} if isinstance(last.get("host"), str) else set()
+    pairs = [
+        {"seq": s, "host": _person(scheduled[s].get("host"), seats),
+         "members": [_person(m, seats) for m in _as_list(scheduled[s].get("members"))]}
+        for s in pending
+    ]
+    return entries, {"pairs": pairs, "current": current}, busy
+
+
+def _one_on_one(seq: int, docs: list[dict], seats: dict) -> dict:
+    """One 1:1 as the transcript renders it.
+
+    The pair comes off its first reduction and the outcome only off its
+    ``final`` one, so a non-null ``ended`` means finished. The members' last
+    exchange carries ``ended`` too while the host's closing exchange is still
+    to run, and that must not read as finished.
+    """
+    first = docs[0]
+    final = next((d for d in reversed(docs) if d.get("final") is True), {})
+    outcome = final.get("outcome") if isinstance(final.get("outcome"), dict) else {}
+    return {
+        "seq": seq,
+        "origin": _str(first.get("origin")),
+        "called_by": _str(first.get("called_by")),
+        "after_turn": _int(first.get("after_turn")) or 0,
+        "host": _person(first.get("host"), seats),
+        "members": [_person(m, seats) for m in _as_list(first.get("members"))],
+        "topic": _str(first.get("topic")) or "",
+        "exchanges": [_exchange(doc, seats) for doc in docs],
+        "ended": _str(final.get("ended")),
+        "aligned": outcome.get("aligned") if isinstance(outcome.get("aligned"), bool) else None,
+        "agreed": _str(outcome.get("agreed")),
+        "still_open": _str(outcome.get("still_open")),
+        "delegated_action": _str(final.get("delegated_action")),
+    }
+
+
+def _exchange(doc: dict, seats: dict) -> dict:
+    """One kept exchange: its prose split by voice, badged the way a turn is."""
+    speaker = doc.get("speaker") if isinstance(doc.get("speaker"), str) else ""
+    return {
+        "exchange": _int(doc.get("exchange")),  # null on the closing exchange
+        "speaker": speaker,
+        "name": _person(speaker, seats)["name"],
+        "body": doc.get("body") or "",
+        "segments": _segments(doc),
+        "delivered": bool(doc.get("delivered")),
+        "aligned": doc.get("aligned") if isinstance(doc.get("aligned"), bool) else None,
+        "closing": doc.get("closing") is True,
+        "badges": _badges(doc, attributed=True),
+    }
+
+
+def _person(role: object, seats: dict) -> dict:
+    """{role, name, title} through the run's own seats, never cast.CAST alone.
+
+    A role the seats do not hold is "unattributed", as ``_entry`` names it,
+    and never a raise: a derived seat exists only in its own run's selection.
+    """
+    role = role if isinstance(role, str) else ""
+    seat = seats.get(role)
+    if not isinstance(seat, dict):
+        return {"role": role, "name": "unattributed", "title": ""}
+    return {"role": role, "name": seat.get("name") or role, "title": seat.get("title") or ""}
+
+
+def _one_on_one_use(reductions: list[Reduction]) -> dict | None:
+    """{used, budget} off the latest reductions that carry them.
+
+    None for a run reduced before 1:1s existed (no ``one_on_one_budget``
+    anywhere). Never this process's environment: the master resolved the
+    budget and wrote it on the plan, turn and 1:1 reductions, the same channel
+    the cap rides (``_cap``).
+    """
+    budget, used = None, 0
+    for reduction in reductions:
+        doc = reduction.json if isinstance(reduction.json, dict) else {}
+        if _int(doc.get("one_on_one_budget")) is not None:
+            budget = doc["one_on_one_budget"]
+        if _int(doc.get("one_on_one_used")) is not None:
+            used = doc["one_on_one_used"]
+    return None if budget is None else {"used": used, "budget": budget}
+
+
+def _in_one_on_one(rows: list[dict], busy: set[str]) -> list[dict]:
+    """Roster rows, with ``in_one_on_one`` over every floor state for ``busy``."""
+    for row in rows:
+        if row["role"] in busy:
+            row["state"] = "in_one_on_one"
+    return rows
+
+
 # --- the document's versions ----------------------------------------------
 
 # Reviewer seats: everyone in the cast who is neither the owner nor the junior IC.
@@ -604,7 +767,14 @@ def _document(
     for n in sorted(t for t, doc in by_turn.items() if t > 0 and _role(doc) == cast.JUNIOR):
         doc = by_turn[n]
         key = thread.snapshot_key(artifact, n)
-        owner_turn, reviewer_turn, provenance = _provenance(n, doc, by_turn)
+        # An edit delegated in a 1:1 is recorded against that 1:1's seq and
+        # never a meeting turn (one-on-ones D7). Checked before `_provenance`,
+        # whose `delegated_by_turn` branch would read its null as "unknown".
+        origin = _int(doc.get("origin_one_on_one"))
+        owner_turn, reviewer_turn, provenance = (
+            (None, None, "recorded") if origin is not None
+            else _provenance(n, doc, by_turn)
+        )
         steps.append({
             "turn": n,
             "path": key,
@@ -614,6 +784,7 @@ def _document(
             "owner_turn": owner_turn,
             "reviewer_turn": reviewer_turn,
             "provenance": provenance,
+            "origin_one_on_one": origin,
         })
 
     final = None

@@ -111,7 +111,7 @@ def test_view_data_returns_every_block_the_contract_names(run2):
 
     assert set(data) == {
         "kind", "roster", "progress", "timeline", "verdict", "document", "evaluation",
-        "voice", "selection",
+        "voice", "selection", "one_on_ones",
     }
     assert data["evaluation"] is None  # never scored: no runs/<id>/eval.json
     assert data["kind"] == "committee"
@@ -120,7 +120,10 @@ def test_view_data_returns_every_block_the_contract_names(run2):
         set(row) == {"role", "name", "title", "state", "stance", *_ROW_KEYS}
         for row in data["roster"]
     )
-    assert set(data["progress"]) == {"turn", "cap", "holder", "queue", "ended"}
+    assert set(data["progress"]) == {
+        "turn", "cap", "holder", "queue", "ended", "paused", "one_on_one",
+    }
+    assert data["one_on_ones"] == []  # run-2 predates 1:1s
     assert len(data["timeline"]) == 20
     assert all(
         set(entry) == {
@@ -422,7 +425,9 @@ def test_a_run_with_no_reductions_renders_an_empty_meeting():
     # the turn count against.
     assert data["progress"] == {
         "turn": 0, "cap": 30, "holder": None, "queue": [], "ended": None,
+        "paused": None, "one_on_one": None,
     }
+    assert data["one_on_ones"] == []
     assert {row["state"] for row in data["roster"]} == {"idle"}
     assert all(row["stance"] is None for row in data["roster"])
 
@@ -552,6 +557,7 @@ def test_the_document_sizes_every_version_under_this_process_home(run2, tmp_path
     assert document["steps"][0] == {
         "turn": 3, "path": "doc/t03.md", "bytes": 11400, "delivered": True,
         "verified": True, "owner_turn": 2, "reviewer_turn": 1, "provenance": "inferred",
+        "origin_one_on_one": None,
     }
     assert document["steps"][4]["bytes"] is None   # the symlink
     assert document["steps"][5]["bytes"] is None   # never written
@@ -1490,6 +1496,7 @@ def test_a_seated_run_before_t01_carries_the_roster_and_the_selection_block():
     # the default 30 this process would otherwise guess.
     assert data["progress"] == {
         "turn": 0, "cap": 24, "holder": None, "queue": [], "ended": None,
+        "paused": None, "one_on_one": None,
     }
     assert data["timeline"] == [] and data["document"]["name"] is None
 
@@ -1814,3 +1821,312 @@ def test_run9_renders_the_nine_unchanged():
     assert all(row[key] is None for row in data["roster"] for key in _ROW_KEYS)
     assert all(entry["name"] == cast.CAST[entry["role"]]["name"]
                for entry in data["timeline"] if entry["role"] in cast.CAST)
+
+
+# --- the 1:1s (one-on-ones C8, D10) -------------------------------------------
+# `_oo` = one-on-one. Every reduction below has the exact shape the playbook
+# writes (C5 selection, C6 plan/turn/one_on_one), so the view is tested against
+# what `reduce` produces and never against a shape invented here.
+
+_OO_CREW = {  # a derived seat (selection C3/C4): only its run's selection knows it
+    "role": "crew_owner", "name": "Noor Haddad", "title": "Crew owner, platform team",
+    "altitude": "", "goal": "", "ambition": "", "stake": "", "lens": "",
+    "style": cast.DERIVED_STYLE, "rationale": "owns the crews the proposal moves",
+    "nominated_by": "owner", "source": "derived",
+}
+
+_OO_FIGURE = (
+    "We own the crews today.\n"
+    "Figure: who runs what\n"
+    "```mermaid\ngraph TD; crews-->teams\n```\n"
+    "Description: crews stay with their teams."
+)
+
+
+def _oo_library(role: str) -> dict:
+    return {**cast.LIBRARY[role], "role": role, "rationale": f"{role} has a stake",
+            "nominated_by": "owner", "source": "library"}
+
+
+def _oo_room() -> Reduction:
+    """selection's final reduction: tpm, library `security` and a derived seat."""
+    from playbooks.committee import selection
+
+    fixed = selection.fixed_seats()
+    seated = [fixed["owner"], fixed["senior_director"], fixed["manager"],
+              _oo_library("tpm"), _oo_library("security"), _OO_CREW, fixed["junior_ic"]]
+    return Reduction(kind="selection", phase="s3-senior_director", json={
+        "stage": 3, "role": "senior_director", "final": True, "delivered": True,
+        "body": "Seated.", "parsed": True, "code": None, "proposed": [], "error": None,
+        "cap": 26, "take": 1, "takes": 1, "kept": True, "voice": None,
+        "violations": [], "flags": [], "seated": seated,
+        "reviewers": ["senior_director", "manager", "tpm", "security", "crew_owner"],
+        "considered": [], "fallback": None,
+    })
+
+
+def _oo_pair(seq, host, members, topic, origin="upfront", called_by="owner") -> dict:
+    """A C3 pair, as `one_on_ones_scheduled` records it."""
+    return {"seq": seq, "origin": origin, "called_by": called_by, "host": host,
+            "members": list(members), "topic": topic}
+
+
+def _oo_plan(*scheduled: dict) -> Reduction:
+    return Reduction(kind="one_on_one_plan", phase="p01-owner", json={
+        "delivered": True, "body": "One 1:1 first.",
+        "one_on_ones_scheduled": list(scheduled), "one_on_ones_dropped": [],
+        "fallback": None if scheduled else "no valid pairs", "one_on_one_budget": 16,
+        "error": None, "take": 1, "takes": 1, "kept": True, "voice": None,
+        "violations": [], "flags": [],
+    })
+
+
+def _oo_turn(n, role, *, scheduled=(), align=None) -> Reduction:
+    """A kept meeting turn carrying the C6 1:1 keys (no artifact: no document)."""
+    return Reduction(kind="turn", phase=f"t{n:02d}-{role}", json={
+        "role": role, "turn": n, "delivered": True, "body": f"Turn {n:02d}.",
+        "stance": None, "cap": 26, "request_floor": False, "delegate": False,
+        "close": False, "action": None, "verified": None, "answers_turn": None,
+        "delegated_by_turn": None, "error": None, "take": 1, "takes": 1, "kept": True,
+        "voice": None, "violations": [], "flags": [], "align": align,
+        "one_on_ones_scheduled": list(scheduled), "one_on_ones_dropped": [],
+        "one_on_one_budget": 16,
+    })
+
+
+def _oo(pair, speaker, exchange, *, used, after_turn=0, closing=False, aligned=None,
+        agreed=None, still_open=None, ended=None, final=False, body=None) -> Reduction:
+    """A kept `one_on_one` reduction with every C6 field."""
+    return Reduction(kind="one_on_one", phase=f"o{used:02d}-{speaker}", json={
+        **pair, "after_turn": after_turn, "speaker": speaker,
+        "exchange": None if closing else exchange, "closing": closing,
+        "delivered": True, "body": f"{speaker} speaks." if body is None else body,
+        "aligned": aligned, "agreed": agreed, "still_open": still_open,
+        "delegate": False, "action": None, "final": final, "ended": ended,
+        "outcome": ({"aligned": ended == "aligned", "agreed": agreed,
+                     "still_open": still_open} if final else None),
+        "delegated_action": None, "one_on_one_budget": 16, "one_on_one_used": used,
+        "error": None, "take": 1, "takes": 1, "kept": True, "voice": None,
+        "violations": [], "flags": [],
+    })
+
+
+def _oo_person(role: str, library: bool = False) -> dict:
+    who = (cast.LIBRARY if library else cast.CAST)[role]
+    return {"role": role, "name": who["name"], "title": who["title"]}
+
+
+def test_view_groups_one_on_ones_by_after_turn():
+    """An up-front group and a pause group, both named through the run's seats."""
+    upfront = _oo_pair(1, "manager", ["crew_owner", "manager"], "who owns the crews")
+    pause = _oo_pair(2, "owner", ["security", "owner"], "threat model", origin="pause")
+    reductions = [
+        _oo_room(), _oo_plan(upfront),
+        _oo(upfront, "crew_owner", 1, used=1, aligned=True, body=_OO_FIGURE),
+        _oo(upfront, "manager", 2, used=2, aligned=True, agreed="crews stay team-owned",
+            ended="aligned", final=True),
+        _oo_turn(1, "senior_director"),
+        _oo_turn(2, "owner", scheduled=[pause], align="security owner: threat model"),
+        _oo(pause, "security", 1, after_turn=2, used=3),
+    ]
+
+    data = view_data(_run("o04-owner"), reductions)
+    first, second = data["one_on_ones"]
+
+    assert [e["n"] for e in data["timeline"]] == [1, 2]  # 1:1s never join the timeline
+    assert set(first) == {
+        "seq", "origin", "called_by", "after_turn", "host", "members", "topic",
+        "exchanges", "ended", "aligned", "agreed", "still_open", "delegated_action",
+    }
+    assert set(first["exchanges"][0]) == {
+        "exchange", "speaker", "name", "body", "segments", "delivered", "aligned",
+        "closing", "badges",
+    }
+    assert (first["seq"], first["origin"], first["called_by"], first["after_turn"]) == (
+        1, "upfront", "owner", 0)
+    assert first["host"] == _oo_person("manager")
+    assert first["members"] == [
+        {"role": "crew_owner", "name": "Noor Haddad", "title": "Crew owner, platform team"},
+        _oo_person("manager"),
+    ]
+    assert first["topic"] == "who owns the crews"
+    opening = first["exchanges"][0]
+    assert (opening["exchange"], opening["speaker"], opening["name"]) == (
+        1, "crew_owner", "Noor Haddad")
+    assert (opening["delivered"], opening["aligned"], opening["closing"]) == (True, True, False)
+    assert opening["body"] == _OO_FIGURE
+    assert [s["kind"] for s in opening["segments"]] == ["text", "mermaid"]  # voice's split
+    assert opening["badges"] == []
+    assert (first["ended"], first["aligned"], first["agreed"], first["still_open"]) == (
+        "aligned", True, "crews stay team-owned", None)
+    assert first["delegated_action"] is None
+
+    assert (second["seq"], second["origin"], second["after_turn"]) == (2, "pause", 2)
+    assert second["members"] == [_oo_person("security", library=True), _oo_person("owner")]
+    assert second["exchanges"][0]["name"] == cast.LIBRARY["security"]["name"]
+    assert (second["ended"], second["aligned"], second["agreed"]) == (None, None, None)
+
+
+def test_view_paused_and_in_one_on_one():
+    """D10 and gap 2: the lag, a member exchange, the closing exchange, and every
+    way a meeting stops that leaves no pause behind."""
+    pair = _oo_pair(1, "manager", ["tpm", "security"], "rollout order",
+                    origin="pause", called_by="manager")
+    meeting = [
+        _oo_room(), _oo_plan(),
+        _oo_turn(1, "senior_director"), _oo_turn(2, "owner"),
+        _oo_turn(3, "manager", scheduled=[pair], align="tpm security: rollout order"),
+        _oo_turn(4, "owner"),
+    ]
+    opens = _oo(pair, "tpm", 1, used=1, after_turn=4, aligned=True)
+    answers = _oo(pair, "security", 2, used=2, after_turn=4, aligned=True, ended="aligned")
+    closes = _oo(pair, "manager", None, used=3, after_turn=4, closing=True,
+                 agreed="tpm sequences it, security signs off", ended="aligned", final=True)
+
+    def seen(reductions, phase):
+        data = view_data(_run(phase), reductions)
+        busy = sorted(r["role"] for r in data["roster"] if r["state"] == "in_one_on_one")
+        return data, busy
+
+    # No exchange kept yet: the view lags one phase ("1:1s next") and the floor stands.
+    data, busy = seen(meeting, "o01-tpm")
+    assert data["progress"]["paused"] == {
+        "pairs": [{
+            "seq": 1, "host": _oo_person("manager"),
+            "members": [_oo_person("tpm"), _oo_person("security", library=True)],
+        }],
+        "current": None,
+    }
+    assert busy == [] and data["progress"]["holder"] == "owner"
+
+    # A member exchange is running: both members are in the 1:1, nobody has the floor.
+    data, busy = seen(meeting + [opens], "o02-security")
+    assert data["progress"]["paused"]["current"] == {"seq": 1, "exchange": 2}
+    assert busy == ["security", "tpm"] and data["progress"]["holder"] is None
+    assert {r["role"]: r["state"] for r in data["roster"]}["owner"] == "spoke"
+
+    # The members are done and the host's closing exchange is running: the host alone.
+    data, busy = seen(meeting + [opens, answers], "o03-manager")
+    assert data["progress"]["paused"]["current"] == {"seq": 1, "exchange": None}
+    assert busy == ["manager"] and data["progress"]["holder"] is None
+    assert data["one_on_ones"][0]["ended"] is None  # only the final reduction finishes it
+
+    # The closing exchange finalised it: nothing pending, and the floor is back.
+    data, busy = seen(meeting + [opens, answers, closes], "t05-tpm")
+    assert data["progress"]["paused"] is None and busy == []
+    assert data["progress"]["holder"] == "owner"
+    assert data["one_on_ones"][0]["agreed"] == "tpm sequences it, security signs off"
+
+    # Mid-1:1: the process lost, the chair's retake phase, or a decision. No pause.
+    lost = Reduction(kind="lost", json={"error": "the meeting was lost"})
+    decision = Reduction(kind="decision", phase="decision", review_state="pending", json={
+        "verdict": "Approve.", "delivered": True, "rechecks": [], "ended": "turn cap",
+        "dropped_one_on_ones": [],
+    })
+    for reductions, phase in [
+        (meeting + [opens, lost], "o02-security"),
+        (meeting + [opens], "decision-take2"),
+        (meeting + [opens, decision], "ruling"),
+    ]:
+        data, busy = seen(reductions, phase)
+        assert data["progress"]["paused"] is None and busy == [], phase
+
+
+def test_view_cap_unaffected_by_one_on_one_reductions(monkeypatch):
+    """1:1 reductions carry no cap, role or turn (C6), and the 1:1 budget rides on
+    the reductions, never on this process's environment (D10)."""
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_TURNS", "30")
+    monkeypatch.setenv("HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS", "4")
+    pair = _oo_pair(1, "owner", ["tpm", "owner"], "the rollout", origin="pause")
+    before = [_oo_room(), _oo_plan(), _oo_turn(1, "senior_director"),
+              _oo_turn(2, "owner", scheduled=[pair], align="tpm owner: the rollout")]
+    assert view_data(_run("o01-tpm"), before)["progress"]["one_on_one"] == {
+        "used": 0, "budget": 16,  # no exchange kept yet
+    }
+
+    reductions = before + [
+        _oo(pair, "tpm", 1, used=1, after_turn=2), _oo(pair, "owner", 2, used=2, after_turn=2),
+        _oo(pair, "tpm", 3, used=3, after_turn=2),
+    ]
+    data = view_data(_run("o04-owner"), reductions)
+
+    assert data["progress"]["cap"] == 26            # the master's cap, not the env's 30
+    assert data["progress"]["turn"] == 2            # a 1:1 is never a meeting turn
+    assert [e["n"] for e in data["timeline"]] == [1, 2]
+    assert data["progress"]["one_on_one"] == {"used": 3, "budget": 16}  # not the env's 4
+
+
+def test_view_legacy_run2_has_no_one_on_ones(run2):
+    """Run-2 predates 1:1s: no reduction carries `one_on_one_budget` (C8)."""
+    data = view_data(_run("decision"), run2)
+    mid = view_data(_run("t04-manager"), run2[:4])
+
+    assert data["one_on_ones"] == [] and mid["one_on_ones"] == []
+    assert (data["progress"]["paused"], data["progress"]["one_on_one"]) == (None, None)
+    assert (mid["progress"]["paused"], mid["progress"]["one_on_one"]) == (None, None)
+    assert [row["role"] for row in data["roster"]] == list(cast.CAST)
+    assert {row["state"] for row in data["roster"]} == {"spoke"}
+    assert mid["progress"]["holder"] == "manager"
+    assert data["verdict"]["dropped_one_on_ones"] == []
+    assert [step["origin_one_on_one"] for step in data["document"]["steps"]] == [None] * 6
+
+
+def test_view_renders_a_one_on_one_without_its_file(tmp_path):
+    """The private 1:1 file is the workers'. The view reads reductions alone and
+    creates nothing (D9, D10)."""
+    pair = _oo_pair(1, "owner", ["crew_owner", "owner"], "who owns the crews")
+    reductions = [
+        _oo_room(), _oo_plan(pair),
+        _oo(pair, "crew_owner", 1, used=1, aligned=True, body="We own them."),
+        _oo(pair, "owner", 2, used=2, aligned=True, body="Then keep them.",
+            agreed="crews stay team-owned", ended="aligned", final=True),
+    ]
+
+    group = view_data(_run("t01-senior_director"), reductions)["one_on_ones"][0]
+
+    assert [x["body"] for x in group["exchanges"]] == ["We own them.", "Then keep them."]
+    assert group["agreed"] == "crews stay team-owned"
+    assert not (tmp_path / "runs").exists()  # nothing read, nothing created
+
+    # A file that disagrees with the reductions changes nothing: it is never opened.
+    decoy = thread.one_on_one_path(RUN_ID, seq=1, members=["crew_owner", "owner"])
+    decoy.write_text("# 1:1 1: DECOY\n\n## exchange 1: DECOY\n\nDECOY\n", encoding="utf-8")
+    assert view_data(_run("t01-senior_director"), reductions)["one_on_ones"][0] == group
+
+
+def test_edit_step_from_a_one_on_one_is_attributed_to_it(run2):
+    """AC11, view half: a 1:1's edit names its seq and never a meeting turn (D7,
+    C8), and that check runs before the `delegated_by_turn` branch."""
+    run2[2].json.update(origin_one_on_one=1, delegated_by_turn=None)  # t03: from 1:1 1
+    run2[5].json.update(origin_one_on_one=None, delegated_by_turn=5)  # t06: a meeting's
+    run2[4].json["answers_turn"] = 4
+    run2[8].json["origin_one_on_one"] = True                          # t09: a bool is no seq
+
+    steps = {s["turn"]: s for s in view_data(_run("decision"), run2)["document"]["steps"]}
+
+    def link(n):
+        step = steps[n]
+        return (step["owner_turn"], step["reviewer_turn"], step["provenance"],
+                step["origin_one_on_one"])
+
+    assert link(3) == (None, None, "recorded", 1)
+    assert link(6) == (5, 4, "recorded", None)
+    assert link(9) == (8, 7, "inferred", None)
+    assert link(12) == (11, 10, "inferred", None)  # legacy: the key is absent
+
+
+def test_view_verdict_lists_dropped_one_on_ones(run2):
+    """Every drop the decision recorded, every reason (C6). The Verdict card picks
+    the `budget` and `meeting ended` ones itself (Task 15)."""
+    assert view_data(_run("decision"), run2)["verdict"]["dropped_one_on_ones"] == []
+
+    drops = [
+        {"seq": None, "text": "tpm tl: rollout", "members": ["tpm", "tl"], "reason": "budget"},
+        {"seq": 3, "text": "pm tl: scope", "members": ["pm", "tl"], "reason": "meeting ended"},
+        {"seq": None, "text": "tl tl: x", "members": None, "reason": "same member"},
+    ]
+    run2[-1].json["dropped_one_on_ones"] = drops + ["junk", 7]
+    assert view_data(_run("decision"), run2)["verdict"]["dropped_one_on_ones"] == drops
+
+    run2[-1].json["dropped_one_on_ones"] = "tpm tl"  # a scalar, hand-edited: no raise
+    assert view_data(_run("decision"), run2)["verdict"]["dropped_one_on_ones"] == []
