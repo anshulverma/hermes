@@ -462,6 +462,12 @@ already queued or still to speak in the opening round. A delegation outranks `cl
 still happens, and costs a turn — and the cap outranks both, naming in the decision any delegation
 it drops.
 
+Before any of that, `turnblock._one` turns every non-printable character in a value (a control
+such as NUL, an invisible or bidi mark, a lone surrogate) into a space and strips the ends, so no
+text key (`action`, `stance`, `agreed`, `still_open`, `align`, `meet_N`) carries one into a goal,
+a file or the committee tab. A NUL in a goal would kill the master at dispatch, and a lone
+surrogate cannot be written to thread.md. A value left blank is absent.
+
 `stance` is not a gate. It is free text, recorded on the turn's reduction and accumulated per
 role so the committee tab can show where each persona currently stands. Absent stays absent: a
 persona that states no stance is shown as having none, never as neutral. Only the owner and the
@@ -511,7 +517,11 @@ exchange of the 1:1 in progress are reserved (see "One-on-ones"). Only the decis
 scheduled pair, as `meeting ended`. Like `stance`, `agreed`, `still_open` and `action` are asked
 for in prose. The plan's worked example is the one placeholder line
 `meet_1: <host> <guest>: <topic>`, which names no seated role, so a verbatim copy schedules
-nothing.
+nothing. A member exchange's worked example is `aligned: no` alone, so a verbatim copy never ends
+a 1:1, and a closing exchange has none. The owner is asked for `delegate` in prose too and is
+never shown `delegate: no`: her latest `delegate` stands, so a template copied on a later
+exchange would withdraw an edit she holds. A `delegate: no` she writes on purpose still
+withdraws it.
 
 ## Voice and retakes
 
@@ -720,13 +730,13 @@ takes file and the images folder relative to the thread rather than by absolute 
 | fixed reviewer speaking for others (senior_director, the longer) | 3029 (571 left) | 3326 (274 left) |
 | junior_ic speaking for others | 3100 (500 left) | 3090 (510 left) |
 | 1:1 plan | 2347 (1253 left) | exempt from retakes |
-| 1:1 owner host | 2950 (650 left) | 3237 (363 left) |
+| 1:1 owner host | 2937 (663 left) | 3224 (376 left) |
 | 1:1 manager host | 2900 (700 left) | 3189 (411 left) |
 | 1:1 library guest (the longest library seat) | 2969 (631 left) | 3254 (346 left) |
 | 1:1 derived guest | 2968 (632 left) | 3274 (326 left) |
 | 1:1 library member of a pause (the longest library seat) | 3044 (556 left) | 3329 (271 left) |
 | 1:1 derived member of a pause | 2988 (612 left) | 3294 (306 left) |
-| 1:1 owner closing | 2858 (742 left) | 3145 (455 left) |
+| 1:1 owner closing | 2772 (828 left) | 3059 (541 left) |
 | 1:1 manager closing | 2733 (867 left) | 3022 (578 left) |
 | owner meeting, align offered | 3244 (356 left) | 3570 (30 left) |
 | manager meeting, align offered (speaking for others) | 3081 (519 left) | 3407 (193 left) |
@@ -786,7 +796,8 @@ playbook; `engine/` and `server/` know nothing of it.
   (`s["one_on_ones_met"]`), only when both members spoke, so a 1:1 that ended `not delivered`
   counts only once it reached its third exchange.
 - **Edits.** The owner may state `delegate` and `action` on any 1:1 exchange she speaks, closing
-  exchanges included, and the latest block that states `delegate` stands. A 1:1 that ends with an
+  exchanges included, and the latest block that states `delegate` stands (her worked example
+  states none, so copying it keeps the edit she holds). A 1:1 that ends with an
   action held hands it to the junior IC, who applies it as an ordinary `tNN-junior_ic` turn before
   anything else runs, with `origin_one_on_one` set to that 1:1's `seq` and `delegated_by_turn`
   null. It costs one `MAX_TURNS` turn, and with the cap unset it raises the cap by one, so a 1:1
@@ -989,8 +1000,11 @@ first turn, as the transcript does (see "Selection").
 **1:1s render inside the transcript and the Metrics section, and no tab is added.** Each 1:1 is
 a collapsed group headed `1:1 <seq>: Host ↔ Guest · <outcome>` (`A ↔ B, hosted by H` when the
 host is not a member) beside its topic, where the outcome reads `in progress`, `aligned` or
-`not aligned (<ended>)`. Its `Agreed:` and `Still open:` lines (or "no outcome recorded: …", or
-"in progress") show even while it is collapsed, and the header is the toggle that shows every
+`not aligned (<ended>)`. A 1:1 with no final reduction reads `in progress` only while
+`progress.paused.pairs` lists its seq; one cut off by a lost, decided or chaired run reads
+`stopped before it finished` instead, and is still not counted as finished. Its `Agreed:` and
+`Still open:` lines (or "no outcome recorded: …", "in progress" or "stopped before it
+finished") show even while it is collapsed, and the header is the toggle that shows every
 kept exchange, rendered through `Segments` and badged like a turn. A group sits after the turn
 it followed, and up-front groups sit before the first turn. Before `t01` exists they render under
 the Selection card as "1:1s before the opening round", so an up-front 1:1 is on screen as soon

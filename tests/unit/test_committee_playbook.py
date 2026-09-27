@@ -370,20 +370,17 @@ def test_what_the_instruction_asks_for_is_what_parse_accepts():
     assert T.parse(_fenced(plan.group(1))) == {"meet_1": "<host> <guest>: <topic>"}
     assert T.pair("<host> <guest>: <topic>") == ("<host>", "<guest>", "<topic>")
 
-    templated = {
-        (False, False, False): {"aligned": False},
-        (True, True, False): {"aligned": False, "delegate": False},
-        (True, False, False): {"aligned": False},
-        (True, True, True): {"delegate": False},
-    }
-    for (host, owner_, closing), signals in templated.items():
+    # A member exchange's template states `aligned: no` and nothing else: the
+    # owner's never states `delegate`, so a copy keeps the edit she holds.
+    for host, owner_, closing in _ONE_ON_ONE_SHAPES[:3]:
         text = T.one_on_one_instruction(host=host, owner=owner_, closing=closing)
         found = re.search(pattern, text, re.S)
         assert found, (host, owner_, closing)
-        assert T.parse(_fenced(found.group(1))) == signals, (host, owner_, closing)
-    # The manager's closing exchange has no flag to state, so no template.
-    manager_close = T.one_on_one_instruction(host=True, owner=False, closing=True)
-    assert re.search(pattern, manager_close, re.S) is None
+        assert T.parse(_fenced(found.group(1))) == {"aligned": False}, (host, owner_, closing)
+    # A closing exchange has no `aligned` to state, so no template.
+    for host, owner_, closing in _ONE_ON_ONE_SHAPES[3:]:
+        text = T.one_on_one_instruction(host=host, owner=owner_, closing=closing)
+        assert re.search(pattern, text, re.S) is None, owner_
 
 
 def test_the_plan_instruction_documents_the_meet_lines():
@@ -421,16 +418,17 @@ def test_the_one_on_one_instruction_documents_its_keys_by_shape():
         assert "`agreed: <one line>`" in text and "`still_open: <one line>`" in text
     assert "agreed" not in guest and "still_open" not in guest
     for text in (owner_host, owner_close):
-        assert "delegate: no" in text
-        assert "`action: <one sentence, 200 characters or fewer>`" in text
+        assert "delegate: no" not in text  # a copy would withdraw a held edit
+        assert "Set delegate: yes only with an `action: <one sentence, 200 characters or fewer>`" in text
     for text in (guest, manager_host, manager_close):
         assert "delegate" not in text and "action" not in text
-    for text in (guest, owner_host, manager_host, owner_close):
-        assert "never as yes" in text
     for text in (guest, owner_host, manager_host):
+        assert "never as yes" in text
         assert "Set aligned: yes only once" in text
-    assert T.FENCE_TAG in manager_close
-    assert manager_close.rstrip().endswith("nothing after it.")
+    for text in (owner_close, manager_close):
+        assert "never as yes" not in text
+        assert f"End with them in one `{T.FENCE_TAG}` fenced block" in text
+        assert text.rstrip().endswith("nothing after it.")
     for text in (guest, owner_host, manager_host, owner_close, manager_close):
         for key in ("request_floor", "close:", "align:", "meet_", "stance"):
             assert key not in text, key
@@ -1009,7 +1007,9 @@ def test_every_goal_stays_under_the_budget_at_maximum_size():
                 role, stage=stage, charge="c" * 5000, artifact=artifact, thread=thread,
                 image=base, retake=retake, last_take=f"takes/{base}-take2.md",
             )))
-    assert selection.FIELD_MAX == 94  # the largest that keeps the derived retake in the margin
+    # The derived retake is 3496, 84 under the margin: each FIELD_MAX character is
+    # five of the goal, so 110 would still fit. It stays 94.
+    assert selection.FIELD_MAX == 94
     for shape, base, retake, g in shapes:
         units = len(g.encode("utf-16-le")) // 2
         assert max(len(g), units) <= cast.GOAL_MAX - 20, f"{shape}: {len(g)} chars, {units} units"
@@ -9185,6 +9185,25 @@ def test_a_pair_that_met_is_never_listed_as_never_met():
     assert dropped(s) == [(["tpm", "owner"], "budget")]
     assert "- dropped_one_on_ones (they never met): tpm ↔ owner (budget)" in verdict(pb, run)
 
+    # the boundary: the guest alone spoke before an undelivered exchange 2, so
+    # they never met; both spoke before an undelivered exchange 3, so they met
+    pb, run, s, _, _, _ = _drive({
+        "p01-owner": {"meet_1": "owner tpm: rollback plan"},
+        "o01-tpm": {"aligned": False}, "o02-owner": {"_ok": False},
+        "t02-owner": {"align": "tpm owner: rollback plan"},
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=2)
+    assert s["one_on_ones_met"] == [] and dropped(s) == [(["tpm", "owner"], "budget")]
+    assert "- dropped_one_on_ones (they never met): tpm ↔ owner (budget)" in verdict(pb, run)
+    pb, run, s, _, _, _ = _drive({
+        "p01-owner": {"meet_1": "owner tpm: rollback plan"},
+        "o01-tpm": {"aligned": False}, "o02-owner": {"aligned": False},
+        "o03-tpm": {"_ok": False},
+        "t02-owner": {"align": "tpm owner: rollback plan"},
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=4)
+    assert s["one_on_ones_met"] == [["owner", "tpm"]]
+    assert dropped(s) == [(["tpm", "owner"], "budget")]
+    assert "never met" not in verdict(pb, run)
+
     # a pair that met, whose repeat 1:1 the turn cap cut off, did meet
     pb, run, s, _, _, _ = _drive({
         "p01-owner": {"meet_1": "owner tpm: rollback plan"},
@@ -9505,6 +9524,9 @@ def test_upfront_owner_delegation_mints_junior_before_the_opening_round(artifact
         "o05-pm", "o06-manager", first,
     ]
     docs = _by_phase(run)
+    # each kept exchange records what its block said, action included
+    assert (docs["o02-owner"]["delegate"], docs["o02-owner"]["action"]) == (True, _EDIT)
+    assert (docs["o04-owner"]["delegate"], docs["o04-owner"]["action"]) == (True, None)
     assert docs["o02-owner"]["delegated_action"] is None  # held until the 1:1 ends
     assert (docs["o04-owner"]["final"], docs["o04-owner"]["delegated_action"]) == (True, _EDIT)
     assert docs["o06-manager"]["delegated_action"] is None  # no owner in 1:1 2, no edit
@@ -9538,6 +9560,68 @@ def test_upfront_owner_delegation_mints_junior_before_the_opening_round(artifact
     assert (docs["o03-tpm"]["ended"], docs["o03-tpm"]["delegated_action"]) == (
         "not delivered", _EDIT)
     assert docs["t01-junior_ic"]["origin_one_on_one"] == 1
+
+
+def test_a_copied_owner_template_keeps_the_edit_she_holds(artifact):
+    """WB review: the owner's 1:1 template once showed `delegate: no`, and her
+    latest `delegate` stands, so copying the template on a later exchange
+    withdrew the edit she had asked for. The template states no `delegate`,
+    so a verbatim copy leaves the edit held and the junior IC still makes it."""
+    template = re.search(
+        r"```" + T.FENCE_TAG + r"\n(.*?)\n```",
+        T.one_on_one_instruction(host=True, owner=True, closing=False), re.S,
+    )
+    _, run, s, seen, sp, ok = _drive(
+        {
+            "p01-owner": {"meet_1": "owner tpm: rollback plan"},
+            "o01-tpm": {"aligned": False},
+            "o02-owner": {"aligned": False, "delegate": True, "action": _EDIT},
+            "o03-tpm": {"aligned": False},
+            "o04-owner": T.parse(_fenced(template.group(1))),  # the template, copied
+        },
+        max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
+    )
+    check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+    i = seen.index("p01-owner")
+    assert seen[i:i + 6] == [
+        "p01-owner", "o01-tpm", "o02-owner", "o03-tpm", "o04-owner", "t01-junior_ic"]
+    docs = _by_phase(run)
+    assert (docs["o04-owner"]["ended"], docs["o04-owner"]["delegated_action"]) == (
+        "exchange cap", _EDIT)
+    assert docs["t01-junior_ic"]["origin_one_on_one"] == 1
+    assert s["rechecks"] == [
+        {"turn": 1, "action": _EDIT, "verified": False, "origin_one_on_one": 1}]
+
+
+def test_worker_text_reaches_no_goal_or_file_with_a_non_printable_character(
+        artifact, o_phase_spy):
+    """WB review: the parser (`turnblock._one`) turns every non-printable
+    character of a value into a space, so no text key carries one into a goal,
+    a file or the view. A NUL in a goal killed the master at dispatch, and a
+    lone surrogate could not be written to thread.md, so the 1:1's outcome
+    entry went missing."""
+    from playbooks.committee import thread
+
+    assert T.parse(_fenced(
+        "stance: a\x00b\nagreed: c\u202ed\nstill_open: \x00\t\naction: e\ud800f\ndelegate: yes\x00"
+    )) == {"stance": "a b", "agreed": "c d", "action": "e f", "delegate": True}
+
+    _, run, s, seen, sp, ok = _drive(
+        {
+            "p01-owner": {"meet_1": "owner tpm: roll\x00back"},
+            "o01-tpm": _ALIGNED,
+            "o02-owner": {"aligned": True, "agreed": "a\ud800b"},
+            "t02-owner": {"delegate": True, "action": "Add a roll\x00back section."},
+        },
+        max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
+    )
+    check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+    goals = {phase: t.payload["goal"] for phase, t in o_phase_spy["tickets"].items()}
+    assert "on: roll back. This is exchange 1" in goals["o01-tpm"]
+    assert "Add a roll back section." in goals["t03-junior_ic"]
+    assert [phase for phase, goal in goals.items() if "\x00" in goal] == []
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert re.search(r"\n## 1:1 1: .* \(aligned\)\n+Agreed: a b\n", text)
 
 
 def test_one_on_one_delegation_after_a_meeting_delegation_has_no_stale_turn_link(artifact):

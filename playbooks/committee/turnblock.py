@@ -107,6 +107,11 @@ def _one(raw: str) -> dict:
     agent that wrote `request_floor: maybe` did not decline the floor, and
     recording a decline it never made is the failure mode this whole module
     exists to avoid.
+
+    Every non-printable character in a value (a control such as NUL, an
+    invisible or bidi mark, a lone surrogate) becomes a space first. Every text
+    key passes here on its way into a goal, a file or the view, and a NUL in a
+    goal kills the master at dispatch.
     """
     out: dict = {}
     for line in raw.splitlines():
@@ -114,7 +119,7 @@ def _one(raw: str) -> dict:
         if not sep:
             continue
         key = key.strip().lower()
-        value = value.strip()
+        value = "".join(c if c.isprintable() else " " for c in value).strip()
         if not value:
             continue
         if key in _TEXT:
@@ -301,17 +306,18 @@ def one_on_one_instruction(*, host: bool, owner: bool, closing: bool) -> str:
       shows ``aligned: no``, so a verbatim copy never ends the 1:1.
     - The host (``host=True``, and whoever takes the closing exchange) is asked
       in prose for ``agreed`` and ``still_open`` on every exchange it takes.
-    - The owner is shown ``delegate: no`` and asked in prose for ``action``:
-      the latest block that states ``delegate`` is the edit the junior IC
-      makes before the meeting resumes.
-    - The manager's closing exchange has no flag to state, so it has no
-      template; its prose names the fence and the two keys.
+    - The owner is asked in prose for ``delegate`` and ``action``, never shown
+      ``delegate: no``: the latest block that states ``delegate`` is the edit
+      the junior IC makes before the meeting resumes, so a template copied on
+      a later exchange would withdraw the edit she already asked for.
+    - A closing exchange has no ``aligned`` to state, so it has no template;
+      its prose names the fence and the keys.
 
     The meeting keys (``request_floor``, ``close``, ``align``, ``meet_N``) are
     never shown, because nothing inside a 1:1 honours them. Nor is ``stance``,
     which a 1:1 does not record.
     """
-    flags = ([] if closing else ["aligned: no"]) + (["delegate: no"] if owner else [])
+    flags = [] if closing else ["aligned: no"]
     prose = ""
     if not closing:
         prose += (

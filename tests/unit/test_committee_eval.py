@@ -4013,6 +4013,10 @@ def test_one_on_one_outcome_lines_belong_to_no_entry(tmp_path):
     assert mentions(lines) == expected
     without = [ln for ln in lines if not ln.startswith(("## 1:1 2:", "Still open: Legal"))]
     assert mentions(without) == expected  # the mid-review outcome changes nothing
+    # a thread with no decision entry yet: the plan never becomes the decision
+    cut = next(i for i, ln in enumerate(lines) if ln.startswith("## decision"))
+    assert E.parse_thread("\n".join(lines[:cut]) + "\n")["decision"] is None
+    assert mentions(lines[:cut]) == expected
 
 
 def test_action_clipped_on_a_one_on_one_edit_reads_the_owner_exchange(tmp_path):
@@ -4105,6 +4109,9 @@ def test_one_on_ones_block_splits_by_outcome_and_medians_member_exchanges(tmp_pa
         "aligned": 1, "not_aligned": 1, "edits_from_one_on_ones": 0,
         "median_words_per_exchange": 15.0,  # the median of 10 and 20, not median_high
     }
+    # 10, 20 and 90: the median is 20, where the mean would be 40
+    more = replace(base, one_on_one_rows=rows + (exchange(1, "security", 90),))
+    assert E._one_on_ones(more)["median_words_per_exchange"] == 20.0
 
 
 def test_one_on_one_outcome_is_citable_judge_evidence(tmp_path):
