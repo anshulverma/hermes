@@ -1364,7 +1364,7 @@ class CommitteePlaybook:
     def _reduce_one_on_one(
         self, run: Run, s: dict, findings: list[Finding]
     ) -> list[Reduction]:
-        """One kept 1:1 exchange: the private file, the gates, the outcome entry.
+        """One 1:1 exchange: a take voice sends back, or the kept take's file entry and gates.
 
         Exactly one ``one_on_one`` reduction per kept take. It carries no
         ``cap``, ``artifact``, ``revised``, ``role`` or ``turn`` (kind-blind
@@ -1377,8 +1377,24 @@ class CommitteePlaybook:
         seq, host, members = one["seq"], one["host"], list(one["members"])
         answer = _latest_answer(findings)
         # A 1:1 never keeps a file image: images/ is the room's (voice D8).
-        _, metrics, violations, flags = self._grade(run, s, role, answer, file_images=False)
-        take = takes = s["take"]
+        discard, metrics, violations, flags = self._grade(
+            run, s, role, answer, file_images=False
+        )
+        if discard:
+            # Held, and the same speaker is asked again as `{base}-take{k}`.
+            # Nothing reaches the 1:1 file or `_apply_one_on_one`, so the
+            # exchange count, the budget, `aligned`, `agreed` and `still_open`
+            # stay where they were (voice's `take` row, plus seq and exchange).
+            return self._discard(
+                run, s, role, answer, metrics, violations, flags, None,
+                extra={"seq": seq, "exchange": one["exchange"]},
+            )
+        # A retake that delivered nothing, or signals only, keeps the held take:
+        # delivered, graded again with file images still refused, and flagged
+        # `retake_failed`. It is this exchange from here on.
+        answer, take, takes, metrics, violations, flags = self._keep(
+            run, s, role, answer, metrics, violations, flags, file_images=False
+        )
         delivered = bool(answer)
         body = turnblock.strip(answer)
         if answer and not body:

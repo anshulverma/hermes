@@ -2849,7 +2849,11 @@ def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, *, reducti
             # owner rule is about the room, and a 1:1 is not the room.
             from engine import contracts
 
-            assert nxt == f"o{s['one_on_one_used']:02d}-{s['current_role']}", nxt
+            # take 1 is o{used}-{role}; a voice retake is `{base}-take{k}` of the
+            # same exchange and spends neither `exchange` nor `one_on_one_used`
+            want = (f"o{s['one_on_one_used']:02d}-{s['current_role']}" if s["take"] == 1
+                    else f"{s['base']}-take{s['take']}")
+            assert nxt == want, (nxt, want)
             ticket = pb.seed(run, _NamedSite("local"))[0]
             contracts.validate(ticket.payload, pb.payload_schema(nxt))
             assert (ticket.id, ticket.payload["kind"], ticket.payload["role"]) == (
@@ -8003,6 +8007,274 @@ def test_derived_seat_can_be_a_one_on_one_guest():
     # a name lookup that skipped the roster would have raised into `error`
     assert [r.json["error"] for r in _exchanges(run)] == [None] * 4
     assert seen[seen.index("o04-manager") + 1] == f"t01-{s['reviewers'][0]}"
+
+
+# --- 1:1 retakes: voice's rules on o-phases (one-on-ones D8, AC15) -----------
+
+_RETAKE_PLAN = {"meet_1": "owner tpm: rollback plan"}
+
+# tpm's second exchange in that 1:1 is o03-tpm. Its own take-1 image name, as a
+# real and valid SVG: a meeting turn's check_images would accept this file.
+_OWN_SVG = '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"></svg>\n'
+_FILE_IMAGE_EXCHANGE = (
+    "The rollback path is drawn below; see step 3 of the proposal.\n\n"
+    "![Rollback flow](images/o03-tpm.svg)\n"
+    "Description: the three rollback steps in order."
+)
+
+
+def _long_exchange(tag: str) -> str:
+    """161 words, over voice's 150-word cap; ``tag`` finds it in the 1:1 file."""
+    return f"{tag}: " + "the rollback needs an owner and a date " * 20
+
+
+def _queue_pause(s: dict, guest: str, topic: str = "rollout order") -> None:
+    """Schedule an owner-hosted pause 1:1 with ``guest``, as an owner's ``align`` does.
+
+    A scripted owner turn calls this, so these tests reach a 1:1 minted right
+    after a meeting turn through the o-phase path alone. The pair has the C3
+    shape, and its seq is taken when it is scheduled.
+    """
+    s["one_on_one_seq"] += 1
+    s["pending_one_on_ones"].append({
+        "seq": s["one_on_one_seq"], "origin": "pause", "called_by": cast.OWNER,
+        "host": cast.OWNER, "members": [guest, cast.OWNER], "topic": topic,
+    })
+
+
+@pytest.fixture
+def o_phase_spy(monkeypatch):
+    """What the REAL seed built, and what the REAL reduce did to the state.
+
+    A spy, never a double. ``tickets[phase]`` is the ticket seed returned, and
+    ``states[phase]`` is (the state just before reduce, the state just after),
+    deep-copied, so a later phase cannot rewrite them.
+    """
+    import copy
+
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    out = {"tickets": {}, "states": {}}
+    seed, reduce = CommitteePlaybook.seed, CommitteePlaybook.reduce
+
+    def seeding(self, run, site):
+        tickets = seed(self, run, site)
+        out["tickets"].update((ticket.phase, ticket) for ticket in tickets)
+        return tickets
+
+    def reducing(self, run, phase, findings, site):
+        before = copy.deepcopy(self._state(run))
+        got = reduce(self, run, phase, findings, site)
+        out["states"][phase] = (before, copy.deepcopy(self._state(run)))
+        return got
+
+    monkeypatch.setattr(CommitteePlaybook, "seed", seeding)
+    monkeypatch.setattr(CommitteePlaybook, "reduce", reducing)
+    return out
+
+
+def _reduced(run) -> dict:
+    """Every reduction `_drive` banked for a seeded phase, by phase name."""
+    return {r.phase: r for r in run.reductions if r.phase}
+
+
+def test_one_on_one_retake_consumes_no_budget_and_never_repeats_a_name(o_phase_spy):
+    """AC15: a retaken exchange is the same exchange said again. It adds no
+    `exchange` and no `one_on_one_used`, and it is named `{base}-take{k}`. An
+    owner meeting-turn retake and an owner 1:1 retake at the same
+    `current_turn` still get distinct names, because their bases differ."""
+    turn_at = {}
+
+    def script(phase, s):
+        turn_at[phase] = s["current_turn"]
+        if phase == "p01-owner":
+            return dict(_RETAKE_PLAN)
+        if phase == "o01-tpm":
+            return {"_prose": _long_exchange("first")}
+        if phase == "t02-owner":
+            return {"_retake": True}  # voice's marker: a meeting-turn retake
+        if phase == "t02-owner-take2":
+            _queue_pause(s, "tpm")
+            return {}
+        if phase == "o04-owner":
+            return {"_prose": _long_exchange("second"), "aligned": True}
+        if phase in ("o01-tpm-take2", "o02-owner", "o03-tpm", "o04-owner-take2"):
+            return {"aligned": True}
+        return {}
+
+    pb, run, s, seen, sp, ok = _drive(
+        script, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    i, j = seen.index("o01-tpm"), seen.index("t02-owner")
+    assert seen[i:i + 3] == ["o01-tpm", "o01-tpm-take2", "o02-owner"]
+    assert seen[j:j + 5] == [
+        "t02-owner", "t02-owner-take2", "o03-tpm", "o04-owner", "o04-owner-take2"]
+    # six 1:1 tickets, four exchanges: neither retake spent the budget
+    assert s["one_on_one_used"] == 4
+    red = _reduced(run)
+    assert [red[p].kind for p in ("o01-tpm", "o04-owner")] == ["take", "take"]
+    assert [
+        (red[p].json["seq"], red[p].json["exchange"], red[p].json["one_on_one_used"],
+         red[p].json["take"], red[p].json["takes"])
+        for p in ("o01-tpm-take2", "o02-owner", "o03-tpm", "o04-owner-take2")
+    ] == [(1, 1, 1, 2, 2), (1, 2, 2, 1, 1), (2, 1, 3, 1, 1), (2, 2, 4, 2, 2)]
+    # the same current_turn under two bases: two names, so two ticket ids
+    assert turn_at["t02-owner-take2"] == turn_at["o04-owner-take2"] == 2
+    retake = o_phase_spy["tickets"]["o04-owner-take2"]
+    assert retake.id == f"{run.id}/o04-owner-take2"
+    # the retake's worker is told which take this is, and why
+    assert retake.payload["title"].endswith("(take 2)")
+    assert "Retake 2 of 3." in retake.payload["goal"]
+
+
+def test_discarded_take_changes_no_state(o_phase_spy):
+    """AC15, C6: a discarded exchange is voice's `take` row plus `seq` and
+    `exchange`. It moves only what voice's `_discard` owns, none of its
+    signals is applied, and it never reaches the 1:1 file."""
+    from playbooks.committee import thread
+
+    pb, run, s, seen, sp, ok = _drive({
+        "p01-owner": _RETAKE_PLAN,
+        "o01-tpm": {"_prose": _long_exchange("tpm-discarded"), "aligned": True},
+        "o02-owner": {"_prose": _long_exchange("owner-discarded"), "aligned": True,
+                      "agreed": "ship it now"},
+        "o02-owner-take2": {"still_open": "who owns the rollback date"},
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    red = _reduced(run)
+    for phase, exchange, tag in (("o01-tpm", 1, "tpm-discarded"),
+                                 ("o02-owner", 2, "owner-discarded")):
+        assert red[phase].kind == "take", phase
+        doc = red[phase].json
+        assert (doc["seq"], doc["exchange"], doc["phase"], doc["turn"]) == (
+            1, exchange, phase, None)
+        assert doc["kept"] is False and "over_cap" in doc["violations"]
+        assert not {"cap", "artifact", "revised", "needs_human_ticket_ids"} & set(doc)
+        before, after = o_phase_spy["states"][phase]
+        assert set(before) == set(after)
+        # `take` moves only in next_phase. `_discard` owns exactly these three:
+        # the held take, the retake note, and the kept take the retake names.
+        assert {key for key in before if before[key] != after[key]} == {
+            "held", "retake", "last_take"}, phase
+        assert after["held"]["take"] == 1 and tag in after["held"]["answer"]
+        assert after["last_take"] == f"takes/{phase}-take1.md"
+    assert seen[seen.index("o02-owner") + 1] == "o02-owner-take2"
+    final = red["o04-owner"].json
+    assert (final["final"], final["ended"]) == (True, "exchange cap")
+    # tpm's `aligned: yes` and the owner's `agreed` rode only on discarded takes
+    assert final["outcome"] == {
+        "aligned": False, "agreed": None, "still_open": "who owns the rollback date"}
+    assert s["one_on_one_used"] == 4
+    private = thread.one_on_one_path(run.id, seq=1, members=["tpm", cast.OWNER]).read_text(
+        encoding="utf-8")
+    assert "tpm-discarded" not in private and "owner-discarded" not in private
+    assert private.count("\n## exchange ") == 4  # the four kept takes, nothing else
+
+
+def test_o_phase_after_a_retaken_turn_starts_at_take_1():
+    """AC15, D8: `_mint` begins every o-phase at take 1, so a 1:1 minted right
+    after a meeting turn kept on take 2 starts at take 1, and its first retake
+    is `-take2`."""
+    at = {}
+
+    def script(phase, s):
+        at[phase] = (s["base"], s["take"])
+        if phase == "t02-owner":
+            return {"_retake": True}
+        if phase == "t02-owner-take2":
+            _queue_pause(s, "tpm")
+            return {}
+        if phase == "o01-tpm":
+            return {"_prose": _long_exchange("tpm"), "aligned": True}
+        if phase in ("o01-tpm-take2", "o02-owner"):
+            return {"aligned": True}
+        return {}  # the plan names no pair: no up-front 1:1, so o01 is the pause's
+
+    _, _, _, seen, _, _ = _drive(script, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    i = seen.index("t02-owner")
+    assert seen[i:i + 5] == [
+        "t02-owner", "t02-owner-take2", "o01-tpm", "o01-tpm-take2", "o02-owner"]
+    assert at["t02-owner-take2"] == ("t02-owner", 2)  # the turn was kept on take 2
+    assert at["o01-tpm"] == ("o01-tpm", 1)  # a fresh base, back at take 1
+    assert at["o01-tpm-take2"] == ("o01-tpm", 2)
+
+
+def test_file_image_in_an_exchange_is_retaken(monkeypatch, tmp_path):
+    """AC15, D8: a file image in a 1:1 is `image_missing` and retaken, whether
+    the file is missing or is the speaker's own valid `images/o03-tpm.svg`. A
+    failed retake keeps the held take still flagged: the master never accepts
+    a 1:1 file image, not even when it re-grades the held take."""
+    from playbooks.committee import thread
+
+    for home, retake in (("missing", {}), ("present", {"_ok": False})):
+        # `_drive` always uses the same run id, so each pass gets its own home
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / home))
+        if home == "present":
+            (thread.images_dir(_run().id) / "o03-tpm.svg").write_text(
+                _OWN_SVG, encoding="utf-8")
+        _, run, _, seen, _, _ = _drive({
+            "p01-owner": _RETAKE_PLAN,
+            "o03-tpm": {"_prose": _FILE_IMAGE_EXCHANGE},
+            "o03-tpm-take2": retake,
+        }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+        red = _reduced(run)
+        took = red["o03-tpm"]
+        assert took.kind == "take" and "image_missing" in took.json["violations"], home
+        assert took.json["voice"]["images"][0]["ok"] is False
+        i = seen.index("o03-tpm")
+        assert seen[i:i + 3] == ["o03-tpm", "o03-tpm-take2", "o04-owner"], home
+        kept = red["o03-tpm-take2"].json
+        private = thread.one_on_one_path(
+            run.id, seq=1, members=["tpm", cast.OWNER]).read_text(encoding="utf-8")
+        if home == "missing":
+            assert kept["take"] == 2 and "image_missing" not in kept["violations"]
+            assert "images/o03-tpm.svg" not in private
+        else:
+            # the held take, re-graded with file images still refused
+            assert (kept["take"], kept["takes"], kept["delivered"]) == (1, 2, True)
+            assert "image_missing" in kept["violations"]
+            assert kept["violations"][-1] == "retake_failed"
+            assert private.count("images/o03-tpm.svg") == 1
+
+
+def test_failed_exchange_retake_keeps_the_held_take():
+    """AC15, D8: an undelivered retake and a signals-only retake each keep the
+    held take. It is delivered, flagged `retake_failed`, written once to the
+    1:1 file and gated with its own signals, and the 1:1 goes on."""
+    from playbooks.committee import thread
+
+    _, run, s, seen, _, _ = _drive({
+        "p01-owner": {**_RETAKE_PLAN, "meet_2": "owner staff_ic: cost"},
+        "o01-tpm": {"_prose": _long_exchange("held-one"), "aligned": True},
+        "o01-tpm-take2": {"_ok": False},  # no finding at all
+        "o02-owner": {"aligned": True},
+        "o03-staff_ic": {"_prose": _long_exchange("held-two"), "aligned": True},
+        # signals only: its own `aligned: no` must not replace the held take's yes
+        "o03-staff_ic-take2": {"_prose": "", "aligned": False},
+        "o04-owner": {"aligned": True},
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    red = _reduced(run)
+    for seq, guest, tag, host_turn in ((1, "tpm", "held-one", "o02-owner"),
+                                       (2, "staff_ic", "held-two", "o04-owner")):
+        phase = f"o{2 * seq - 1:02d}-{guest}-take2"
+        assert red[phase].kind == "one_on_one", phase
+        doc = red[phase].json
+        assert (doc["seq"], doc["exchange"], doc["delivered"]) == (seq, 1, True)
+        assert (doc["take"], doc["takes"]) == (1, 2)
+        assert "over_cap" in doc["violations"] and doc["violations"][-1] == "retake_failed"
+        assert doc["body"].startswith(f"{tag}:")
+        assert doc["aligned"] is True  # the held take's signal, not the retake's
+        assert seen[seen.index(phase) + 1] == host_turn  # the 1:1 goes on
+        private = thread.one_on_one_path(
+            run.id, seq=seq, members=[guest, cast.OWNER]).read_text(encoding="utf-8")
+        assert private.count(f"{tag}:") == 1
+        final = red[host_turn].json
+        assert (final["final"], final["ended"], final["outcome"]["aligned"]) == (
+            True, "aligned", True)
+    assert s["one_on_one_used"] == 4 and s["one_on_ones_done"] == [1, 2]
 
 
 # --- registration and wiring ---------------------------------------------
