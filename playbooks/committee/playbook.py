@@ -294,10 +294,13 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
     alternates between the two members, and the end is tested only after
     ``members[1]``'s exchange, so a member host always speaks last and its
     outcome postdates the guest's last word. An undelivered exchange ends the
-    1:1 at once. Finalize records the seq as done and clears
-    ``s["one_on_one"]``. ``reduce`` does only the file writes around this call,
-    and ``_drive`` reaches it through the real ``reduce``, so it is never
-    transcribed.
+    1:1 at once. A 1:1 whose host is not a member then gets the host's ONE
+    closing exchange (D6), unless the members' part ended ``not delivered``;
+    that exchange records the outcome and nothing else, delivered or not, and
+    leaves ``ended`` as the members set it. Finalize records the seq as done
+    and clears ``s["one_on_one"]``. ``reduce`` does only the file writes
+    around this call, and ``_drive`` reaches it through the real ``reduce``,
+    so it is never transcribed.
 
     Returns what this exchange said (``aligned``, ``agreed``, ``still_open``,
     each None unless honoured), whether it was the ``final`` one, why the 1:1
@@ -316,7 +319,9 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
         # the host's latest STATED values: an exchange that omits one keeps it
         one["agreed"] = agreed if agreed is not None else one["agreed"]
         one["still_open"] = still_open if still_open is not None else one["still_open"]
-    if not delivered:
+    if one["closing"]:
+        pass  # D6: the outcome only; `ended` stays what the members' part set
+    elif not delivered:
         one["ended"] = "not delivered"
     elif role == second:
         if all(one["aligned"][m] is True for m in one["members"]):
@@ -325,7 +330,13 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
             one["ended"] = "exchange cap"
         elif _free(s) < 2:  # another round needs two; never a lone exchange
             one["ended"] = "budget"
-    one["next"] = None if one["ended"] else (second if role == first else first)
+    if (one["ended"] not in (None, "not delivered") and not one["closing"]
+            and one["host"] not in one["members"]):
+        # D6: the caller of a pair she is not in closes it. `closing` releases
+        # the unit `_free` reserved, which next_phase spends on the next mint.
+        one["next"], one["closing"] = one["host"], True
+    else:
+        one["next"] = None if one["ended"] else (second if role == first else first)
     outcome = None
     if one["next"] is None:
         outcome = {
@@ -621,13 +632,17 @@ class CommitteePlaybook:
         NN is ``one_on_one_used`` after the bump, so names never repeat across
         1:1s. A retake never comes here (voice's ``_retake`` names it off
         ``s["base"]``), so a retake spends neither the budget nor an exchange.
+        The host's closing exchange (D6) spends the unit ``_free`` reserved for
+        it, but not an exchange: the 4-exchange cap counts member exchanges only.
         """
         one = s["one_on_one"]
         role = one["next"]
         s["one_on_one_used"] += 1
-        one["exchange"] += 1
+        if not one["closing"]:
+            one["exchange"] += 1
         return self._mint(
-            s, kind="one_on_one", role=role, name=f"o{s['one_on_one_used']:02d}-{role}"
+            s, kind="one_on_one_close" if one["closing"] else "one_on_one", role=role,
+            name=f"o{s['one_on_one_used']:02d}-{role}",
         )
 
     def _decision(self, s: dict, ended: str) -> str:
@@ -825,13 +840,17 @@ class CommitteePlaybook:
                 },
             )]
 
-        if s["current_kind"] == "one_on_one":
+        if s["current_kind"] in ("one_on_one", "one_on_one_close"):
             # A 1:1 exchange: the speaker `_mint` recorded, the other member,
             # and the private file only the 1:1's two participants are told of.
             # A retake names its kept take and a seated member says whom it
-            # speaks for, as a meeting goal does.
-            one, role = s["one_on_one"], s["current_role"]
-            other = next(m for m in one["members"] if m != role)
+            # speaks for, as a meeting goal does. The host of a pair she is not
+            # in reads the file and writes only the outcome (D6): she talks to
+            # neither member, and a closing exchange has no exchange number.
+            one, role, kind = s["one_on_one"], s["current_role"], s["current_kind"]
+            closing = one["closing"]
+            other = None if closing else next(m for m in one["members"] if m != role)
+            exchange = None if closing else one["exchange"]
             return [Ticket(
                 id=f"{run.id}/{phase}",
                 run_id=run.id,
@@ -843,9 +862,9 @@ class CommitteePlaybook:
                 payload={
                     "role": role,
                     "title": cast.title(
-                        role, "one_on_one", turn=s["current_turn"], take=s["take"],
+                        role, kind, turn=s["current_turn"], take=s["take"],
                         roster=s["roster"] or None, other=other, seq=one["seq"],
-                        exchange=one["exchange"],
+                        exchange=exchange,
                     ),
                     "goal": cast.one_on_one_goal(
                         role,
@@ -857,16 +876,16 @@ class CommitteePlaybook:
                         other=other,
                         members=list(one["members"]),
                         topic=one["topic"],
-                        exchange=one["exchange"],
+                        exchange=exchange,
                         host=one["host"],
-                        closing=False,
+                        closing=closing,
                         roster=s["roster"],
                         retake=s["note"],
                         last_take=s["last_take"],
                         speaks_for=[entry["stakeholder"] for entry in s["considered"]
                                     if entry.get("represented_by") == role],
                     ),
-                    "kind": "one_on_one",
+                    "kind": kind,
                     "action": None,
                 },
             )]
@@ -1120,7 +1139,8 @@ class CommitteePlaybook:
             return self._reduce_select(run, s, findings)
         if s["current_kind"] == "plan":
             return self._reduce_plan(run, s, findings)
-        if s["current_kind"] == "one_on_one":
+        if s["current_kind"] in ("one_on_one", "one_on_one_close"):
+            # one fold; `one_on_one["closing"]` tells the two apart inside it
             return self._reduce_one_on_one(run, s, findings)
         return self._reduce_turn(run, s, findings)
 
@@ -1436,17 +1456,21 @@ class CommitteePlaybook:
     def _reduce_one_on_one(
         self, run: Run, s: dict, findings: list[Finding]
     ) -> list[Reduction]:
-        """One 1:1 exchange: a take voice sends back, or the kept take's file entry and gates.
+        """One 1:1 exchange, member or closing (D6): a take voice sends back, or
+        the kept take's file entry and gates.
 
         Exactly one ``one_on_one`` reduction per kept take. It carries no
         ``cap``, ``artifact``, ``revised``, ``role`` or ``turn`` (kind-blind
         readers pick those up) and no path under ``one-on-ones/``: only the two
-        participants' goals name the private file. Never raises.
+        participants' goals name the private file. A closing exchange has no
+        exchange number. Never raises.
         """
         errors: list[str] = []
         role = s["current_role"]
         one = dict(s["one_on_one"])  # finalize clears s["one_on_one"]
         seq, host, members = one["seq"], one["host"], list(one["members"])
+        closing = one["closing"]
+        exchange = None if closing else one["exchange"]
         answer = _latest_answer(findings)
         # A 1:1 never keeps a file image: images/ is the room's (voice D8).
         discard, metrics, violations, flags = self._grade(
@@ -1459,7 +1483,7 @@ class CommitteePlaybook:
             # stay where they were (voice's `take` row, plus seq and exchange).
             return self._discard(
                 run, s, role, answer, metrics, violations, flags, None,
-                extra={"seq": seq, "exchange": one["exchange"]},
+                extra={"seq": seq, "exchange": exchange},
             )
         # A retake that delivered nothing, or signals only, keeps the held take:
         # delivered, graded again with file images still refused, and flagged
@@ -1474,8 +1498,8 @@ class CommitteePlaybook:
         try:
             thread.append_one_on_one(
                 run.id, seq=seq, host=host, members=members, topic=one["topic"],
-                speaker=role, exchange=one["exchange"], body=body,
-                closing=one["closing"], roster=s["roster"],
+                speaker=role, exchange=exchange, body=body,
+                closing=closing, roster=s["roster"],
             )
         except Exception as exc:  # never raise out of reduce
             errors.append(f"one-on-one file: {exc}")
@@ -1487,6 +1511,8 @@ class CommitteePlaybook:
                     run.id, seq=seq, host=host, members=members,
                     aligned=gate["outcome"]["aligned"], agreed=gate["outcome"]["agreed"],
                     still_open=gate["outcome"]["still_open"], ended=gate["ended"],
+                    # D6: only a closing exchange can fail to bring the outcome
+                    closing_delivered=delivered if closing else True,
                     roster=s["roster"],
                 )
             except Exception as exc:  # never raise out of reduce
@@ -1500,8 +1526,8 @@ class CommitteePlaybook:
             "members": members,
             "topic": one["topic"],
             "speaker": role,
-            "exchange": one["exchange"],
-            "closing": one["closing"],
+            "exchange": exchange,
+            "closing": closing,
             "delivered": delivered,
             "body": body,
             # what this exchange said and was honoured; the 1:1's standing

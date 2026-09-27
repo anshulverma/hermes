@@ -1516,7 +1516,7 @@ def test_one_on_one_goal_duty_by_shape():
     roster = _seated_roster()
     file = "/home/x/.hermes/runs/committee-20260918-000000/one-on-ones/01-crew_owner-owner.md"
     kw = dict(charge=_CHARGE, artifact=_ARTIFACT, thread=_THREAD, file=file,
-              topic="rollback — who pages", roster=roster)
+              topic="rollback – who — pages", roster=roster)
     pair, owner, manager = ["crew_owner", cast.OWNER], cast.OWNER, cast.MANAGER
 
     def shape(role, other, x, members=pair, host=owner, closing=False, **over):
@@ -1526,20 +1526,38 @@ def test_one_on_one_goal_duty_by_shape():
     guest = shape("crew_owner", owner, 1)
     later = shape("crew_owner", owner, 3)
     host = shape(owner, "crew_owner", 2)
+    mhost = shape(manager, "crew_owner", 2, ["crew_owner", manager], manager)
+    mguest = shape("security", manager, 1, ["security", manager], manager)
     member = shape("security", "crew_owner", 1, ["security", "crew_owner"], manager)
     closer = shape(manager, None, None, ["crew_owner", "security"], manager, True)
     security = cast.persona("security", roster)["name"]
 
     assert "You are Kofi Mensah, Crew Service Owner." in guest
-    assert "with Maya Okonkwo, who hosts it, on: rollback - who pages." in guest
+    # both long dashes of the topic come back as `-` (voice rule 5)
+    assert "with Maya Okonkwo, who hosts it, on: rollback - who - pages." in guest
     assert "exchange 1 of at most 4" in guest and "so do not read it" in guest
+    assert ("State your position and what would align you. The 1:1 file is empty "
+            "until your exchange, which opens it, so do not read it.") in guest
     assert "exchange 3 of at most 4" in later and "do not read" not in later
+    assert "State your position and what would align you. Read the 1:1 file first." in later
     assert "with Kofi Mensah, which you host, on:" in host
     assert "exchange 2 of at most 4" in host and "do not read" not in host
-    assert "Read the 1:1 file, answer Kofi Mensah and keep `agreed`" in host
+    assert ("Read the 1:1 file, answer Kofi Mensah and keep `agreed` and `still_open` "
+            "current: the room reads only those.") in host
+    # the manager hosts the same way, and her guest is told who hosts it
+    assert "with Kofi Mensah, which you host, on:" in mhost
+    assert ("Read the 1:1 file, answer Kofi Mensah and keep `agreed` and `still_open` "
+            "current") in mhost
+    assert "with Ruth Delgado, who hosts it, on:" in mguest and "hosted by" not in mguest
     assert "with Kofi Mensah, hosted by Ruth Delgado, on:" in member
-    assert "the closing exchange: the members have finished" in closer
+    assert ("You host a private 1:1 on: rollback - who - pages. This is the closing "
+            "exchange: the members have finished.") in closer
     assert f"You called this 1:1 between Kofi Mensah and {security}." in closer
+    assert ("Read the 1:1 file and record the outcome: the room reads only your "
+            "`agreed` and `still_open`.") in closer
+    # the topic is clipped to TOPIC_MAX, not to the charge's CHARGE_MAX
+    g = shape(owner, "crew_owner", 2, topic="t" * 5000)
+    assert "t" * cast.TOPIC_MAX not in g and "t" * (cast.TOPIC_MAX - 1) + "…" in g
 
     for role, is_host, g in (("crew_owner", False, guest), (owner, True, host),
                              (manager, True, closer)):
@@ -1556,6 +1574,8 @@ def test_one_on_one_goal_duty_by_shape():
         at = [g.index(p) for p in parts]
         assert at == sorted(at), role
         assert g.count(file) == 1, role
+        assert (f"Only this 1:1's participants are told about its file, and Hermes "
+                f"appends your answer to it: {file}") in g, role
         assert g.endswith(_DONE_ONE_ON_ONE), role
         for absent in ("request_floor", "images folder", cast._UNCHANGED_ORIGINAL):
             assert absent not in g, (role, absent)
@@ -2842,7 +2862,7 @@ def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, *, reducti
                     reductions.append((nxt, reduction))
             continue
         block = script(nxt, s) if callable(script) else dict(script.get(nxt, {}))
-        if s["current_kind"] == "one_on_one":
+        if s["current_kind"] in ("one_on_one", "one_on_one_close"):
             # A 1:1 exchange, seeded and reduced for real: the o-phase seed,
             # `_grade`, `_apply_one_on_one` and both file writes run with nothing
             # transcribed. Its speaker never joins `speakers`: the reviewer ->
@@ -8531,6 +8551,199 @@ def test_turn_cap_drops_pending_one_on_ones_as_meeting_ended():
     assert footer in red.json["verdict"]
     assert footer in thread.path(run.id).read_text(encoding="utf-8")
     assert "not owner or manager" not in red.json["verdict"]
+
+
+# --- 1:1s: the caller's closing exchange (D6) -------------------------------
+
+
+@pytest.fixture
+def closing_spy(monkeypatch):
+    """What the REAL reduce returned, in order, plus the payload the real seed
+    builds for each closing exchange just before it is reduced.
+
+    A spy, never a double. `_drive` seeds each o-phase itself but keeps no
+    ticket; this spy seeds the closing exchange again just before its reduce
+    (seed is pure for this kind), to keep the payload for the assertions.
+    """
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    out = {"reductions": [], "closing": []}
+    real = CommitteePlaybook.reduce
+
+    def spy(self, run, phase, findings, site):
+        if self._state(run)["current_kind"] == "one_on_one_close":
+            out["closing"].append(self.seed(run, site)[0].payload)
+        got = real(self, run, phase, findings, site)
+        out["reductions"].extend(got)
+        return got
+
+    monkeypatch.setattr(CommitteePlaybook, "reduce", spy)
+    return out
+
+
+def _drive_closing(monkeypatch, tmp_path, spy, name, script, budget=16):
+    """One `_drive` under its own HERMES_HOME: (run, state, phases, reductions).
+
+    `_drive` always uses the same run id, so each run gets a fresh home and
+    its thread.md and 1:1 files are its own.
+    """
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / name))
+    spy["reductions"].clear()
+    spy["closing"].clear()
+    _, run, s, seen, _, _ = _drive(
+        script, selection=DEFAULT_SELECTION, one_on_one_budget=budget
+    )
+    return run, s, seen, list(spy["reductions"])
+
+
+def _exchanges_minted(seen):
+    """The 1:1 exchanges a run minted, in order, retakes left out."""
+    return [p for p in seen if re.fullmatch(r"o\d\d-[a-z_]+", p)]
+
+
+def _one_on_one_docs(reductions):
+    """The kept 1:1 exchanges' reduction docs, in order."""
+    return [r.json for r in reductions if r.kind == "one_on_one"]
+
+
+# Two members who are neither the owner nor the manager. The opening round is
+# senior_director, manager, tpm, pm, tl, staff_ic, data_scientist, so the
+# manager speaks at t03 and the owner answers at t02 and t04.
+_ALIGN_TWO_OTHERS = {"align": "tpm tl: rollout order"}
+
+
+def test_pair_without_owner_or_manager_gets_the_callers_closing_exchange(
+    monkeypatch, tmp_path, closing_spy
+):
+    """AC3, D6: a pair the caller is not in meets alone; the caller then hosts
+    ONE closing exchange that reads the 1:1 file and records the outcome."""
+    from playbooks.committee import thread
+
+    # Both align. The manager's closing take 1 breaks the cap and is retaken,
+    # and take 2 records what was agreed and what is still open.
+    run, s, seen, red = _drive_closing(monkeypatch, tmp_path, closing_spy, "kept", {
+        "t03-manager": _ALIGN_TWO_OTHERS,
+        "o01-tpm": {"aligned": True},
+        "o02-tl": {"aligned": True},
+        "o03-manager": {"_prose": "word " * 200},
+        "o03-manager-take2": {"agreed": "ship behind a flag",
+                              "still_open": "who owns the rollback"},
+    })
+    i = seen.index("t03-manager")
+    assert seen[i:i + 7] == ["t03-manager", "t04-owner", "o01-tpm", "o02-tl",
+                             "o03-manager", "o03-manager-take2", "t05-tpm"]
+    # the closing exchange spends one unit of the budget; its retake spends none
+    assert (s["one_on_one_used"], s["one_on_one"], s["one_on_ones_done"]) == (3, None, [1])
+    taken = [r.json for r in red if r.kind == "take" and "seq" in r.json]
+    assert [(t["phase"], t["seq"], t["exchange"]) for t in taken] == [("o03-manager", 1, None)]
+    kept = _one_on_one_docs(red)
+    assert [(k["speaker"], k["exchange"], k["closing"], k["final"]) for k in kept] == [
+        ("tpm", 1, False, False), ("tl", 2, False, False), ("manager", None, True, True)]
+    assert kept[1]["ended"] == "aligned"  # the members are done; the closing is next
+    close = kept[2]
+    assert (close["host"], close["called_by"], close["members"]) == (
+        "manager", "manager", ["tpm", "tl"])
+    assert close["aligned"] is None and close["ended"] == "aligned"
+    assert (close["take"], close["takes"]) == (2, 2)
+    assert close["outcome"] == {"aligned": True, "agreed": "ship behind a flag",
+                                "still_open": "who owns the rollback"}
+    name = {role: s["roster"][role]["name"] for role in ("tpm", "tl", "manager")}
+    path = thread.one_on_one_path(run.id, seq=1, members=["tpm", "tl"])
+    first, again = closing_spy["closing"]
+    assert (first["kind"], first["role"], first["action"]) == (
+        "one_on_one_close", "manager", None)
+    assert first["title"] == f"1:1 1 — {name['manager']} (manager) records the outcome"
+    assert again["title"] == first["title"] + " (take 2)"
+    assert "called this 1:1 between" in first["goal"] and str(path) in first["goal"]
+    assert "write no file at all" in first["goal"] and "Retake 2 of 3" in again["goal"]
+    one = path.read_text(encoding="utf-8")
+    assert "## exchange 1: " in one and "## exchange 2: " in one
+    assert one.count("## outcome: ") == 1 and f"## outcome: {name['manager']}, " in one
+    assert "word word" not in one  # the discarded take never reaches the file
+    heading = f"## 1:1 1: {name['tpm']} ↔ {name['tl']}, hosted by {name['manager']}"
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert f"{heading} (aligned)" in text
+    assert "Agreed: ship behind a flag" in text
+    assert "Still open: who owns the rollback" in text
+
+    # The same pair aligns, but the closing exchange delivers nothing: the 1:1
+    # still ends aligned, and its entry says the host's outcome never came.
+    run, s, seen, red = _drive_closing(monkeypatch, tmp_path, closing_spy, "silent", {
+        "t03-manager": _ALIGN_TWO_OTHERS,
+        "o01-tpm": {"aligned": True},
+        "o02-tl": {"aligned": True},
+        "o03-manager": {"_ok": False},
+    })
+    assert seen[seen.index("o03-manager") + 1] == "t05-tpm"
+    close = _one_on_one_docs(red)[-1]
+    assert (close["closing"], close["delivered"], close["final"], close["ended"]) == (
+        True, False, True, "aligned")
+    assert close["outcome"] == {"aligned": True, "agreed": None, "still_open": None}
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert f"{heading} (aligned)" in text
+    assert "_(no outcome recorded: the host's closing exchange was not delivered)_" in text
+
+    # A member exchange that delivers nothing ends the 1:1 at once, and nobody
+    # is sent to close a 1:1 whose members never finished.
+    run, s, seen, red = _drive_closing(monkeypatch, tmp_path, closing_spy, "member", {
+        "t03-manager": _ALIGN_TWO_OTHERS,
+        "o01-tpm": {"_ok": False},
+    })
+    assert _exchanges_minted(seen) == ["o01-tpm"]
+    assert seen[seen.index("o01-tpm") + 1] == "t05-tpm"
+    last = _one_on_one_docs(red)[-1]
+    assert (last["speaker"], last["final"], last["ended"]) == ("tpm", True, "not delivered")
+    text = thread.path(run.id).read_text(encoding="utf-8")
+    assert f"{heading} (not aligned)" in text
+    assert "_(no outcome recorded: not delivered)_" in text
+
+    # The owner calls the same pair from her reply. The caller closes, so she does.
+    _, s, seen, red = _drive_closing(monkeypatch, tmp_path, closing_spy, "owner", {
+        "t02-owner": _ALIGN_TWO_OTHERS,
+        "o01-tpm": {"aligned": True},
+        "o02-tl": {"aligned": True},
+    })
+    i = seen.index("t02-owner")
+    assert seen[i:i + 5] == ["t02-owner", "o01-tpm", "o02-tl", "o03-owner", "t03-manager"]
+    close = _one_on_one_docs(red)[-1]
+    assert (close["speaker"], close["host"], close["called_by"], close["closing"]) == (
+        "owner", "owner", "owner", True)
+
+
+def test_closing_exchange_reserve_keeps_used_within_budget(monkeypatch, tmp_path, closing_spy):
+    """D5: a pair the host is not in needs 3 (two member exchanges and the
+    closing one). The closing exchange stays reserved while the members talk,
+    so it always runs and `used` never passes the budget."""
+    want = {
+        # need 3 > free 2: the manager's align is dropped when it arrives
+        2: ([], None),
+        # just enough: one round, then free = 3 - 2 - 1 (the reserve) = 0
+        3: (["o01-tpm", "o02-tl", "o03-manager"], "budget"),
+        # free = 4 - 2 - 1 = 1 after one round. Without the reserve a second
+        # round would run and the closing exchange would make used 5 > 4.
+        4: (["o01-tpm", "o02-tl", "o03-manager"], "budget"),
+        # room for two rounds: the closing exchange is outside the 4-exchange cap
+        5: (["o01-tpm", "o02-tl", "o03-tpm", "o04-tl", "o05-manager"], "exchange cap"),
+    }
+    for budget, (phases, ended) in want.items():
+        _, s, seen, red = _drive_closing(
+            monkeypatch, tmp_path, closing_spy, f"budget-{budget}",
+            {"t03-manager": _ALIGN_TWO_OTHERS}, budget=budget,
+        )
+        assert _exchanges_minted(seen) == phases, budget
+        assert s["one_on_one_used"] == len(phases) <= budget, budget
+        resumed_after = phases[-1] if phases else "t04-owner"
+        assert seen[seen.index(resumed_after) + 1] == "t05-tpm", budget
+        if not phases:
+            assert [(d["seq"], d["reason"]) for d in s["dropped_one_on_ones"]] == [
+                (None, "budget")], budget
+            continue
+        kept = _one_on_one_docs(red)
+        assert [k["exchange"] for k in kept] == [*range(1, len(phases)), None], budget
+        assert (kept[-1]["closing"], kept[-1]["final"], kept[-1]["ended"]) == (
+            True, True, ended), budget
+        assert kept[-1]["one_on_one_used"] == len(phases), budget
+        assert (s["one_on_ones_done"], s["dropped_one_on_ones"]) == ([1], []), budget
 
 
 # --- registration and wiring ---------------------------------------------
