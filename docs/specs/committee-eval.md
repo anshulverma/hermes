@@ -169,17 +169,24 @@ every file it decodes is read as `utf-8` with `errors="replace"`. The precedence
 fields first, then `thread.md`, then the fixed layout.
 
 - **Turns.** The `turn` reductions with an int `turn`, keyed by that value; the last one by id per
-  number wins. `take` reductions and the losing duplicates count in `metrics.extra_takes`. Every
-  other kind except `decision` counts in `metrics.other_kinds` (`lost` now; later `selection`,
-  `one_on_one_plan`, `one_on_one`) and never raises.
+  number wins. Every `take` reduction (a 1:1 retake, which carries an int `seq`, included) and the
+  losing duplicates count in `metrics.extra_takes`. Every other kind except `decision` and the 1:1
+  kinds (`ONE_ON_ONE_KINDS`: `one_on_one_plan`, `one_on_one`) counts in `metrics.other_kinds`
+  (`lost`, `selection`) and never raises. The 1:1 kinds and the 1:1 retakes are kept as
+  `(kind, json)` pairs in `Target.one_on_one_rows` instead, for `metrics.one_on_ones`,
+  `action_clipped` and entries.json.
 - **Bodies** (`body(target, n)`). The reduction's `body`. A legacy run uses its thread entry.
 - **thread.md** (`parse_thread(text)`).
   - The header is every line before the first line matching `^## `.
-  - Entry boundaries match only `^## turn (\d{2,}) — (.+) \((\w+)\)$` and `^## decision — .+$`.
-    After the first boundary every other line is body, including `## ` headings.
-  - Lines after the header and before the first entry belong to no entry, so they are never
+  - Entry boundaries match only `^## turn (\d{2,}) — (.+) \((\w+)\)$`, `^## decision — .+$` and
+    the two 1:1 headings, `^## 1:1 (\d+): ` (an outcome) and `^## 1:1 plan: ` (the plan). A 1:1
+    heading closes the entry before it. An outcome is its own entry, in
+    `parse_thread(text)["one_on_ones"]` keyed by its seq, and the plan, from its heading to the
+    next boundary, belongs to no entry. After the first boundary every other line is body,
+    including `## ` headings and a stray `## 1:1` line that matches neither 1:1 heading.
+  - Lines after the header and before the first boundary belong to no entry, so they are never
     header or body evidence. Examples are selection's `## selection N: …` and
-    `## committee seated`, and one-on-ones' `## 1:1 …`.
+    `## committee seated`.
   - Lines are 1-based and inclusive, and only `"\n"` ends one: a CRLF counts once, and
     `str.splitlines` is never used, because it also splits at a form feed, U+0085 or U+2028 and
     would shift every later line number. An entry runs from its `## ` heading to the line before
@@ -323,8 +330,15 @@ then by turn, then by line (nulls last), and every `line` is null when thread.md
   clipped action under 200 characters.
   - The delegating owner turn is the junior's `delegated_by_turn`, else the nearest earlier
     delivered owner turn with `delegate`.
+  - An edit from a 1:1 (the re-check's int `origin_one_on_one`, else its junior turn's) is judged
+    by that 1:1's delegating owner exchange in the owner turn's place, with the same two tests:
+    the latest `one_on_one` reduction with that `seq`, speaker `cast.OWNER`, `delegate` true and
+    a non-null `action`, which is the action finalize handed over as the edit. It never falls
+    back to a meeting owner turn: with no such exchange, the length test runs on the re-check's
+    action.
   - `turn` is the re-check's turn. `quote` is the action's last 40 chars. `line` is the decision
-    entry's line starting `- re-check of turn NN`, else null.
+    entry's line starting `- re-check of turn NN`, else null. A 1:1 edit's flag adds `seq`, the
+    1:1 the edit came from.
   - It is report-only, never scored. run-9 has it at t03, t06, t09, t15, t18 and t24 (lines 861
     to 875), and run-2 at t03 to t18 (lines 966 to 976).
 - `verdict_count_mismatch`: each claim `edit_claims` finds in chair prose, line by line, whose
@@ -451,9 +465,13 @@ only.
   - `inputs/thread.md` is the exact bytes `load_target` read and measured, never a re-read, so it
     cannot differ from what the metrics describe.
   - `entries.json` (`build_entries`) is
-    `{header: {text, line_start, line_end}, turns: {"<n>": {role, body, line_start, line_end}}, decision: {chair_prose, line_start, line_end}}`.
+    `{header: {text, line_start, line_end}, turns: {"<n>": {role, body, line_start, line_end}}, decision: {chair_prose, line_start, line_end}, one_on_ones: {"<seq>": {text, line_start, line_end}}}`.
     With no thread.md it is built from the reductions, with every line null and `header.text`
     set to `""`.
+  - `one_on_ones` holds every 1:1 outcome, `{}` for a run that held none. With thread.md it is
+    each `## 1:1 N:` entry's body and lines. With no thread.md it is each 1:1's final
+    `one_on_one` reduction (the latest wins) in `thread.append_one_on_one_outcome`'s words
+    (`Agreed: …` and `Still open: …`, else `_(no outcome recorded: <why>)_`), lines null.
   - `metrics.json` is byte-identical to the deterministic block (see Results).
   - `rubric.md` (`rubric_text`): line 1 is `rubric_version: <version>`. Then comes one
     `<id>: <dimension version>` line per dimension, a blank line, and `RUBRIC` verbatim.
@@ -486,7 +504,8 @@ only.
   - Each judge dimension is `{score, rationale, evidence: [{turn, where, quote}]}`, with at most
     5 evidence items, each quote at most 300 characters and the rationale at most 4000.
     concern_coverage may add `concerns` and `absent_stakeholders`, which go under its `detail`.
-  - `where` is one of turn, decision, header, original or revised. Unknown keys are ignored.
+  - `where` is one of turn, decision, header, original, revised or one_on_one. A one_on_one item
+    cites a 1:1 outcome by its seq, given as `turn`. Unknown keys are ignored.
   - `parse_answer` takes the last fence whose body parses as a JSON object, so a restated answer
     wins and a broken last fence falls back to the one before it. The fences are found in one
     pass over the answer's lines (an opener line, then the next bare ```` ``` ```` line), so an
@@ -519,9 +538,10 @@ only.
      - A quote is clipped to 300 chars (`QUOTE_MAX`) and its whitespace collapsed. It is
        `verified` iff it has at least 3 words (counted by `words`) and 12 characters, and is a
        substring, whitespace collapsed on both sides, of the place it cites in entries.json: the
-       turn's body (matched by `turn`), `chair_prose`, or `header.text`. For original and revised
-       it must be a substring of the whole inputs copy. A shorter quote such as "." or "e" would
-       match anything, so it never verifies.
+       turn's body (matched by `turn`), `chair_prose`, `header.text`, or a 1:1 outcome's `text`
+       in `one_on_ones` (matched by `turn` as its seq, so a null or another seq never verifies
+       against it). For original and revised it must be a substring of the whole inputs copy. A
+       shorter quote such as "." or "e" would match anything, so it never verifies.
      - `line` is the line the quote starts on, in inputs/thread.md within the entry's range, or
        in the original or revised copy. The range's lines are collapsed and joined with single
        spaces, and the quote's offset in that text maps back to its line, so a quote that crosses
@@ -866,9 +886,10 @@ spec, and compares it against run-9 and run-2.
     `compute_metrics` dict with `==`: a new metrics key goes into `compute_metrics` and into both
     expected dicts in the same change.
   - `Target.turns` is `{int: the last turn doc by id}` and `Target.decision` is the latest decision
-    doc. `Target` keeps no raw reduction rows, and `load_target` keeps no non-turn reduction doc (it
-    only counts them in `other_kinds`). A loop that needs one, such as the final `selection`, adds a
-    `Target` field filled in `load_target`'s reduction loop.
+    doc. Beyond those, `Target` keeps only `selection` (the latest final selection doc) and
+    `one_on_one_rows` (the 1:1 kinds and 1:1 retakes as `(kind, json)` pairs); any other
+    reduction doc is at most counted (`extra_takes`, `other_kinds`). A loop that needs another
+    adds a `Target` field filled in `load_target`'s reduction loop.
   - The entries dict is `build_entries(target)`, with str turn keys. The header roster is
     `parse_thread(text)["roster"]`. `seats` is built inline in `compute_metrics` from
     `roster(target)` and `reviewers(target)`, and the judge sees it only through

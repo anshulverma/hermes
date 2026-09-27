@@ -1810,7 +1810,9 @@ def test_judge_goal_under_budget():
     for piece in (*E.JUDGE_DIMS, '"score"', "1-5", '"rationale"', '"evidence"', '"turn"',
                   '"where"', '"quote"', '"decision"', '"header"', '"original"', '"revised"',
                   "at most 5 evidence items", "at most 300 characters",
-                  "each rationale at most 4000 characters"):
+                  "each rationale at most 4000 characters",
+                  # one-on-ones C9: a 1:1 outcome is citable, by its seq
+                  '"revised" | "one_on_one"', 'the 1:1 number for "one_on_one"'):
         assert piece in goal, piece
     # The rubric is named, never inlined.
     assert E.RUBRIC not in goal and "asserts things nobody said" not in goal
@@ -4037,25 +4039,35 @@ def test_action_clipped_on_a_one_on_one_edit_reads_the_owner_exchange(tmp_path):
         1: {"role": "owner", "turn": 1, "delivered": True, "delegate": True,
             "action": long, "voice": {"action_chars": cut + 50}},
         2: junior(2, by=1), 4: junior(4, origin=1), 6: junior(6, origin=2), 8: junior(8, origin=3),
+        10: junior(10, origin=4),
     }
+    unclipped = {"action_chars": 9}
     rows = (
         exchange(1, "owner", delegate=True, action=long, voice={"action_chars": cut + 40}),
-        exchange(1, "security"),  # a later guest exchange delegates nothing
-        exchange(2, "owner", delegate=True, action=long, voice={"action_chars": cut + 60}),
-        exchange(2, "owner", delegate=True, action=short, voice={"action_chars": len(short)}),
+        # Later seq 1 exchanges that hand over nothing, each with an unclipped voice:
+        # a guest's, an owner's without delegate, and an owner's without an action.
+        exchange(1, "security", delegate=True, action="short one", voice=unclipped),
+        exchange(1, "owner", action="short one", voice=unclipped),
+        exchange(1, "owner", delegate=True, voice={"action_chars": 0}),
         exchange(3, "owner", delegate=True, action=long),  # no voice: the length rule
+        # voice says exactly ACTION_MAX, so not clipped, though the length rule would say so
+        exchange(4, "owner", delegate=True, action=long, voice={"action_chars": cut}),
+        exchange(2, "owner", delegate=True, action=long, voice={"action_chars": cut + 60}),
+        # the last row of all: seq 1, 3 and 4 never read another 1:1's exchange
+        exchange(2, "owner", delegate=True, action=short, voice={"action_chars": len(short)}),
     )
     rechecks = [
         {"turn": 2, "action": long, "verified": True, "origin_one_on_one": None},
         {"turn": 4, "action": long, "verified": True, "origin_one_on_one": 1},
         {"turn": 6, "action": short, "verified": True, "origin_one_on_one": 2},
         {"turn": 8, "action": long, "verified": True},  # only the junior turn names its 1:1
+        {"turn": 10, "action": long, "verified": True, "origin_one_on_one": 4},
     ]
     target = dataclasses.replace(
         base, turns=turns, thread=None, thread_text=None, one_on_one_rows=rows,
         decision={"delivered": True, "verdict": "Approve.", "rechecks": rechecks})
 
-    flags = [f for f in E.compute_flags(target, {"rechecks_verified": 4})
+    flags = [f for f in E.compute_flags(target, {"rechecks_verified": 5})
              if f["id"] == "action_clipped"]
 
     tail = long[-40:]
@@ -4065,7 +4077,34 @@ def test_action_clipped_on_a_one_on_one_edit_reads_the_owner_exchange(tmp_path):
         # no turn 6: 1:1 2's standing action is the short one, and t01's clipped
         # action never stands in for it
         {"id": "action_clipped", "turn": 8, "seq": 3, "quote": tail, "line": None},
+        # no turn 10: 1:1 4's owner exchange has a voice, so the length rule never runs
     ]
+
+
+def test_one_on_ones_block_splits_by_outcome_and_medians_member_exchanges(tmp_path):
+    """C9: aligned and not aligned split the finals, and the median reads only the
+    delivered member exchanges with prose: never a closing one, never a signals-only one."""
+    home, run_id = build_home(tmp_path, "run-9")
+    base = E.load_target(str(home), run_id)
+
+    def exchange(seq, speaker, words, **extra):  # a kept, delivered 1:1 exchange
+        return ("one_on_one", {"seq": seq, "speaker": speaker, "closing": False,
+                               "delivered": True, "voice": {"words": words}, **extra})
+
+    rows = (
+        ("one_on_one_plan", {"one_on_ones_scheduled": [], "fallback": None}),
+        exchange(1, "security", 10),
+        exchange(1, "owner", 20, final=True, origin="upfront", outcome={"aligned": True}),
+        exchange(2, "tpm", None, voice=None, body="_(the speaker sent signals only, no prose)_"),
+        exchange(2, "owner", 1000, closing=True, final=True, origin="pause",
+                 outcome={"aligned": False}),
+    )
+
+    assert E._one_on_ones(replace(base, one_on_one_rows=rows)) == {
+        "count": 2, "upfront": 1, "pause": 1, "kept_exchanges": 4, "retakes": 0,
+        "aligned": 1, "not_aligned": 1, "edits_from_one_on_ones": 0,
+        "median_words_per_exchange": 15.0,  # the median of 10 and 20, not median_high
+    }
 
 
 def test_one_on_one_outcome_is_citable_judge_evidence(tmp_path):
