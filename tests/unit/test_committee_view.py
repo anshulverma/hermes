@@ -1967,6 +1967,34 @@ def test_view_groups_one_on_ones_by_after_turn():
     assert (second["ended"], second["aligned"], second["agreed"]) == (None, None, None)
 
 
+def test_view_one_on_one_outcome_and_exchange_fields():
+    """The group's outcome comes off the final reduction's `outcome`, never that
+    exchange's own keys (a host can omit on her closing exchange what she stated
+    earlier), and each exchange keeps its delivery, closing flag and badges."""
+    closed = _oo_pair(1, "owner", ["tpm", "security"], "the appendix")
+    unheard = _oo_pair(2, "manager", ["crew_owner", "manager"], "who owns the crews")
+    closing = _oo(closed, "owner", None, used=3, closing=True, ended="budget", final=True)
+    closing.json.update(
+        outcome={"aligned": False, "agreed": "tpm first", "still_open": "who signs"},
+        agreed=None, still_open=None, delegated_action="Cut the appendix.")
+    silent = _oo(unheard, "crew_owner", 1, used=4, ended="not delivered", final=True)
+    silent.json.update(delivered=False, body="", takes=2)
+    reductions = [
+        _oo_room(), _oo_plan(closed, unheard),
+        _oo(closed, "tpm", 1, used=1), _oo(closed, "security", 2, used=2, ended="budget"),
+        closing, silent,
+    ]
+
+    first, second = view_data(_run("t01-senior_director"), reductions)["one_on_ones"]
+
+    assert (first["agreed"], first["still_open"], first["delegated_action"]) == (
+        "tpm first", "who signs", "Cut the appendix.")
+    ex = first["exchanges"][-1]
+    assert (ex["closing"], ex["exchange"]) == (True, None)
+    ex = second["exchanges"][0]
+    assert (ex["delivered"], ex["badges"]) == (False, ["no_turn", "retaken"])
+
+
 def test_view_paused_and_in_one_on_one():
     """D10 and gap 2: the lag, a member exchange, the closing exchange, and every
     way a meeting stops that leaves no pause behind."""
@@ -2002,12 +2030,14 @@ def test_view_paused_and_in_one_on_one():
     # A member exchange is running: both members are in the 1:1, nobody has the floor.
     data, busy = seen(meeting + [opens], "o02-security")
     assert data["progress"]["paused"]["current"] == {"seq": 1, "exchange": 2}
+    assert [p["seq"] for p in data["progress"]["paused"]["pairs"]] == [1]  # the running one too
     assert busy == ["security", "tpm"] and data["progress"]["holder"] is None
     assert {r["role"]: r["state"] for r in data["roster"]}["owner"] == "spoke"
 
     # The members are done and the host's closing exchange is running: the host alone.
     data, busy = seen(meeting + [opens, answers], "o03-manager")
     assert data["progress"]["paused"]["current"] == {"seq": 1, "exchange": None}
+    assert [p["seq"] for p in data["progress"]["paused"]["pairs"]] == [1]
     assert busy == ["manager"] and data["progress"]["holder"] is None
     assert data["one_on_ones"][0]["ended"] is None  # only the final reduction finishes it
 
@@ -2032,6 +2062,22 @@ def test_view_paused_and_in_one_on_one():
         assert data["progress"]["paused"] is None and busy == [], phase
 
 
+def test_view_paused_before_t01_lists_every_up_front_pair():
+    """Gap 2 before the first turn: the plan's pairs are pending too, and every
+    pending pair is listed, the running one included."""
+    one = _oo_pair(1, "owner", ["owner", "tpm"], "the rollout")
+    two = _oo_pair(2, "manager", ["manager", "security"], "the threat model")
+    reductions = [_oo_room(), _oo_plan(one, two), _oo(one, "tpm", 1, used=1)]
+
+    data = view_data(_run("o02-owner"), reductions)
+    paused = data["progress"]["paused"]
+
+    assert [p["seq"] for p in paused["pairs"]] == [1, 2]
+    assert paused["current"] == {"seq": 1, "exchange": 2}
+    assert sorted(r["role"] for r in data["roster"] if r["state"] == "in_one_on_one") == [
+        "owner", "tpm"]
+
+
 def test_view_cap_unaffected_by_one_on_one_reductions(monkeypatch):
     """1:1 reductions carry no cap, role or turn (C6), and the 1:1 budget rides on
     the reductions, never on this process's environment (D10)."""
@@ -2054,6 +2100,7 @@ def test_view_cap_unaffected_by_one_on_one_reductions(monkeypatch):
     assert data["progress"]["turn"] == 2            # a 1:1 is never a meeting turn
     assert [e["n"] for e in data["timeline"]] == [1, 2]
     assert data["progress"]["one_on_one"] == {"used": 3, "budget": 16}  # not the env's 4
+    assert data["progress"]["paused"]["current"] == {"seq": 1, "exchange": 4}  # after the latest
 
 
 def test_view_legacy_run2_has_no_one_on_ones(run2):
