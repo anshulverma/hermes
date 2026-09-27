@@ -14,7 +14,7 @@ How good a finished review was is scored by a second playbook, `committee-eval`;
 
 ## Phases
 
-`phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01, the three selection phases before them as `s{N}-{role}`, and a retake of any speaking phase as `{base}-take{k}`.
+`phases = ["open", "decision", "ruling"]`; turn phases are minted at runtime as `t{NN:02d}-{role}`, NN from 01, the three selection phases before them as `s{N}-{role}`, the owner's 1:1 plan as `p01-owner` and each 1:1 exchange as `o{NN:02d}-{role}`, and a retake of any speaking phase as `{base}-take{k}`.
 
 - **open** — zero tickets. `seed` resolves configuration, seats the fixed four, writes
   `doc/00-original<ext>`, makes `runs/<run_id>/images/`, then writes the thread header (charge,
@@ -23,9 +23,21 @@ How good a finished review was is scored by a second playbook, `committee-eval`;
   worker runs.
 - **s1-owner, s2-manager, s3-senior_director**: one ticket each, strictly in turn, minted at
   runtime before the first turn. The owner proposes the committee, her manager amends it and the
-  chair ratifies it. They consume no turn number and none of the cap, so the phase after
-  `s3-senior_director` is `t01-senior_director`, the seated committee's first reviewer. A retake
-  is `s2-manager-take2` and so on. See "Selection".
+  chair ratifies it. They consume no turn number and none of the cap, so the first turn after
+  `s3-senior_director` is `t01-senior_director`, the seated committee's first reviewer (the 1:1
+  plan and any up-front 1:1s come between them). A retake is `s2-manager-take2` and so on. See
+  "Selection".
+- **p01-owner**, only while 1:1s are on (a 1:1 budget of 2 or more): one ticket for the owner,
+  once, after `s3-senior_director` and before `t01`. The owner plans up to three up-front 1:1s
+  (`meet_1`, `meet_2`, `meet_3`), each hosted by herself or her manager. It spends no turn and
+  none of the 1:1 budget, and a plan that is undelivered or names no valid pair goes straight on
+  to the opening round. See "One-on-ones".
+- **o{NN}-{role}**: one 1:1 exchange, one speaker. The planned 1:1s run one after another before
+  the opening round; a pause runs its 1:1 later, between two meeting turns. NN is the count of
+  1:1 exchanges spent so far, bumped at mint, so it is unique across every 1:1 in the run, and a
+  voice retake is `o{NN}-{role}-take{k}`, for example `o03-tpm-take2`. When the host is not one
+  of the two members, the members' part is followed by the host's closing exchange, a ticket of
+  kind `one_on_one_close`, unless it ended `not delivered`.
 - **t{NN}-{role}** — one ticket, one speaker: the opening round in the seated committee's order,
   the owner's reply after every *delivered* reviewer turn, then whoever asked for the floor, FIFO.
   A turn whose worker produced nothing is answered by nobody — its thread entry is the `NO_TURN`
@@ -44,6 +56,18 @@ How good a finished review was is scored by a second playbook, `committee-eval`;
 One speaker per phase is a rule, not a habit, and a retake is a new phase with the same speaker:
 two would race for the thread file, and a repeated phase name deadlocks the run silently. The
 review ends when the owner closes, the queue empties or the cap is hit.
+
+**A pause for 1:1s is phases, not run state.** The engine run stays `running` through the plan
+and every 1:1, no `run_paused` event is written, and the meeting resumes on its own. A plan or
+1:1 phase never touches the turn counter, `last_speaker`, the opening round, the floor queue or
+`closed`. `next_phase` tries, in order: the decision and ruling phases, a pending voice retake,
+selection's phases, the plan, the 1:1 in progress, a pending delegation (the junior IC, within
+the cap), the turn cap, the owner's reply, the next pending 1:1, an accepted close, then the
+opening round and the floor queue. So a pause called on the owner's turn starts right after it
+(after the junior IC's edit, if she also delegated one), a pause called on the manager's turn
+starts after the owner's reply, a pause still runs if the owner then closes (only the turn cap
+drops a pending 1:1, as `meeting ended`), and the opening round or the queue then picks up where
+it stopped.
 
 ## The cast
 
@@ -79,8 +103,8 @@ are held to the 150-word cap; the chair's 300 words stay with the decision. `sta
 and `action_too_long` never send a selector back, because her `hermes-turn` block is stripped
 and ignored: no `_apply_block` runs on a select phase. A retake that delivers nothing keeps the
 held take's list, with `retake_failed`. `_select` never touches the turn counter, `current_turn`,
-`last_speaker`, the cap, `opening` or the floor queue, so the phase after `s3-senior_director` is
-`t01-senior_director`, numbered as it always was. There is no human gate. A `selection`
+`last_speaker`, the cap, `opening` or the floor queue, so the first turn after
+`s3-senior_director` is `t01-senior_director`, numbered as it always was. There is no human gate. A `selection`
 reduction never carries `needs_human_ticket_ids`.
 
 **The fixed seats.** The owner, the senior director (the chair), the manager (the owner's
@@ -200,7 +224,9 @@ their failure never costs the run its committee.
   meeting's own `lost`; either way the run ends failed and thread.md keeps what was written.
 - `_apply_selection(s, resolved)` installs the result, from one resolved dict, and is the only
   code after `open` that sets `s["roster"]`, `s["reviewers"]`, `s["considered"]` and the cap; it
-  resets `s["opening"]` to a copy of the reviewers.
+  resets `s["opening"]` to a copy of the reviewers. One exception: 1:1 finalize
+  (`_apply_one_on_one`) is the cap's second writer, adding one when a 1:1 hands the junior IC an
+  edit and the cap is unset.
 
 **Who a seat speaks for.** Seed hands each turn goal the considered stakeholders whose
 `represented_by` is that seat (`cast.goal(..., speaks_for=...)`), rendered in the brief as one
@@ -218,7 +244,8 @@ counts such a stakeholder as represented only when its representative's turns ra
 
 **The cap.** With `HERMES_COMMITTEE_MAX_TURNS` unset, the cap is 2 × reviewers + 16, fixed when the
 chair ratifies: 22 for three reviewers, 30 for the default seven (so a fallback keeps 30), 40 for
-twelve. Until then it is 30, provisionally. When every owner reply delegates, reviewer k opens at
+twelve. Until then it is 30, provisionally. Each edit delegated from a 1:1 then raises it by
+one (see "One-on-ones"). When every owner reply delegates, reviewer k opens at
 turn 3k-2, so every seated reviewer gets an opening turn. An explicit value is used as-is
 (`s["cap_explicit"]`), even one below 3 × reviewers - 2, which cuts the opening round short.
 
@@ -336,7 +363,7 @@ that is more than zero ("N more not listed.", "N more considered, not listed.", 
 entries, not listed."); the considered list with who represents each stakeholder, or "Not
 represented.", or "Everyone considered was seated."; "Default committee: selection fell back
 (<words>)" on a fallback, <words> being `selection.fallback_words(code)`; and "Selection stopped:
-the meeting was lost." when the master lost the meeting mid-selection. No tab is added. The Metrics tab keeps its empty state until `t01`, and it counts
+the meeting was lost." when the master lost the meeting mid-selection. No tab is added. The Metrics tab keeps its empty state until `t01` or the first kept 1:1 exchange, and it counts
 a derived seat's turns like any other seat's.
 
 A derived seat's name and title are a selector's words, and the name check above compares only
@@ -356,8 +383,9 @@ derived seat cannot pass for a cast or library persona.
 - `s["cap_explicit"]`: whether `HERMES_COMMITTEE_MAX_TURNS` set the cap. When it did not, the cap
   is 2 × reviewers + 16 and a later loop may add to it.
 - `s["current_kind"]`: default `None`; `None`, `"select"`, `"turn"` or `"decision"`, plus a later
-  loop's own kinds. Junior turns are `"turn"`. `seed` and `reduce` tell a selection stage from a
-  turn by it (the decision by `DECISION_PHASES` membership) and never parse the phase name.
+  loop's own kinds (one-on-ones appends `"plan"`, `"one_on_one"` and `"one_on_one_close"`, as it
+  does to the payload's `kind` enum). Junior turns are `"turn"`. `seed` and `reduce` tell a
+  selection stage from a turn by it (the decision by `DECISION_PHASES` membership) and never parse the phase name.
 - `s["base"]`: the take-1 name, set by every minter through `_begin(s, base)`, `_select`
   included. Reuse it rather than add a second phase key. `_retake` has no select branch.
 - `s["selection_next"]`: the next stage, 1-3, and 4 once selection is done. 4 is the default, so
@@ -381,16 +409,27 @@ is *Decide whether to approve this proposal.*
 | Var | Default | Meaning |
 |---|---|---|
 | `HERMES_COMMITTEE_ARTIFACT` | — (**required**) | Absolute path to the file under review |
-| `HERMES_COMMITTEE_MAX_TURNS` | 2 × reviewers + 16 (`30` for the default seven) | Hard time-box on turn phases; an explicit value is used as-is |
+| `HERMES_COMMITTEE_MAX_TURNS` | 2 × reviewers + 16 (`30` for the default seven) | Hard time-box on turn phases; an explicit value is used as-is; unset, it also grows by one per edit delegated from a 1:1 |
+| HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS | 16 | Budget of 1:1 exchanges per run, separate from MAX_TURNS; 0 turns 1:1s off; junk or negative falls back to 16 |
 | `HERMES_COMMITTEE_DRIVER` | unset | Optional methodology slash command |
 
 `ARTIFACT` and `MAX_TURNS` are read once, at `open` seed time, so a mid-run change cannot swap the
 cap or the artifact; an `ARTIFACT` that is unset or is not an existing readable file fails the run
 on the spot, naming the variable. A `MAX_TURNS` that does not parse — *and one below `1`, which
 would mint a committee that never speaks* — counts as unset. Unset, the cap is 30 until the chair
-ratifies, then 2 × reviewers + 16 (see "Selection"); an explicit value is used as-is, even one too
-small for the opening round. `DRIVER` is read on every `driver()` call, which may run in another
-process.
+ratifies, then 2 × reviewers + 16 (see "Selection"), plus one per edit delegated from a 1:1; an
+explicit value is used as-is, even one too small for the opening round. `DRIVER` is read on
+every `driver()` call, which may run in another process.
+
+`HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS` is read once, at `open`, beside `MAX_TURNS`; unset, one
+that does not parse and one below `0` all mean 16. It counts exchange tickets, closing exchanges
+included and retakes not, and `1` is off too, since a 1:1 needs two exchanges. With 1:1s off
+there is no plan phase and no `align` offer, so the run's phases are exactly those of a run
+without 1:1s. At the default of 16 the up-front 1:1s can spend at most 12, which leaves at least
+4 for pauses. The other 1:1 bounds are constants: `ONE_ON_ONE_MAX_EXCHANGES = 4` member
+exchanges per 1:1 and `UPFRONT_MAX = 3` planned 1:1s (`playbook.py`), a topic clipped to
+`TOPIC_MAX = 160` characters (`cast.py`), and `PAIR_MAX = 200` for an `align` or `meet_N` line
+and `OUTCOME_MAX = 200` for `agreed` and `still_open` (`turnblock.py`).
 
 The charge is clipped to 400 characters (`cast.CHARGE_MAX`) with an ellipsis rather than cut
 mid-word. A delegated `action` and a `stance` are cut to 200 (`turnblock.ACTION_MAX`,
@@ -438,6 +477,41 @@ owner is told so in its goal, and `_apply_block` enforces it. Without the gate t
 persona wants "a clear decision" and "concedes fast on small things" — can end the committee at
 turn 02, producing a two-turn transcript that reaches `done` looking healthy. The
 owner may close again on any later turn.
+
+**1:1 keys.** The block also carries the 1:1 keys, all in `turnblock.KEYS`. Each is honoured only
+where this table says, and recorded but ignored anywhere else. The owner's and the manager's
+meeting goals offer `align` (`turnblock.instruction(..., align=True)`) only while 1:1s are on.
+The plan and the 1:1 exchanges get their own worked examples (`turnblock.plan_instruction`,
+`turnblock.one_on_one_instruction`), and a 1:1 goal never shows `request_floor`, `close`,
+`align`, `meet_N` or `stance`.
+
+| key | honoured on | from |
+|---|---|---|
+| `align: <role> <role>: <topic>`, one per turn (a repeated line: the last wins) | a delivered meeting turn | owner, manager |
+| `meet_1`, `meet_2`, `meet_3`, each `<host> <guest>: <topic>` | the plan | owner |
+| `aligned: yes\|no` | a 1:1 member exchange | either member |
+| `agreed`, `still_open`, one line each | a 1:1 exchange or closing exchange | the host |
+| `delegate`, `action` | a 1:1 exchange or closing exchange, held until the 1:1 ends | owner |
+| `request_floor`, `close`, `align`, `meet_N` | never inside a 1:1, which records no `stance` either | nobody |
+
+A pair line is read by `turnblock.pair`: it is split at the first `:` into roles and topic, and
+the roles are split on commas or spaces and lowercased. The seated roles are the keys of
+`s["roster"]`, the seats listed under `## committee seated`, so a library or derived seat
+qualifies and the `chair` sentinel does not. A plan line's host is `owner` or `manager` and its
+guest another seated role, never `owner` or `junior_ic`; an `align` names two distinct seated
+roles, neither of them `junior_ic`. A dropped line is recorded with the first reason that
+applies, in this order: `one-on-ones off` (align only: the budget is below 2),
+`not owner or manager` (align only), `malformed` (no `:`, or not exactly two roles), `no topic`,
+`unknown role`, `invalid host` (plan only), `owner as guest` (plan only), `same member`,
+`junior_ic`, `duplicate` and `budget`. An `align` is a `duplicate` of a pair already pending (a
+pair may meet again once its 1:1 is done); a plan line is also a `duplicate` of an earlier line
+that passed the role checks, whether that line was scheduled or dropped for `budget`. A pair is
+dropped for `budget` when the budget cannot hold it once every pending pair and the closing
+exchange of the 1:1 in progress are reserved (see "One-on-ones"). Only the decision drops a
+scheduled pair, as `meeting ended`. Like `stance`, `agreed`, `still_open` and `action` are asked
+for in prose. The plan's worked example is the one placeholder line
+`meet_1: <host> <guest>: <topic>`, which names no seated role, so a verbatim copy schedules
+nothing.
 
 ## Voice and retakes
 
@@ -560,14 +634,14 @@ Take 3 is kept verbatim whatever it says, its prose never clipped (only an over-
 cut, and flagged `stance_clipped`), with the rules it broke. An undelivered or signals-only take
 is never sent back; its `voice` is null.
 
-- **Names and precedence (C8).** Take 1 is `t{NN}-{role}`, `s{N}-{role}` or `decision`; take k
-  is `{base}-take{k}`, where `s["base"]` is the take-1 name. Every mint of a speaking phase, here
-  and in any later loop, calls `_begin(s, base)`. `_retake` reads only `base` and `take`, so the
+- **Names and precedence (C8).** Take 1 is `t{NN}-{role}`, `s{N}-{role}`, `p01-owner`,
+  `o{NN}-{role}` or `decision`; take k is `{base}-take{k}`, where `s["base"]` is the take-1 name.
+  Every mint of a speaking phase, here and in any later loop, calls `_begin(s, base)`. `_retake` reads only `base` and `take`, so the
   turn counter, `current_turn`, `last_speaker` and HERMES_COMMITTEE_MAX_TURNS are untouched.
-  `next_phase` checks `_lost`, then a pending retake, then a pending selection stage, then
-  delegation, close, the cap and the rest, so a retake runs before a pending delegation and
-  before the cap. At a `DECISION_PHASES` phase a
-  pending retake mints `decision-take{k}`, otherwise `ruling`.
+  `next_phase` checks `_lost`, then a pending retake, then a pending selection stage, then the
+  1:1 plan and the 1:1 in progress, then delegation, the cap and the rest (the whole order is
+  under "Phases"), so a retake runs before a pending delegation and before the cap. At a
+  `DECISION_PHASES` phase a pending retake mints `decision-take{k}`, otherwise `ruling`.
 - **A retake that delivers nothing** (its worker failed, or it sent signals only) keeps the held
   take, graded again, with `retake_failed` added; that take is then written, gated, re-checked and
   snapshotted once. Its over-long stance or action is cut as take 3's would be, and the stance
@@ -587,7 +661,7 @@ is never sent back; its `voice` is null.
   violations, flags, error}` plus the caller's `extra` keys, and never `artifact`, `revised` or
   `cap` (the keys the kind-agnostic readers scan). Its `body` is the prose without the turn
   block, and its `error` is `takes: …` when the take file could not be written, else null. A kept
-  take goes under its own kind (`turn`, `decision`, `selection`, later `one_on_one`) with
+  take goes under its own kind (`turn`, `decision`, `selection`, `one_on_one_plan`, `one_on_one`) with
   `{take, takes, kept: true, voice, violations, flags}`; `voice` is null on an undelivered take,
   and a decision adds `body`, the chair's prose before the footer.
 - **Helpers later loops reuse**, none of which restates a rule: `_begin`;
@@ -603,7 +677,9 @@ is never sent back; its `voice` is null.
 - **Model invariants (T11, `check_invariants` in tests/unit/test_committee_playbook.py).** Phase
   names are unique, the last phase is in `DECISION_PHASES`, exactly one decision is kept, NN is
   unique, ordered and within the cap among non-`-take` phases, and every delivered reviewer turn
-  that was kept is answered by a kept owner turn.
+  that was kept is answered by a kept owner turn. Every check after the first leaves out the
+  selection phases, `p01-owner` and every `o{NN}-*` phase; the 1:1 phases have their own (see
+  "Invariants").
 - **The summary.** `voice.summary` over the kept rows (the last turn reduction per number, plus
   the latest decision) is the view's top-level `voice` and eval's `metrics.voice_summary`; eval
   measures a pre-voice run's bodies itself, on copies. Voice changed concision's inputs, so it is
@@ -617,45 +693,121 @@ goal shape must fit it. For the cast's own shapes, voice's rule stands: if one g
 keep a 20-character margin (3580), in characters and in UTF-16 units, and spec D7 governs them:
 a select goal or a library seat that goes over shortens its own fixed text, since
 `selection.FIELD_MAX` clips only a derived seat's fields; for a derived seat,
-lower `selection.FIELD_MAX`, never raise `GOAL_MAX`. The owner's retake has 28 characters left
-at this worst case (a real stem such as `t12-data_scientist` is 30 shorter), which is why the goal
-names the takes file and the images folder relative to the thread rather than by absolute path.
+lower `selection.FIELD_MAX`, never raise `GOAL_MAX`. The tightest shape is the owner's retake
+with the align offer, 30 characters under at this worst case (a real stem such as
+`t12-data_scientist` is 30 shorter). One-on-ones paid for that offer out of the owner's own fixed
+text: `_GUARDRAIL_IMAGE` went from 228 to 182 characters before format, and `_FLOOR_OWNER` and
+the thread's channel paragraph gave up 32 more. The same worst case is why the goal names the
+takes file and the images folder relative to the thread rather than by absolute path.
 
 | shape | take 1 | retake |
 |---|---|---|
-| owner | 3246 (354 left) | 3572 (28 left) |
-| senior_director | 2929 (671 left) | 3255 (345 left) |
-| manager | 2835 (765 left) | 3161 (439 left) |
-| tpm | 2794 (806 left) | 3120 (480 left) |
-| pm | 2811 (789 left) | 3137 (463 left) |
-| tl | 2819 (781 left) | 3145 (455 left) |
-| staff_ic | 2844 (756 left) | 3170 (430 left) |
-| data_scientist | 2790 (810 left) | 3116 (484 left) |
+| owner | 3127 (473 left) | 3453 (147 left) |
+| senior_director | 2826 (774 left) | 3152 (448 left) |
+| manager | 2732 (868 left) | 3058 (542 left) |
+| tpm | 2691 (909 left) | 3017 (583 left) |
+| pm | 2708 (892 left) | 3034 (566 left) |
+| tl | 2716 (884 left) | 3042 (558 left) |
+| staff_ic | 2741 (859 left) | 3067 (533 left) |
+| data_scientist | 2687 (913 left) | 3013 (587 left) |
 | junior_ic | 2868 (732 left) | 2893 (707 left) |
 | chair | 2553 (1047 left) | 2879 (721 left) |
-| s1-owner (select) | 3054 (546 left) | 3340 (260 left) |
-| s2-manager (select) | 3014 (586 left) | 3302 (298 left) |
-| s3-senior_director (select) | 3271 (329 left) | 3567 (33 left) |
-| derived reviewer (24-char slug, clip limits) | 3273 (327 left) | 3579 (21 left) |
-| library seat (the longest: sre at take 1, partner_owner at a retake) | 3251 (349 left) | 3542 (58 left) |
-| fixed reviewer speaking for others (senior_director, the longer) | 3103 (497 left) | 3400 (200 left) |
+| s1-owner (select) | 3007 (593 left) | 3293 (307 left) |
+| s2-manager (select) | 2965 (635 left) | 3253 (347 left) |
+| s3-senior_director (select) | 3214 (386 left) | 3510 (90 left) |
+| derived reviewer (24-char slug, clip limits) | 3190 (410 left) | 3496 (104 left) |
+| library seat (the longest: sre) | 3189 (411 left) | 3474 (126 left) |
+| fixed reviewer speaking for others (senior_director, the longer) | 3029 (571 left) | 3326 (274 left) |
 | junior_ic speaking for others | 3100 (500 left) | 3090 (510 left) |
+| 1:1 plan | 2347 (1253 left) | exempt from retakes |
+| 1:1 owner host | 2950 (650 left) | 3237 (363 left) |
+| 1:1 manager host | 2900 (700 left) | 3189 (411 left) |
+| 1:1 library guest (the longest library seat) | 2969 (631 left) | 3254 (346 left) |
+| 1:1 derived guest | 2968 (632 left) | 3274 (326 left) |
+| 1:1 library member of a pause (the longest library seat) | 3044 (556 left) | 3329 (271 left) |
+| 1:1 derived member of a pause | 2988 (612 left) | 3294 (306 left) |
+| 1:1 owner closing | 2858 (742 left) | 3145 (455 left) |
+| 1:1 manager closing | 2733 (867 left) | 3022 (578 left) |
+| owner meeting, align offered | 3244 (356 left) | 3570 (30 left) |
+| manager meeting, align offered (speaking for others) | 3081 (519 left) | 3407 (193 left) |
 
 The select rows are `cast.select_goal` for each stage, each naming its own image (`s1-owner.svg`)
 and, on a retake, its own last take (`takes/s1-owner-take2.md`). The derived reviewer is the
 longest persona a selector can seat: a 24-character slug, every field at its clip limit
-(`selection.FIELD_MAX` = 94, the largest that keeps its retake within 3580 once
-`cast.DERIVED_STYLE` and a 150-character speaks-for line joined it; it was 120), image
-`t99-<slug>` and last take `takes/t99-<slug>-take2.md`. It fits only at that real stem: at the
-cast rows' 48-character stem it would be over; a derived seat with no stake measures the same,
+(`selection.FIELD_MAX` = 94, cut from 120 so its retake fit within 3580 once
+`cast.DERIVED_STYLE` and a 150-character speaks-for line joined it), image `t99-<slug>` and last
+take `takes/t99-<slug>-take2.md`. Since one-on-ones shortened `_GUARDRAIL_IMAGE`, that retake has
+84 characters to spare under 3580 (each character of `FIELD_MAX` is five of the goal, so 110
+would still fit), and `FIELD_MAX` stays 94; at the cast rows' 48-character stem the retake is
+3536, still within 3580. A derived seat with no stake measures the same,
 its stake being the rationale clipped to `selection.FIELD_MAX`. Each library row carries its
 rationale at `selection.RATIONALE_MAX` in its "Why you hold this seat" line, the same speaks-for
 line and the `cast.DERIVED_STYLE` sentence under them; the fixed rows carry the speaks-for line
 and that sentence, at `t99-<role>` (the junior IC's goal offers no image). In
 every row UTF-16 units equal characters: worker text above U+FFFF is blanked, and the fixed text
-has none. `test_every_goal_stays_under_the_budget_at_maximum_size` holds every one of these
-under `GOAL_MAX`, and the selection rows within 3580 in both units; a later loop that adds a goal
-shape adds it there and here.
+has none. The 1:1 rows are `_assert_one_on_one_goals_fit()`'s, at the same worst case plus a
+5000-character topic and a 1:1 file under the deep run directory: the seated roster with the
+derived seat at its clip limits and every library seat's rationale at `selection.RATIONALE_MAX`,
+a 150-character speaks-for line on every seat but the owner, and a retake naming
+`takes/o99-<role>-take2.md`. A library row is its longest library seat. The align rows are the
+owner's and the manager's meeting goals with `align=True` at the cast rows' 48-character stem, on
+that roster, the manager speaking for others. The plan is exempt from retakes, so it has no
+retake shape. `test_every_goal_stays_under_the_budget_at_maximum_size` holds every one of these
+under `GOAL_MAX`, and the selection, 1:1 and align rows within 3580 in both units; a later loop
+that adds a goal shape adds it there and here.
+
+## One-on-ones
+
+Before the opening round the owner, or her manager (`manager`), holds 1:1s with key members, and
+later in the review the owner or the manager can pause the meeting for more. It all lives in the
+playbook; `engine/` and `server/` know nothing of it.
+
+- **Scheduling.** Every scheduling and budget decision is made in `reduce`, by one of three pure
+  gates: `_apply_plan` (the plan's `meet_N` lines), `_apply_block` (an `align` on a meeting turn,
+  through `_align`) and `_apply_one_on_one` (the only place a 1:1 ends). `next_phase` only mints,
+  and through `_decision` drops whatever the turn cap leaves pending. A pair needs 2 exchanges, or
+  3 when its host is not a member (`_need`), and is scheduled only if the budget still holds it
+  once every pending pair, and the closing exchange of the 1:1 in progress, are reserved
+  (`_free`). So a scheduled pair always starts, and `one_on_one_used` never passes the budget.
+  Scheduled pairs wait in `s["pending_one_on_ones"]`, first in, first out, one 1:1 at a time.
+- **Who meets.** A 1:1 has two members who exchange, and a host who is always the owner or the
+  manager. A planned 1:1 is its guest and its host, guest first. A pause names a pair: the owner
+  hosts if she is in it, else the manager if she is, else the caller. A host who is not a member
+  reads the 1:1 file once the members finish and records the outcome in one closing exchange
+  (`one_on_one_close`), which counts against the budget but not the 4-exchange cap.
+- **How it ends.** The first member opens and the two alternate. After each exchange by the
+  second member (the host, when the host is a member) the 1:1 ends at the first of: `aligned`
+  (both members' latest `aligned` is yes; an absent key reads as no), `exchange cap` (4 member
+  exchanges) or `budget` (fewer than 2 exchanges of the budget left unreserved). An undelivered
+  exchange with no held take ends it at once as `not delivered`, with no closing exchange.
+- **Outcome.** A 1:1 is aligned when it ended `aligned`. `agreed` and `still_open` are the
+  host's latest stated values (an exchange that omits one keeps the last), and with whether it
+  aligned they are all the room reads of it. A pair has met, for the verdict footer
+  (`s["one_on_ones_met"]`), only when both members spoke, so a 1:1 that ended `not delivered`
+  counts only once it reached its third exchange.
+- **Edits.** The owner may state `delegate` and `action` on any 1:1 exchange she speaks, closing
+  exchanges included, and the latest block that states `delegate` stands. A 1:1 that ends with an
+  action held hands it to the junior IC, who applies it as an ordinary `tNN-junior_ic` turn before
+  anything else runs, with `origin_one_on_one` set to that 1:1's `seq` and `delegated_by_turn`
+  null. It costs one `MAX_TURNS` turn, and with the cap unset it raises the cap by one, so a 1:1
+  edit never takes a reviewer's opening turn. The cap never drops it: a 1:1 starts only while a
+  turn is left, and no plan or 1:1 phase spends one. A 1:1 without the owner makes no edit, and
+  one that ends with nothing held hands nothing over.
+- **Voice.** An exchange keeps the owner's or reviewer's cap and every hard rule in "Voice and
+  retakes". A take that breaks one is retaken as `o{NN}-{role}-take{k}`, which spends neither the
+  budget nor an exchange, and a retake that delivers nothing keeps the held take. Plan and
+  exchange goals say "write no file at all": the master grades 1:1 takes with
+  `_grade(..., file_images=False)`, so any file image is `image_missing` and retaken, because
+  `images/` is the whole room's. A mermaid figure stays in the exchange. The plan is not speech in
+  the room: it is graded but never retaken. As a meeting goal does, an exchange goal says whom a
+  seated member speaks for, and a retake's goal names its kept take
+  (`cast.one_on_one_goal(..., last_take=, speaks_for=)`). Every plan and exchange goal shape has
+  its row in the goal headroom table.
+- **Privacy.** Only a 1:1's participants' goals name its file. The file is 0600 in a 0700
+  `one-on-ones/` folder, appended through `O_NOFOLLOW` and only as a regular file, and named only
+  from seat slugs, so a planted symlink, file or FIFO, or a role that is not a slug, is refused
+  rather than written through. A refused folder never stalls the meeting: the goal still names
+  the path, the exchange's `error` records the refusal, and the 1:1 goes on.
 
 ## Where things land
 
@@ -664,7 +816,9 @@ Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
 - `runs/<run_id>/thread.md` — the transcript, append-only: the `open` header (charge, artifact,
   the fixed four, the seat library, ground rules), one `## turn NN — <name>, <title> (<role>)` entry per settled turn (its
   kept take only), then `## decision`. Before the first turn come one `## selection N: ...` entry
-  per kept selection stage and `## committee seated` (see "Selection"). A turn whose worker failed
+  per kept selection stage and `## committee seated` (see "Selection"), then, with 1:1s on, the
+  1:1 plan and each up-front 1:1's outcome; a pause's outcome lands between the two meeting turns
+  its 1:1 ran between (see below). A turn whose worker failed
   still gets a stub —
   `_(no turn delivered — the worker failed; see hermes show)_`.
 - `runs/<run_id>/revised/<basename>` — the revised copy, byte-copied from the original before the
@@ -700,12 +854,49 @@ Under `$HERMES_HOME` (default `~/.hermes`), mode 0700:
 - `runs/<run_id>/takes/` — mode 0700: the body of each take the rules sent back, as
   `{base}-take{n}.md` (0600), written by the master so the retake can reread it ("Voice and
   retakes"). No route serves it.
+- `runs/<run_id>/one-on-ones/<seq:02d>-<m0>-<m1>.md`: one private file per 1:1, for example
+  `runs/<run_id>/one-on-ones/01-tpm-manager.md`, `m0` and `m1` being its members in speaking
+  order. Only `reduce` writes it, append-only and kept takes only: exchange 1 first writes the
+  header `# 1:1 <seq>: <M0> ↔ <M1>, hosted by <Host>`, `Topic: <topic>` and the ground rules, then
+  each kept exchange appends `## exchange N: Name, Title (role)`, and a closing exchange
+  `## outcome: Name, Title (role)`. No reduction records its path, no route serves it, and the
+  view never reads it (see "One-on-ones" for how it is kept private).
 
 Every turn reduction also carries `answers_turn` (on an owner turn, the reviewer turn it answered)
 and `delegated_by_turn` (on a junior-IC turn, the owner turn whose delegation it applied), and the
 decision carries `dropped_delegation_turn`. All three are always written, null where they do not
 apply, so an absent key marks a reduction from before they existed. The recorded `artifact` and
 `revised` stay the master's absolute host paths; nothing that serves the view opens them.
+
+thread.md gets each 1:1's outcome, never its exchanges. The plan writes
+`## 1:1 plan: Name, Title (owner)`, one `- Host ↔ Guest: <topic>` line per scheduled pair (or
+`_(no up-front 1:1s: no plan delivered)_`, or `_(no up-front 1:1s: no valid pairs)_`), and one
+`- dropped: <line> (<reason>)` line per dropped plan line. A 1:1 writes its outcome entry the
+moment it ends, so the entry comes before the next `## turn` entry and before `## decision`:
+`## 1:1 <seq>: <Host> ↔ <Guest> (aligned)` or `(not aligned)` (`<A> ↔ <B>, hosted by <Host>`
+when the host is not a member), then `Agreed: …` and `Still open: …`, each only when stated.
+When the host stated neither, it reads `_(no outcome recorded: <ended>)_`, or
+`_(no outcome recorded: the host's closing exchange was not delivered)_`. committee-eval takes
+`## 1:1 N: ` and `## 1:1 plan: ` as entry boundaries: an outcome is its own entry, citable as
+`where:"one_on_one"`, and the plan belongs to none. `verdict_grounded@2` and
+`concern_coverage@4` count a claim or a concern settled in an outcome entry as grounded or
+answered; see [committee-eval.md](committee-eval.md).
+
+The plan is reduced as `one_on_one_plan` (`delivered`, `body`, `one_on_ones_scheduled`,
+`one_on_ones_dropped`, `fallback`, `one_on_one_budget`, `error` and voice's kept-take fields),
+and each kept exchange as `one_on_one`, with `seq`, `origin` (`upfront` or `pause`),
+`called_by`, `after_turn` (0 for an up-front 1:1), `host`, `members`, `topic`, `speaker`,
+`exchange` (null on a closing exchange), `closing`, `delivered`, `body`, `aligned`, `agreed`,
+`still_open`, `delegate`, `action`, `final`, `ended`, `outcome` (`{aligned, agreed, still_open}`,
+on the final exchange only), `delegated_action`, `one_on_one_budget`, `one_on_one_used`, `error`
+and voice's kept-take fields. Neither kind carries `cap`, `artifact`, `revised`, `role` or
+`turn`, because kind-blind readers pick those up. A discarded exchange is voice's `take`
+reduction plus `seq` and `exchange`. A meeting turn adds `align` (as asked),
+`one_on_ones_scheduled`, `one_on_ones_dropped` and `one_on_one_budget`, and every turn reduction
+and every `rechecks` entry adds `origin_one_on_one`: the seq a junior turn's edit came from, null
+otherwise. The decision adds `dropped_one_on_ones`, every drop of every reason, and its verdict
+names the pairs that never met, `- dropped_one_on_ones (they never met): <role> ↔ <role> (<reason>)`,
+for the reasons `budget` and `meeting ended` only, leaving out a pair that met in another 1:1.
 
 A run reduced before `doc/` existed can be backfilled once from its junior-IC traces, from the repo
 root: `python scripts/backfill_doc_snapshots.py --run <id> --rev <commit> --path <repo path>
@@ -795,6 +986,31 @@ header's artifact line meanwhile, and once `doc/00-original` is readable it show
 on Original, under "Nothing said yet". On a run that is seating its committee it waits for the
 first turn, as the transcript does (see "Selection").
 
+**1:1s render inside the transcript and the Metrics section, and no tab is added.** Each 1:1 is
+a collapsed group headed `1:1 <seq>: Host ↔ Guest · <outcome>` (`A ↔ B, hosted by H` when the
+host is not a member) beside its topic, where the outcome reads `in progress`, `aligned` or
+`not aligned (<ended>)`. Its `Agreed:` and `Still open:` lines (or "no outcome recorded: …", or
+"in progress") show even while it is collapsed, and the header is the toggle that shows every
+kept exchange, rendered through `Segments` and badged like a turn. A group sits after the turn
+it followed, and up-front groups sit before the first turn. Before `t01` exists they render under
+the Selection card as "1:1s before the opening round", so an up-front 1:1 is on screen as soon
+as its first exchange is reduced. While 1:1s are pending, the progress card reads "Paused for
+1:1s: A ↔ B (exchange x of 4)", with "(closing)" on a closing exchange, or "1:1s next: …" while
+none of them has a kept exchange yet. While a 1:1 runs nobody holds the floor, and the roster
+rows of its two members (of the host alone during a closing exchange) read "in a 1:1", a solid
+live badge that outranks every floor state. The Metrics section's 1:1s block is never hidden:
+"K 1:1s · E of B exchanges · A aligned" (K the finished 1:1s), or "1:1s were off for this run"
+when the budget was below 2, or "1:1s not recorded for this run" for a run reduced before 1:1s
+existed. The verdict card's `dropped-one-on-ones` note lists the pairs that never met, for the
+reasons `budget` and `meeting ended`, as the verdict footer does. An edit delegated in a 1:1 is a
+stepper step "raised in 1:1 M0 ↔ M1", with "why: <topic>", "delegated: <action>" and a
+`1:1 <seq>` link that opens the group and scrolls it into view, and the group's "see edit k"
+selects the step. A derived seat's name carries its marker on every 1:1 surface. All of it is
+built from reductions: `view_data` carries `one_on_ones`, `progress.paused` (`{pairs, current}`,
+null when no 1:1 is pending or the meeting is over), `progress.one_on_one` (`{used, budget}`,
+null for a run reduced before 1:1s) and `verdict.dropped_one_on_ones`, and reads neither the 1:1
+files nor the server's environment. `timeline`, the floor and the turn metrics stay turns only.
+
 The view is the playbook's, not the control plane's. `playbooks/committee/view/dist/committee.umd.js`
 is built from `playbooks/committee/view/src/` with the toolchain in `web/` and committed, so
 running it needs no Node — only rebuilding does
@@ -813,7 +1029,8 @@ nothing until the view and its data have loaded, and a failed asset load is left
 own tab to report. The committee view declares `metrics` and shows the meeting's numbers there:
 turns per seat (undelivered ones called out), delegations out of delivered owner turns, junior
 edits applied or not by the master's re-check, floor latency in turns (reductions carry no
-timestamps), and cumulative prose per turn, with signals-only and undelivered turns adding none.
+timestamps), and cumulative prose per turn, with signals-only and undelivered turns adding none,
+and the 1:1s block described above.
 
 **A turn renders only through `Segments`** (`playbooks/committee/view/src/Voice.tsx`), never as one
 Markdown blob: Markdown passes an image's `src` through raw, so `images/x.svg` would resolve
@@ -942,6 +1159,14 @@ the master" also means "a playbook you trust with the operator's API token".
   `hermes run resume <id> --wait` finishes the run after the ruling, reading it from the database.
 - `MockAgent` cannot serve this playbook — it echoes the request payload back as the result — so
   exercising a whole run needs an agent double that actually talks.
+- **A 1:1 is private by prompt only.** Workers run under `bypassPermissions`, so nothing but the
+  goal stops a worker from reading a 1:1 file it is not in. The room reads only the outcome
+  entries in thread.md.
+- **1:1 state is not resumable either.** The plan, the pending pairs and the 1:1 in progress
+  live in the master's memory beside the floor queue. A process lost mid-1:1 records `lost` and
+  ends the run `failed`, and the view then shows no pause.
+- **1:1s need a local site**, like the rest of the meeting: the 1:1 files live on the master,
+  and remote sites are out of scope.
 
 ## Invariants
 
@@ -966,3 +1191,13 @@ the master" also means "a playbook you trust with the operator's API token".
   `_state_by_run` is empty: no `self._state(run)`, no file IO, no parsing of the runtime phase name.
   Adding state to any of them breaks a split deployment silently rather than failing a test.
 - Stdlib-only. Nothing is written outside the run's own directory under `$HERMES_HOME`.
+- **Plan and 1:1 phases carry their own names.** `p01-owner` is minted at most once, and the
+  `o{NN}-{role}` names are unique and strictly increasing (1, 2, 3, … with no gap), with NN never
+  above the 1:1 budget and `one_on_one_used` never above it either. The test model's NN checks
+  (`check_invariants`) skip `p01-owner` and every `oNN-*` name, their `-take{k}` forms included,
+  and check oNN on their own.
+- A 1:1 never sets run state. The run stays `running`, and no plan or 1:1 reduction carries
+  `needs_human_ticket_ids`: only the decision reduction does.
+- Every scheduled 1:1 either finishes or is listed once in `dropped_one_on_ones` as
+  `meeting ended`, and every 1:1 has at most 4 member exchanges and at most one closing exchange.
+  The turn cap never drops an edit delegated from a 1:1.

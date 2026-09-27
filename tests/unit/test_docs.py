@@ -177,3 +177,32 @@ def test_committee_spec_documents_selection():
         "the opening round in seniority order",
     ):
         assert stale not in content, f"committee spec still says {stale!r}"
+
+
+def test_committee_spec_documents_one_on_ones():
+    """docs/specs/committee-playbook.md documents the 1:1 phases, keys, bounds, env var, files and view."""
+    from playbooks.committee import cast, playbook, turnblock
+
+    spec_path = Path(__file__).parent.parent.parent / "docs" / "specs" / "committee-playbook.md"
+    content = spec_path.read_text()
+
+    for needle in (
+        "HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS", "p01-owner", "one-on-ones/", "align:",
+        "meet_1", "still_open", "one_on_one_close", "dropped_one_on_ones", "in a 1:1",
+    ):
+        assert needle in content, f"committee spec does not document {needle!r}"
+    # The bounds are stated as the code has them, so a changed constant fails here.
+    for name, value in (
+        ("ONE_ON_ONE_MAX_EXCHANGES", playbook.ONE_ON_ONE_MAX_EXCHANGES),
+        ("UPFRONT_MAX", playbook.UPFRONT_MAX),
+        ("TOPIC_MAX", cast.TOPIC_MAX),
+        ("PAIR_MAX", turnblock.PAIR_MAX),
+        ("OUTCOME_MAX", turnblock.OUTCOME_MAX),
+    ):
+        assert f"`{name} = {value}`" in content, f"committee spec does not state {name} = {value}"
+    row = (
+        "| HERMES_COMMITTEE_MAX_ONE_ON_ONE_TURNS | 16 | Budget of 1:1 exchanges per run, separate "
+        "from MAX_TURNS; 0 turns 1:1s off; junk or negative falls back to 16 |"
+    )
+    assert row in content, "the Configuration table lacks the verbatim 1:1 budget row"
+    assert playbook.DEFAULT_MAX_ONE_ON_ONE == 16 and playbook.ENV_MAX_ONE_ON_ONE in row
