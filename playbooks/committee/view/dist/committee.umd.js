@@ -1986,9 +1986,18 @@
 		}
 		return `1:1s next: ${pairs.map((p) => pairLabel(p, derived)).join(", ")}`;
 	}
+	/**
+	* A 1:1 with no final reduction is running only while the pause lists its seq.
+	* `view_data` drops the pause once the run is lost or decided or the chair has
+	* it, so after that the 1:1 was cut off. `ended` stays null either way, so it
+	* is still not counted as finished.
+	*/
+	function unfinished(g, live) {
+		return live.has(g.seq) ? "in progress" : "stopped before it finished";
+	}
 	/** The collapsed header's word on the 1:1. */
-	function outcomeLine(g) {
-		if (g.ended === null) return "in progress";
+	function outcomeLine(g, live) {
+		if (g.ended === null) return unfinished(g, live);
 		return g.aligned ? "aligned" : `not aligned (${g.ended})`;
 	}
 	/**
@@ -1996,15 +2005,15 @@
 	* payload carries no `closing_delivered`, but the closing exchange is kept
 	* either way, so an undelivered one is visible in `exchanges`.
 	*/
-	function outcomeLines(g) {
-		if (g.ended === null) return ["in progress"];
+	function outcomeLines(g, live) {
+		if (g.ended === null) return [unfinished(g, live)];
 		const lines = [];
 		if (g.agreed !== null) lines.push(`Agreed: ${g.agreed}`);
 		if (g.still_open !== null) lines.push(`Still open: ${g.still_open}`);
 		if (lines.length > 0) return lines;
 		return [`no outcome recorded: ${g.exchanges.some((x) => x.closing && !x.delivered) ? "the host's closing exchange was not delivered" : g.ended}`];
 	}
-	function OneOnOneGroup({ g, runId, open, onToggle, derived, edit, onSeeEdit }) {
+	function OneOnOneGroup({ g, runId, open, onToggle, derived, live, edit, onSeeEdit }) {
 		const { Badge } = ds();
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 			"data-testid": `one-on-one-${g.seq}`,
@@ -2045,7 +2054,7 @@
 								fontWeight: 600,
 								color: "var(--text-primary)"
 							},
-							children: `1:1 ${g.seq}: ${pairLabel(g, derived)} · ${outcomeLine(g)}`
+							children: `1:1 ${g.seq}: ${pairLabel(g, derived)} · ${outcomeLine(g, live)}`
 						}),
 						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 							style: {
@@ -2065,7 +2074,7 @@
 						lineHeight: 1.45,
 						color: "var(--text-secondary)"
 					},
-					children: outcomeLines(g).map((line) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: line }, line))
+					children: outcomeLines(g, live).map((line) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: line }, line))
 				}),
 				edit !== void 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
 					type: "button",
@@ -2855,6 +2864,7 @@
 		if (data.document.captured) data.document.steps.forEach((step, i) => {
 			if (typeof step.origin_one_on_one === "number") oneOnOneEdits.set(step.origin_one_on_one, [i + 1, step.turn]);
 		});
+		const live = new Set((data.progress.paused?.pairs ?? []).map((p) => p.seq));
 		const group = (g) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OneOnOneGroup, {
 			g,
 			runId,
@@ -2870,7 +2880,8 @@
 				else next.add(g.seq);
 				return next;
 			}),
-			derived
+			derived,
+			live
 		}, `oneonone-${g.seq}`);
 		const openTurn = (n) => {
 			setOpen((prev) => new Set(prev).add(n));

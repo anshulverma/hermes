@@ -3392,6 +3392,7 @@ describe('CommitteeView one-on-ones', () => {
     const second = screen.getByTestId('one-on-one-2');
     const header = within(second).getByRole('button');
     expect(header).toHaveTextContent('1:1 2: Ruth Delgado ↔ Elena Vargas · not aligned (exchange cap)');
+    expect(header).toHaveTextContent('whether a pilot customer exists');
     expect(header).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByTestId('one-on-one-outcome-2')).toHaveTextContent(
       'Still open: whether the pilot customer signs before Q3',
@@ -3405,12 +3406,51 @@ describe('CommitteeView one-on-ones', () => {
     expect(within(second).queryByText(/pilot is a hope/)).toBeNull();
 
     fireEvent.click(header);
+    expect(header).toHaveAttribute('aria-expanded', 'true');
     expect(within(second).getByText(/pilot is a hope/)).toBeInTheDocument();
     expect(within(second).getByText('exchange 3')).toBeInTheDocument();
     expect(screen.getByTestId('one-on-one-outcome-2')).toBeInTheDocument();
+    // One click opens one group.
+    expect(within(screen.getByTestId('one-on-one-1')).getByRole('button')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByText(/relay has a named owner/)).toBeNull();
 
     fireEvent.click(header);
     expect(within(second).queryByText(/pilot is a hope/)).toBeNull();
+
+    // The host's closing exchange is labelled 'outcome', and an undelivered one says so.
+    const third = screen.getByTestId('one-on-one-3');
+    fireEvent.click(within(third).getByRole('button'));
+    expect(within(third).getByText('outcome')).toBeInTheDocument();
+    expect(within(third).getByText('no turn delivered')).toBeInTheDocument();
+    expect(within(third).getByText('no prose recorded for this exchange')).toBeInTheDocument();
+    expect(within(third).queryByText(/exchange null/)).toBeNull();
+  });
+
+  it("words a 1:1's outcome as thread.md does: agreed and still open, or why none was recorded", () => {
+    const [withTpm, withPm, tlAndStaff] = oneOnOneRun.one_on_ones!;
+    const lines = (seq: number) =>
+      [...screen.getByTestId(`one-on-one-outcome-${seq}`).children].map((line) => line.textContent);
+
+    // A member's exchange that never arrived ends the 1:1 'not delivered'; a delivered closing leaves `ended`.
+    const failed = { ...withPm.exchanges[1], delivered: false, body: '', segments: [], badges: ['no_turn'] };
+    const heard = { ...tlAndStaff.exchanges[2], delivered: true, badges: [] };
+    const { unmount } = show({
+      ...oneOnOneRun,
+      one_on_ones: [
+        withTpm,
+        { ...withPm, ended: 'not delivered', aligned: false, still_open: null, exchanges: [withPm.exchanges[0], failed] },
+        { ...tlAndStaff, exchanges: [...tlAndStaff.exchanges.slice(0, 2), heard] },
+      ],
+    });
+    expect(lines(2)).toEqual(['no outcome recorded: not delivered']);
+    expect(lines(3)).toEqual(['no outcome recorded: aligned']);
+    unmount();
+
+    show({ ...oneOnOneRun, one_on_ones: [withTpm, { ...withPm, agreed: 'the pilot is unsigned' }, tlAndStaff] });
+    expect(lines(2)).toEqual([
+      'Agreed: the pilot is unsigned',
+      'Still open: whether the pilot customer signs before Q3',
+    ]);
   });
 
   it('renders a 1:1 exchange through Segments, so its diagram is a figure', () => {
@@ -3452,6 +3492,17 @@ describe('CommitteeView one-on-ones', () => {
     expect(screen.getByTestId('paused-for-one-on-ones')).toHaveTextContent(
       '1:1s next: Marcus Feld ↔ Priya Raman, hosted by Ruth Delgado',
     );
+    // Every pending pair, in order.
+    const [{ host: owner }, { members: [pm] }] = oneOnOneRun.one_on_ones!;
+    const fourth = { seq: 4, host: owner, members: [pm, owner] as [typeof pm, typeof pm] };
+    const twoNext = {
+      ...pausedRun,
+      progress: { ...pausedRun.progress, paused: { pairs: [...pausedRun.progress.paused!.pairs, fourth], current: null } },
+    };
+    rerender(<CommitteeView runId="run-2" data={twoNext} refetch={noop} />);
+    expect(screen.getByTestId('paused-for-one-on-ones').textContent).toBe(
+      '1:1s next: Marcus Feld ↔ Priya Raman, hosted by Ruth Delgado, Maya Okonkwo ↔ Elena Vargas',
+    );
 
     // A derived seat is marked wherever a 1:1 names it, as on every other surface.
     const derivedTl = {
@@ -3468,10 +3519,31 @@ describe('CommitteeView one-on-ones', () => {
     expect(within(third).getByText('tl · derived seat')).toBeInTheDocument();
   });
 
+  it('says a 1:1 the run stopped before it finished was stopped, not in progress', () => {
+    // A lost run, a decision or the chair ends the pause, and view_data sends it as null.
+    const stopped = { ...pausedRun, progress: { ...pausedRun.progress, paused: null } };
+    const { unmount } = show(stopped);
+
+    expect(within(screen.getByTestId('one-on-one-3')).getByRole('button').textContent).toBe(
+      '▸1:1 3: Marcus Feld ↔ Priya Raman, hosted by Ruth Delgado · stopped before it finishedwhether the shard API ships as v1 or waits for v2',
+    );
+    expect(screen.getByTestId('one-on-one-outcome-3').textContent).toBe('stopped before it finished');
+    expect(screen.queryByText(/in progress/)).toBeNull();
+    unmount();
+
+    // Still not finished: the Metrics tab counts only the two that ended.
+    render(<CommitteeView runId="run-2" data={stopped} refetch={noop} variant="metrics" />);
+    expect(screen.getByTestId('one-on-one-count').textContent).toBe('2 1:1s · 7 of 16 exchanges · 1 aligned');
+  });
+
   it('shows who is in a 1:1 on the roster', () => {
     show(pausedRun);
 
     expect(within(screen.getByTestId('roster-tl')).getByText('in a 1:1')).toBeInTheDocument();
+    // Solid and live, as the floor holder's badge is.
+    expect(within(screen.getByTestId('roster-tl')).getByText('in a 1:1').getAttribute('style')).toContain(
+      'background: var(--status-live)',
+    );
     expect(within(screen.getByTestId('roster-staff_ic')).getByText('in a 1:1')).toBeInTheDocument();
     // The host of a member exchange waits outside it.
     expect(screen.getByTestId('roster-manager')).toHaveTextContent('waiting to speak');
@@ -3503,6 +3575,23 @@ describe('CommitteeView one-on-ones', () => {
     expect(screen.getByTestId('one-on-one-count')).toHaveTextContent('1 1:1s · 2 of 16 exchanges · 1 aligned');
     rerender(<CommitteeView runId="run-2" data={{ ...upfrontRun, one_on_ones: [] }} refetch={noop} variant="metrics" />);
     expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
+
+    // Every up-front group, and a derived seat marked in '1:1s next'.
+    rerender(
+      <CommitteeView
+        runId="run-2"
+        data={{
+          ...upfrontRun,
+          roster: upfrontRun.roster.map((p) => (p.role === 'pm' ? { ...p, source: 'derived' as const } : p)),
+          one_on_ones: oneOnOneRun.one_on_ones!.slice(0, 2),
+        }}
+        refetch={noop}
+      />,
+    );
+    expect(transcriptOrder(container)).toEqual(['one-on-one-1', 'one-on-one-2']);
+    expect(screen.getByTestId('paused-for-one-on-ones').textContent).toBe(
+      '1:1s next: Ruth Delgado ↔ Elena Vargas (pm · derived seat)',
+    );
   });
 
   it('leaves a run from before 1:1s exactly as it was', () => {
@@ -3511,6 +3600,10 @@ describe('CommitteeView one-on-ones', () => {
     expect(container.querySelector('[data-testid^="one-on-one-"]')).toBeNull();
     expect(screen.queryByTestId('paused-for-one-on-ones')).toBeNull();
     expect(screen.queryByText('in a 1:1')).toBeNull();
+
+    // Seated before t01 with no 1:1: no empty up-front section.
+    show(seatedData);
+    expect(screen.queryByText('1:1s before the opening round')).toBeNull();
   });
 });
 
@@ -3523,6 +3616,7 @@ describe('CommitteeView 1:1s on the Metrics tab', () => {
   it('counts finished 1:1s, exchanges against the budget, and the aligned ones', () => {
     metrics(metricsOneOnOnes);
 
+    expect(screen.getByText('1:1s')).toBeInTheDocument();
     expect(screen.getByTestId('one-on-one-count')).toHaveTextContent(
       '2 1:1s · 6 of 16 exchanges · 1 aligned',
     );
@@ -3601,8 +3695,30 @@ describe('Verdict 1:1s that never met', () => {
     unmountSpoke();
 
     // A pair the playbook refused on the spot is not a pair that never met.
-    render(<Verdict runId="run-2" verdict={{ ...VERDICT, dropped_one_on_ones: drops.slice(2) }} />);
+    const { unmount: unmountRefused } = render(
+      <Verdict runId="run-2" verdict={{ ...VERDICT, dropped_one_on_ones: drops.slice(2) }} />,
+    );
     expect(screen.queryByTestId('dropped-one-on-ones')).toBeNull();
+    unmountRefused();
+
+    // Whichever order the drop names the pair in, it met: the 1:1 seats [tpm, owner].
+    const again = { seq: null, text: 'owner tpm: again', members: ['owner', 'tpm'], reason: 'budget' };
+    const { unmount: unmountAgain } = render(
+      <Verdict runId="run-2" verdict={{ ...VERDICT, dropped_one_on_ones: [again] }} oneOnOnes={[oneOnOneRun.one_on_ones![0]]} />,
+    );
+    expect(screen.queryByTestId('dropped-one-on-ones')).toBeNull();
+    unmountAgain();
+
+    // The view hands the card its 1:1s and its derived seats.
+    show({
+      ...oneOnOneRun,
+      roster: oneOnOneRun.roster.map((p) => (p.role === 'tl' ? { ...p, source: 'derived' as const } : p)),
+      verdict: {
+        ...run2.verdict!,
+        dropped_one_on_ones: [again, { seq: null, text: 'tl tpm: order', members: ['tl', 'tpm'], reason: 'budget' }],
+      },
+    });
+    expect(screen.getByTestId('dropped-one-on-ones')).toHaveTextContent(/first: tl · derived seat ↔ tpm \(budget\)$/);
   });
 });
 
@@ -3648,5 +3764,22 @@ describe('CommitteeView 1:1 edits', () => {
     expect(screen.getByTestId('see-edit-5')).toHaveTextContent('see edit 2');
     expect(screen.getByTestId('see-edit-3')).toHaveTextContent('see edit 1');
     expect(screen.queryByTestId('see-edit-2')).toBeNull();
+  });
+
+  it("marks a derived seat on the step's 1:1 line, and links a 1:1 to its edit only when snapshots were captured", () => {
+    const { unmount } = show({
+      ...editFromOneOnOne,
+      roster: editFromOneOnOne.roster.map((p) => (p.role === 'tpm' ? { ...p, source: 'derived' as const } : p)),
+    });
+    fireEvent.click(screen.getByTestId('step-3'));
+    expect(screen.getByTestId('step-raised').textContent).toBe(
+      'raised in 1:1 Sam Iyer (tpm · derived seat) ↔ Maya Okonkwo 1:1 2',
+    );
+    unmount();
+
+    // Otherwise the link would land on "not captured".
+    show({ ...editFromOneOnOne, document: { ...editFromOneOnOne.document, captured: false } });
+    expect(screen.getByTestId('one-on-one-2')).toBeInTheDocument();
+    expect(screen.queryByTestId('see-edit-one-on-one-2')).toBeNull();
   });
 });
