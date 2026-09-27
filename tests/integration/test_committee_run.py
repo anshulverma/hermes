@@ -266,6 +266,22 @@ def _wrap(prose: str, block: str) -> str:
     return f"{prose}\n\n{FENCE}{turnblock.FENCE_TAG}\n{block}\n{FENCE}\n"
 
 
+# Every 1:1 exchange kind, the closing exchange included.
+ONE_ON_ONE_KINDS = ("one_on_one", "one_on_one_close")
+
+# What the double says around any block `phase_blocks` supplies: short, plain
+# and inside voice's rules, so no take of this script is ever discarded.
+TALK = "Here is where I stand on the rollout, and what would settle it for me."
+
+
+def _hermes_turn(fields: dict) -> str:
+    """A hermes-turn body from a dict: True is yes, False is no, a str verbatim."""
+    return "\n".join(
+        f"{key}: {'yes' if value is True else 'no' if value is False else value}"
+        for key, value in fields.items()
+    )
+
+
 # What every selector answers by default: today's five library reviewers in
 # SENIORITY order, so a selection run's meeting is today's meeting.
 DEFAULT_SEATS = ["tpm", "pm", "tl", "staff_ic", "data_scientist"]
@@ -320,6 +336,13 @@ class ScriptedCommitteeAgent:
     discards the take and mints a retake; the double never edits on a
     ``-take`` phase, because a retake is report-only.
 
+    ``phase_blocks`` maps a phase name to the hermes-turn block that phase
+    answers, for any role and kind (``p01-owner``, ``o02-owner``,
+    ``t04-manager``). A plan or 1:1 phase without an entry answers ``TALK``
+    with an empty block: no pair planned, ``aligned`` unstated. With
+    ``db_path`` set, the double reads ``runs.state`` over a read-only
+    connection each time it answers a 1:1 exchange, into ``o_phase_states``.
+
     The chair's prose deliberately does NOT contain the simulation disclaimer.
     A real chair is asked for one by its completion condition, but a double that
     says it lets the tests pass on the double's own words: the disclaimer the
@@ -342,6 +365,8 @@ class ScriptedCommitteeAgent:
         violate_phases=(),
         selection_blocks=None,
         fail_select=(),
+        phase_blocks=None,
+        db_path=None,
     ):
         self.owner_block = owner_block
         self.owner_phases = None if owner_phases is None else frozenset(owner_phases)
@@ -354,6 +379,10 @@ class ScriptedCommitteeAgent:
         } | dict(selection_blocks or {})
         self.fail_select = frozenset(fail_select)
         self.violate_phases = frozenset(violate_phases)
+        self.phase_blocks = dict(phase_blocks or {})
+        self.db_path = db_path
+        # (phase, runs.state) for every 1:1 exchange answered, in order.
+        self.o_phase_states: list[tuple[str, str]] = []
 
     # --- Agent protocol ---------------------------------------------------
 
@@ -401,6 +430,18 @@ class ScriptedCommitteeAgent:
                 started_at=now, ended_at=now, payload={}, evidence_ref=None,
             )
 
+        if self.db_path is not None and payload.get("kind") in ONE_ON_ONE_KINDS:
+            # AC6: the run's state as the engine records it while a 1:1 runs,
+            # over a separate read-only connection (WAL readers never block).
+            reader = sqlite3.connect(Path(self.db_path).as_uri() + "?mode=ro", uri=True)
+            try:
+                (state,) = reader.execute(
+                    "SELECT state FROM runs WHERE id=?", (envelope.get("run_id"),)
+                ).fetchone()
+            finally:
+                reader.close()
+            self.o_phase_states.append((envelope.get("phase"), state))
+
         return Result(
             outcome="ok",
             termination_reason="goal_met",
@@ -439,6 +480,12 @@ class ScriptedCommitteeAgent:
             if action.startswith("no-op:"):
                 return f"I left the revised copy untouched: {action}"
             return f"I applied the delegated change to the revised copy: {action}"
+        phase = envelope.get("phase")
+        if phase in self.phase_blocks:
+            return _wrap(TALK, _hermes_turn(self.phase_blocks[phase]))
+        if kind == "plan" or kind in ONE_ON_ONE_KINDS:
+            # No signals: nothing planned, and `aligned` unstated reads as no.
+            return _wrap(TALK, "")
         if role == cast.OWNER:
             speaking = (
                 self.owner_phases is None
@@ -1678,3 +1725,258 @@ def test_a_delegation_answering_a_selected_seat_names_it(
     assert metrics["turns_by_role"] == {
         "senior_director": 1, cast.OWNER: 3, "manager": 1, "security": 1, cast.JUNIOR: 1,
     }
+
+
+# --- one-on-ones (committee-one-on-ones) -------------------------------------
+
+CREW_OWNER_NAME = "Rafael Ortiz"
+
+# Every selector sends the same full list: the library `security` seat and a
+# derived `crew_owner`. The opening round is then senior_director, manager,
+# security, crew_owner, and the unset cap resolves to 2 * 4 + 16.
+CREW_SEATS = {
+    "seats": [
+        {"role": "security", "rationale": "The scheduler holds the deploy credentials."},
+        {
+            "role": "crew_owner",
+            "name": CREW_OWNER_NAME,
+            "title": "Crew Scheduling Lead",
+            "rationale": "Owns the crew rota the migration reschedules.",
+            "altitude": "runs the weekly crew rota",
+            "goal": "no shift is missed during the cutover",
+            "ambition": "a rota nobody patches by hand",
+            "stake": "their team absorbs every scheduler outage",
+            "lens": "what breaks at 3am on a weekend",
+        },
+    ],
+    "not_seated": [],
+}
+# selection_blocks values are whole answers: prose plus one hermes-selection fence.
+ONE_ON_ONE_SELECTION = {
+    role: _selection(STAKE, CREW_SEATS["seats"])
+    for role in (cast.OWNER, "manager", "senior_director")
+}
+
+AGREED_1 = "The threat model lands before cutover."
+OPEN_1 = "Who owns key rotation after the move."
+AGREED_2 = "On-call load stays flat through the migration."
+OPEN_2 = "Weekend coverage in the first month."
+AGREED_3 = "Security signs off on the rollout order first."
+OPEN_3 = "The exact freeze window."
+
+# One hermes-turn block per phase name (True is yes, False is no, a str verbatim).
+# The owner plans two up-front 1:1s naming both new seats as guests and
+# delegates an edit in the one she hosts. The manager pauses the meeting on her
+# opening turn for two members who are neither of them, so she closes it.
+ONE_ON_ONE_BLOCKS = {
+    "p01-owner": {
+        "meet_1": "owner security: threat model",
+        "meet_2": "manager crew_owner: on-call load",
+    },
+    "o01-security": {"aligned": True},
+    "o02-owner": {
+        "aligned": True, "agreed": AGREED_1, "still_open": OPEN_1,
+        "delegate": True, "action": EDIT_ACTION,
+    },
+    "o03-crew_owner": {"aligned": True},
+    "o04-manager": {"aligned": True, "agreed": AGREED_2, "still_open": OPEN_2},
+    "t04-manager": {"request_floor": False, "align": "security crew_owner: rollout order"},
+    "o05-security": {"aligned": True},
+    "o06-crew_owner": {"aligned": True},
+    "o07-manager": {"agreed": AGREED_3, "still_open": OPEN_3},
+}
+
+ONE_ON_ONE_PHASES = [
+    "s1-owner", "s2-manager", "s3-senior_director",
+    "p01-owner",
+    "o01-security", "o02-owner",        # 1:1 1, owner-hosted: aligned, delegates
+    "t01-junior_ic",                    # that edit, before anything else runs
+    "o03-crew_owner", "o04-manager",    # 1:1 2, manager-hosted
+    "t02-senior_director", "t03-owner", "t04-manager", "t05-owner",
+    "o05-security", "o06-crew_owner",   # 1:1 3, the manager's pause ...
+    "o07-manager",                      # ... and her closing exchange
+    "t06-security", "t07-owner", "t08-crew_owner", "t09-owner",
+    "decision",
+]
+
+
+def _run_one_on_ones(conn, db_path, site, monkeypatch, run_id, *, phase_blocks=None):
+    """The scripted 1:1 run, driven until its verdict waits on a human.
+
+    Shared with eval's integration test. The `artifact` fixture pins the budget
+    to 0 so every other test keeps its phases; this run turns it on.
+    """
+    monkeypatch.setenv(committee.ENV_MAX_ONE_ON_ONE, "16")
+    pb = committee.CommitteePlaybook()
+    agent = ScriptedCommitteeAgent(
+        selection_blocks=ONE_ON_ONE_SELECTION,
+        phase_blocks=ONE_ON_ONE_BLOCKS if phase_blocks is None else phase_blocks,
+        db_path=db_path,
+    )
+    host = _start(conn, run_id, pb, site, agent)
+    # 21 phases, and the run parks on the held verdict, so every round runs.
+    assert _drive(conn, run_id, pb, site, agent, host, rounds=60) == "running"
+    return pb, agent, host
+
+
+def test_one_on_ones_plan_pause_and_delegation_end_to_end(
+    home, source_repo, artifact, conn, db_path, local_site, monkeypatch
+):
+    """AC6, AC7, AC11 and AC16 through the real engine, local site and SQLite.
+
+    Selection seats `security` and a derived `crew_owner`. The owner plans two
+    up-front 1:1s with them as guests and delegates an edit in the one she
+    hosts, so the junior IC edits before the second 1:1. The manager pauses the
+    meeting on her opening turn for `security` and `crew_owner` and closes that
+    1:1 herself. The run stays `running` throughout, and the verdict is the only
+    thing that waits on a human.
+    """
+    run_id = "committee-20260925-000121"
+    original = thread.digest(artifact)
+    pb, agent, host = _run_one_on_ones(conn, db_path, local_site, monkeypatch, run_id)
+
+    phases = _dispatched_phases(conn, run_id)
+    assert phases == ONE_ON_ONE_PHASES
+    reductions = _reductions(conn, run_id)
+    assert [kind for _, kind, _ in reductions] == (
+        ["selection"] * 3 + ["one_on_one_plan"] + ["one_on_one"] * 2 + ["turn"]
+        + ["one_on_one"] * 2 + ["turn"] * 4 + ["one_on_one"] * 3 + ["turn"] * 4
+        + ["decision"]
+    )
+
+    # AC6: the engine's own run state at every o-phase, and no operator pause.
+    assert agent.o_phase_states == [(p, "running") for p in phases if p.startswith("o")]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM events WHERE run_id=? AND kind='run_paused'", (run_id,)
+    ).fetchone()[0] == 0
+    # Q6: nothing waited on a human mid-run; only the verdict does.
+    assert all("needs_human_ticket_ids" not in doc for _, _, doc in reductions[:-1])
+    assert reductions[-1][2]["needs_human_ticket_ids"] == [f"{run_id}/decision"]
+    assert conn.execute(
+        "SELECT id FROM tickets WHERE run_id=? AND state='needs_human'", (run_id,)
+    ).fetchall() == [(f"{run_id}/decision",)]
+
+    names = {
+        seat["role"]: seat["name"]
+        for _, kind, doc in reductions if kind == "selection" and doc.get("final")
+        for seat in doc["seated"]
+    }
+    assert names["crew_owner"] == CREW_OWNER_NAME
+
+    # The plan and the pause, as reduce scheduled them.
+    plan = _reduction_for(conn, run_id, "p01-owner")
+    assert (plan["fallback"], plan["one_on_ones_dropped"]) == (None, [])
+    assert [(p["seq"], p["host"], p["members"]) for p in plan["one_on_ones_scheduled"]] == [
+        (1, cast.OWNER, ["security", cast.OWNER]),
+        (2, "manager", ["crew_owner", "manager"]),
+    ]
+    pause = _reduction_for(conn, run_id, "t04-manager")
+    assert pause["align"] == "security crew_owner: rollout order"
+    assert pause["one_on_ones_scheduled"] == [{
+        "seq": 3, "origin": "pause", "called_by": "manager", "host": "manager",
+        "members": ["security", "crew_owner"], "topic": "rollout order",
+    }]
+    ones = [doc for _, kind, doc in reductions if kind == "one_on_one"]
+    finals = {doc["seq"]: doc for doc in ones if doc["final"]}
+    assert [
+        (d["origin"], d["after_turn"], d["ended"], d["outcome"]["aligned"],
+         d["delegated_action"])
+        for d in (finals[1], finals[2], finals[3])
+    ] == [
+        ("upfront", 0, "aligned", True, EDIT_ACTION),
+        ("upfront", 1, "aligned", True, None),
+        ("pause", 5, "aligned", True, None),
+    ]
+    assert [(d["exchange"], d["closing"]) for d in ones if d["seq"] == 3] == [
+        (1, False), (2, False), (None, True),
+    ]
+    for doc in [plan, *ones]:
+        assert not {"cap", "role", "turn", "artifact", "revised"} & set(doc)
+    assert _reduction_for(conn, run_id, "decision")["dropped_one_on_ones"] == []
+
+    # AC11: the 1:1's edit is a junior turn attributed to that 1:1, never to a
+    # meeting turn, and with the cap unset it bought its own turn (D7).
+    edit = _reduction_for(conn, run_id, "t01-junior_ic")
+    assert (edit["origin_one_on_one"], edit["delegated_by_turn"], edit["verified"]) == (
+        1, None, True,
+    )
+    rechecks = _reduction_for(conn, run_id, "decision")["rechecks"]
+    assert [(c["turn"], c["verified"], c["origin_one_on_one"]) for c in rechecks] == [
+        (1, True, 1),
+    ]
+    assert _reduction_for(conn, run_id, "t09-owner")["cap"] == 2 * 4 + 16 + 1
+    assert EDIT_ACTION in thread.revised_path(run_id, str(artifact)).read_text()
+    assert thread.digest(artifact) == original
+
+    # AC7 + AC16: thread.md order and names, and the private 1:1 files.
+    raw = [row[0] for row in conn.execute(
+        "SELECT json FROM reductions WHERE run_id=?", (run_id,)
+    ).fetchall()]
+    assert not any("one-on-ones/" in doc for doc in raw)
+    entries = _entries(run_id)
+    headings = [h for h, _ in entries]
+
+    def at(prefix):
+        return next(i for i, h in enumerate(headings) if h.startswith(prefix))
+
+    plan_at, decision_at = at("## 1:1 plan: "), at("## decision")
+    assert names["security"] in entries[plan_at][1]
+    assert CREW_OWNER_NAME in entries[plan_at][1]
+    for seq, final in finals.items():
+        outcome_at = at(f"## 1:1 {seq}: ")
+        heading, body = entries[outcome_at]
+        # "## turn 07 ..." -> 7: every turn before the outcome is at or before
+        # its after_turn, and the next turn comes after it.
+        earlier = [int(h.split()[2]) for h in headings[:outcome_at] if h.startswith("## turn ")]
+        assert max(earlier, default=0) == final["after_turn"], heading
+        next_turn = at(f"## turn {final['after_turn'] + 1:02d} ")
+        assert plan_at < outcome_at < next_turn < decision_at
+        assert heading.endswith("(aligned)")
+        assert f"Agreed: {final['outcome']['agreed']}" in body
+        assert f"Still open: {final['outcome']['still_open']}" in body
+        path = thread.one_on_one_path(run_id, seq=seq, members=final["members"])
+        assert sorted(path.parent.glob(f"{seq:02d}-*.md")) == [path]
+        text = path.read_text()
+        assert [line.split(":")[0] for line in text.splitlines() if line.startswith("## ")] == [
+            "## outcome" if d["closing"] else f"## exchange {d['exchange']}"
+            for d in ones if d["seq"] == seq
+        ]
+        for member in final["members"]:
+            assert names[member] in heading and names[member] in text
+    assert f"hosted by {names['manager']}" in headings[at("## 1:1 3: ")]
+
+    # AC11 view half and AC16 in the view, built from reductions alone.
+    data = _view(conn, run_id)
+    (step,) = data["document"]["steps"]
+    assert (step["turn"], step["origin_one_on_one"], step["provenance"],
+            step["owner_turn"], step["reviewer_turn"], step["verified"]) == (
+        1, 1, "recorded", None, None, True,
+    )
+    view_ones = data["one_on_ones"]
+    assert [(o["seq"], o["origin"], o["after_turn"], o["ended"], o["aligned"])
+            for o in view_ones] == [
+        (1, "upfront", 0, "aligned", True),
+        (2, "upfront", 1, "aligned", True),
+        (3, "pause", 5, "aligned", True),
+    ]
+    assert [(o["agreed"], o["still_open"]) for o in view_ones] == [
+        (AGREED_1, OPEN_1), (AGREED_2, OPEN_2), (AGREED_3, OPEN_3),
+    ]
+    assert [o["host"]["name"] for o in view_ones] == [
+        names[cast.OWNER], names["manager"], names["manager"],
+    ]
+    assert [[m["name"] for m in o["members"]] for o in view_ones] == [
+        [names["security"], names[cast.OWNER]],
+        [CREW_OWNER_NAME, names["manager"]],
+        [names["security"], CREW_OWNER_NAME],
+    ]
+    assert [[x["name"] for x in o["exchanges"]] for o in view_ones] == [
+        [names["security"], names[cast.OWNER]],
+        [CREW_OWNER_NAME, names["manager"]],
+        [names["security"], CREW_OWNER_NAME, names["manager"]],
+    ]
+    assert [o["delegated_action"] for o in view_ones] == [EDIT_ACTION, None, None]
+    assert data["progress"]["paused"] is None
+    assert data["progress"]["one_on_one"] == {"used": 7, "budget": 16}
+
+    assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
