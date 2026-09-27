@@ -2240,6 +2240,52 @@ def test_append_one_on_one_writes_the_header_once_then_exchanges(tmp_path):
     assert later.read_text(encoding="utf-8") == (
         f"\n## exchange 2: {_seat_heading(roster, 'owner')}\n\nb\n")
 
+    # The open's hardening. A FIFO planted at a 1:1's name is never waited on
+    # (O_NONBLOCK: with no reader the open fails, and the alarm turns a hang
+    # into a failure) and never written into (with a reader it is refused as
+    # not a regular file, and its descriptor is closed: the reader sees EOF,
+    # not EAGAIN from a writer still holding it open).
+    import os
+    import signal
+
+    pair = dict(seq=8, host="owner", members=["tpm", "owner"], topic="t", speaker="tpm",
+                exchange=2, body="x", closing=False, roster=roster)
+    fifo = thread.one_on_one_path(run_id, seq=8, members=["tpm", "owner"])
+    os.mkfifo(fifo)
+
+    def hung(signum, frame):
+        raise AssertionError("append_one_on_one blocked on a FIFO")
+
+    old = signal.signal(signal.SIGALRM, hung)
+    signal.alarm(5)
+    try:
+        with pytest.raises(OSError):
+            thread.append_one_on_one(run_id, **pair)
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            with pytest.raises(ValueError):
+                thread.append_one_on_one(run_id, **pair)
+            assert os.read(reader, 64) == b""
+        finally:
+            os.close(reader)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+    # A file left group- or world-readable is made private again on append.
+    loose = thread.one_on_one_path(run_id, seq=10, members=["tpm", "owner"])
+    loose.write_text("\n## exchange 1: earlier\n\nx\n", encoding="utf-8")
+    loose.chmod(0o644)
+    thread.append_one_on_one(run_id, **{**pair, "seq": 10})
+    assert loose.stat().st_mode & 0o777 == 0o600
+
+    # ... and no append leaks a descriptor (checked where /proc exists).
+    if os.path.isdir("/proc/self/fd"):
+        before = len(os.listdir("/proc/self/fd"))
+        for k in range(5):
+            thread.append_one_on_one(run_id, **{**pair, "seq": 10, "exchange": 3 + k})
+        assert len(os.listdir("/proc/self/fd")) == before
+
 
 def test_append_one_on_one_outcome_wording(tmp_path):
     """The room reads only this entry: who met, aligned or not, what was agreed, what is open."""
@@ -2307,6 +2353,45 @@ def test_append_plan_lists_pairs_fallback_and_drops(tmp_path):
         "- dropped: chair tpm: x (unknown role)\n"
         f"\n{heading}\n\n_(no up-front 1:1s: no plan delivered)_\n"
     )
+
+
+def test_one_on_one_worker_text_is_clipped_to_its_cap(tmp_path):
+    """A topic is clipped to cast.TOPIC_MAX (the plan line and the private
+    file), an outcome line to turnblock.OUTCOME_MAX and a dropped plan line to
+    turnblock.PAIR_MAX: whole at its cap, ellipsised one past it."""
+    from playbooks.committee import thread
+
+    run_id = "committee-20260925-000000"
+    roster = _one_on_one_roster()
+    n = {role: seat["name"] for role, seat in roster.items()}
+    members = ["tpm", "manager"]
+    topic = "t" * 187
+    clipped = cast.clip(topic, cast.TOPIC_MAX)
+    assert clipped == "t" * (cast.TOPIC_MAX - 1) + "…"
+    pair = {"seq": 1, "origin": "upfront", "called_by": "owner", "host": "manager",
+            "members": members, "topic": topic}
+    drops = [{"seq": None, "text": text, "members": None, "reason": "budget"}
+             for text in ("d" * turnblock.PAIR_MAX, "e" * (turnblock.PAIR_MAX + 1))]
+    thread.append_plan(run_id, pairs=[pair], dropped=drops, fallback=None, roster=roster)
+    thread.append_one_on_one(run_id, seq=1, host="manager", members=members, topic=topic,
+                             speaker="tpm", exchange=1, body="x", closing=False,
+                             roster=roster)
+    for seq, size in ((1, turnblock.OUTCOME_MAX), (2, 300)):
+        thread.append_one_on_one_outcome(
+            run_id, seq=seq, host="manager", members=members, aligned=True,
+            agreed="a" * size, still_open="s" * size, ended="aligned", roster=roster)
+
+    shared = thread.path(run_id).read_text(encoding="utf-8").splitlines()
+    assert f"- {n['manager']} ↔ {n['tpm']}: {clipped}" in shared
+    assert f"- dropped: {'d' * turnblock.PAIR_MAX} (budget)" in shared
+    assert f"- dropped: {cast.clip('e' * (turnblock.PAIR_MAX + 1), turnblock.PAIR_MAX)} (budget)" in shared
+    assert "Agreed: " + "a" * turnblock.OUTCOME_MAX in shared
+    assert "Still open: " + "s" * turnblock.OUTCOME_MAX in shared
+    assert "Agreed: " + cast.clip("a" * 300, turnblock.OUTCOME_MAX) in shared
+    assert "Still open: " + cast.clip("s" * 300, turnblock.OUTCOME_MAX) in shared
+    private = thread.one_on_one_path(run_id, seq=1, members=members).read_text(
+        encoding="utf-8")
+    assert f"Topic: {clipped}" in private.splitlines()
 
 
 def test_one_on_one_thread_lines_carry_no_long_dashes(tmp_path):
@@ -2388,6 +2473,23 @@ def test_one_on_one_names_resolve_through_the_roster(tmp_path):
         encoding="utf-8")
     assert private.startswith(f"# 1:1 2: {sec} ↔ {crew}, hosted by {owner}\n")
     assert f"## exchange 1: {crew}, Crew Service Owner (crew_owner)\n" in private
+    # A seat named from its title is named once (cast.label), and a title's
+    # trailing stop is dropped before the role, as `## committee seated` does.
+    titled = {
+        **roster,
+        "crew_owner": {"role": "crew_owner", "name": "Crew Owner", "title": "Crew Owner",
+                       "source": "derived"},
+        "sre_lead": {"role": "sre_lead", "name": "Ana Ruiz", "title": "Site Reliability Lead.",
+                     "source": "derived"},
+    }
+    pair = dict(seq=3, host="owner", members=["crew_owner", "sre_lead"], topic="pages",
+                closing=False, roster=titled)
+    thread.append_one_on_one(run_id, **pair, speaker="crew_owner", exchange=1, body="a")
+    thread.append_one_on_one(run_id, **pair, speaker="sre_lead", exchange=2, body="b")
+    lines = thread.one_on_one_path(run_id, seq=3, members=["crew_owner", "sre_lead"]).read_text(
+        encoding="utf-8").splitlines()
+    assert "## exchange 1: Crew Owner (crew_owner)" in lines
+    assert "## exchange 2: Ana Ruiz, Site Reliability Lead (sre_lead)" in lines
     # Without the run's roster a derived seat has no persona at all.
     with pytest.raises(KeyError):
         thread.append_one_on_one_outcome(run_id, seq=2, host="owner", members=members,
@@ -2807,7 +2909,7 @@ def _answer(block):
     return _turn_answer(prose, **keys) if keys else prose
 
 
-def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, *, reductions=None):
+def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, real_turns=False, *, reductions=None):
     """Drive a whole run through the real next_phase.
 
     `script` maps a phase name to the block its speaker emits, or is a callable
@@ -2831,6 +2933,12 @@ def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, *, reducti
     pb = _committee()
     run = _run()
     s = pb._state(run)
+    if real_turns:
+        # The product's own `open` first (the `artifact` fixture exports the
+        # file), so every setting below overrides what it read from the env.
+        # `open` starts selection, so a real run always passes `selection=`.
+        assert selection is not None, "real_turns seeds open, which starts selection"
+        assert pb.seed(run, _NamedSite("local")) == []
     s["max_turns"] = DEFAULT_MAX_TURNS if max_turns is None else max_turns  # selection
     s["cap_explicit"] = max_turns is not None  # selection
     if selection is not None:  # selection
@@ -2915,6 +3023,8 @@ def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, *, reducti
         if nxt in DECISION_PHASES:
             speakers.append("chair")
             delivered.append(True)
+            if real_turns and not block.get("_retake"):
+                _reduce_for_real(pb, run, nxt, block)
             continue
         # the turn number reduce() reads must match the name next_phase minted;
         # a retake is `{base}-take{k}` of the same speaker and the same NN
@@ -2928,8 +3038,28 @@ def _drive(script, max_turns=30, selection=None, one_on_one_budget=0, *, reducti
         # The product's gates, including what a turn with no finding does to the
         # machine. `_drive` transcribes none of that -- deleting a gate from
         # _apply_block turns every layer below RED.
-        _apply_block(s, s["current_role"], block, delivered=delivered[-1])
+        if real_turns:
+            # seed + reduce for real: the gates run inside reduce, and the
+            # re-check, `rechecks` and every provenance key are the product's
+            _reduce_for_real(pb, run, nxt, block)
+        else:
+            _apply_block(s, s["current_role"], block, delivered=delivered[-1])
     return pb, run, s, seen, speakers, delivered
+
+
+def _reduce_for_real(pb, run, phase, block):
+    """Seed `phase` and reduce `_answer(block)` through the product (real_turns).
+
+    Reductions are banked on `run.reductions` the way the queue stores them,
+    the same as the plan and o-phase branches do, so a test reads them back.
+    """
+    site = _NamedSite("local")
+    assert len(pb.seed(run, site)) == 1
+    answer = _answer(block)
+    findings = [_finding(run, f"{run.id}/{phase}", answer)] if answer is not None else []
+    for red in pb.reduce(run, phase, findings, site):
+        red.phase = phase
+        run.reductions.append(red)
 
 
 def _kept(phases):
@@ -5050,7 +5180,7 @@ def test_reduce_records_a_junior_ic_edit_that_changed_the_file_as_verified(tmp_p
     assert reductions[0].json["verified"] is True
     assert reductions[0].json["error"] is None
     assert s["rechecks"] == [
-        {"turn": 5, "action": "add a rollback paragraph", "verified": True}
+        {"turn": 5, "action": "add a rollback paragraph", "verified": True, "origin_one_on_one": None}
     ]
     assert artifact.read_text() == "the original proposal\n"  # original untouched
 
@@ -5085,7 +5215,7 @@ def test_reduce_records_a_junior_ic_edit_that_changed_nothing_as_unverified(tmp_
 
     assert reductions[0].json["verified"] is False
     assert s["rechecks"] == [
-        {"turn": 5, "action": "add a rollback paragraph", "verified": False}
+        {"turn": 5, "action": "add a rollback paragraph", "verified": False, "origin_one_on_one": None}
     ]
 
 
@@ -5130,7 +5260,7 @@ def test_reduce_junior_edit_measures_this_edit_not_drift_from_the_original(tmp_p
     assert reductions[0].json["verified"] is False, \
         "a second no-op edit was waved through by comparing against the original"
     assert s["rechecks"] == [
-        {"turn": 9, "action": "also name the on-call owner", "verified": False}
+        {"turn": 9, "action": "also name the on-call owner", "verified": False, "origin_one_on_one": None}
     ]
 
 
@@ -5215,7 +5345,7 @@ def test_reduce_treats_a_missing_pre_edit_snapshot_as_a_failed_recheck(tmp_path)
         "an invented revised copy was reported as a verified edit"
     assert reductions[0].json["error"] is None
     assert s["rechecks"] == [
-        {"turn": 5, "action": "add a rollback paragraph", "verified": False}
+        {"turn": 5, "action": "add a rollback paragraph", "verified": False, "origin_one_on_one": None}
     ]
 
 
@@ -8744,6 +8874,250 @@ def test_closing_exchange_reserve_keeps_used_within_budget(monkeypatch, tmp_path
             True, True, ended), budget
         assert kept[-1]["one_on_one_used"] == len(phases), budget
         assert (s["one_on_ones_done"], s["dropped_one_on_ones"]) == ([1], []), budget
+
+
+# --- 1:1s: the owner's delegation from a 1:1 (one-on-ones D7) ----------------
+
+_EDIT = "Add a rollback section."
+
+
+@pytest.fixture
+def minted_from(monkeypatch):
+    """phase -> a deep copy of the state `next_phase` minted it from.
+
+    AC3 measures the meeting "immediately before" a phase is minted: after the
+    previous phase's reduce, before this mint. A spy, never a double.
+    """
+    import copy
+
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    out = {}
+    real = CommitteePlaybook.next_phase
+
+    def spy(self, run):
+        before = copy.deepcopy(self._state_by_run.get(run.id))
+        phase = real(self, run)
+        out[phase] = before
+        return phase
+
+    monkeypatch.setattr(CommitteePlaybook, "next_phase", spy)
+    return out
+
+
+def _by_phase(run):
+    """The reduction docs `_drive` banked, by phase (no run below retakes)."""
+    return {r.phase: r.json for r in run.reductions}
+
+
+def _seats_for(n):
+    """Selection answers (stage role -> answer) seating `n` reviewers beyond the
+    fixed senior_director and manager: nine library seats, then a derived one."""
+    import json
+
+    seats = [
+        {"role": role, "rationale": f"The proposal needs the {role} view."}
+        for role in ("tpm", "pm", "tl", "staff_ic", "data_scientist",
+                     "security", "sre", "privacy", "partner_owner")
+    ]
+    seats.append({"role": "crew_owner", "title": "Crew Service Owner",
+                  "rationale": "Every crew is team-owned, and she runs them."})
+    answer = ("These seats cover the proposal between them.\n\n```hermes-selection\n"
+              + json.dumps({"seats": seats[:n], "not_seated": []}) + "\n```\n")
+    return dict.fromkeys((cast.OWNER, cast.MANAGER, "senior_director"), answer)
+
+
+def test_upfront_owner_delegation_mints_junior_before_the_opening_round(artifact):
+    """AC11 (playbook half): the edit the owner delegates in an up-front 1:1 is
+    t01-junior_ic the moment that 1:1 ends, before the next 1:1 and before the
+    opening round, credited to the 1:1 and to no meeting turn. Her latest
+    `delegate` decides, and a later `yes` with no action keeps the held one."""
+    _, run, s, seen, sp, ok = _drive(
+        {
+            "p01-owner": {"meet_1": "owner tpm: rollback plan",
+                          "meet_2": "manager pm: staffing"},
+            "o02-owner": {"delegate": True, "action": _EDIT},
+            "o03-tpm": {"aligned": True},
+            "o04-owner": {"aligned": True, "delegate": True},  # yes, no action: ignored
+            "o05-pm": {"aligned": True},
+            "o06-manager": {"aligned": True},
+        },
+        max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
+    )
+    check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+
+    first = f"t02-{s['reviewers'][0]}"
+    assert seen[seen.index("p01-owner"):seen.index(first) + 1] == [
+        "p01-owner", "o01-tpm", "o02-owner", "o03-tpm", "o04-owner", "t01-junior_ic",
+        "o05-pm", "o06-manager", first,
+    ]
+    docs = _by_phase(run)
+    assert docs["o02-owner"]["delegated_action"] is None  # held until the 1:1 ends
+    assert (docs["o04-owner"]["final"], docs["o04-owner"]["delegated_action"]) == (True, _EDIT)
+    assert docs["o06-manager"]["delegated_action"] is None  # no owner in 1:1 2, no edit
+    junior = docs["t01-junior_ic"]
+    assert (junior["origin_one_on_one"], junior["delegated_by_turn"], junior["answers_turn"]) == (
+        1, None, None)
+    # MAX_TURNS unset: 2 x 7 reviewers + 16, plus the turn the 1:1's edit bought
+    assert junior["cap"] == s["max_turns"] == 31
+    # the scripted junior edits nothing, and the master's re-check says so
+    assert s["rechecks"] == [
+        {"turn": 1, "action": _EDIT, "verified": False, "origin_one_on_one": 1}]
+    assert (docs["o01-tpm"]["after_turn"], docs["o05-pm"]["after_turn"]) == (0, 1)
+    assert docs[first]["origin_one_on_one"] is None  # `_turn` resets it on every mint
+    assert s["delegation"] is None and s["delegation_origin"] is None
+
+
+def test_one_on_one_delegation_after_a_meeting_delegation_has_no_stale_turn_link(artifact):
+    """AC11: a meeting delegation leaves `delegation_turn` at its owner turn.
+    The 1:1's handover clears it, so the 1:1's edit names the 1:1 and never
+    that stale turn, while the meeting's edit keeps its own link."""
+    _, run, s, seen, sp, ok = _drive(
+        {
+            "t02-owner": {"delegate": True, "action": "Cut the appendix."},
+            "t04-manager": {"align": "owner tpm: rollout order"},
+            "o01-tpm": {"aligned": True},
+            "o02-owner": {"aligned": True, "delegate": True, "action": _EDIT},
+        },
+        max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
+    )
+    check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+
+    i = seen.index("t02-owner")
+    assert seen[i:i + 8] == ["t02-owner", "t03-junior_ic", "t04-manager", "t05-owner",
+                             "o01-tpm", "o02-owner", "t06-junior_ic", "t07-tpm"]
+    docs = _by_phase(run)
+    meeting, one_on_one = docs["t03-junior_ic"], docs["t06-junior_ic"]
+    assert (meeting["delegated_by_turn"], meeting["origin_one_on_one"]) == (2, None)
+    assert (one_on_one["delegated_by_turn"], one_on_one["origin_one_on_one"]) == (None, 1)
+    assert [(c["turn"], c["action"], c["origin_one_on_one"]) for c in s["rechecks"]] == [
+        (3, "Cut the appendix.", None), (6, _EDIT, 1)]
+
+
+def test_pause_with_a_delegation_changes_only_turn_and_rechecks(artifact, minted_from):
+    """AC3 (delegation half): measured just before the pause's first exchange
+    is minted and just before the next meeting turn is minted, the meeting
+    moved by the edit alone: one turn, one re-check and, with the cap unset,
+    one more turn on the cap. An explicit cap takes no bump (D7)."""
+    from playbooks.committee.playbook import _apply_one_on_one
+
+    _, run, s, seen, sp, ok = _drive(
+        {
+            "t01-senior_director": {"request_floor": True},  # a queue to carry through
+            "t03-manager": {"align": "tpm owner: rollout order"},
+            "o01-tpm": {"aligned": True},
+            "o02-owner": {"aligned": True, "delegate": True, "action": _EDIT},
+        },
+        max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
+    )
+    check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+
+    i = seen.index("t03-manager")
+    assert seen[i:i + 6] == ["t03-manager", "t04-owner", "o01-tpm", "o02-owner",
+                             "t05-junior_ic", "t06-tpm"]
+    keys = ("opening", "queue", "closed", "last_speaker", "turn", "delegation",
+            "rechecks", "max_turns")
+    before = {key: minted_from["o01-tpm"][key] for key in keys}
+    after = {key: minted_from["t06-tpm"][key] for key in keys}
+    assert before["queue"] == ["senior_director"] and before["opening"][0] == "tpm"
+    assert after == {
+        **before,
+        "turn": before["turn"] + 1,
+        "rechecks": [*before["rechecks"], after["rechecks"][-1]],
+        "max_turns": before["max_turns"] + 1,  # MAX_TURNS unset
+    }
+    assert after["rechecks"][-1] == {
+        "turn": 5, "action": _EDIT, "verified": False, "origin_one_on_one": 1}
+
+    # The handover itself, with the cap set and unset: only an unset cap grows.
+    for explicit, cap in ((True, 40), (False, 41)):
+        st = _committee()._state(_run())
+        st.update(cap_explicit=explicit, max_turns=40, delegation_turn=2,
+                  current_role=cast.OWNER, one_on_one={
+                      "seq": 3, "origin": "pause", "called_by": "manager",
+                      "after_turn": 4, "host": "owner", "members": ["tpm", "owner"],
+                      "topic": "rollout order", "exchange": 2, "next": "owner",
+                      "closing": False, "aligned": {"tpm": True, "owner": None},
+                      "agreed": None, "still_open": None, "held_action": None,
+                      "ended": None,
+                  })
+        gate = _apply_one_on_one(
+            st, {"aligned": True, "delegate": True, "action": _EDIT}, delivered=True)
+        assert (gate["final"], gate["ended"], gate["delegated_action"]) == (
+            True, "aligned", _EDIT), explicit
+        assert (st["delegation"], st["delegation_origin"], st["delegation_turn"],
+                st["max_turns"]) == (_EDIT, 3, None, cap), explicit
+
+
+def test_one_on_one_edits_never_cost_a_reviewer_their_opening_turn():
+    """AC4 (second half), D7: with MAX_TURNS unset, each 1:1 edit buys its own
+    turn, so every seated reviewer still opens when the owner delegates on
+    every meeting reply and every 1:1 exchange, hosts every 1:1, and asks for
+    another 1:1 on every reply. R = 3..12 reviewers, budgets 0..20."""
+    def script(phase, s):
+        if s["current_kind"] == "plan":
+            return {f"meet_{n}": f"owner {role}: scope"
+                    for n, role in enumerate(s["reviewers"][:3], 1)}
+        block = {"aligned": True}
+        if s["current_role"] == cast.OWNER:
+            guest = s["reviewers"][s["turn"] % len(s["reviewers"])]
+            block.update(delegate=True, action=_EDIT, align=f"owner {guest}: follow-up")
+        return block
+
+    for r in range(3, 13):
+        for budget in range(21):
+            try:
+                _, run, s, seen, sp, ok = _drive(
+                    script, max_turns=None, selection=_seats_for(r - 2),
+                    one_on_one_budget=budget,
+                )
+                check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+                assert len(s["reviewers"]) == r
+                finals = [x.json for x in run.reductions
+                          if x.kind == "one_on_one" and x.json["final"]]
+                assert bool(finals) is (budget >= 2)  # the premise: 1:1s did meet
+                assert all(d["delegated_action"] == _EDIT for d in finals)
+                assert s["max_turns"] == 2 * r + 16 + len(finals)
+                assert set(s["reviewers"]) <= set(sp), seen
+            except AssertionError as exc:
+                raise AssertionError(f"reviewers={r} budget={budget}: {exc}") from exc
+
+
+def test_a_one_on_one_without_a_delegation_hands_nothing_over(artifact, minted_from):
+    """Gap 1: finalize hands over a held action only. The owner's `no` in her
+    last exchange withdraws the edit she asked for earlier, so the 1:1 leaves
+    `delegation_origin`, `delegation_turn` and `max_turns` as they were, and
+    the next meeting delegation is a plain meeting delegation."""
+    _, run, s, seen, sp, ok = _drive(
+        {
+            "t02-owner": {"delegate": True, "action": "Cut the appendix."},
+            "t04-manager": {"align": "owner tpm: rollout order"},
+            "o02-owner": {"delegate": True, "action": _EDIT},
+            "o03-tpm": {"aligned": True},
+            "o04-owner": {"aligned": True, "delegate": False},
+            "t07-owner": {"delegate": True, "action": "Name the rollback owner."},
+        },
+        max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
+    )
+    check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+
+    i = seen.index("t05-owner")
+    assert seen[i:i + 8] == ["t05-owner", "o01-tpm", "o02-owner", "o03-tpm", "o04-owner",
+                             "t06-tpm", "t07-owner", "t08-junior_ic"]
+    keys = ("delegation", "delegation_origin", "delegation_turn", "max_turns", "turn",
+            "rechecks")
+    before = {key: minted_from["o01-tpm"][key] for key in keys}
+    assert {key: minted_from["t06-tpm"][key] for key in keys} == before
+    # the meeting delegation's turn link and the resolved cap, both untouched
+    assert (before["delegation_turn"], before["max_turns"]) == (2, 30)
+    docs = _by_phase(run)
+    assert docs["o02-owner"]["delegate"] is True  # asked for, then withdrawn
+    last = docs["o04-owner"]
+    assert (last["final"], last["ended"], last["delegated_action"]) == (True, "aligned", None)
+    late = docs["t08-junior_ic"]
+    assert (late["origin_one_on_one"], late["delegated_by_turn"]) == (None, 7)
+    assert [(c["turn"], c["origin_one_on_one"]) for c in s["rechecks"]] == [
+        (3, None), (8, None)]
 
 
 # --- registration and wiring ---------------------------------------------

@@ -181,7 +181,10 @@ def _apply_selection(s: dict, resolved: dict) -> None:
     After ``open`` seats the fixed four, this is the only writer of
     ``roster``, ``reviewers``, ``opening`` and ``considered``, and only ``_reduce_select``
     calls it, on the chair's kept take. It also sets ``max_turns`` to
-    2 x reviewers + 16 unless ``cap_explicit`` (D5). ``resolved`` is the dict
+    2 x reviewers + 16 unless ``cap_explicit`` (D5). One exception
+    (one-on-ones D7): 1:1 finalize in ``_apply_one_on_one`` is the second
+    writer of ``max_turns``, adding 1 when a 1:1 hands over a delegation and
+    ``cap_explicit`` is false. ``resolved`` is the dict
     ``selection.resolve`` or ``selection.fallback`` returns. Everything is
     built before anything is assigned, so a malformed ``resolved`` raises with
     the state untouched and the caller installs the fallback: ``opening`` is
@@ -297,7 +300,8 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
     1:1 at once. A 1:1 whose host is not a member then gets the host's ONE
     closing exchange (D6), unless the members' part ended ``not delivered``;
     that exchange records the outcome and nothing else, delivered or not, and
-    leaves ``ended`` as the members set it. Finalize records the seq as done
+    leaves ``ended`` as the members set it. Finalize records the seq as done,
+    hands the owner's held delegation to the junior IC if there is one (D7),
     and clears ``s["one_on_one"]``. ``reduce`` does only the file writes
     around this call, and ``_drive`` reaches it through the real ``reduce``,
     so it is never transcribed.
@@ -319,6 +323,14 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
         # the host's latest STATED values: an exchange that omits one keeps it
         one["agreed"] = agreed if agreed is not None else one["agreed"]
         one["still_open"] = still_open if still_open is not None else one["still_open"]
+    if delivered and role == cast.OWNER and "delegate" in block:
+        # D7: the owner's latest block in this 1:1 that states `delegate`
+        # decides, closing exchanges included. yes with an action holds it,
+        # no clears it, yes without an action is ignored, as in a meeting turn.
+        if not block["delegate"]:
+            one["held_action"] = None
+        elif block.get("action"):
+            one["held_action"] = block["action"]
     if one["closing"]:
         pass  # D6: the outcome only; `ended` stays what the members' part set
     elif not delivered:
@@ -337,8 +349,20 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
         one["next"], one["closing"] = one["host"], True
     else:
         one["next"] = None if one["ended"] else (second if role == first else first)
-    outcome = None
+    outcome = delegated_action = None
     if one["next"] is None:
+        if one["held_action"]:
+            # D7: the junior IC applies it next (next_phase item 6), credited to
+            # this 1:1. Clearing `delegation_turn` stops the junior turn from
+            # naming an earlier meeting delegation's owner turn. With the cap
+            # unset the edit buys its own turn, so no reviewer loses her
+            # opening slot (selection D5); an explicit cap is literal.
+            s["delegation"] = one["held_action"]
+            s["delegation_origin"] = one["seq"]
+            s["delegation_turn"] = None
+            if not s["cap_explicit"]:
+                s["max_turns"] += 1
+            delegated_action = one["held_action"]
         outcome = {
             "aligned": one["ended"] == "aligned",
             "agreed": one["agreed"],
@@ -353,7 +377,7 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
         "final": outcome is not None,
         "ended": one["ended"],
         "outcome": outcome,
-        "delegated_action": None,
+        "delegated_action": delegated_action,
     }
 
 
@@ -605,7 +629,7 @@ class CommitteePlaybook:
 
     def _turn(
         self, s: dict, role: str, *, answers: int | None = None,
-        delegated_by: int | None = None,
+        delegated_by: int | None = None, origin: int | None = None,
     ) -> str:
         """Mint the next turn phase for `role` and advance the counter.
 
@@ -616,6 +640,9 @@ class CommitteePlaybook:
         name = f"t{s['turn']:02d}-{role}"
         s["answers_turn"] = answers
         s["delegated_by_turn"] = delegated_by
+        # the 1:1 whose delegation a junior turn applies (D7); None on every
+        # other mint, the way `delegated_by` resets
+        s["origin_one_on_one"] = origin
         # reduce needs NN for the thread heading and must not parse the phase name.
         s["current_turn"] = s["turn"]
         s["turn"] += 1
@@ -1663,6 +1690,7 @@ class CommitteePlaybook:
                 "turn": turn,
                 "action": s["pending_action"] or "",
                 "verified": verified,
+                "origin_one_on_one": s["origin_one_on_one"],
             })
 
         return [Reduction(kind="turn", json={
@@ -1710,6 +1738,10 @@ class CommitteePlaybook:
             # turn order instead.
             "answers_turn": s["answers_turn"],
             "delegated_by_turn": s["delegated_by_turn"],
+            # the 1:1 seq a junior turn's edit came from (D7), null on every
+            # other turn and for a meeting delegation; absent only on
+            # reductions from before 1:1s existed
+            "origin_one_on_one": s["origin_one_on_one"],
             # voice C4: which take was kept, how many were dispatched, and what
             # the rules made of it. voice is null for an undelivered take.
             "take": take,
@@ -1887,7 +1919,12 @@ class CommitteePlaybook:
         if s["delegation"] and s["turn"] <= s["max_turns"]:
             s["pending_action"] = s["delegation"]
             s["delegation"] = None  # consumed exactly once, here
-            return self._turn(s, cast.JUNIOR, delegated_by=s["delegation_turn"])
+            name = self._turn(
+                s, cast.JUNIOR, delegated_by=s["delegation_turn"],
+                origin=s["delegation_origin"],
+            )
+            s["delegation_origin"] = None  # consumed with the delegation
+            return name
         if s["turn"] > s["max_turns"]:
             # D3 item 7: the cap alone, and the one route that drops a pending
             # 1:1 (`meeting ended`). An owner that closed is still why the

@@ -738,7 +738,7 @@ def test_delegated_edit_writes_only_the_revised_copy(
 
     decision = _reduction_for(conn, run_id, "decision")
     assert decision["rechecks"] == [
-        {"turn": 15, "action": EDIT_ACTION, "verified": True}
+        {"turn": 15, "action": EDIT_ACTION, "verified": True, "origin_one_on_one": None}
     ]
     assert decision["dropped_delegation"] is None
     assert _heading(15, cast.JUNIOR) in [h for h, _ in _turns(run_id)]
@@ -857,7 +857,7 @@ def test_failed_recheck_is_named_in_the_decision(
 
     decision = _reduction_for(conn, run_id, "decision")
     assert decision["rechecks"] == [
-        {"turn": 15, "action": NOOP_ACTION, "verified": False}
+        {"turn": 15, "action": NOOP_ACTION, "verified": False, "origin_one_on_one": None}
     ]
     # Named in the transcript itself, not buried in the reduction json -- and
     # named as a FAILURE. Without the verdict, an unconditional "APPLIED" reads
