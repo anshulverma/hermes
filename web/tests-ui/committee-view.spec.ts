@@ -685,3 +685,140 @@ test('the committee tab shows the seated roster before the first turn', async ({
   // Asserted only once the roster has rendered, so it cannot pass on a blank page.
   await expect(page.getByText('Nothing said yet')).toHaveCount(0);
 });
+
+// --- one-on-ones: an up-front 1:1 is on screen before anyone has spoken -----
+
+/**
+ * A run stopped where the up-front 1:1s end: every row it has, in order, as the
+ * playbook writes it (selection C5, one-on-ones C6). The owner put the TPM
+ * forward and the manager and the chair kept him, so three reviewers sit and
+ * the cap is 2 × 3 + 16. The owner planned one 1:1 with the TPM, both said
+ * `aligned: yes` in one round, and t01 is not reduced yet. No 1:1 file is
+ * written, because the view builds the group from reductions alone and the
+ * private file is never read.
+ */
+const ONE_ON_ONE_RUN = 'committee-e2e-one-on-ones';
+const ONE_ON_ONE_AGREED = 'Maya owns the relay through week 6 and the TPM tracks it.';
+const ONE_ON_ONE_GUEST_SAYS = 'I can back week 6 only if the relay has a named owner.';
+
+/** Idempotent, like `seed()`: the run's rows are deleted before they are written again. */
+function seedOneOnOne(): void {
+  const words = (body: string) => ({ words: body.split(' ').length, images: [] });
+  const tpmWhy = 'owns the delivery plan the proposal leans on';
+  const tpm = { role: 'tpm', name: 'Sam Iyer', title: 'Technical Program Manager', rationale: tpmWhy };
+  const fixed = (role: string) => SEATED.find((s) => s.role === role)!;
+  // Each selector's kept stage (`_reduce_select`), all three listing the TPM.
+  // Only the chair's is final: it carries the committee and the cap it sized.
+  const stage = (n: number, role: string, body: string) => ({
+    stage: n, role, final: n === 3, delivered: true, body, parsed: true, code: null,
+    proposed: [tpm], proposed_dropped: 0, not_seated: [], not_seated_dropped: 0, invalid_count: 0,
+    error: null, cap: n === 3 ? 22 : 30, take: 1, takes: 1, kept: true, voice: words(body),
+    violations: [], flags: ['no_pointer'],
+  });
+  const ratified = {
+    ...stage(3, 'senior_director', 'Seat the TPM: the plan is only as good as its dates.'),
+    seated: [
+      fixed('owner'), fixed('senior_director'), fixed('manager'),
+      seatRecord('tpm', tpm.name, tpm.title, tpmWhy, 'owner', 'library'), fixed('junior_ic'),
+    ],
+    reviewers: ['senior_director', 'manager', 'tpm'],
+    considered: [], considered_dropped: 0, invalid_dropped: 0, fallback: null,
+  };
+  // `_apply_plan`'s pair: the guest first, the owner hosting from her own seat.
+  const pair = {
+    seq: 1, origin: 'upfront', called_by: 'owner', host: 'owner',
+    members: ['tpm', 'owner'], topic: 'who owns the relay through week 6',
+  };
+  const planBody = 'One 1:1 before the room: the TPM, on the relay.';
+  const plan = {
+    delivered: true, body: planBody, one_on_ones_scheduled: [pair], one_on_ones_dropped: [],
+    fallback: null, one_on_one_budget: 16, error: null, take: 1, takes: 1, kept: true,
+    voice: words(planBody), violations: [], flags: [],
+  };
+  // The guest opens. The host's exchange 2 runs the end test, and with both
+  // aligned it finalizes the 1:1: only that row carries `ended` and `outcome`.
+  const exchange = (n: number, speaker: string, body: string, last: boolean) => ({
+    ...pair, after_turn: 0, speaker, exchange: n, closing: false, delivered: true, body,
+    aligned: true, agreed: last ? ONE_ON_ONE_AGREED : null, still_open: null,
+    delegate: false, action: null, final: last, ended: last ? 'aligned' : null,
+    outcome: last ? { aligned: true, agreed: ONE_ON_ONE_AGREED, still_open: null } : null,
+    delegated_action: null, one_on_one_budget: 16, one_on_one_used: n,
+    error: null, take: 1, takes: 1, kept: true, voice: words(body), violations: [], flags: [],
+  });
+  // Each under the phase `record_reduction` writes: the phase it reduces.
+  const rows: [string, string, object][] = [
+    ['s1-owner', 'selection', stage(1, 'owner', 'Seat the TPM: the relay has no owner on paper.')],
+    ['s2-manager', 'selection', stage(2, 'manager', 'Keep the TPM, who tracks the weeks.')],
+    ['s3-senior_director', 'selection', ratified],
+    ['p01-owner', 'one_on_one_plan', plan],
+    ['o01-tpm', 'one_on_one', exchange(1, 'tpm', ONE_ON_ONE_GUEST_SAYS, false)],
+    ['o02-owner', 'one_on_one',
+      exchange(2, 'owner', 'I will own the relay myself through week 6.', true)],
+  ];
+
+  const db = new DatabaseSync(`${HOME}/queue.db`);
+  try {
+    const now = Date.now() / 1000;
+    db.prepare('DELETE FROM reductions WHERE run_id = ?').run(ONE_ON_ONE_RUN);
+    db.prepare('DELETE FROM runs WHERE id = ?').run(ONE_ON_ONE_RUN);
+    // Still running, on t01's phase: the opening round is about to start.
+    db.prepare(
+      `INSERT INTO runs (id, playbook, site, base_ref, config_json, state, phase,
+                         created_at, updated_at)
+       VALUES (?, 'committee', 'local', 'main', '{}', 'running', 't01-senior_director', ?, ?)`,
+    ).run(ONE_ON_ONE_RUN, now, now);
+    const insert = db.prepare(
+      `INSERT INTO reductions (run_id, phase, kind, json, review_state, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+    );
+    rows.forEach(([phase, kind, doc], i) =>
+      insert.run(ONE_ON_ONE_RUN, phase, kind, JSON.stringify(doc), now + i, now + i));
+  } finally {
+    db.close();
+  }
+}
+
+test.describe('an up-front 1:1 before the first turn', () => {
+  test.beforeAll(() => {
+    if (!HOME) return;
+    seedOneOnOne();
+  });
+
+  test('the up-front 1:1 and its outcome show below the Selection card before t01', async ({ page, request }) => {
+    // The container's own view.py builds the group from reductions, names
+    // resolved through the run's seats. Once the final exchange is in, it sees
+    // no pause.
+    const data = await (await request.get(`/api/runs/${ONE_ON_ONE_RUN}/view`)).json();
+    expect(data.timeline).toHaveLength(0);
+    expect(data.one_on_ones).toHaveLength(1);
+    expect(data.one_on_ones[0]).toMatchObject({
+      seq: 1, origin: 'upfront', after_turn: 0, ended: 'aligned', aligned: true,
+      agreed: ONE_ON_ONE_AGREED, host: { role: 'owner', name: 'Maya Okonkwo' },
+    });
+    expect(data.one_on_ones[0].members[0].name).toBe('Sam Iyer');
+    expect(data.progress.paused).toBeNull();
+    expect(data.progress.one_on_one).toEqual({ used: 2, budget: 16 });
+
+    await page.goto(`/#playbook?run=${ONE_ON_ONE_RUN}`);
+    await expect(page.getByText('Dana Whitfield').first()).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText('Nothing said yet')).toHaveCount(0);
+
+    const group = page.locator('[data-testid="one-on-one-1"]');
+    const outcome = page.locator('[data-testid="one-on-one-outcome-1"]');
+    await expect(group).toBeVisible();
+    await expect(outcome).toBeVisible();
+    await expect(group).toContainText('1:1 1: Maya Okonkwo ↔ Sam Iyer · aligned');
+    await expect(outcome).toContainText(`Agreed: ${ONE_ON_ONE_AGREED}`);
+
+    // Below the Selection card, measured in the layout. The card's empty
+    // considered list reads this line (selection C6).
+    const card = await page.getByText('Everyone considered was seated.').first().boundingBox();
+    const box = await group.boundingBox();
+    expect(card!.y).toBeLessThan(box!.y);
+
+    // Collapsed until asked. The guest's exchange renders once the header is clicked.
+    await expect(group.getByText(ONE_ON_ONE_GUEST_SAYS)).toHaveCount(0);
+    await group.getByRole('button').first().click();
+    await expect(group.getByText(ONE_ON_ONE_GUEST_SAYS)).toBeVisible();
+  });
+});
