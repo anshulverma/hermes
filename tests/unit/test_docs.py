@@ -138,7 +138,7 @@ def test_committee_spec_documents_selection():
     assert len(re.findall(r"`selection\.FIELD_MAX` = \d+", content)) >= 2
     # the SPA's empty-state gate, read from the view itself rather than restated
     view = (root / "playbooks" / "committee" / "view" / "src" / "CommitteeView.tsx").read_text()
-    [gate] = re.findall(r"if \((data\.timeline\.length === 0 && \(data\.selection[^{]*?)\) \{", view)
+    [gate] = re.findall(r"if \((data\.timeline\.length === 0 && \(+data\.selection[^{]*?)\) \{", view)
 
     for needle in (
         "## Selection", "s1-owner", "s2-manager-take2", "s3-senior_director",

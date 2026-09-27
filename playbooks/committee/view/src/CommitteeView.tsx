@@ -23,7 +23,7 @@
  * committed, unminified artifact.
  */
 
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import Verdict, { type VerdictData } from './Verdict';
 import { Segments, violationText, type Segment } from './Voice';
 import DocumentHistory, { type DiffMode, type DocumentBlock, type StepId } from './Diff';
@@ -34,7 +34,7 @@ export type Persona = {
   role: string;
   name: string;
   title: string;
-  /** spoke · holds_floor · queued · idle */
+  /** spoke · holds_floor · queued · idle · in_one_on_one */
   state: string;
   stance: string | null;
   /**
@@ -135,6 +135,50 @@ export type Entry = {
 /** voice.summary, C11: every key is always present, null when its population is empty. */
 export type VoiceSummary = Record<string, number | null | Record<string, number | null>>;
 
+/** A seat in a 1:1, named as the roster names it (selection's seats included). */
+export type OneOnOnePerson = { role: string; name: string; title: string };
+
+/** One kept exchange of a 1:1; `exchange` is null on the host's closing exchange. */
+export type OneOnOneExchange = {
+  exchange: number | null;
+  speaker: string;
+  name: string;
+  body: string;
+  segments: Segment[];
+  delivered: boolean;
+  aligned: boolean | null;
+  closing: boolean;
+  badges: string[];
+};
+
+/**
+ * One 1:1, grouped from its `one_on_one` reductions (one-on-ones C8).
+ * `after_turn` is the turn it followed, 0 before the opening round. `ended`
+ * and the outcome fields stay null until its final exchange, so a non-null
+ * `ended` means finished.
+ */
+export type OneOnOne = {
+  seq: number;
+  origin: 'upfront' | 'pause';
+  called_by: string;
+  after_turn: number;
+  host: OneOnOnePerson;
+  members: [OneOnOnePerson, OneOnOnePerson];
+  topic: string;
+  exchanges: OneOnOneExchange[];
+  ended: string | null;
+  aligned: boolean | null;
+  agreed: string | null;
+  still_open: string | null;
+  delegated_action: string | null;
+};
+
+/** Every scheduled 1:1 not yet finished, and the one running now (null: none has started). */
+export type Paused = {
+  pairs: { seq: number; host: OneOnOnePerson; members: [OneOnOnePerson, OneOnOnePerson] }[];
+  current: { seq: number; exchange: number | null } | null;
+};
+
 export type Progress = {
   turn: number;
   cap: number;
@@ -142,6 +186,14 @@ export type Progress = {
   queue: string[];
   /** owner closed · queue empty · turn cap · chair turn failed · chair retake failed */
   ended: string | null;
+  /**
+   * The 1:1s the meeting is paused for; null when none is pending or the
+   * meeting is over. Optional here and below: a payload from before 1:1s
+   * (run-2, the host's load test) has none of the keys.
+   */
+  paused?: Paused | null;
+  /** 1:1 exchanges spent of the run's budget; null on a run from before 1:1s. */
+  one_on_one?: { used: number; budget: number } | null;
 };
 
 /** One row of the Evaluation block: `view_data`'s `evaluation.dimensions[id]`. */
@@ -190,6 +242,8 @@ export type CommitteeData = {
    * when the tab first appears -- so `tsc` forces that branch downstream.
    */
   document: DocumentBlock;
+  /** Every 1:1, apart from `timeline` (which stays turns only), in seq order. */
+  one_on_ones?: OneOnOne[];
   /**
    * selection C6: the stages, the stakeholders considered and any fallback.
    * null for a run from before selection, and absent on a payload older than
@@ -299,13 +353,17 @@ function tellsText(voice: Entry['voice']): string | undefined {
     .join(', ');
 }
 
-/** spoke · holds_floor · queued · idle, as a reader would say it. */
+/** spoke · holds_floor · queued · idle · in_one_on_one, as a reader would say it. */
 const ROSTER_STATE: Record<string, string> = {
   holds_floor: 'has the floor',
   queued: 'waiting to speak',
   spoke: 'spoke',
   idle: 'has not spoken',
+  in_one_on_one: 'in a 1:1',
 };
+
+/** Drawn solid and live: the seat is speaking now, in the room or in a 1:1. */
+const LIVE_STATES = new Set(['holds_floor', 'in_one_on_one']);
 
 const ENDED_NOTE: Record<string, string> = {
   'owner closed': 'The owner moved to close and the chair ruled.',
@@ -332,9 +390,19 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 // --- progress ----------------------------------------------------------------
 
-function ProgressBar({ progress, legacy }: { progress: Progress; legacy: boolean }) {
+function ProgressBar({
+  progress,
+  legacy,
+  derived,
+}: {
+  progress: Progress;
+  legacy: boolean;
+  /** Roles whose seat a selector invented, marked in the paused badge's names. */
+  derived: Set<string>;
+}) {
   const { Badge } = ds();
   const { turn, cap, holder, queue, ended } = progress;
+  const paused = progress.paused ?? null;
   const pct = cap > 0 ? Math.min(100, Math.round((turn / cap) * 100)) : 0;
   // Amber is the "ran out of turns" colour, so it follows the ending and not
   // the arithmetic. run-2 finished at turn 20 of 20 because the owner closed;
@@ -375,6 +443,12 @@ function ProgressBar({ progress, legacy }: { progress: Progress; legacy: boolean
         {holder ? (
           <Badge size="sm" variant="solid" tone="live" data-testid="floor-holder">
             {holder} has the floor
+          </Badge>
+        ) : null}
+        {/* `holder` is null while a 1:1 runs, so this takes the floor badge's place. */}
+        {paused ? (
+          <Badge size="sm" variant="outline" tone="live" data-testid="paused-for-one-on-ones">
+            {pausedLabel(paused, derived)}
           </Badge>
         ) : null}
       </div>
@@ -463,9 +537,9 @@ function Roster({ roster, legacy }: { roster: Persona[]; legacy: boolean }) {
             <span style={{ marginLeft: 'auto', flex: 'none' }}>
               <Badge
                 size="sm"
-                variant={p.state === 'holds_floor' ? 'solid' : 'outline'}
+                variant={LIVE_STATES.has(p.state) ? 'solid' : 'outline'}
                 tone={
-                  p.state === 'holds_floor' ? 'live' : p.state === 'queued' ? 'attention' : undefined
+                  LIVE_STATES.has(p.state) ? 'live' : p.state === 'queued' ? 'attention' : undefined
                 }
               >
                 {ROSTER_STATE[p.state] ?? p.state}
@@ -732,6 +806,148 @@ function SelectionCard({
   );
 }
 
+// --- 1:1s --------------------------------------------------------------------
+//
+// A 1:1 is private while it runs: only its participants are told about its
+// file. The room reads its outcome, so the outcome is on show even when the
+// group is collapsed; the kept exchanges wait behind the toggle. Every string
+// here is worker-written or a seat's name, and all of it renders as plain text.
+
+/** playbook.ONE_ON_ONE_MAX_EXCHANGES: member exchanges per 1:1, the closing one aside. */
+const MAX_EXCHANGES = 4;
+
+/**
+ * `Host ↔ Guest`, or `A ↔ B, hosted by H` when the host sits in neither seat.
+ * A derived seat's name carries its marker, as on every other surface.
+ */
+function pairLabel(
+  { host, members }: { host: OneOnOnePerson; members: [OneOnOnePerson, OneOnOnePerson] },
+  derived: Set<string> = new Set(),
+) {
+  const who = (p: OneOnOnePerson) => (derived.has(p.role) ? `${p.name} (${derivedSeat(p.role)})` : p.name);
+  const [a, b] = members;
+  if (a.role !== host.role && b.role !== host.role) return `${who(a)} ↔ ${who(b)}, hosted by ${who(host)}`;
+  return `${who(host)} ↔ ${who(a.role === host.role ? b : a)}`;
+}
+
+function pausedLabel({ pairs, current }: Paused, derived: Set<string> = new Set()): string {
+  const now = current ? pairs.find((p) => p.seq === current.seq) : undefined;
+  if (current && now) {
+    const at = current.exchange === null ? 'closing' : `exchange ${current.exchange} of ${MAX_EXCHANGES}`;
+    return `Paused for 1:1s: ${pairLabel(now, derived)} (${at})`;
+  }
+  return `1:1s next: ${pairs.map((p) => pairLabel(p, derived)).join(', ')}`;
+}
+
+/** The collapsed header's word on the 1:1. */
+function outcomeLine(g: OneOnOne): string {
+  if (g.ended === null) return 'in progress';
+  return g.aligned ? 'aligned' : `not aligned (${g.ended})`;
+}
+
+/**
+ * What the room reads, worded as thread.md's outcome entry words it. The
+ * payload carries no `closing_delivered`, but the closing exchange is kept
+ * either way, so an undelivered one is visible in `exchanges`.
+ */
+function outcomeLines(g: OneOnOne): string[] {
+  if (g.ended === null) return ['in progress'];
+  const lines: string[] = [];
+  if (g.agreed !== null) lines.push(`Agreed: ${g.agreed}`);
+  if (g.still_open !== null) lines.push(`Still open: ${g.still_open}`);
+  if (lines.length > 0) return lines;
+  const unheard = g.exchanges.some((x) => x.closing && !x.delivered);
+  return [`no outcome recorded: ${unheard ? "the host's closing exchange was not delivered" : g.ended}`];
+}
+
+function OneOnOneGroup({
+  g,
+  runId,
+  open,
+  onToggle,
+  derived,
+}: {
+  g: OneOnOne;
+  runId: string;
+  open: boolean;
+  onToggle: () => void;
+  /** Roles whose seat a selector invented. */
+  derived: Set<string>;
+}) {
+  const { Badge } = ds();
+  return (
+    <div
+      data-testid={`one-on-one-${g.seq}`}
+      style={{ borderTop: '1px solid var(--border-hairline)', padding: '8px 0' }}
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={onToggle}
+        style={{
+          display: 'flex',
+          gap: 8,
+          alignItems: 'baseline',
+          width: '100%',
+          textAlign: 'left',
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          cursor: 'pointer',
+          flexWrap: 'wrap',
+        }}
+      >
+        <span aria-hidden style={{ color: 'var(--text-muted)', fontSize: 10, width: 10 }}>
+          {open ? '▾' : '▸'}
+        </span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+          {`1:1 ${g.seq}: ${pairLabel(g, derived)} · ${outcomeLine(g)}`}
+        </span>
+        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{g.topic}</span>
+      </button>
+
+      <div
+        data-testid={`one-on-one-outcome-${g.seq}`}
+        style={{ marginTop: 4, marginLeft: 18, fontSize: 11.5, lineHeight: 1.45, color: 'var(--text-secondary)' }}
+      >
+        {outcomeLines(g).map((line) => (
+          <div key={line}>{line}</div>
+        ))}
+      </div>
+
+      {open && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6, paddingLeft: 18 }}>
+          {g.exchanges.map((x, i) => (
+            <div key={i}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <span style={{ ...mono, fontSize: 11, color: 'var(--text-muted)' }}>
+                  {x.closing ? 'outcome' : `exchange ${x.exchange}`}
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>{x.name}</span>
+                <span style={{ ...mono, fontSize: 10, color: 'var(--text-muted)' }}>
+                  {derived.has(x.speaker) ? derivedSeat(x.speaker) : x.speaker}
+                </span>
+                {x.badges.map((b) => (
+                  <Badge key={b} size="sm" variant="outline" tone={BADGE_TONE[b]}>
+                    {BADGE_LABEL[b] ?? b}
+                  </Badge>
+                ))}
+              </div>
+              {x.segments.length > 0 ? (
+                <Segments segments={x.segments} runId={runId} />
+              ) : (
+                <span style={{ fontSize: 12, fontStyle: 'italic', color: 'var(--text-muted)' }}>
+                  no prose recorded for this exchange
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // --- timeline ----------------------------------------------------------------
 
 function TimelineEntry({
@@ -906,6 +1122,8 @@ function Timeline({
   edits,
   onSeeEdit,
   derived,
+  oneOnOnes,
+  group,
 }: {
   runId: string;
   timeline: Entry[];
@@ -917,11 +1135,21 @@ function Timeline({
   onSeeEdit: (turn: number) => void;
   /** Roles whose seat a selector invented. */
   derived: Set<string>;
+  /** Every 1:1 in seq order; each is drawn after the turn it followed. */
+  oneOnOnes: OneOnOne[];
+  /** Draws one group; the view holds which groups are open, so a link can open one. */
+  group: (g: OneOnOne) => React.ReactNode;
 }) {
   const allOpen = timeline.length > 0 && open.size === timeline.length;
 
   // Oldest first — see the module docstring.
   const ordered = [...timeline].sort((a, b) => a.n - b.n);
+  // Each 1:1 goes after the turn it followed: up-front ones (after_turn 0)
+  // before t01, then after each entry every group whose after_turn falls from
+  // that entry up to the next, in seq order. A half-open range rather than
+  // `===`, so no group can miss its entry and silently vanish.
+  const between = (lo: number, hi: number) =>
+    oneOnOnes.filter((g) => g.after_turn >= lo && g.after_turn < hi).map(group);
 
   return (
     <Section title={`Transcript — ${timeline.length} turns, oldest first`}>
@@ -942,24 +1170,27 @@ function Timeline({
       >
         {allOpen ? 'Collapse all' : 'Expand all'}
       </button>
-      {ordered.map((entry) => (
-        <TimelineEntry
-          key={entry.n}
-          runId={runId}
-          entry={entry}
-          open={open.has(entry.n)}
-          edit={edits.get(entry.n)?.[0]}
-          onSeeEdit={() => onSeeEdit(edits.get(entry.n)![1])}
-          derived={derived.has(entry.role)}
-          onToggle={() =>
-            setOpen((prev) => {
-              const next = new Set(prev);
-              if (next.has(entry.n)) next.delete(entry.n);
-              else next.add(entry.n);
-              return next;
-            })
-          }
-        />
+      {between(-Infinity, ordered[0]?.n ?? Infinity)}
+      {ordered.map((entry, i) => (
+        <Fragment key={entry.n}>
+          <TimelineEntry
+            runId={runId}
+            entry={entry}
+            open={open.has(entry.n)}
+            edit={edits.get(entry.n)?.[0]}
+            onSeeEdit={() => onSeeEdit(edits.get(entry.n)![1])}
+            derived={derived.has(entry.role)}
+            onToggle={() =>
+              setOpen((prev) => {
+                const next = new Set(prev);
+                if (next.has(entry.n)) next.delete(entry.n);
+                else next.add(entry.n);
+                return next;
+              })
+            }
+          />
+          {between(entry.n, ordered[i + 1]?.n ?? Infinity)}
+        </Fragment>
       ))}
     </Section>
   );
@@ -1377,6 +1608,9 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   const [selected, setSelected] = useState<StepId>('original');
   const [open, setOpen] = useState<Set<number>>(new Set());
   const [diffMode, setDiffMode] = useState<DiffMode>('unified');
+  // Which 1:1 groups are open. Held here beside `open`, so a link from
+  // elsewhere in the view can open one.
+  const [openGroups, setOpenGroups] = useState<Set<number>>(new Set());
 
   // A run captured before this view existed. Its reductions predate `body`,
   // `stance`, `ended`, `artifact` and `revised`, so `view_data` returns those
@@ -1390,6 +1624,26 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
     (data.verdict !== null && data.progress.ended === null);
   // Seats a selector invented, by role: their rows say so wherever they appear.
   const derived = new Set(data.roster.filter((p) => p.source === 'derived').map((p) => p.role));
+
+  // Every 1:1 in seq order. A payload from before 1:1s has no key at all.
+  const oneOnOnes = [...(data.one_on_ones ?? [])].sort((a, b) => a.seq - b.seq);
+  const group = (g: OneOnOne) => (
+    <OneOnOneGroup
+      key={`oneonone-${g.seq}`}
+      g={g}
+      runId={runId}
+      open={openGroups.has(g.seq)}
+      onToggle={() =>
+        setOpenGroups((prev) => {
+          const next = new Set(prev);
+          if (next.has(g.seq)) next.delete(g.seq);
+          else next.add(g.seq);
+          return next;
+        })
+      }
+      derived={derived}
+    />
+  );
 
   // A step's `tNN` link: open that turn in the transcript and bring it on screen
   // -- its last row, the take the step context reads for a turn settled twice.
@@ -1434,9 +1688,10 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
   // with nothing to show yet: phase `open`, or a run from before selection
   // whose first turn has not settled (`selection` null, or absent on an older
   // payload). A run that is seating its committee does have something to show,
-  // and falls through to the pre-t01 layout below. The Metrics tab is the
-  // exception: it counts turns, and there are none.
-  if (data.timeline.length === 0 && (data.selection == null || variant === 'metrics')) {
+  // and falls through to the pre-t01 layout below, and so does one whose
+  // up-front 1:1s have kept an exchange. The Metrics tab is the exception: it
+  // counts turns, and there are none.
+  if (data.timeline.length === 0 && ((data.selection == null && oneOnOnes.length === 0) || variant === 'metrics')) {
     // No padding of its own, for the same reason the populated branch has none:
     // PlaybookView.tsx already wraps this component in `padding: 20`, and 32
     // inside 20 is 52px on one branch and 20 on the other.
@@ -1468,23 +1723,28 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
       </div>
     );
 
-  // Before t01, on a run that is seating its committee (the gate above has
-  // returned for every other empty timeline). Nothing has been said in the
-  // meeting yet, but who is in the room, why, and who put them there is
-  // already known, so the tab shows that. There is no transcript and no
-  // verdict card, which would only restate "nothing yet". No Document card
-  // either (C6): it comes with t01, like the transcript, even though `open`
-  // has already kept the original. doc-diff's pre-t01 card stays on the gate's
-  // empty-state branch above, for runs with `selection` null.
+  // Before t01, on a run that is seating its committee or holding its up-front
+  // 1:1s (the gate above has returned for every other empty timeline).
+  // Nothing has been said in the meeting yet, but who is in the room, why,
+  // and who put them there is already known, so the tab shows that. There is
+  // no transcript and no verdict card, which would only restate "nothing
+  // yet". No Document card either (C6): it comes with t01, like the
+  // transcript, even though `open` has already kept the original. doc-diff's
+  // pre-t01 card stays on the gate's empty-state branch above, for runs with
+  // `selection` null and no 1:1.
   if (data.timeline.length === 0) {
     // The selector at work holds the floor, which only a turn sets on the server's rows.
     const current = data.selection?.current;
     const roster = data.roster.map((p) => (p.role === current?.role ? { ...p, state: 'holds_floor' } : p));
+    // Up-front 1:1s run before t01; without this the human would see none of
+    // them until the first turn (Q4). From t01 the Timeline draws them.
+    const upfront = oneOnOnes.filter((g) => g.after_turn === 0);
     return (
       <div data-testid="committee-view" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        <ProgressBar progress={data.progress} legacy={legacy} />
+        <ProgressBar progress={data.progress} legacy={legacy} derived={derived} />
         <Roster roster={roster} legacy={legacy} />
         {data.selection != null && <SelectionCard selection={data.selection} runId={runId} derived={derived} />}
+        {upfront.length > 0 && <Section title="1:1s before the opening round">{upfront.map(group)}</Section>}
       </div>
     );
   }
@@ -1520,7 +1780,7 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
       data-testid="committee-view"
       style={{ display: 'flex', flexDirection: 'column', gap: 16 }}
     >
-      <ProgressBar progress={data.progress} legacy={legacy} />
+      <ProgressBar progress={data.progress} legacy={legacy} derived={derived} />
       <Roster roster={data.roster} legacy={legacy} />
       {data.selection != null && <SelectionCard selection={data.selection} runId={runId} derived={derived} />}
       <Timeline
@@ -1531,6 +1791,8 @@ export default function CommitteeView({ runId, data, variant }: CommitteeViewPro
         edits={edits}
         onSeeEdit={seeEdit}
         derived={derived}
+        oneOnOnes={oneOnOnes}
+        group={group}
       />
       <Verdict runId={runId} verdict={data.verdict} />
       {history}

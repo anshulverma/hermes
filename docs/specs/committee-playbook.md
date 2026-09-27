@@ -317,8 +317,10 @@ voice's soft-flag badges (`no_pointer`, `no_example`, `tells`), since a selector
 pointer or example, nor `signals_only`, since for a selector the list is the answer. Each
 `considered` entry names its `represented_by_name`.
 
-On the committee tab, a run that is seating its committee never shows "Nothing said yet": the
-empty-state gate is `data.timeline.length === 0 && (data.selection == null || variant === 'metrics')`.
+On the committee tab, a run that is seating its committee or holding its up-front 1:1s never shows
+"Nothing said yet": the empty-state gate is
+`data.timeline.length === 0 && ((data.selection == null && oneOnOnes.length === 0) || variant === 'metrics')`,
+`oneOnOnes` being the payload's `one_on_ones`.
 Before `t01` the tab shows the progress bar (its cap read off the latest `selection` reduction
 once one exists), the roster with each seat's "why:" and "put forward by <Name>", "fixed seat" or
 "default seat", and the Selection card. The transcript, the verdict card and the Document card
@@ -369,7 +371,7 @@ derived seat cannot pass for a cast or library persona.
   stakeholders a seat represents; a later loop's goal for a seated member passes the same.
 - `test_the_manager_is_the_owners_manager`: the manager's stake says she manages Maya, the
   proposal owner.
-- The SPA empty-state gate `data.timeline.length === 0 && (data.selection == null || variant === 'metrics')`.
+- The SPA empty-state gate `data.timeline.length === 0 && ((data.selection == null && oneOnOnes.length === 0) || variant === 'metrics')`.
 
 ## Configuration
 

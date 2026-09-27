@@ -1418,13 +1418,16 @@
 		if (!tells || typeof tells !== "object") return void 0;
 		return Object.entries(tells).filter(([, n]) => typeof n === "number" && n > 0).map(([kind, n]) => `${kind.replaceAll("_", " ")} ${n}`).join(", ");
 	}
-	/** spoke · holds_floor · queued · idle, as a reader would say it. */
+	/** spoke · holds_floor · queued · idle · in_one_on_one, as a reader would say it. */
 	var ROSTER_STATE = {
 		holds_floor: "has the floor",
 		queued: "waiting to speak",
 		spoke: "spoke",
-		idle: "has not spoken"
+		idle: "has not spoken",
+		in_one_on_one: "in a 1:1"
 	};
+	/** Drawn solid and live: the seat is speaking now, in the room or in a 1:1. */
+	var LIVE_STATES = /* @__PURE__ */ new Set(["holds_floor", "in_one_on_one"]);
 	var ENDED_NOTE = {
 		"owner closed": "The owner moved to close and the chair ruled.",
 		"queue empty": "Everyone who asked for the floor got it.",
@@ -1455,9 +1458,10 @@
 			})
 		});
 	}
-	function ProgressBar({ progress, legacy }) {
+	function ProgressBar({ progress, legacy, derived }) {
 		const { Badge } = ds();
 		const { turn, cap, holder, queue, ended } = progress;
+		const paused = progress.paused ?? null;
 		const pct = cap > 0 ? Math.min(100, Math.round(turn / cap * 100)) : 0;
 		const outOfTurns = ended === "turn cap" || ended === null && cap > 0 && turn >= cap;
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
@@ -1510,6 +1514,13 @@
 							tone: "live",
 							"data-testid": "floor-holder",
 							children: [holder, " has the floor"]
+						}) : null,
+						paused ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Badge, {
+							size: "sm",
+							variant: "outline",
+							tone: "live",
+							"data-testid": "paused-for-one-on-ones",
+							children: pausedLabel(paused, derived)
 						}) : null
 					]
 				}),
@@ -1612,8 +1623,8 @@
 							},
 							children: /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Badge, {
 								size: "sm",
-								variant: p.state === "holds_floor" ? "solid" : "outline",
-								tone: p.state === "holds_floor" ? "live" : p.state === "queued" ? "attention" : void 0,
+								variant: LIVE_STATES.has(p.state) ? "solid" : "outline",
+								tone: LIVE_STATES.has(p.state) ? "live" : p.state === "queued" ? "attention" : void 0,
 								children: ROSTER_STATE[p.state] ?? p.state
 							})
 						}),
@@ -1892,6 +1903,169 @@
 			})
 		});
 	}
+	/** playbook.ONE_ON_ONE_MAX_EXCHANGES: member exchanges per 1:1, the closing one aside. */
+	var MAX_EXCHANGES = 4;
+	/**
+	* `Host ↔ Guest`, or `A ↔ B, hosted by H` when the host sits in neither seat.
+	* A derived seat's name carries its marker, as on every other surface.
+	*/
+	function pairLabel({ host, members }, derived = /* @__PURE__ */ new Set()) {
+		const who = (p) => derived.has(p.role) ? `${p.name} (${derivedSeat(p.role)})` : p.name;
+		const [a, b] = members;
+		if (a.role !== host.role && b.role !== host.role) return `${who(a)} ↔ ${who(b)}, hosted by ${who(host)}`;
+		return `${who(host)} ↔ ${who(a.role === host.role ? b : a)}`;
+	}
+	function pausedLabel({ pairs, current }, derived = /* @__PURE__ */ new Set()) {
+		const now = current ? pairs.find((p) => p.seq === current.seq) : void 0;
+		if (current && now) {
+			const at = current.exchange === null ? "closing" : `exchange ${current.exchange} of ${MAX_EXCHANGES}`;
+			return `Paused for 1:1s: ${pairLabel(now, derived)} (${at})`;
+		}
+		return `1:1s next: ${pairs.map((p) => pairLabel(p, derived)).join(", ")}`;
+	}
+	/** The collapsed header's word on the 1:1. */
+	function outcomeLine(g) {
+		if (g.ended === null) return "in progress";
+		return g.aligned ? "aligned" : `not aligned (${g.ended})`;
+	}
+	/**
+	* What the room reads, worded as thread.md's outcome entry words it. The
+	* payload carries no `closing_delivered`, but the closing exchange is kept
+	* either way, so an undelivered one is visible in `exchanges`.
+	*/
+	function outcomeLines(g) {
+		if (g.ended === null) return ["in progress"];
+		const lines = [];
+		if (g.agreed !== null) lines.push(`Agreed: ${g.agreed}`);
+		if (g.still_open !== null) lines.push(`Still open: ${g.still_open}`);
+		if (lines.length > 0) return lines;
+		return [`no outcome recorded: ${g.exchanges.some((x) => x.closing && !x.delivered) ? "the host's closing exchange was not delivered" : g.ended}`];
+	}
+	function OneOnOneGroup({ g, runId, open, onToggle, derived }) {
+		const { Badge } = ds();
+		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+			"data-testid": `one-on-one-${g.seq}`,
+			style: {
+				borderTop: "1px solid var(--border-hairline)",
+				padding: "8px 0"
+			},
+			children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("button", {
+					type: "button",
+					"aria-expanded": open,
+					onClick: onToggle,
+					style: {
+						display: "flex",
+						gap: 8,
+						alignItems: "baseline",
+						width: "100%",
+						textAlign: "left",
+						background: "none",
+						border: "none",
+						padding: 0,
+						cursor: "pointer",
+						flexWrap: "wrap"
+					},
+					children: [
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							"aria-hidden": true,
+							style: {
+								color: "var(--text-muted)",
+								fontSize: 10,
+								width: 10
+							},
+							children: open ? "▾" : "▸"
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							style: {
+								fontSize: 13,
+								fontWeight: 600,
+								color: "var(--text-primary)"
+							},
+							children: `1:1 ${g.seq}: ${pairLabel(g, derived)} · ${outcomeLine(g)}`
+						}),
+						/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+							style: {
+								fontSize: 11,
+								color: "var(--text-muted)"
+							},
+							children: g.topic
+						})
+					]
+				}),
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					"data-testid": `one-on-one-outcome-${g.seq}`,
+					style: {
+						marginTop: 4,
+						marginLeft: 18,
+						fontSize: 11.5,
+						lineHeight: 1.45,
+						color: "var(--text-secondary)"
+					},
+					children: outcomeLines(g).map((line) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", { children: line }, line))
+				}),
+				open && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("div", {
+					style: {
+						display: "flex",
+						flexDirection: "column",
+						gap: 8,
+						marginTop: 6,
+						paddingLeft: 18
+					},
+					children: g.exchanges.map((x, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
+						style: {
+							display: "flex",
+							gap: 8,
+							alignItems: "baseline",
+							flexWrap: "wrap"
+						},
+						children: [
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								style: {
+									...mono,
+									fontSize: 11,
+									color: "var(--text-muted)"
+								},
+								children: x.closing ? "outcome" : `exchange ${x.exchange}`
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								style: {
+									fontSize: 12,
+									fontWeight: 600,
+									color: "var(--text-primary)"
+								},
+								children: x.name
+							}),
+							/* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								style: {
+									...mono,
+									fontSize: 10,
+									color: "var(--text-muted)"
+								},
+								children: derived.has(x.speaker) ? derivedSeat(x.speaker) : x.speaker
+							}),
+							x.badges.map((b) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Badge, {
+								size: "sm",
+								variant: "outline",
+								tone: BADGE_TONE[b],
+								children: BADGE_LABEL[b] ?? b
+							}, b))
+						]
+					}), x.segments.length > 0 ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Segments, {
+						segments: x.segments,
+						runId
+					}) : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+						style: {
+							fontSize: 12,
+							fontStyle: "italic",
+							color: "var(--text-muted)"
+						},
+						children: "no prose recorded for this exchange"
+					})] }, i))
+				})
+			]
+		});
+	}
 	function TimelineEntry({ runId, entry, open, onToggle, edit, onSeeEdit, derived }) {
 		const { Badge } = ds();
 		const segments = entry.segments ?? (entry.body ? [{
@@ -2049,40 +2223,45 @@
 			]
 		});
 	}
-	function Timeline({ runId, timeline, open, setOpen, edits, onSeeEdit, derived }) {
+	function Timeline({ runId, timeline, open, setOpen, edits, onSeeEdit, derived, oneOnOnes, group }) {
 		const allOpen = timeline.length > 0 && open.size === timeline.length;
 		const ordered = [...timeline].sort((a, b) => a.n - b.n);
+		const between = (lo, hi) => oneOnOnes.filter((g) => g.after_turn >= lo && g.after_turn < hi).map(group);
 		return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(Section, {
 			title: `Transcript — ${timeline.length} turns, oldest first`,
-			children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
-				type: "button",
-				"data-testid": "expand-all",
-				onClick: () => setOpen(allOpen ? /* @__PURE__ */ new Set() : new Set(ordered.map((e) => e.n))),
-				style: {
-					alignSelf: "flex-start",
-					padding: "2px 8px",
-					fontSize: 11,
-					color: "var(--text-primary)",
-					background: "var(--wash-subtle)",
-					border: "1px solid var(--border-hairline)",
-					borderRadius: "var(--radius-md)",
-					cursor: "pointer"
-				},
-				children: allOpen ? "Collapse all" : "Expand all"
-			}), ordered.map((entry) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(TimelineEntry, {
-				runId,
-				entry,
-				open: open.has(entry.n),
-				edit: edits.get(entry.n)?.[0],
-				onSeeEdit: () => onSeeEdit(edits.get(entry.n)[1]),
-				derived: derived.has(entry.role),
-				onToggle: () => setOpen((prev) => {
-					const next = new Set(prev);
-					if (next.has(entry.n)) next.delete(entry.n);
-					else next.add(entry.n);
-					return next;
-				})
-			}, entry.n))]
+			children: [
+				/* @__PURE__ */ (0, react_jsx_runtime.jsx)("button", {
+					type: "button",
+					"data-testid": "expand-all",
+					onClick: () => setOpen(allOpen ? /* @__PURE__ */ new Set() : new Set(ordered.map((e) => e.n))),
+					style: {
+						alignSelf: "flex-start",
+						padding: "2px 8px",
+						fontSize: 11,
+						color: "var(--text-primary)",
+						background: "var(--wash-subtle)",
+						border: "1px solid var(--border-hairline)",
+						borderRadius: "var(--radius-md)",
+						cursor: "pointer"
+					},
+					children: allOpen ? "Collapse all" : "Expand all"
+				}),
+				between(-Infinity, ordered[0]?.n ?? Infinity),
+				ordered.map((entry, i) => /* @__PURE__ */ (0, react_jsx_runtime.jsxs)(react.Fragment, { children: [/* @__PURE__ */ (0, react_jsx_runtime.jsx)(TimelineEntry, {
+					runId,
+					entry,
+					open: open.has(entry.n),
+					edit: edits.get(entry.n)?.[0],
+					onSeeEdit: () => onSeeEdit(edits.get(entry.n)[1]),
+					derived: derived.has(entry.role),
+					onToggle: () => setOpen((prev) => {
+						const next = new Set(prev);
+						if (next.has(entry.n)) next.delete(entry.n);
+						else next.add(entry.n);
+						return next;
+					})
+				}), between(entry.n, ordered[i + 1]?.n ?? Infinity)] }, entry.n))
+			]
 		});
 	}
 	function Bar({ value, max }) {
@@ -2566,8 +2745,22 @@
 		const [selected, setSelected] = (0, react.useState)("original");
 		const [open, setOpen] = (0, react.useState)(/* @__PURE__ */ new Set());
 		const [diffMode, setDiffMode] = (0, react.useState)("unified");
+		const [openGroups, setOpenGroups] = (0, react.useState)(/* @__PURE__ */ new Set());
 		const legacy = data.timeline.length > 0 && data.document.name === null || data.verdict !== null && data.progress.ended === null;
 		const derived = new Set(data.roster.filter((p) => p.source === "derived").map((p) => p.role));
+		const oneOnOnes = [...data.one_on_ones ?? []].sort((a, b) => a.seq - b.seq);
+		const group = (g) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(OneOnOneGroup, {
+			g,
+			runId,
+			open: openGroups.has(g.seq),
+			onToggle: () => setOpenGroups((prev) => {
+				const next = new Set(prev);
+				if (next.has(g.seq)) next.delete(g.seq);
+				else next.add(g.seq);
+				return next;
+			}),
+			derived
+		}, `oneonone-${g.seq}`);
 		const openTurn = (n) => {
 			setOpen((prev) => new Set(prev).add(n));
 			const rows = window.document.querySelectorAll(`[data-testid="entry-${n}"]`);
@@ -2590,7 +2783,7 @@
 				derived
 			})
 		});
-		if (data.timeline.length === 0 && (data.selection == null || variant === "metrics")) {
+		if (data.timeline.length === 0 && (data.selection == null && oneOnOnes.length === 0 || variant === "metrics")) {
 			const empty = /* @__PURE__ */ (0, react_jsx_runtime.jsx)(EmptyState, {
 				title: "Nothing said yet",
 				description: "The committee view fills in as each member takes the floor.",
@@ -2627,6 +2820,7 @@
 				...p,
 				state: "holds_floor"
 			} : p);
+			const upfront = oneOnOnes.filter((g) => g.after_turn === 0);
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				"data-testid": "committee-view",
 				style: {
@@ -2637,7 +2831,8 @@
 				children: [
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, {
 						progress: data.progress,
-						legacy
+						legacy,
+						derived
 					}),
 					/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, {
 						roster,
@@ -2647,6 +2842,10 @@
 						selection: data.selection,
 						runId,
 						derived
+					}),
+					upfront.length > 0 && /* @__PURE__ */ (0, react_jsx_runtime.jsx)(Section, {
+						title: "1:1s before the opening round",
+						children: upfront.map(group)
 					})
 				]
 			});
@@ -2673,7 +2872,8 @@
 			children: [
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProgressBar, {
 					progress: data.progress,
-					legacy
+					legacy,
+					derived
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Roster, {
 					roster: data.roster,
@@ -2691,7 +2891,9 @@
 					setOpen,
 					edits,
 					onSeeEdit: seeEdit,
-					derived
+					derived,
+					oneOnOnes,
+					group
 				}),
 				/* @__PURE__ */ (0, react_jsx_runtime.jsx)(Verdict, {
 					runId,

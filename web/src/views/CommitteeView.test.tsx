@@ -16,6 +16,7 @@ import { setToken, clearToken } from '../api/auth';
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import CommitteeView from '../../../playbooks/committee/view/src/CommitteeView';
 import { run2, midRun, edgeTurns } from '../../../playbooks/committee/view/src/run2.fixture';
+import { oneOnOneRun, pausedRun, upfrontRun } from '../../../playbooks/committee/view/src/oneOnOne.fixture';
 import {
   selectingData,
   seatedData,
@@ -3353,3 +3354,150 @@ describe('CommitteeView selection card', () => {
   });
 });
 
+
+// --- one-on-ones (committee-one-on-ones C8) -------------------------------------
+
+describe('CommitteeView one-on-ones', () => {
+  /** Turns and 1:1 groups, in the order the transcript draws them. */
+  const transcriptOrder = (container: HTMLElement) =>
+    [...container.querySelectorAll('[data-testid]')]
+      .map((el) => el.getAttribute('data-testid') ?? '')
+      .filter((id) => /^(entry|one-on-one)-\d+$/.test(id));
+
+  it('places each 1:1 as a collapsed group after the turn it followed, up-front ones before t01', () => {
+    const { container } = show(oneOnOneRun);
+
+    expect(transcriptOrder(container)).toEqual([
+      'one-on-one-1',
+      'one-on-one-2',
+      'entry-1',
+      'entry-2',
+      'entry-3',
+      'entry-4',
+      'entry-5',
+      'entry-6',
+      'one-on-one-3',
+      'entry-7',
+    ]);
+
+    const second = screen.getByTestId('one-on-one-2');
+    const header = within(second).getByRole('button');
+    expect(header).toHaveTextContent('1:1 2: Ruth Delgado ↔ Elena Vargas · not aligned (exchange cap)');
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByTestId('one-on-one-outcome-2')).toHaveTextContent(
+      'Still open: whether the pilot customer signs before Q3',
+    );
+    expect(screen.getByTestId('one-on-one-3')).toHaveTextContent(
+      '1:1 3: Marcus Feld ↔ Priya Raman, hosted by Ruth Delgado · aligned',
+    );
+    expect(screen.getByTestId('one-on-one-outcome-3')).toHaveTextContent(
+      "no outcome recorded: the host's closing exchange was not delivered",
+    );
+    expect(within(second).queryByText(/pilot is a hope/)).toBeNull();
+
+    fireEvent.click(header);
+    expect(within(second).getByText(/pilot is a hope/)).toBeInTheDocument();
+    expect(within(second).getByText('exchange 3')).toBeInTheDocument();
+    expect(screen.getByTestId('one-on-one-outcome-2')).toBeInTheDocument();
+
+    fireEvent.click(header);
+    expect(within(second).queryByText(/pilot is a hope/)).toBeNull();
+  });
+
+  it('renders a 1:1 exchange through Segments, so its diagram is a figure', () => {
+    // A render that never settles: jsdom has no URL.createObjectURL to draw with.
+    const restore = shelf(() => new Promise(() => {}));
+    try {
+      show(oneOnOneRun);
+      const first = screen.getByTestId('one-on-one-1');
+      fireEvent.click(within(first).getByRole('button'));
+
+      expect(within(first).getByTestId('figure-mermaid')).toBeInTheDocument();
+      expect(within(first).getByText('rendering diagram…')).toBeInTheDocument();
+      expect(within(first).getByText('the relay')).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  it('says the meeting is paused for a 1:1, which exchange is running, and which 1:1s are next', () => {
+    const at = (current: { seq: number; exchange: number | null } | null) => ({
+      ...pausedRun,
+      progress: { ...pausedRun.progress, paused: { ...pausedRun.progress.paused!, current } },
+    });
+    const { rerender } = show(pausedRun);
+
+    expect(screen.getByTestId('paused-for-one-on-ones')).toHaveTextContent(
+      'Paused for 1:1s: Marcus Feld ↔ Priya Raman, hosted by Ruth Delgado (exchange 2 of 4)',
+    );
+    expect(screen.queryByTestId('floor-holder')).toBeNull();
+    expect(within(screen.getByTestId('one-on-one-3')).getByRole('button')).toHaveTextContent('· in progress');
+    expect(screen.getByTestId('one-on-one-outcome-3')).toHaveTextContent('in progress');
+
+    rerender(<CommitteeView runId="run-2" data={at({ seq: 3, exchange: null })} refetch={noop} />);
+    expect(screen.getByTestId('paused-for-one-on-ones')).toHaveTextContent(
+      'Paused for 1:1s: Marcus Feld ↔ Priya Raman, hosted by Ruth Delgado (closing)',
+    );
+
+    rerender(<CommitteeView runId="run-2" data={at(null)} refetch={noop} />);
+    expect(screen.getByTestId('paused-for-one-on-ones')).toHaveTextContent(
+      '1:1s next: Marcus Feld ↔ Priya Raman, hosted by Ruth Delgado',
+    );
+
+    // A derived seat is marked wherever a 1:1 names it, as on every other surface.
+    const derivedTl = {
+      ...pausedRun,
+      roster: pausedRun.roster.map((p) => (p.role === 'tl' ? { ...p, source: 'derived' as const } : p)),
+    };
+    rerender(<CommitteeView runId="run-2" data={derivedTl} refetch={noop} />);
+    const third = screen.getByTestId('one-on-one-3');
+    expect(screen.getByTestId('paused-for-one-on-ones')).toHaveTextContent(
+      'Paused for 1:1s: Marcus Feld (tl · derived seat) ↔ Priya Raman, hosted by Ruth Delgado',
+    );
+    expect(within(third).getByRole('button')).toHaveTextContent('1:1 3: Marcus Feld (tl · derived seat) ↔ Priya Raman');
+    fireEvent.click(within(third).getByRole('button'));
+    expect(within(third).getByText('tl · derived seat')).toBeInTheDocument();
+  });
+
+  it('shows who is in a 1:1 on the roster', () => {
+    show(pausedRun);
+
+    expect(within(screen.getByTestId('roster-tl')).getByText('in a 1:1')).toBeInTheDocument();
+    expect(within(screen.getByTestId('roster-staff_ic')).getByText('in a 1:1')).toBeInTheDocument();
+    // The host of a member exchange waits outside it.
+    expect(screen.getByTestId('roster-manager')).toHaveTextContent('waiting to speak');
+    expect(screen.getByTestId('roster-manager')).not.toHaveTextContent('in a 1:1');
+  });
+
+  it('shows the up-front 1:1s below the Selection card before anyone has spoken', () => {
+    const { container, rerender } = show(upfrontRun);
+
+    expect(screen.queryByText('Nothing said yet')).toBeNull();
+    expect(container.querySelector('[data-testid^="entry-"]')).toBeNull();
+    expect(screen.getByTestId('one-on-one-1')).toHaveTextContent('1:1 1: Maya Okonkwo ↔ Sam Iyer · aligned');
+    expect(screen.getByTestId('one-on-one-outcome-1')).toHaveTextContent(
+      'Agreed: Maya owns the relay through week 6',
+    );
+    // Below the card: its empty considered list reads this line (selection C6).
+    const card = screen.getByText('Everyone considered was seated.');
+    expect(
+      card.compareDocumentPosition(screen.getByTestId('one-on-one-1')) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    // The empty-state gate lets a kept up-front 1:1 through even with no selection block.
+    rerender(<CommitteeView runId="run-2" data={{ ...upfrontRun, selection: null }} refetch={noop} />);
+    expect(screen.queryByText('Nothing said yet')).toBeNull();
+    expect(screen.getByTestId('one-on-one-outcome-1')).toHaveTextContent('Agreed: Maya owns the relay through week 6');
+    // The Metrics tab keeps its empty state until t01.
+    rerender(<CommitteeView runId="run-2" data={upfrontRun} refetch={noop} variant="metrics" />);
+    expect(screen.getByText('Nothing said yet')).toBeInTheDocument();
+  });
+
+  it('leaves a run from before 1:1s exactly as it was', () => {
+    const { container } = show();
+
+    expect(container.querySelector('[data-testid^="one-on-one-"]')).toBeNull();
+    expect(screen.queryByTestId('paused-for-one-on-ones')).toBeNull();
+    expect(screen.queryByText('in a 1:1')).toBeNull();
+  });
+});
