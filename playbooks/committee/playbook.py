@@ -374,7 +374,10 @@ def _apply_one_on_one(s: dict, block: dict, *, delivered: bool) -> dict:
             "still_open": one["still_open"],
         }
         s["one_on_ones_done"].append(one["seq"])
-        s["one_on_ones_met"].append(sorted(one["members"]))
+        # met = both members spoke: members alternate, so a 1:1 that ended
+        # 'not delivered' at exchange k had k-1 delivered exchanges
+        if one["ended"] != "not delivered" or one["exchange"] >= 3:
+            s["one_on_ones_met"].append(sorted(one["members"]))
         s["one_on_one"] = None
     return {
         "aligned": aligned,
@@ -1824,15 +1827,16 @@ class CommitteePlaybook:
             )
         never_met = [
             drop for drop in s["dropped_one_on_ones"]
-            if drop["reason"] == "meeting ended"
-            or (drop["reason"] == "budget" and sorted(drop["members"]) not in s["one_on_ones_met"])
+            if drop["reason"] in ("budget", "meeting ended")
+            and sorted(drop["members"]) not in s["one_on_ones_met"]
         ]
         if never_met:
             # Symmetric with dropped_floor_requests: a 1:1 the budget or the end
             # of the meeting stopped is a fact about this committee's output.
             # Refused asks (a reviewer's align, a bad line) are not: they sit on
             # their turn reductions and in `dropped_one_on_ones` below. Nor is a
-            # repeat ask the budget refused for a pair that did meet.
+            # repeat ask the budget or the end of the meeting cut off for a pair
+            # that did meet.
             parts.append(
                 "- dropped_one_on_ones (they never met): "
                 + ", ".join(

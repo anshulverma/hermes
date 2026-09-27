@@ -8525,6 +8525,27 @@ def test_a_one_on_one_file_that_cannot_be_written_never_stops_the_meeting(monkey
         assert ds["one_on_ones_done"] == [1], name
         assert dseen[dseen.index("o02-owner") + 1] == f"t01-{ds['reviewers'][0]}", name
 
+    # FIX_T10: a runs/<id> the worker made read-only makes the one-on-ones
+    # mkdir raise OSError; seed still hands out the one ticket naming the file
+    import os
+
+    if os.geteuid() == 0:
+        pytest.skip("root ignores the mode bits")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "read-only"))
+    pb, run, s = _at_plan()
+    answer = _answer({"meet_1": "owner tpm: rollback plan"})
+    pb.reduce(run, "p01-owner", [_finding(run, f"{run.id}/p01-owner", answer)], site)
+    parent = thread.path(run.id).parent
+    os.chmod(parent, 0o500)
+    try:
+        run.phase = pb.next_phase(run)
+        assert run.phase == "o01-tpm"
+        tickets = pb.seed(run, site)
+        assert len(tickets) == 1
+        assert str(parent / "one-on-ones" / "01-tpm-owner.md") in tickets[0].payload["goal"]
+    finally:
+        os.chmod(parent, 0o700)
+
 
 # --- 1:1 retakes: voice's rules on o-phases (one-on-ones D8, AC15) -----------
 
@@ -9142,6 +9163,51 @@ def test_a_pair_that_met_is_never_listed_as_never_met():
     assert ("- dropped_one_on_ones (they never met): owner ↔ pm (budget)\n\n" + _SIMULATION
             in red.json["verdict"])
     assert "tpm ↔ owner" not in red.json["verdict"]
+
+    def verdict(pb, run):
+        return pb.reduce(
+            run, "decision",
+            [_finding(run, f"{run.id}/decision", "Defer it: the drill date is still open.")],
+            _NamedSite("local"),
+        )[0].json["verdict"]
+
+    def dropped(s):
+        return [(d["members"], d["reason"]) for d in s["dropped_one_on_ones"]]
+
+    # FIX_T10: a 1:1 that ended 'not delivered' before both members spoke is
+    # not a meeting, so the budget-refused retry of that pair never met
+    pb, run, s, _, _, _ = _drive({
+        "p01-owner": {"meet_1": "owner tpm: rollback plan"},
+        "o01-tpm": {"_ok": False},
+        "t02-owner": {"align": "tpm owner: rollback plan"},
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=2)
+    assert s["one_on_ones_done"] == [1] and s["one_on_ones_met"] == []
+    assert dropped(s) == [(["tpm", "owner"], "budget")]
+    assert "- dropped_one_on_ones (they never met): tpm ↔ owner (budget)" in verdict(pb, run)
+
+    # a pair that met, whose repeat 1:1 the turn cap cut off, did meet
+    pb, run, s, _, _, _ = _drive({
+        "p01-owner": {"meet_1": "owner tpm: rollback plan"},
+        "o01-tpm": _ALIGNED, "o02-owner": _ALIGNED,
+        "t02-owner": {"align": "tpm owner: the drill date"},
+    }, max_turns=2, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+    assert dropped(s) == [(["tpm", "owner"], "meeting ended")]
+    assert "never met" not in verdict(pb, run)
+
+    # a pause its caller closed (D6) met, and so did a 1:1 that hit the
+    # exchange cap without aligning
+    for script, budget, pair in (
+        ({"t03-manager": {"align": "tpm pm: rollout order"},
+          "o01-tpm": _ALIGNED, "o02-pm": _ALIGNED,
+          "t06-owner": {"align": "tpm pm: again"}}, 3, ["tpm", "pm"]),
+        ({"p01-owner": {"meet_1": "owner tpm: rollback plan"},
+          "o01-tpm": {"aligned": False}, "o02-owner": {"aligned": False},
+          "o03-tpm": {"aligned": False}, "o04-owner": {"aligned": False},
+          "t02-owner": {"align": "tpm owner: again"}}, 4, ["tpm", "owner"]),
+    ):
+        pb, run, s, _, _, _ = _drive(script, selection=DEFAULT_SELECTION, one_on_one_budget=budget)
+        assert s["one_on_one_used"] == budget and dropped(s) == [(pair, "budget")], pair
+        assert "never met" not in verdict(pb, run), pair
 
 
 # --- 1:1s: the caller's closing exchange (D6) -------------------------------
