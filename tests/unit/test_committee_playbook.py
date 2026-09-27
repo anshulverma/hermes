@@ -9417,16 +9417,17 @@ def test_upfront_owner_delegation_mints_junior_before_the_opening_round(artifact
     """AC11 (playbook half): the edit the owner delegates in an up-front 1:1 is
     t01-junior_ic the moment that 1:1 ends, before the next 1:1 and before the
     opening round, credited to the 1:1 and to no meeting turn. Her latest
-    `delegate` decides, and a later `yes` with no action keeps the held one."""
+    `delegate` decides, and a later `yes` with no action keeps the held one.
+    Only the owner hands over an edit: the others' `delegate` is never read."""
     _, run, s, seen, sp, ok = _drive(
         {
             "p01-owner": {"meet_1": "owner tpm: rollback plan",
                           "meet_2": "manager pm: staffing"},
             "o02-owner": {"delegate": True, "action": _EDIT},
-            "o03-tpm": {"aligned": True},
+            "o03-tpm": {"aligned": True, "delegate": True, "action": "Tpm edit."},
             "o04-owner": {"aligned": True, "delegate": True},  # yes, no action: ignored
-            "o05-pm": {"aligned": True},
-            "o06-manager": {"aligned": True},
+            "o05-pm": {"aligned": True, "delegate": True, "action": "Pm edit."},
+            "o06-manager": {"aligned": True, "delegate": True, "action": "Manager edit."},
         },
         max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
     )
@@ -9441,6 +9442,7 @@ def test_upfront_owner_delegation_mints_junior_before_the_opening_round(artifact
     assert docs["o02-owner"]["delegated_action"] is None  # held until the 1:1 ends
     assert (docs["o04-owner"]["final"], docs["o04-owner"]["delegated_action"]) == (True, _EDIT)
     assert docs["o06-manager"]["delegated_action"] is None  # no owner in 1:1 2, no edit
+    assert "t02-junior_ic" not in seen and len(s["rechecks"]) == 1
     junior = docs["t01-junior_ic"]
     assert (junior["origin_one_on_one"], junior["delegated_by_turn"], junior["answers_turn"]) == (
         1, None, None)
@@ -9452,6 +9454,24 @@ def test_upfront_owner_delegation_mints_junior_before_the_opening_round(artifact
     assert (docs["o01-tpm"]["after_turn"], docs["o05-pm"]["after_turn"]) == (0, 1)
     assert docs[first]["origin_one_on_one"] is None  # `_turn` resets it on every mint
     assert s["delegation"] is None and s["delegation_origin"] is None
+
+    # A 1:1 that ends `not delivered` still hands over the edit the owner held.
+    _, run, s, seen, sp, ok = _drive(
+        {
+            "p01-owner": {"meet_1": "owner tpm: rollback plan"},
+            "o01-tpm": {"aligned": False},
+            "o02-owner": {"aligned": False, "delegate": True, "action": _EDIT},
+            "o03-tpm": {"_ok": False},
+        },
+        max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
+    )
+    check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+    i = seen.index("p01-owner")
+    assert seen[i:i + 5] == ["p01-owner", "o01-tpm", "o02-owner", "o03-tpm", "t01-junior_ic"]
+    docs = _by_phase(run)
+    assert (docs["o03-tpm"]["ended"], docs["o03-tpm"]["delegated_action"]) == (
+        "not delivered", _EDIT)
+    assert docs["t01-junior_ic"]["origin_one_on_one"] == 1
 
 
 def test_one_on_one_delegation_after_a_meeting_delegation_has_no_stale_turn_link(artifact):
@@ -9478,6 +9498,24 @@ def test_one_on_one_delegation_after_a_meeting_delegation_has_no_stale_turn_link
     assert (one_on_one["delegated_by_turn"], one_on_one["origin_one_on_one"]) == (None, 1)
     assert [(c["turn"], c["action"], c["origin_one_on_one"]) for c in s["rechecks"]] == [
         (3, "Cut the appendix.", None), (6, _EDIT, 1)]
+
+    # The owner may delegate on the closing exchange of a pair she called.
+    _, run, s, seen, sp, ok = _drive(
+        {
+            "t02-owner": {"align": "tpm pm: rollout order"},
+            "o01-tpm": {"aligned": True},
+            "o02-pm": {"aligned": True},
+            "o03-owner": {"agreed": "ship it", "delegate": True, "action": _EDIT},
+        },
+        max_turns=None, selection=DEFAULT_SELECTION, one_on_one_budget=16, real_turns=True,
+    )
+    check_invariants(s, seen, sp, max_turns=s["max_turns"], delivered=ok)
+    i = seen.index("t02-owner")
+    assert seen[i:i + 5] == ["t02-owner", "o01-tpm", "o02-pm", "o03-owner", "t03-junior_ic"]
+    docs = _by_phase(run)
+    assert docs["o03-owner"]["closing"] is True
+    assert docs["o03-owner"]["delegated_action"] == _EDIT
+    assert docs["t03-junior_ic"]["origin_one_on_one"] == 1
 
 
 def test_pause_with_a_delegation_changes_only_turn_and_rechecks(artifact, minted_from):
@@ -9516,23 +9554,29 @@ def test_pause_with_a_delegation_changes_only_turn_and_rechecks(artifact, minted
         "turn": 5, "action": _EDIT, "verified": False, "origin_one_on_one": 1}
 
     # The handover itself, with the cap set and unset: only an unset cap grows.
-    for explicit, cap in ((True, 40), (False, 41)):
+    # Her latest action replaces the one she held; a closing exchange counts.
+    member = {"members": ["tpm", "owner"], "aligned": {"tpm": True, "owner": None},
+              "exchange": 2, "closing": False, "ended": None}
+    closing = {"members": ["tpm", "pm"], "aligned": {"tpm": True, "pm": True},
+               "exchange": 2, "closing": True, "ended": "aligned"}
+    for explicit, cap, shape, block in (
+        (True, 40, member, {"aligned": True, "delegate": True, "action": _EDIT}),
+        (False, 41, member, {"aligned": True, "delegate": True, "action": _EDIT}),
+        (False, 41, closing, {"agreed": "x", "delegate": True, "action": _EDIT}),
+    ):
         st = _committee()._state(_run())
         st.update(cap_explicit=explicit, max_turns=40, delegation_turn=2,
                   current_role=cast.OWNER, one_on_one={
                       "seq": 3, "origin": "pause", "called_by": "manager",
-                      "after_turn": 4, "host": "owner", "members": ["tpm", "owner"],
-                      "topic": "rollout order", "exchange": 2, "next": "owner",
-                      "closing": False, "aligned": {"tpm": True, "owner": None},
-                      "agreed": None, "still_open": None, "held_action": None,
-                      "ended": None,
+                      "after_turn": 4, "host": "owner", "topic": "rollout order",
+                      "next": "owner", "agreed": None, "still_open": None,
+                      "held_action": "Cut the appendix.", **shape,
                   })
-        gate = _apply_one_on_one(
-            st, {"aligned": True, "delegate": True, "action": _EDIT}, delivered=True)
+        gate = _apply_one_on_one(st, block, delivered=True)
         assert (gate["final"], gate["ended"], gate["delegated_action"]) == (
-            True, "aligned", _EDIT), explicit
+            True, "aligned", _EDIT), (explicit, shape["closing"])
         assert (st["delegation"], st["delegation_origin"], st["delegation_turn"],
-                st["max_turns"]) == (_EDIT, 3, None, cap), explicit
+                st["max_turns"]) == (_EDIT, 3, None, cap), (explicit, shape["closing"])
 
 
 def test_one_on_one_edits_never_cost_a_reviewer_their_opening_turn():
