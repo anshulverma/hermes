@@ -3531,6 +3531,23 @@ def test_budget_zero_turns_one_on_ones_off():
     assert "p01-owner" in seen
     assert [phase for phase in seen if phase != "p01-owner"] == base
 
+    # Task 7 (AC9): with 1:1s off no meeting goal offers `align`, and an
+    # `align` that arrives anyway is dropped as `one-on-ones off`.
+    for off_budget in (0, 1):
+        off_pb = _committee()
+        off_run = _run()
+        off_s = off_pb._state(off_run)
+        off_s["one_on_one_budget"] = off_budget
+        for role in (cast.OWNER, cast.MANAGER):
+            off_run.phase = off_pb._turn(off_s, role)
+            goal = off_pb.seed(off_run, _NamedSite("local"))[0].payload["goal"]
+            assert "align:" not in goal, (off_budget, role)
+        gates = _apply_block(off_s, cast.MANAGER, {"align": "tpm manager: rollout order"})
+        assert gates == {"scheduled": [], "dropped": [{
+            "seq": None, "text": "tpm manager: rollout order",
+            "members": ["tpm", "manager"], "reason": "one-on-ones off"}]}, off_budget
+        assert off_s["pending_one_on_ones"] == [] and off_s["one_on_one_seq"] == 0
+
 
 def test_undelivered_plan_records_no_plan_delivered(monkeypatch):
     """C6 and the plan edge case: a plan whose worker produced nothing schedules
@@ -8275,6 +8292,245 @@ def test_failed_exchange_retake_keeps_the_held_take():
         assert (final["final"], final["ended"], final["outcome"]["aligned"]) == (
             True, "aligned", True)
     assert s["one_on_one_used"] == 4 and s["one_on_ones_done"] == [1, 2]
+
+
+# --- 1:1s: the mid-review pause (one-on-ones D3, D4, C4, C6) ----------------
+
+# Both members say aligned on their first exchange, so each 1:1 is two exchanges.
+_ALIGNED = {"aligned": True}
+
+
+def test_manager_pause_runs_after_the_owner_reply_and_resumes_state(monkeypatch):
+    """AC3 with no 1:1 delegation: the manager's align runs after the owner
+    answers her, while the opening round is still loaded, and the meeting then
+    picks up exactly where it stopped. The owner's own align in that reply
+    queues behind it (FIFO). A reply that delegates runs the junior IC first."""
+    from playbooks.committee.playbook import CommitteePlaybook
+
+    watched = ("opening", "queue", "closed", "last_speaker", "turn", "delegation")
+    before = []  # the watched state just before each mint: before[k - 1] mints seen[k]
+    real = CommitteePlaybook.next_phase
+
+    def spy(self, run):
+        s = self._state_by_run[run.id]
+        before.append({
+            key: list(s[key]) if isinstance(s[key], list) else s[key] for key in watched
+        })
+        return real(self, run)
+
+    monkeypatch.setattr(CommitteePlaybook, "next_phase", spy)
+    _, _, s, seen, sp, ok = _drive({
+        "t03-manager": {"align": "tpm manager: rollout order"},
+        "t04-owner": {"align": "owner pm: cost"},
+        "o01-tpm": _ALIGNED, "o02-manager": _ALIGNED,
+        "o03-pm": _ALIGNED, "o04-owner": _ALIGNED,
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    check_invariants(s, seen, sp, delivered=ok)
+    assert s["reviewers"][:3] == ["senior_director", "manager", "tpm"]
+    at = seen.index("t03-manager")
+    assert seen[at:at + 8] == [
+        "t03-manager", "t04-owner",
+        "o01-tpm", "o02-manager",  # the manager's pair, scheduled first
+        "o03-pm", "o04-owner",     # the owner's, called in her reply
+        "t05-tpm", "t06-owner",    # the opening round resumes where it stopped
+    ]
+    paused = before[seen.index("o01-tpm") - 1]
+    resumed = before[seen.index("t05-tpm") - 1]
+    assert paused == resumed
+    assert resumed["opening"][0] == "tpm" and resumed["last_speaker"] == cast.OWNER
+    assert (s["one_on_ones_done"], s["pending_one_on_ones"], s["dropped_one_on_ones"]) == (
+        [1, 2], [], [])
+
+    # An owner reply that delegates as well: the junior IC's edit outranks the
+    # pause (D3 item 6 above item 9), then the 1:1, then the next speaker.
+    _, _, d, dseen, dsp, dok = _drive({
+        "t03-manager": {"align": "tpm manager: rollout order"},
+        "t04-owner": {"delegate": True, "action": "Name the rollback owner."},
+        "o01-tpm": _ALIGNED, "o02-manager": _ALIGNED,
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    check_invariants(d, dseen, dsp, delivered=dok)
+    at = dseen.index("t03-manager")
+    assert dseen[at:at + 6] == [
+        "t03-manager", "t04-owner", "t05-junior_ic", "o01-tpm", "o02-manager", "t06-tpm"]
+    assert d["one_on_ones_done"] == [1]
+
+
+def test_owner_close_does_not_cancel_a_managers_pause():
+    """D3 items 9 and 10: a pause called before or on the owner's close still
+    runs, and only then does the close end the meeting."""
+    # The manager queues in the opening round, calls the pause from her queue
+    # turn, and the owner answers it with a close.
+    _, _, s, seen, sp, ok = _drive({
+        "t03-manager": {"request_floor": True},
+        "t15-manager": {"align": "tpm manager: rollout order"},
+        "t16-owner": {"close": True},
+        "o01-tpm": _ALIGNED, "o02-manager": _ALIGNED,
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    check_invariants(s, seen, sp, delivered=ok)
+    assert seen[-5:] == ["t15-manager", "t16-owner", "o01-tpm", "o02-manager", "decision"]
+    assert (s["closed"], s["ended"], s["one_on_ones_done"]) == (True, "owner closed", [1])
+    assert s["dropped_one_on_ones"] == []
+
+    # The owner's own align on her closing turn runs too.
+    _, _, own, own_seen, own_sp, own_ok = _drive({
+        "t14-owner": {"close": True, "align": "owner pm: cost"},
+        "o01-pm": _ALIGNED, "o02-owner": _ALIGNED,
+    }, selection=DEFAULT_SELECTION, one_on_one_budget=16)
+
+    check_invariants(own, own_seen, own_sp, delivered=own_ok)
+    assert own_seen[-4:] == ["t14-owner", "o01-pm", "o02-owner", "decision"]
+    assert (own["ended"], own["one_on_ones_done"]) == ("owner closed", [1])
+
+
+def test_align_is_validated_with_reasons():
+    """C4: every align gate in order with the first failure named, the host and
+    members of a scheduled pair, and the turn reduction keeping the text as asked."""
+    roster = _drive({}, selection=DEFAULT_SELECTION)[2]["roster"]  # the seated nine
+    held = {"seq": 7, "origin": "pause", "called_by": "owner", "host": "owner",
+            "members": ["tl", "owner"], "topic": "api freeze"}
+
+    def gate(role, text, budget=16, pending=()):
+        s = _committee()._state(_run())
+        s.update(roster=roster, one_on_one_budget=budget,
+                 pending_one_on_ones=[dict(p) for p in pending])
+        return s, _apply_block(s, role, {"align": text})
+
+    for role, text, budget, pending, reason in [
+        ("tpm", "tpm manager: order", 1, (), "one-on-ones off"),  # off outranks the caller
+        ("tpm", "tpm manager: order", 16, (), "not owner or manager"),
+        (cast.JUNIOR, "tpm manager: order", 16, (), "not owner or manager"),
+        (cast.MANAGER, "tpm manager order", 16, (), "malformed"),  # no colon
+        (cast.MANAGER, "tpm, pm, tl: order", 16, (), "malformed"),  # three roles
+        (cast.MANAGER, "tpm:", 16, (), "malformed"),  # checked before no topic
+        (cast.MANAGER, "tpm manager:", 16, (), "no topic"),
+        (cast.OWNER, "chair tpm: order", 16, (), "unknown role"),  # the sentinel is no seat
+        (cast.OWNER, "security tpm: order", 16, (), "unknown role"),  # not seated here
+        (cast.OWNER, "tpm TPM: order", 16, (), "same member"),
+        (cast.OWNER, "junior_ic tpm: order", 16, (), "junior_ic"),
+        (cast.OWNER, "owner tl: again", 3, (held,), "duplicate"),  # outranks budget
+        (cast.OWNER, "owner pm: cost", 3, (held,), "budget"),  # free 3 - 2 = 1 < 2
+        (cast.MANAGER, "tpm pm: order", 2, (), "budget"),  # a closing exchange: needs 3
+    ]:
+        s, gates = gate(role, text, budget, pending)
+        assert gates["scheduled"] == [] and len(gates["dropped"]) == 1, (text, gates)
+        drop = gates["dropped"][0]
+        assert (drop["seq"], drop["text"], drop["reason"]) == (None, text, reason), (text, drop)
+        assert s["dropped_one_on_ones"] == [drop] and s["one_on_one_seq"] == 0, text
+        assert len(s["pending_one_on_ones"]) == len(pending), text
+    # a drop names the pair when the line parsed, and nothing when it did not
+    assert gate(cast.OWNER, "Owner, PM: cost", 3, (held,))[1]["dropped"][0]["members"] == [
+        "owner", "pm"]
+    assert gate(cast.MANAGER, "tpm manager order")[1]["dropped"][0]["members"] is None
+
+    # A turn that delivered nothing asks for nothing.
+    s = _committee()._state(_run())
+    s.update(roster=roster, one_on_one_budget=16, last_speaker=cast.MANAGER)
+    assert _apply_block(s, cast.MANAGER, {"align": "tpm manager: order"}, delivered=False) == {
+        "scheduled": [], "dropped": []}
+    assert s["last_speaker"] == cast.OWNER and s["dropped_one_on_ones"] == []
+
+    # Scheduled: the owner hosts if she is in the pair, else the manager if she
+    # is, else the caller, who then closes the 1:1 (D6). seq counts in order.
+    s = _committee()._state(_run())
+    s.update(roster=roster, one_on_one_budget=16)
+    made = [
+        _apply_block(s, cast.MANAGER, {"align": "TPM, Manager: rollout order"}),
+        _apply_block(s, cast.MANAGER, {"align": "tl staff_ic: api shape"}),
+        _apply_block(s, cast.OWNER, {"align": "manager owner: headcount"}),
+    ]
+    assert made[0] == {"scheduled": [{
+        "seq": 1, "origin": "pause", "called_by": "manager", "host": "manager",
+        "members": ["tpm", "manager"], "topic": "rollout order"}], "dropped": []}
+    assert [(g["scheduled"][0]["host"], g["scheduled"][0]["members"]) for g in made[1:]] == [
+        ("manager", ["tl", "staff_ic"]), ("owner", ["manager", "owner"])]
+    assert [p["seq"] for p in s["pending_one_on_ones"]] == [1, 2, 3]
+    assert s["one_on_one_seq"] == 3 and s["dropped_one_on_ones"] == []
+
+    # Through the real reduce: a reviewer's align is refused but kept as asked,
+    # a manager's is scheduled, and both ride on the turn reduction (C6).
+    for role, text, want in (
+        ("tpm", "tpm tl: rollout order", []),
+        (cast.MANAGER, "tpm manager: rollout order", [{
+            "seq": 1, "origin": "pause", "called_by": "manager", "host": "manager",
+            "members": ["tpm", "manager"], "topic": "rollout order"}]),
+    ):
+        pb = _committee()
+        run = _run()
+        run.id = f"committee-align-{role}"
+        s = pb._state(run)
+        s.update(roster=roster, one_on_one_budget=16, turn=5)
+        run.phase = pb._turn(s, role)
+        answer = _turn_answer("Rollback needs a named owner before launch.", align=text)
+        reds = pb.reduce(run, run.phase, [_finding(run, f"{run.id}/{run.phase}", answer)],
+                         _NamedSite("local"))
+        doc = reds[0].json
+        assert [r.kind for r in reds] == ["turn"], role
+        assert (doc["align"], doc["one_on_one_budget"]) == (text, 16), role
+        assert doc["one_on_ones_scheduled"] == want == s["pending_one_on_ones"], role
+        assert doc["one_on_ones_dropped"] == ([] if want else [{
+            "seq": None, "text": text, "members": ["tpm", "tl"],
+            "reason": "not owner or manager"}]), role
+
+
+def test_align_is_offered_only_to_the_owner_and_manager():
+    """AC9: the align sentence rides only in the owner's and the manager's
+    meeting goals, and only while the budget can hold a 1:1 (2 or more)."""
+    site = _NamedSite("local")
+    for budget, offered in ((16, {cast.OWNER, cast.MANAGER}),
+                            (2, {cast.OWNER, cast.MANAGER}),
+                            (0, set())):
+        pb = _committee()
+        run = _run()
+        s = pb._state(run)
+        s["one_on_one_budget"] = budget
+        carries = set()
+        for role in (cast.OWNER, *cast.SENIORITY):
+            run.phase = pb._turn(s, role)
+            if "align:" in pb.seed(run, site)[0].payload["goal"]:
+                carries.add(role)
+        run.phase = pb._decision(s, "queue empty")
+        assert "align:" not in pb.seed(run, site)[0].payload["goal"], budget  # the chair
+        assert carries == offered, (budget, carries)
+
+
+def test_turn_cap_drops_pending_one_on_ones_as_meeting_ended():
+    """D3 item 7: only the cap drops a pending pair, as `meeting ended`. The
+    decision reduction lists every drop; the footer names the pairs that never
+    met for budget or because the meeting ended."""
+    from playbooks.committee import thread
+
+    pb, run, s, seen, _, _ = _drive({
+        "t01-senior_director": {"align": "tpm pm: order"},
+        "t03-manager": {"align": "tpm manager: rollout order"},
+        "t04-owner": {"align": "owner pm: cost"},
+    }, max_turns=4, selection=DEFAULT_SELECTION, one_on_one_budget=2)
+
+    assert seen[-3:] == ["t03-manager", "t04-owner", "decision"]
+    assert not [p for p in seen if _O_PHASE.match(p)]
+    assert (s["ended"], s["pending_one_on_ones"], s["one_on_ones_done"]) == ("turn cap", [], [])
+    dropped = [
+        {"seq": None, "text": "tpm pm: order", "members": ["tpm", "pm"],
+         "reason": "not owner or manager"},
+        {"seq": None, "text": "owner pm: cost", "members": ["owner", "pm"], "reason": "budget"},
+        {"seq": 1, "text": "tpm manager: rollout order", "members": ["tpm", "manager"],
+         "reason": "meeting ended"},
+    ]
+    assert s["dropped_one_on_ones"] == dropped
+
+    red = pb.reduce(
+        run, "decision",
+        [_finding(run, f"{run.id}/decision", "Defer it: the rollout order is still open.")],
+        _NamedSite("local"),
+    )[0]
+    assert red.kind == "decision" and red.json["dropped_one_on_ones"] == dropped
+    footer = ("- dropped_one_on_ones (they never met): "
+              "owner ↔ pm (budget), tpm ↔ manager (meeting ended)")
+    assert footer in red.json["verdict"]
+    assert footer in thread.path(run.id).read_text(encoding="utf-8")
+    assert "not owner or manager" not in red.json["verdict"]
 
 
 # --- registration and wiring ---------------------------------------------

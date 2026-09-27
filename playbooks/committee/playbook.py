@@ -80,7 +80,7 @@ _FINAL_KEYS = (
 _TURN_BLOCK_RULES = ("stance_too_long", "action_too_long")
 
 
-def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> None:
+def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> dict:
     """The gates of spec 5.4, applied to one settled turn.
 
     Enforced, not advisory, and there is exactly ONE copy of them: ``reduce``
@@ -95,10 +95,15 @@ def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> 
     ``_(no turn delivered …)_`` either hallucinates a reply or burns the turn.
     Attributing the silence to the owner is what makes ``next_phase`` move on to
     the next speaker instead.
+
+    Returns what became of an ``align`` line, for the turn reduction:
+    ``{"scheduled": [pair], "dropped": [drop]}``, both empty when none was asked
+    for (one-on-ones D4). A pause is scheduled here and nowhere else.
     """
+    gates: dict = {"scheduled": [], "dropped": []}
     if not delivered:
         s["last_speaker"] = cast.OWNER
-        return
+        return gates
     if block.get("request_floor") and role not in (cast.OWNER, cast.JUNIOR, cast.CHAIR):
         # `opening` as well as `queue`: a delegated turn mints without popping,
         # so a role can still be waiting in the opening round.
@@ -115,6 +120,59 @@ def _apply_block(s: dict, role: str, block: dict, *, delivered: bool = True) -> 
         if block.get("delegate") and block.get("action"):
             s["delegation"] = block["action"]
             s["delegation_turn"] = s["current_turn"]
+    if block.get("align"):
+        kind, entry = _align(s, role, block["align"])
+        gates[kind].append(entry)
+    return gates
+
+
+def _align(s: dict, role: str, text: str) -> tuple[str, dict]:
+    """Schedule the pause one ``align: <role> <role>: <topic>`` line asks for.
+
+    Returns ``("scheduled", pair)`` or ``("dropped", drop)``. The C4 gates run
+    in order and the first that fails names the drop. The host is the owner if
+    she is in the pair, else the manager if she is, else the caller, who then
+    hosts through one closing exchange and so needs a third exchange of the
+    budget (``_need``). ``seq`` is an identity, assigned only when the pair is
+    scheduled. ``duplicate`` is checked against pending pairs only: a pair may
+    meet again after its 1:1 is done.
+    """
+    parsed = turnblock.pair(text)
+    a, b, topic = parsed if isinstance(parsed, tuple) else (None, None, "")
+    host = next((h for h in (cast.OWNER, cast.MANAGER) if h in (a, b)), role)
+    pair = {
+        "seq": None,
+        "origin": "pause",
+        "called_by": role,
+        "host": host,
+        "members": [b if a == host else a, host] if host in (a, b) else [a, b],
+        "topic": cast.clip(topic, cast.TOPIC_MAX),
+    }
+    if s["one_on_one_budget"] < 2:
+        reason = "one-on-ones off"
+    elif role not in (cast.OWNER, cast.MANAGER):
+        reason = "not owner or manager"
+    elif isinstance(parsed, str):
+        reason = parsed  # "malformed" or "no topic", checked in that order by pair()
+    elif a not in s["roster"] or b not in s["roster"]:
+        reason = "unknown role"  # `chair` is a sentinel, never a roster key
+    elif a == b:
+        reason = "same member"
+    elif cast.JUNIOR in (a, b):
+        reason = "junior_ic"
+    elif any({a, b} == set(p["members"]) for p in s["pending_one_on_ones"]):
+        reason = "duplicate"
+    elif _free(s) < _need(pair):
+        reason = "budget"
+    else:
+        s["one_on_one_seq"] += 1
+        pair["seq"] = s["one_on_one_seq"]
+        s["pending_one_on_ones"].append(pair)
+        return "scheduled", pair
+    drop = {"seq": None, "text": text,
+            "members": None if a is None else [a, b], "reason": reason}
+    s["dropped_one_on_ones"].append(drop)
+    return "dropped", drop
 
 
 def _apply_selection(s: dict, resolved: dict) -> None:
@@ -590,6 +648,17 @@ class CommitteePlaybook:
             s["dropped_delegation"] = s["delegation"]
             s["dropped_delegation_turn"] = s["delegation_turn"]
             s["delegation"] = None
+        # D3 item 7: only the turn cap reaches here with a 1:1 still pending
+        # (a close waits for them, item 10), and none is lost unrecorded.
+        for pair in s["pending_one_on_ones"]:
+            first, second = pair["members"]
+            s["dropped_one_on_ones"].append({
+                "seq": pair["seq"],
+                "text": f"{first} {second}: {pair['topic']}",
+                "members": [first, second],
+                "reason": "meeting ended",
+            })
+        s["pending_one_on_ones"] = []
         return "decision"
 
     def _select(self, s: dict, stage: int) -> str:
@@ -895,6 +964,9 @@ class CommitteePlaybook:
                 last_take=s["last_take"],
                 roster=s["roster"] or None,
                 speaks_for=speaks_for,
+                # a no-op for the chair and the junior IC, whose shapes
+                # return before the meeting instruction
+                align=role in (cast.OWNER, cast.MANAGER) and s["one_on_one_budget"] >= 2,
             )
 
         return [Ticket(
@@ -1496,7 +1568,7 @@ class CommitteePlaybook:
         block = turnblock.parse(answer)
 
         # The gates of spec 5.4.
-        _apply_block(s, role, block, delivered=bool(answer))
+        gates = _apply_block(s, role, block, delivered=bool(answer))
 
         # `stance` is not a gate -- it steers nothing, so it is not in
         # `_apply_block`. It rides on the turn reduction below and nowhere else:
@@ -1599,6 +1671,12 @@ class CommitteePlaybook:
             "request_floor": bool(block.get("request_floor")),
             "delegate": bool(block.get("delegate")),
             "close": bool(block.get("close")),
+            # `align` as asked; whether it was honoured is the next two keys.
+            "align": block.get("align"),
+            "one_on_ones_scheduled": [dict(pair) for pair in gates["scheduled"]],
+            "one_on_ones_dropped": [dict(drop) for drop in gates["dropped"]],
+            # the budget `open` resolved: the server process cannot read it (D10)
+            "one_on_one_budget": s["one_on_one_budget"],
             "action": block.get("action"),
             "verified": verified,
             # Always written, null when not applicable: an ABSENT key marks a
@@ -1671,6 +1749,23 @@ class CommitteePlaybook:
                 "- dropped_floor_requests (the review ended before their turn "
                 f"came): {', '.join(s['queue'])}"
             )
+        never_met = [
+            drop for drop in s["dropped_one_on_ones"]
+            if drop["reason"] in ("budget", "meeting ended")
+        ]
+        if never_met:
+            # Symmetric with dropped_floor_requests: a 1:1 the budget or the end
+            # of the meeting stopped is a fact about this committee's output.
+            # Refused asks (a reviewer's align, a bad line) are not: they sit on
+            # their turn reductions and in `dropped_one_on_ones` below.
+            parts.append(
+                "- dropped_one_on_ones (they never met): "
+                + ", ".join(
+                    f"{' ↔ '.join(drop['members']) if drop['members'] else drop['text']}"
+                    f" ({drop['reason']})"
+                    for drop in never_met
+                )
+            )
         parts.append(_SIMULATION)
         text = "\n\n".join(parts)
 
@@ -1697,6 +1792,7 @@ class CommitteePlaybook:
             "dropped_delegation": s["dropped_delegation"],
             "dropped_delegation_turn": s["dropped_delegation_turn"],
             "dropped_floor_requests": list(s["queue"]),
+            "dropped_one_on_ones": [dict(drop) for drop in s["dropped_one_on_ones"]],
             # Why the meeting stopped. A chair that delivered nothing outranks
             # whatever routed the run here: that IS how this meeting ended, and
             # it is the ending the operator has to act on. The fallback covers a
@@ -1766,9 +1862,10 @@ class CommitteePlaybook:
             s["pending_action"] = s["delegation"]
             s["delegation"] = None  # consumed exactly once, here
             return self._turn(s, cast.JUNIOR, delegated_by=s["delegation_turn"])
-        if s["closed"] or s["turn"] > s["max_turns"]:
-            # Mirrors the `or`: an owner that closed is why the meeting stopped,
-            # even when the cap would have stopped it on the next hop anyway.
+        if s["turn"] > s["max_turns"]:
+            # D3 item 7: the cap alone, and the one route that drops a pending
+            # 1:1 (`meeting ended`). An owner that closed is still why the
+            # meeting stopped, even when the cap would have stopped it anyway.
             return self._decision(s, "owner closed" if s["closed"] else "turn cap")
         if s["last_speaker"] != cast.OWNER:
             # the owner answers every reviewer; `current_turn` is still that
@@ -1798,6 +1895,13 @@ class CommitteePlaybook:
                 "ended": None,
             }
             return self._exchange(s)
+        if s["closed"]:
+            # D3 item 10, below the pending 1:1s: a pause called on or before
+            # the owner's close still runs, so closing cannot cancel it (Q2).
+            # `closed` is set only on a delivered owner turn, and neither the
+            # junior IC nor a p/o phase moves `last_speaker` off the owner, so
+            # the owner-reply rule (item 8) cannot fire in between.
+            return self._decision(s, "owner closed")
         if s["opening"]:
             return self._turn(s, s["opening"].pop(0))
         if s["queue"]:
