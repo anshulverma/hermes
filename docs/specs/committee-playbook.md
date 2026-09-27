@@ -213,7 +213,7 @@ derived seat's fields are its reason. Fixed seats get no Why line (their reason 
 they represent someone; the chair's decision gets neither, and the owner never speaks for anyone.
 Both lines are selector text, so they sit above the brief's `style:` line: on a derived seat
 `cast.DERIVED_STYLE` follows them, and a hand-written brief (a library or fixed seat) adds that
-same sentence on its own line under them, before its own style. Eval's `concern_coverage@3`
+same sentence on its own line under them, before its own style. Eval's `concern_coverage@4`
 counts such a stakeholder as represented only when its representative's turns raise its concern.
 
 **The cap.** With `HERMES_COMMITTEE_MAX_TURNS` unset, the cap is 2 × reviewers + 16, fixed when the
@@ -291,7 +291,7 @@ of `fixed`, `library` or `derived`. No selection reduction carries `artifact`, `
 `turn: null`, and `code` too when it was the chair's unusable list. Readers take the latest
 `selection` reduction with `final: true`. Selection reductions count under eval's
 `metrics.other_kinds`, never as turns. eval reads `metrics.seats` from the final one (a malformed
-one fails closed, so concern coverage caps), and `concern_coverage@3` counts a considered
+one fails closed, so concern coverage caps), and `concern_coverage@4` counts a considered
 stakeholder as represented only when its representative's turns raise that stakeholder's
 concern, and as missing otherwise: see [committee-eval.md](committee-eval.md).
 

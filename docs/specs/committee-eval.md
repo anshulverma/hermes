@@ -369,6 +369,7 @@ only.
   5: every claim in the chair prose traces to a turn or to the document, and the verdict follows from the arguments.
   3: mostly grounded, with some unsupported claims.
   1: asserts things nobody said, or contradicts the thread.
+  A claim settled in a `## 1:1` outcome entry counts as grounded (cite `where:"one_on_one"`).
 
   edits_address_concerns
   5: each edit does what its delegation asked and resolves the concern behind it.
@@ -380,12 +381,13 @@ only.
   5: every seated member's main concerns were answered by the owner or by an edit, and the thread names no needed stakeholder missing from the room.
   1: major concerns went unanswered, or a missing function is named repeatedly.
   Concerns come from each member's own turns, never from persona config. The judge also gets `seats`, `unanswered_reviewer_turns` and `outside_room_mentions`. A stakeholder in seats.considered counts as represented only when the turns of its represented_by member raise that stakeholder's concern; otherwise it counts as missing, as does one with no represented_by, or one the thread names who is in neither seats.roster nor seats.considered.
+  A concern settled in a `## 1:1` outcome entry counts as answered.
 
   Evidence: every quote is verbatim and contiguous from the place it cites (no ellipses, no paraphrase).
   ```
 
   - The text is pinned: `test_voice_measure_and_version` asserts the first 8 hex of its sha256
-    (`f4a1cd8f`). An edit fails that test until the affected judge dimension's `@n` is bumped and
+    (`5c622e34`). An edit fails that test until the affected judge dimension's `@n` is bumped and
     the hash re-pinned. The same change updates the block above and this hash.
   - The planning spec's closing sentence ("The run-9 baseline for absent stakeholders includes at
     least Security and on-call/SRE.") is left out of `RUBRIC` on purpose (G13): it is an
@@ -408,8 +410,9 @@ only.
     reads `cost_usd unknown: -1`, and a drop reads `dropped delegation: -1`). concision starts
     `"start 1 (median_reviewer_owner 825.0 > 800)"`. It ends `"; floor 1"` when the floor bit.
 - **Versions.**
-  - `DIMENSIONS` maps each id to an explicit `"<id>@<n>"`. Today `edits_address_concerns@2`,
-    `concern_coverage@3`, `concision@2` and `verdict_consistency@2`, the rest `@1`.
+  - `DIMENSIONS` maps each id to an explicit `"<id>@<n>"`. Today `verdict_grounded@2`,
+    `edits_address_concerns@2`, `concern_coverage@4`, `concision@2` and
+    `verdict_consistency@2`, the rest `@1`.
     edits_address_concerns@2 rewrote anchors 3 and 1, which both said "partial" at @1.
     concern_coverage@2 (committee-selection) gave the judge `seats.considered` and counted a
     considered stakeholder with a represented_by as represented. concern_coverage@3
@@ -417,7 +420,9 @@ only.
     its represented_by member raise that stakeholder's concern, and as missing otherwise, as it
     does one without a represented_by: a selector's word alone no longer covers anyone, and each
     seated member's goal now names the stakeholders it speaks for. Evals scored at @2 compare as
-    stale. concision@2 reads voice's new counts (see
+    stale. verdict_grounded@2 and concern_coverage@4 (committee-one-on-ones) count a claim or a
+    concern settled in a `## 1:1` outcome entry as grounded or answered, and the judge may cite
+    one as `where:"one_on_one"` with `turn` = its seq. concision@2 reads voice's new counts (see
     voice.py below). verdict_consistency@2 counts only the chair's claims; @1 also took up to 2
     points for `delegation_truncated_but_applied` flags (run-9 scored 1).
   - `dimension_versions(rules=RULES)` returns `DIMENSIONS` with concision suffixed
@@ -830,7 +835,8 @@ the previous one. Each behaviour loop scores its live run with the two commands 
 spec, and compares it against run-9 and run-2.
 
 - **Names.**
-  - eval.py's only voice import is `from playbooks.committee.voice import RULES, measure, summary`.
+  - eval.py's only voice import is
+    `from playbooks.committee.voice import RULES, kind as voice_kind, measure, summary`.
   - Build on `words`, `DIMENSIONS`, `JUDGE_DIMS`, `DETERMINISTIC_DIMS`, `dimension_versions(rules)`,
     `rubric_version(versions)`, `compute_metrics(target)` and `calibration(ledger_lines)`.
   - Quote verification is two calls, never one that reads the disk itself:
@@ -892,11 +898,17 @@ spec, and compares it against run-9 and run-2.
   committee-one-on-ones bumps it to @4). The header parser already ignores its pre-t01 lines. `outside_room_mentions` counts only body lines of turn and decision
   entries: selection amendment, because a turn heading now carries the run's roster name and
   title, which a selector may write for a derived seat.
-- **committee-one-on-ones.**
-  - Up-front `## 1:1 …` outcome lines before t01 belong to no entry, so they are never header
-    evidence.
-  - Mid-review `## 1:1 — …` lines inside a turn's line range may count in
-    `outside_room_mentions`. That is report-only and never scored.
+- **committee-one-on-ones** (as built).
+  - thread.md's `## 1:1 N: ` outcome and `## 1:1 plan: ` headings close the entry before them:
+    an outcome is its own entry (`parse_thread(text)["one_on_ones"]`, entries.json
+    `one_on_ones`, citable as `where:"one_on_one"` by seq) and the plan belongs to none. So no
+    1:1 line is header, turn-body or `outside_room_mentions` evidence. A stray `## 1:1` line
+    inside a body splits nothing.
+  - `metrics.one_on_ones` (`count, upfront, pause, kept_exchanges, retakes, aligned,
+    not_aligned, edits_from_one_on_ones, median_words_per_exchange`) is absent for a run with
+    no plan and no 1:1. The 1:1 kinds (`ONE_ON_ONE_KINDS`) and 1:1 retakes stay out of the turn
+    metrics and `other_kinds`; `extra_takes` still counts every take. `action_clipped` on a
+    1:1 edit reads that 1:1's latest delegating owner exchange and carries its `seq`.
   - Efficiency's cost, tokens, traces and time already cover every attempt on the run's tickets,
     1:1s included. So efficiency's definition and version do not change, and `turns >= cap`
     counts meeting turns only.

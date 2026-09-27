@@ -133,9 +133,9 @@ def test_voice_measure_and_version():
         "efficiency", "concision", "verdict_consistency",
     )
     assert E.DIMENSIONS == {
-        "verdict_grounded": "verdict_grounded@1",
+        "verdict_grounded": "verdict_grounded@2",
         "edits_address_concerns": "edits_address_concerns@2",
-        "concern_coverage": "concern_coverage@3",
+        "concern_coverage": "concern_coverage@4",
         "efficiency": "efficiency@1",
         "concision": "concision@2",
         "verdict_consistency": "verdict_consistency@2",
@@ -148,7 +148,7 @@ def test_voice_measure_and_version():
     assert "3: some edits resolve their concern, others only partly." in E.RUBRIC
     assert "1: cosmetic or unrelated edits, or edits that leave the concern unresolved." in E.RUBRIC
     assert "partial." not in E.RUBRIC
-    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "f4a1cd8f", (
+    assert hashlib.sha256(E.RUBRIC.encode()).hexdigest()[:8] == "5c622e34", (
         "RUBRIC text changed: bump the affected judge dimension's version in DIMENSIONS, "
         "re-pin this hash, and update the verbatim block and hash in docs/specs/committee-eval.md"
     )
@@ -988,6 +988,7 @@ def test_unknown_kinds_retakes_new_seats(tmp_path):
     assert before["outside_room_mentions"][0]["quote"].startswith(
         "- **Auth needs a yes from outside this room.**")
     assert (before["other_kinds"], before["extra_takes"]) == ({}, 0)
+    assert "one_on_ones" not in before  # run-9 held no 1:1: its metrics keep their keys
 
     assert "security" not in cast.CAST
     now = time.time()
@@ -1029,7 +1030,14 @@ def test_unknown_kinds_retakes_new_seats(tmp_path):
 
     m = compute_metrics(load_target(str(home), run_id))  # never raises
     assert m["extra_takes"] == 3  # two takes plus the losing t03
-    assert m["other_kinds"] == {"selection": 1, "one_on_one_plan": 1, "one_on_one": 1}
+    # one-on-ones C9: 1:1 kinds count in their own block, never as other kinds. The
+    # one_on_one row carries no seq, final or delivered, so only kept_exchanges moves.
+    assert m["other_kinds"] == {"selection": 1}
+    assert m["one_on_ones"] == {
+        "count": 0, "upfront": 0, "pause": 0, "kept_exchanges": 1, "retakes": 0,
+        "aligned": 0, "not_aligned": 0, "edits_from_one_on_ones": 0,
+        "median_words_per_exchange": None,
+    }
     assert m["turns"] == 25
     assert m["turns_by_role"] == {**before["turns_by_role"], "security": 1}
     assert m["seats"] == {
@@ -2128,6 +2136,14 @@ def test_evidence_verification(tmp_path, monkeypatch):
     assert rejected(turn=None, where="original", quote=gate)
     assert rejected(turn=None, where="revised", quote="rewritten after the snapshot")
     assert rejected(turn=1, where="turn", quote="  \n ")  # empty is in everything: never evidence
+    # A 1:1 outcome is its own place, cited by its seq (one-on-ones C9). run-9 held none.
+    assert entries["one_on_ones"] == {}
+    assert rejected(turn=1, where="one_on_one", quote=t1)  # an unknown seq
+    held = {**entries, "one_on_ones": {"2": {"text": "Agreed: Gate the rollout on the drill.",
+                                             "line_start": None, "line_end": None}}}
+    # T10's snap came from read_snapshot; swap in the held entries, thread.md stays run-9's
+    assert E.verify_evidence({"turn": 2, "where": "one_on_one", "quote": "Gate the rollout"},
+                             {**snap, "entries": held}) == ok("one_on_one", "Gate the rollout", None, turn=2)
     for where in ("original", "revised"):
         assert rejected(turn=None, where=where, quote="")
         assert rejected(turn=None, where=where, quote="e")  # in every copy: too short to back anything
@@ -3908,8 +3924,8 @@ def test_a_turn_heading_never_counts_as_outside_room():
 
 def test_concern_coverage_is_at_version_three_with_the_represented_rule(tmp_path, monkeypatch):
     # @3 (committee-selection FIX_WB): a representative counts only if its turns raise it
-    assert "concern_coverage@3" in repr(E.DIMENSIONS)
-    assert "concern_coverage@2" not in repr(E.DIMENSIONS)
+    assert "concern_coverage@4" in repr(E.DIMENSIONS)  # @4 (one-on-ones) keeps the rule
+    assert "concern_coverage@3" not in repr(E.DIMENSIONS)
     assert REPRESENTED_RULE in " ".join(E.RUBRIC.split())
 
     home = _sel_home(tmp_path / "chosen", _sel_artifact(tmp_path), selected=True)
@@ -3918,3 +3934,220 @@ def test_concern_coverage_is_at_version_three_with_the_represented_rule(tmp_path
         encoding="utf-8")
 
     assert REPRESENTED_RULE in " ".join(rubric_md.split())
+
+
+# --- one-on-ones (committee-one-on-ones C9, D11) --------------------------------
+
+
+def _one_on_one_thread() -> list[str]:
+    """thread.md lines in thread.py's layout: a plan, an up-front and a mid-review
+    1:1 outcome, and a stray ``## 1:1`` line inside a turn body."""
+    return [
+        "# Committee — run-x", "",
+        "Charge: Decide whether to fund it.", "",
+        "## 1:1 plan: Maya Okonkwo, Staff Engineer & proposal owner (owner)", "",
+        "- Maya Okonkwo ↔ Sam Iyer: who is not in this room", "",
+        "## 1:1 1: Maya Okonkwo ↔ Sam Iyer (aligned)", "",
+        "Agreed: Rollback by Friday.",
+        "Still open: Who pages.", "",
+        "## turn 01 — Sam Iyer, Technical Program Manager (tpm)", "",
+        "Security is not in this room, and it should be.", "",
+        "## turn 02 — Maya Okonkwo, Staff Engineer & proposal owner (owner)", "",
+        "Taken.", "",
+        "## 1:1 2: Sam Iyer ↔ Marcus Feld, hosted by Maya Okonkwo (not aligned)", "",
+        "Still open: Legal is not in this room.", "",
+        "## turn 03 — Marcus Feld, Tech Lead (tl)", "",
+        "## 1:1 with Sam went well", "",
+        "I agree now.", "",
+        "## decision — Dana Whitfield, Senior Director of Engineering", "",
+        "Approve with changes.",
+    ]
+
+
+def _line_of(lines: list[str]) -> dict[str, int]:
+    """Each non-blank line -> its 1-based number (every one used here is unique)."""
+    return {line: n for n, line in enumerate(lines, 1) if line}
+
+
+def test_one_on_one_outcome_lines_belong_to_no_entry(tmp_path):
+    """C9: a 1:1 heading closes the entry before it; no 1:1 line is header, turn or
+    outside-room evidence; a stray ``## 1:1`` line inside a body splits nothing."""
+    import dataclasses
+
+    lines = _one_on_one_thread()
+    at = _line_of(lines)
+    parsed = E.parse_thread("\n".join(lines) + "\n")
+    one = at["## 1:1 1: Maya Okonkwo ↔ Sam Iyer (aligned)"]
+    two = at["## 1:1 2: Sam Iyer ↔ Marcus Feld, hosted by Maya Okonkwo (not aligned)"]
+    t01 = at["## turn 01 — Sam Iyer, Technical Program Manager (tpm)"]
+    t03 = at["## turn 03 — Marcus Feld, Tech Lead (tl)"]
+
+    assert parsed["header"]["line_end"] == 4  # the plan heading ends the header
+    assert "1:1" not in parsed["header"]["text"]
+    assert list(parsed["turns"]) == [1, 2, 3]
+    assert (parsed["turns"][1]["line_start"], parsed["turns"][1]["line_end"]) == (t01, t01 + 3)
+    # the mid-review outcome closes turn 02: its lines are no longer turn 02's body
+    assert (parsed["turns"][2]["line_end"], parsed["turns"][2]["body"]) == (two - 1, "Taken.")
+    assert parsed["turns"][3]["body"] == "## 1:1 with Sam went well\n\nI agree now."
+    assert parsed["one_on_ones"] == {
+        1: {"body": "Agreed: Rollback by Friday.\nStill open: Who pages.",
+            "line_start": one, "line_end": t01 - 1},
+        2: {"body": "Still open: Legal is not in this room.",
+            "line_start": two, "line_end": t03 - 1},
+    }
+    assert parsed["decision"]["body"] == "Approve with changes."
+
+    home, run_id = build_home(tmp_path, "run-9")
+    base = E.load_target(str(home), run_id)
+
+    def mentions(rows):
+        text = "\n".join(rows) + "\n"
+        return E._outside_room_mentions(
+            dataclasses.replace(base, thread_text=text, thread=E.parse_thread(text)))
+
+    control = "Security is not in this room, and it should be."
+    expected = [{"line": at[control], "quote": control}]
+    # the plan line and the outcome line both say "not in this room"; neither counts
+    assert mentions(lines) == expected
+    without = [ln for ln in lines if not ln.startswith(("## 1:1 2:", "Still open: Legal"))]
+    assert mentions(without) == expected  # the mid-review outcome changes nothing
+
+
+def test_action_clipped_on_a_one_on_one_edit_reads_the_owner_exchange(tmp_path):
+    """C9: a 1:1 edit is judged by the 1:1's latest delegating owner exchange (else the
+    length rule), never by a meeting owner turn, and its flag names the seq."""
+    import dataclasses
+
+    from playbooks.committee import turnblock
+
+    home, run_id = build_home(tmp_path, "run-9")
+    base = E.load_target(str(home), run_id)
+    cut = turnblock.ACTION_MAX
+    long, short = "L" * cut, "Name the pager."
+
+    def junior(n, by=None, origin=None):
+        return {"role": "junior_ic", "turn": n, "delivered": True, "verified": True,
+                "delegated_by_turn": by, "origin_one_on_one": origin}
+
+    def exchange(seq, speaker, **extra):  # a kept 1:1 exchange
+        return ("one_on_one", {"seq": seq, "speaker": speaker, "delegate": False,
+                               "action": None, **extra})
+
+    turns = {
+        1: {"role": "owner", "turn": 1, "delivered": True, "delegate": True,
+            "action": long, "voice": {"action_chars": cut + 50}},
+        2: junior(2, by=1), 4: junior(4, origin=1), 6: junior(6, origin=2), 8: junior(8, origin=3),
+    }
+    rows = (
+        exchange(1, "owner", delegate=True, action=long, voice={"action_chars": cut + 40}),
+        exchange(1, "security"),  # a later guest exchange delegates nothing
+        exchange(2, "owner", delegate=True, action=long, voice={"action_chars": cut + 60}),
+        exchange(2, "owner", delegate=True, action=short, voice={"action_chars": len(short)}),
+        exchange(3, "owner", delegate=True, action=long),  # no voice: the length rule
+    )
+    rechecks = [
+        {"turn": 2, "action": long, "verified": True, "origin_one_on_one": None},
+        {"turn": 4, "action": long, "verified": True, "origin_one_on_one": 1},
+        {"turn": 6, "action": short, "verified": True, "origin_one_on_one": 2},
+        {"turn": 8, "action": long, "verified": True},  # only the junior turn names its 1:1
+    ]
+    target = dataclasses.replace(
+        base, turns=turns, thread=None, thread_text=None, one_on_one_rows=rows,
+        decision={"delivered": True, "verdict": "Approve.", "rechecks": rechecks})
+
+    flags = [f for f in E.compute_flags(target, {"rechecks_verified": 4})
+             if f["id"] == "action_clipped"]
+
+    tail = long[-40:]
+    assert flags == [
+        {"id": "action_clipped", "turn": 2, "quote": tail, "line": None},  # t01's own voice
+        {"id": "action_clipped", "turn": 4, "seq": 1, "quote": tail, "line": None},
+        # no turn 6: 1:1 2's standing action is the short one, and t01's clipped
+        # action never stands in for it
+        {"id": "action_clipped", "turn": 8, "seq": 3, "quote": tail, "line": None},
+    ]
+
+
+def test_one_on_one_outcome_is_citable_judge_evidence(tmp_path):
+    """C9: entries.json carries every 1:1 outcome (from thread.md, else from the final
+    reductions), a judge quote citing one verifies, and both rubric sentences exist."""
+    import dataclasses
+
+    home, run_id = build_home(tmp_path, "run-9")
+    base = E.load_target(str(home), run_id)
+    lines = _one_on_one_thread()
+    at = _line_of(lines)
+    text = "\n".join(lines) + "\n"
+    target = dataclasses.replace(base, thread_text=text, thread=E.parse_thread(text))
+    one = at["## 1:1 1: Maya Okonkwo ↔ Sam Iyer (aligned)"]
+    two = at["## 1:1 2: Sam Iyer ↔ Marcus Feld, hosted by Maya Okonkwo (not aligned)"]
+
+    # From thread.md: each outcome span, keyed by its seq as a string.
+    entries = E.build_entries(target)
+    assert entries["one_on_ones"] == {
+        "1": {"text": "Agreed: Rollback by Friday.\nStill open: Who pages.",
+              "line_start": one, "line_end": one + 4},
+        "2": {"text": "Still open: Legal is not in this room.",
+              "line_start": two, "line_end": two + 3},
+    }
+    # verify_evidence(item, snap) reads a snapshot shaped as read_snapshot returns it:
+    # {"entries": dict, "thread" | "original" | "revised": str | None}.
+    snap = {"entries": entries, "thread": text, "original": None, "revised": None}
+
+    def cite(turn, quote, snap):
+        item = {"turn": turn, "where": "one_on_one", "quote": quote}
+        return E.verify_evidence(item, snap)
+
+    quote = "Agreed: Rollback by Friday."
+    assert cite(1, quote, snap) == {
+        "turn": 1, "where": "one_on_one", "quote": quote,
+        "line": at[quote], "verified": True,
+    }
+    for seq in (2, 9, None):  # another 1:1, an unknown seq, no seq at all
+        assert cite(seq, quote, snap)["verified"] is False, seq
+
+    # No thread.md: the final reductions give the text thread.md would hold, lines null.
+    rows = (
+        ("one_on_one_plan", {"one_on_ones_scheduled": [], "fallback": None}),
+        ("one_on_one", {"seq": 1, "exchange": 1, "closing": False, "delivered": True,
+                        "final": False}),
+        ("one_on_one", {"seq": 1, "exchange": 2, "closing": False, "delivered": True,
+                        "final": True, "ended": "aligned",
+                        "outcome": {"aligned": True, "agreed": "Rollback by Friday.",
+                                    "still_open": "Who pages."}}),
+        ("take", {"seq": 2, "exchange": None}),
+        ("one_on_one", {"seq": 2, "exchange": None, "closing": True, "delivered": False,
+                        "final": True, "ended": "exchange cap",
+                        "outcome": {"aligned": False, "agreed": None, "still_open": None}}),
+        ("one_on_one", {"seq": 3, "exchange": 1, "closing": False, "delivered": False,
+                        "final": True, "ended": "not delivered",
+                        "outcome": {"aligned": False, "agreed": None, "still_open": None}}),
+    )
+    bare = E.build_entries(dataclasses.replace(
+        base, thread=None, thread_text=None, one_on_one_rows=rows))
+    assert bare["one_on_ones"] == {
+        "1": {"text": "Agreed: Rollback by Friday.\nStill open: Who pages.",
+              "line_start": None, "line_end": None},
+        "2": {"text": "_(no outcome recorded: the host's closing exchange was not delivered)_",
+              "line_start": None, "line_end": None},
+        "3": {"text": "_(no outcome recorded: not delivered)_",
+              "line_start": None, "line_end": None},
+    }
+    got = cite(1, "Still open: Who pages.",
+               {"entries": bare, "thread": None, "original": None, "revised": None})
+    assert (got["verified"], got["line"]) == (True, None)
+    # thread.md wins whenever it exists: seq 3 has no outcome entry there
+    both = E.build_entries(dataclasses.replace(target, one_on_one_rows=rows))
+    assert list(both["one_on_ones"]) == ["1", "2"]
+
+    grounded = ("A claim settled in a `## 1:1` outcome entry counts as grounded "
+                "(cite `where:\"one_on_one\"`).")
+    answered = "A concern settled in a `## 1:1` outcome entry counts as answered."
+    rubric = " ".join(E.RUBRIC.split())
+    assert rubric.index("verdict_grounded") < rubric.index(grounded) < rubric.index(
+        "edits_address_concerns")
+    assert rubric.index("concern_coverage") < rubric.index(answered) < rubric.index("Evidence:")
+    written = " ".join(E.rubric_text(E.dimension_versions(), "r00000000").split())
+    assert grounded in written and answered in written  # what inputs/rubric.md holds
+    assert (E.DIMENSIONS["verdict_grounded"], E.DIMENSIONS["concern_coverage"]) == (
+        "verdict_grounded@2", "concern_coverage@4")

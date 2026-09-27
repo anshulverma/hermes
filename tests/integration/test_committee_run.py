@@ -1980,3 +1980,134 @@ def test_one_on_ones_plan_pause_and_delegation_end_to_end(
     assert data["progress"]["one_on_one"] == {"used": 7, "budget": 16}
 
     assert _rule(conn, run_id, pb, local_site, agent, host, accept=True) == "done"
+
+
+# --- one-on-ones: eval (committee-one-on-ones C9, AC12) -------------------------
+
+# 222 characters in 25 words: over ACTION_MAX, and the junior's report of the
+# clipped action still fits her one-sentence cap.
+LONG_ACTION = (
+    "Add a rollback runbook to section four covering detection, containment, "
+    "communication, verification, reconciliation, documentation, retrospectives, "
+    "escalation, instrumentation, rehearsal, sign-off, ownership and deadlines."
+)
+# The owner's last word in 1:1 1 repeats the long action on every take, so voice's
+# action_too_long discards takes 1 and 2 and take 3 is kept (voice's MAX_TAKES).
+LONG_OWNER = {**ONE_ON_ONE_BLOCKS["o02-owner"], "action": LONG_ACTION}
+EVAL_ONE_ON_ONE_BLOCKS = {
+    **ONE_ON_ONE_BLOCKS,
+    **{phase: LONG_OWNER for phase in ("o02-owner", "o02-owner-take2", "o02-owner-take3")},
+}
+# The judge cites two 1:1 outcome entries and the chair's own words.
+ONE_ON_ONE_EVIDENCE = {
+    "verdict_grounded": {"turn": 1, "where": "one_on_one", "quote": f"Agreed: {AGREED_1}"},
+    "edits_address_concerns": {"turn": None, "where": "decision", "quote": CHAIR_PROSE},
+    "concern_coverage": {"turn": 3, "where": "one_on_one", "quote": f"Still open: {OPEN_3}"},
+}
+
+
+class OneOnOneJudgeAgent(ScriptedJudgeAgent):
+    """ScriptedJudgeAgent, citing 1:1 outcome entries where it cited meeting turns."""
+
+    def parse_result(self, raw: str, envelope: dict) -> Result:
+        from dataclasses import replace
+
+        result = super().parse_result(raw, envelope)
+        if result.outcome != "ok":
+            return result
+        scores = {
+            dim: {"score": JUDGE_SCORES[dim], "rationale": f"scripted judge: {dim}",
+                  "evidence": [ONE_ON_ONE_EVIDENCE[dim]]}
+            for dim in committee_eval.JUDGE_DIMS
+        }
+        fence = f"{FENCE}{committee_eval.FENCE_TAG}\n{json.dumps(scores)}\n{FENCE}\n"
+        return replace(result, payload={"answer": f"Scored the run.\n\n{fence}"})
+
+
+def _without_one_on_ones(conn, run_id, dest: Path) -> int:
+    """queue.db copied into ``dest`` minus every plan, 1:1 and 1:1-retake reduction and
+    the attempts of their tickets. Returns how many attempts were deleted."""
+    dest.mkdir(parents=True)
+    copy = sqlite3.connect(dest / "queue.db")
+    conn.backup(copy)
+    doomed = []
+    for rid, phase, kind, doc in copy.execute(
+        "SELECT id, phase, kind, json FROM reductions WHERE run_id=?", (run_id,)
+    ).fetchall():
+        seq = json.loads(doc).get("seq")
+        if kind in committee_eval.ONE_ON_ONE_KINDS or (
+            kind == "take" and isinstance(seq, int) and not isinstance(seq, bool)
+        ):
+            doomed.append((rid, f"{run_id}/{phase}"))
+    copy.executemany("DELETE FROM reductions WHERE id=?", [(rid,) for rid, _ in doomed])
+    gone = copy.executemany(
+        "DELETE FROM attempts WHERE ticket_id=?", [(ticket,) for _, ticket in doomed]
+    ).rowcount
+    copy.commit()
+    copy.execute("PRAGMA journal_mode=DELETE")  # one plain file: eval's mode=ro open needs no -wal
+    copy.close()
+    return gone
+
+
+def test_eval_counts_one_on_ones_separately(
+    eval_home, source_repo, artifact, local_site, monkeypatch, tmp_path
+):
+    """AC12: eval reports the 1:1s in their own block and keeps them out of the turn
+    metrics, clips a 1:1 edit by its owner exchange, and verifies a 1:1 quote."""
+    import statistics
+
+    assert len(LONG_ACTION) > turnblock.ACTION_MAX
+    conn = eval_home
+    home = committee_eval.eval_home()
+    run_id = "committee-20260925-000131"
+    _run_one_on_ones(conn, str(Path(home) / "queue.db"), local_site, monkeypatch, run_id,
+                     phase_blocks=EVAL_ONE_ON_ONE_BLOCKS)
+
+    assert [p for p in _dispatched_phases(conn, run_id) if p.startswith("o02-")] == [
+        "o02-owner", "o02-owner-take2", "o02-owner-take3"]
+    ones = [doc for _, kind, doc in _reductions(conn, run_id) if kind == "one_on_one"]
+    [owner] = [d for d in ones if d["seq"] == 1 and d["speaker"] == cast.OWNER]
+    assert owner["take"] == 3 and owner["voice"]["action_chars"] > turnblock.ACTION_MAX
+    members = [d for d in ones if not d["closing"] and d["delivered"]]
+    assert len(members) == 6
+
+    full = committee_eval.compute_metrics(committee_eval.load_target(home, run_id))
+    assert full["one_on_ones"] == {
+        "count": 3, "upfront": 2, "pause": 1, "kept_exchanges": 7, "retakes": 2,
+        "aligned": 3, "not_aligned": 0, "edits_from_one_on_ones": 1,
+        "median_words_per_exchange": float(
+            statistics.median(d["voice"]["words"] for d in members)),
+    }
+
+    # The turn population is exactly what it would be had no 1:1 happened.
+    stripped = tmp_path / "stripped"
+    gone = _without_one_on_ones(conn, run_id, stripped)
+    bare = committee_eval.compute_metrics(committee_eval.load_target(str(stripped), run_id))
+    for key in ("turns", "turns_by_role", "words", "voice", "other_kinds"):
+        assert full[key] == bare[key], key
+    assert not set(committee_eval.ONE_ON_ONE_KINDS) & set(full["other_kinds"])
+    assert "one_on_ones" not in bare
+    assert full["extra_takes"] == bare["extra_takes"] + 2  # voice's definition: every take
+    # the plan, seven kept exchanges and two discarded takes; the bill still covers them
+    assert gone == 10
+    assert full["traces"]["expected"] == bare["traces"]["expected"] + gone
+
+    # action_clipped: t01's edit came from 1:1 1, so the owner's kept take decides.
+    rechecks = _reduction_for(conn, run_id, "decision")["rechecks"]
+    assert [(c["turn"], c["origin_one_on_one"]) for c in rechecks] == [(1, 1)]
+    clipped = [f for f in committee_eval.measure_target(home, run_id)["flags"]
+               if f["id"] == "action_clipped"]
+    assert [(f["turn"], f["seq"], f["quote"]) for f in clipped] == [
+        (1, 1, rechecks[0]["action"][-40:])]
+
+    # The eval run: done, the block reported, and a quote from a 1:1 outcome verified.
+    eval_run = _eval(conn, local_site, OneOnOneJudgeAgent(), run_id)
+    assert _run_state(conn, eval_run) == "done"
+    body = json.loads(committee_eval.eval_json_path(home, home, run_id).read_text())
+    assert body["judge"]["status"] == "ok", body["judge"]
+    assert body["metrics"]["one_on_ones"] == full["one_on_ones"]
+    [item] = body["dimensions"]["verdict_grounded"]["evidence"]
+    assert (item["where"], item["turn"], item["verified"]) == ("one_on_one", 1, True), item
+    lines = thread.path(run_id).read_text().splitlines()
+    assert lines[item["line"] - 1] == f"Agreed: {AGREED_1}"
+    assert lines[item["line"] - 3].startswith("## 1:1 1: ")

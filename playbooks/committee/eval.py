@@ -10,8 +10,8 @@ ruling.
 
 Every dimension carries a version, so a score is only ever compared with scores
 taken under the same definition. The voice rules and the one word counter live
-in playbooks/committee/voice.py; this module imports only ``RULES``, ``measure``
-and ``summary`` from it, so there is never a second definition to drift.
+in playbooks/committee/voice.py; this module imports only ``RULES``, ``kind``,
+``measure`` and ``summary`` from it, so there is never a second definition to drift.
 
 Stdlib-only.
 """
@@ -42,13 +42,14 @@ from engine import playbook as _playbook
 from engine.models import Driver, Finding, Reduction, Run, Ticket
 from playbooks.committee import cast, thread, turnblock
 from playbooks.committee.playbook import _SIMULATION
-from playbooks.committee.voice import RULES, measure, summary
+from playbooks.committee.voice import RULES, kind as voice_kind, measure, summary
 
 # D5 order. A loop that changes a dimension's definition, bands or inputs bumps its n.
 DIMENSIONS: dict[str, str] = {
-    "verdict_grounded": "verdict_grounded@1",
+    "verdict_grounded": "verdict_grounded@2",  # @2: a claim settled in a 1:1 outcome is grounded
     "edits_address_concerns": "edits_address_concerns@2",  # @2: anchors 3 and 1 no longer overlap
-    "concern_coverage": "concern_coverage@3",  # @3: represented only if the representative's turns raise it
+    # @3: represented only if the representative's turns raise it; @4: settled in a 1:1 is answered
+    "concern_coverage": "concern_coverage@4",
     "efficiency": "efficiency@1",
     "concision": "concision@2",  # @2: voice words skip fences and image lines; filler_hits sums every tell
     "verdict_consistency": "verdict_consistency@2",  # @2: only the chair's own claims count
@@ -79,6 +80,8 @@ RUBRIC = "\n".join((
     "verdict follows from the arguments.",
     "3: mostly grounded, with some unsupported claims.",
     "1: asserts things nobody said, or contradicts the thread.",
+    "A claim settled in a `## 1:1` outcome entry counts as grounded "
+    "(cite `where:\"one_on_one\"`).",
     "",
     "edits_address_concerns",
     "5: each edit does what its delegation asked and resolves the concern behind it.",
@@ -97,6 +100,7 @@ RUBRIC = "\n".join((
     "its represented_by member raise that stakeholder's concern; otherwise it counts "
     "as missing, as does one with no represented_by, or one the thread names who is "
     "in neither seats.roster nor seats.considered.",
+    "A concern settled in a `## 1:1` outcome entry counts as answered.",
     "",
     f"Evidence: {VERBATIM}.",
 ))
@@ -200,9 +204,18 @@ ENV_RUN = "HERMES_COMMITTEE_EVAL_RUN"
 ENV_HOME = "HERMES_COMMITTEE_EVAL_HOME"
 RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-# thread.md: the only entry boundaries are thread.py's own turn and decision headings.
+# thread.md: the entry boundaries are thread.py's own turn and decision headings (and,
+# below, its 1:1 outcome and plan headings).
 _TURN_HEADING = re.compile(r"^## turn (\d{2,}) — (.+) \((\w+)\)$")
 _DECISION_HEADING = re.compile(r"^## decision — .+$")
+# one-on-ones C9: the 1:1 outcome and plan headings (thread.append_one_on_one_outcome
+# and thread.append_plan) close the entry before them. An outcome is its own entry
+# and the plan belongs to none. A stray "## 1:1 ..." body line matches neither.
+_OUTCOME_HEADING = re.compile(r"^## 1:1 (\d+): ")
+_PLAN_HEADING = re.compile(r"^## 1:1 plan: ")
+_OUTCOME, _PLAN = "1:1", "1:1 plan"  # head roles no turn heading can carry (a role is \w+)
+# The reduction kinds that are 1:1 work: never turns, never other_kinds.
+ONE_ON_ONE_KINDS = ("one_on_one_plan", "one_on_one")
 _LABEL = re.compile(r"^(?:\*\*)?(Charge|Artifact|Committee):(?:\*\*)?\s*(.*)$")
 _SEAT = re.compile(r"^- (\w+) — (.+)$")
 # The master's footer under the chair's words (playbook._reduce_decision).
@@ -346,6 +359,9 @@ class Target:
     traces: dict[int, bytes | None]
     # selection D8: the latest final selection reduction's json, or None
     selection: dict | None = None
+    # one-on-ones C9: the (kind, json) pairs of every plan, kept 1:1 exchange and
+    # 1:1 retake (a take with an int seq), in reduction order
+    one_on_one_rows: tuple[tuple[str, dict], ...] = ()
 
 
 def _lines(text: str) -> list[str]:
@@ -364,11 +380,13 @@ def parse_thread(text: str) -> dict:
 
     The header is every line before the first ``## `` line. Entry boundaries are
     only thread.py's ``## turn NN — Name (role)`` and ``## decision — …``
-    headings, so any other ``## `` line after the first boundary is body. Lines
-    between the header and the first boundary (selection, 1:1 plans) belong to
-    no entry. Lines are 1-based and inclusive over ``_lines(text)``: an entry
-    runs from its heading to the line before the next boundary. A turn number
-    written twice keeps its last entry.
+    headings, plus the 1:1 outcome (``## 1:1 N: ``) and plan (``## 1:1 plan: ``)
+    headings, which close the entry before them: an outcome is its own entry
+    (``one_on_ones``) and the plan belongs to none. Any other ``## `` line after
+    the first boundary is body. Lines between the header and the first boundary
+    (selection) belong to no entry. Lines are 1-based and inclusive over
+    ``_lines(text)``: an entry runs from its heading to the line before the next
+    boundary. A turn number written twice keeps its last entry.
     """
     lines = _lines(text) if isinstance(text, str) else []
     first = next((i for i, line in enumerate(lines) if line.startswith("## ")), len(lines))
@@ -387,19 +405,31 @@ def parse_thread(text: str) -> dict:
                 seat = _SEAT.match(line)
                 if seat and seat.group(1) not in seats:
                     seats.append(seat.group(1))
-    heads: list[tuple[int, int | None, str | None]] = []  # (index, turn, role); turn None = decision
+    # (index, number, role): (i, None, None) is the decision, role _OUTCOME a 1:1
+    # outcome numbered by its seq, and role _PLAN the plan.
+    heads: list[tuple[int, int | None, str | None]] = []
     for i, line in enumerate(lines):
         turn = _TURN_HEADING.match(line)
+        outcome = _OUTCOME_HEADING.match(line)
         if turn:
             heads.append((i, int(turn.group(1)), turn.group(3)))
         elif _DECISION_HEADING.match(line):
             heads.append((i, None, None))
+        elif outcome:
+            heads.append((i, int(outcome.group(1)), _OUTCOME))
+        elif _PLAN_HEADING.match(line):
+            heads.append((i, None, _PLAN))
     turns: dict[int, dict] = {}
+    one_on_ones: dict[int, dict] = {}
     decision = None
     for k, (i, n, role) in enumerate(heads):
         end = heads[k + 1][0] if k + 1 < len(heads) else len(lines)
         entry = {"body": "\n".join(lines[i + 1:end]).strip(), "line_start": i + 1, "line_end": end}
-        if n is None:
+        if role == _PLAN:
+            continue  # the plan closed the entry before it and belongs to none (D3)
+        if role == _OUTCOME:
+            one_on_ones[n] = entry
+        elif n is None:
             decision = entry
         else:
             turns[n] = {"role": role, **entry}
@@ -410,6 +440,7 @@ def parse_thread(text: str) -> dict:
         "roster": seats,
         "turns": dict(sorted(turns.items())),
         "decision": decision,
+        "one_on_ones": dict(sorted(one_on_ones.items())),
     }
 
 
@@ -454,7 +485,7 @@ def load_target(home: str, run_id: str) -> Target:
             turns[n] = doc  # the last by id per number wins
         elif kind == "take":
             takes += 1
-        elif kind not in ("turn", "decision"):
+        elif kind not in ("turn", "decision", *ONE_ON_ONE_KINDS):
             other[kind] = other.get(kind, 0) + 1
     turns = dict(sorted(turns.items()))
     decision, review_state = _decision(rows)
@@ -496,7 +527,8 @@ def load_target(home: str, run_id: str) -> Target:
         attempts=attempts,
         traces={a["id"]: thread.read_regular(run_dir / "traces" / f"{a['id']}.jsonl")
                 for a in attempts},
-        selection=_final_selection(rows),
+        selection=_final_selection(rows), one_on_one_rows=_one_on_one_rows(
+            (kind, doc) for kind, _, doc in rows),
     )
 
 
@@ -706,7 +738,8 @@ def _ended(target: Target) -> str:
 def _outside_room_mentions(target: Target) -> list[dict]:
     """Body lines of turn and decision entries that name someone outside the room.
 
-    Lines before t01 (the header, selection, 1:1 plans) belong to no entry (D3).
+    Lines outside every turn and decision entry (the header, selection, the 1:1
+    plan and outcomes) are never scanned (D3, one-on-ones C9).
     An entry's heading is never scanned: it carries the run's roster name and
     title, which a selector may write for a derived seat. With no thread.md,
     the turn bodies and the chair prose are scanned instead, with ``line``
@@ -765,6 +798,122 @@ def _selected_seats(seats: dict, final: dict | None) -> dict:
     }
 
 
+# --- one-on-ones: counted apart from the meeting (committee-one-on-ones C9) ------
+
+
+def _seq(value: object) -> int | None:
+    """A 1:1 number: an int that is not a bool, else None."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _one_on_one_rows(rows) -> tuple[tuple[str, dict], ...]:
+    """The (kind, json) pairs that are 1:1 work: plans, kept exchanges, 1:1 retakes.
+
+    A ``take`` belongs here only with an int ``seq`` (a discarded 1:1 exchange); a
+    meeting turn's take has none. Malformed json is skipped, never raised on.
+    """
+    return tuple(
+        (kind, doc) for kind, doc in rows
+        if isinstance(doc, dict) and (
+            kind in ONE_ON_ONE_KINDS or (kind == "take" and _seq(doc.get("seq")) is not None))
+    )
+
+
+def _finals(target: Target) -> dict[int, dict]:
+    """seq -> that 1:1's final ``one_on_one`` reduction (the latest wins), seq ascending."""
+    out: dict[int, dict] = {}
+    for kind, doc in target.one_on_one_rows:
+        seq = _seq(doc.get("seq"))
+        if kind == "one_on_one" and doc.get("final") is True and seq is not None:
+            out[seq] = doc
+    return dict(sorted(out.items()))
+
+
+def _one_on_one_delegator(target: Target, seq: int) -> dict | None:
+    """The latest owner exchange in 1:1 ``seq`` stating ``delegate: yes`` with an action.
+
+    That is the action finalize handed over as the edit (D7), so action_clipped
+    reads its ``voice``.
+    """
+    found = None
+    for kind, doc in target.one_on_one_rows:
+        if (kind == "one_on_one" and _seq(doc.get("seq")) == seq
+                and doc.get("speaker") == cast.OWNER and doc.get("delegate") is True
+                and doc.get("action") is not None):
+            found = doc
+    return found
+
+
+def _one_on_ones(target: Target) -> dict | None:
+    """C9's ``one_on_ones`` block, or None when the run has no plan and no 1:1.
+
+    ``count`` is the 1:1s with a final reduction, split by origin and by the
+    outcome's ``aligned``. Words are voice's: the kept take's ``voice["words"]``,
+    else voice.measure over the body for a row with no voice dict. A present
+    ``voice: null`` (a signals-only take) is unmeasured and left out, as
+    ``_prose_voice`` leaves such a turn out. A closing exchange is not a member
+    exchange, so it is out of the median too.
+    """
+    rows = target.one_on_one_rows
+    if not any(kind in ONE_ON_ONE_KINDS for kind, _ in rows):
+        return None
+    kept = [doc for kind, doc in rows if kind == "one_on_one"]
+    finals = list(_finals(target).values())
+    aligned = sum(1 for d in finals
+                  if isinstance(d.get("outcome"), dict) and d["outcome"].get("aligned") is True)
+    counts = []
+    for doc in kept:
+        if doc.get("closing") or not doc.get("delivered"):
+            continue
+        if "voice" in doc and doc["voice"] is None:
+            continue
+        recorded = doc.get("voice")
+        n = recorded.get("words") if isinstance(recorded, dict) else None
+        if not _is_number(n):
+            n = measure(str(doc.get("body") or ""), voice_kind(str(doc.get("speaker") or "")))["words"]
+        counts.append(n)
+    return {
+        "count": len(finals),
+        "upfront": sum(1 for d in finals if d.get("origin") == "upfront"),
+        "pause": sum(1 for d in finals if d.get("origin") == "pause"),
+        "kept_exchanges": len(kept),
+        "retakes": sum(1 for kind, _ in rows if kind == "take"),
+        "aligned": aligned,
+        "not_aligned": len(finals) - aligned,
+        "edits_from_one_on_ones": sum(
+            1 for t in target.turns.values()
+            if t.get("role") == cast.JUNIOR and _seq(t.get("origin_one_on_one")) is not None),
+        "median_words_per_exchange": float(statistics.median(counts)) if counts else None,
+    }
+
+
+def _outcome_text(final: dict) -> str:
+    """A final reduction's outcome in thread.append_one_on_one_outcome's words."""
+    outcome = final.get("outcome") if isinstance(final.get("outcome"), dict) else {}
+    lines = [f"{label}: {outcome[key]}"
+             for label, key in (("Agreed", "agreed"), ("Still open", "still_open"))
+             if isinstance(outcome.get(key), str) and outcome[key].strip()]
+    if lines:
+        return "\n".join(lines)
+    lost = final.get("closing") is True and not final.get("delivered")
+    why = "the host's closing exchange was not delivered" if lost else final.get("ended")
+    return f"_(no outcome recorded: {why})_"
+
+
+def _outcome_entries(target: Target) -> dict:
+    """entries.json ``one_on_ones``: each outcome's text and lines, keyed by str(seq).
+
+    From thread.md's ``## 1:1 N:`` spans; with no thread.md, from each final
+    ``one_on_one`` reduction, lines null (gap 6).
+    """
+    if target.thread is not None:
+        spans = target.thread.get("one_on_ones") or {}
+        return {str(seq): {"text": e["body"], "line_start": e["line_start"],
+                           "line_end": e["line_end"]} for seq, e in spans.items()}
+    return {str(seq): {"text": _outcome_text(doc), "line_start": None, "line_end": None}
+            for seq, doc in _finals(target).items()}
+
+
 def compute_metrics(target: Target) -> dict:
     """C5's metrics from the loaded target: what the record says happened.
 
@@ -788,7 +937,7 @@ def compute_metrics(target: Target) -> dict:
     spoken = [r for r in revs if any(t.get("role") == r for t in delivered)]
     caps = [t["cap"] for t in turns.values() if t.get("cap") is not None]
     totals = trace_totals([target.traces.get(a["id"]) for a in target.attempts])
-    return {
+    metrics = {
         "turns": len(turns),
         "turns_by_role": by_role,
         "undelivered_turns": len(turns) - len(delivered),
@@ -822,6 +971,12 @@ def compute_metrics(target: Target) -> dict:
         "extra_takes": target.takes + target.duplicate_turns,
         **_prose_metrics(target),
     }
+    # one-on-ones C9: the 1:1 figures in their own block. The key is absent for a
+    # run with no plan and no 1:1, so every earlier run's metrics stay byte-identical.
+    one_on_ones = _one_on_ones(target)
+    if one_on_ones is not None:
+        metrics["one_on_ones"] = one_on_ones
+    return metrics
 
 
 # --- the prose and the document (C5 words, voice, bytes, edits; D3 per-edit) --
@@ -1053,7 +1208,13 @@ def compute_flags(target: Target, metrics: dict) -> list[dict]:
         if not isinstance(n, int) or isinstance(n, bool):
             continue
         action = check.get("action") if isinstance(check.get("action"), str) else ""
-        voice = (_delegator(target, n) or {}).get("voice")
+        # one-on-ones C9: an edit delegated in a 1:1 is judged by that 1:1's owner
+        # exchange, never by a meeting owner turn.
+        seq = _seq(check.get("origin_one_on_one"))
+        if seq is None:
+            seq = _seq((target.turns.get(n) or {}).get("origin_one_on_one"))
+        source = _delegator(target, n) if seq is None else _one_on_one_delegator(target, seq)
+        voice = (source or {}).get("voice")
         if isinstance(voice, dict):
             chars = voice.get("action_chars")
             clipped = (isinstance(chars, (int, float)) and not isinstance(chars, bool)
@@ -1062,10 +1223,13 @@ def compute_flags(target: Target, metrics: dict) -> list[dict]:
             clipped = len(action) >= turnblock.ACTION_MAX or action.endswith("…")
         if clipped:
             prefix = f"- re-check of turn {n:02d} "
-            flags.append({
+            flag = {
                 "id": "action_clipped", "turn": n, "quote": action[-40:],
                 "line": _find_line(lines, _span(target, None), lambda ln: ln.startswith(prefix)),
-            })
+            }
+            if seq is not None:
+                flag["seq"] = seq  # the 1:1 the edit came from, beside the junior's turn
+            flags.append(flag)
     recorded = metrics.get("rechecks_verified")
     after = 0
     for raw in _lines(chair_prose(decision)):
@@ -1211,7 +1375,8 @@ def measure_target(home: str, run_id: str) -> dict:
 
 
 def build_entries(target: Target) -> dict:
-    """inputs/entries.json: every turn, the header and the chair's prose, with their lines.
+    """inputs/entries.json: every turn, the header, the chair's prose and every 1:1
+    outcome, with their lines.
 
     Bodies follow D3 (the reduction's ``body``; the thread entry on a legacy run),
     and the decision is chair prose only, so the re-check footer can never back a
@@ -1238,6 +1403,7 @@ def build_entries(target: Target) -> dict:
         "decision": {"chair_prose": chair_prose(target.decision),
                      "line_start": decision.get("line_start"),
                      "line_end": decision.get("line_end")},
+        "one_on_ones": _outcome_entries(target),
     }
 
 
@@ -1316,7 +1482,8 @@ _GOAL_CONTRACT = (
     f"Done when: your answer ends with one ```{FENCE_TAG} fenced block holding one JSON "
     f"object with the keys {', '.join(JUDGE_DIMS)}. Each key maps to "
     '{"score": <an integer 1-5>, "rationale": "<why>", "evidence": [{"turn": <the turn '
-    'number, or null>, "where": "turn" | "decision" | "header" | "original" | "revised", '
+    'number, or the 1:1 number for "one_on_one", or null>, "where": "turn" | "decision" | '
+    '"header" | "original" | "revised" | "one_on_one", '
     '"quote": "<verbatim>"}]}, '
     f"with at most {EVIDENCE_MAX} evidence items per dimension, each quote at most "
     f"{QUOTE_MAX} characters and each rationale at most {RATIONALE_MAX} characters. "
@@ -1361,8 +1528,8 @@ def judge_goal(inputs: dict) -> str:
 
 # --- D6: parse the judge's answer, and verify every quote against inputs/ ------
 
-_WHERE = ("turn", "decision", "header", "original", "revised")
-_ENTRY_TEXT = {"turn": "body", "decision": "chair_prose", "header": "text"}
+_WHERE = ("turn", "decision", "header", "original", "revised", "one_on_one")
+_ENTRY_TEXT = {"turn": "body", "decision": "chair_prose", "header": "text", "one_on_one": "text"}
 
 
 def _fences(answer: str) -> list[str]:
@@ -1444,12 +1611,13 @@ def read_snapshot(inputs: dict, digests: dict) -> dict:
 
 
 def _entry_for(entries: object, where: str, turn: int | None) -> dict | None:
-    """The entries.json place an item cites: a turn by number, the decision or the header."""
+    """The entries.json place an item cites: a turn by number, a 1:1 outcome by its
+    seq, the decision or the header."""
     if not isinstance(entries, dict):
         return None
-    if where == "turn":
-        turns = entries.get("turns")
-        entry = turns.get(str(turn)) if isinstance(turns, dict) and turn is not None else None
+    if where in ("turn", "one_on_one"):
+        places = entries.get("turns" if where == "turn" else "one_on_ones")
+        entry = places.get(str(turn)) if isinstance(places, dict) and turn is not None else None
     else:
         entry = entries.get(where)
     return entry if isinstance(entry, dict) else None
