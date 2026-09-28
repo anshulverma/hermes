@@ -104,6 +104,21 @@ describe('useHashView', () => {
     expect(window.location.hash).toBe('#overview');
   });
 
+  it('keeps the run being viewed when the tab changes', () => {
+    // Dropping it sent the console to the newest run on every tab click.
+    setHash('#overview?run=run-14');
+    const { result } = renderHook(() => useHashView());
+    act(() => result.current[1]('review'));
+    expect(window.location.hash).toBe('#review?run=run-14');
+  });
+
+  it('still drops what was open on the old tab when the tab changes', () => {
+    setHash('#board?run=run-14&ticket=run-14%2F3-report');
+    const { result } = renderHook(() => useHashView());
+    act(() => result.current[1]('crew'));
+    expect(window.location.hash).toBe('#crew?run=run-14');
+  });
+
   it('ignores a hashchange to an unknown view by falling back to the default', () => {
     setHash('#board');
     const { result } = renderHook(() => useHashView());

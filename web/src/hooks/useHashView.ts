@@ -9,7 +9,8 @@
  * A tab may carry parameters after a `?` (`#board?ticket=run-5%2F35-report`) for
  * the thing open on it. Same reasoning: a ticket you are reading should survive
  * a refresh, and be a link you can send someone. Parameters belong to the tab,
- * so switching tabs drops them.
+ * so switching tabs drops them -- except `run`, the run being viewed, which
+ * every tab shows.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -103,12 +104,13 @@ export function useHashView(): [View, (view: View) => void] {
 
   const setView = useCallback((next: View) => {
     setViewState(next);
-    // Switching tabs drops the previous tab's parameters: a ticket id means
-    // nothing on the crew tab. Compare the raw hash so a non-canonical one
-    // (`#bogus`) is corrected, while re-clicking the current tab stays a no-op.
-    if (typeof window !== 'undefined' && window.location.hash !== `#${next}`) {
-      window.location.hash = next;
-    }
+    if (typeof window === 'undefined') return;
+    // Switching tabs drops the previous tab's parameters -- a ticket id means
+    // nothing on the crew tab -- but keeps the run being viewed, which every tab
+    // shares. Compare the raw hash so a non-canonical one (`#bogus`) is
+    // corrected, while re-clicking the current tab stays a no-op.
+    const target = buildHash(next, { run: parseHashParam(window.location.hash, 'run') });
+    if (window.location.hash !== target) window.location.hash = target.slice(1);
   }, []);
 
   return [view, setView];
