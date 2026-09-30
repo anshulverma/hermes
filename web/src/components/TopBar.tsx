@@ -1,23 +1,14 @@
 /**
- * TopBar component - app header with live indicator.
- * Phase A1: minimal shell (no view nav tabs yet - those are added incrementally in Phase B).
- * Phase C1: LiveDot now reflects WebSocket connection state.
+ * TopBar - the app header: the wordmark (a link to the default run), the pages
+ * that are about every run, and the live indicator.
+ *
+ * Nothing here is about one run: the runs rail picks the run and the run pane
+ * carries its tabs, so no item comes or goes as the run changes.
  */
 
+import type { CSSProperties } from 'react';
 import LiveDot from './LiveDot';
-
-import type { Run } from '../api/client';
-
-/** What each top tab opens; App maps the route onto these. */
-export type View =
-  | 'overview'
-  | 'metrics'
-  | 'board'
-  | 'crew'
-  | 'outputs'
-  | 'review'
-  | 'activity'
-  | 'playbook';
+import type { Route } from '../hooks/useRoute';
 
 /**
  * Height of the app chrome, in px.
@@ -82,44 +73,37 @@ function HermesMark() {
   );
 }
 
+/** The cross-run pages, always shown, in this order. */
+const PAGES: { page: Route['page']; href: string; label: string }[] = [
+  { page: 'needs-you', href: '#/needs-you', label: 'Needs you' },
+  { page: 'crew', href: '#/crew', label: 'Crew' },
+  { page: 'activity', href: '#/activity', label: 'Activity' },
+];
+
+function itemStyle(current: boolean): CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    padding: '6px 12px',
+    fontSize: 13,
+    textDecoration: 'none',
+    color: current ? 'var(--text-primary)' : 'var(--text-muted)',
+    background: current ? 'var(--wash-subtle)' : 'transparent',
+    borderRadius: 'var(--radius-md)',
+    transition: 'all 120ms ease-out',
+  };
+}
+
 type TopBarProps = {
   connected: boolean;
-  view?: View;
-  onViewChange?: (view: View) => void;
-  // Every run, newest first, and which one the console is showing. Optional so
-  // the bar still renders before the run list has loaded.
-  runs?: Run[];
-  selectedRunId?: string | null;
-  onRunChange?: (runId: string) => void;
-  /** How many reductions are holding a ticket for a human, if known. */
-  reviewCount?: number | null;
-  /** Whether the run being viewed has a playbook-owned view to show. */
-  hasPlaybookView?: boolean;
+  /** The page on screen; its item carries aria-current="page". */
+  page?: Route['page'];
+  /** Decisions waiting across every run (the sum of `awaiting`); no badge when 0 or not yet known. */
+  needsYouCount?: number | null;
 };
 
-export default function TopBar({
-  connected,
-  view = 'overview',
-  onViewChange,
-  runs,
-  selectedRunId,
-  onRunChange,
-  reviewCount,
-  hasPlaybookView = false,
-}: TopBarProps) {
-  const handleTabClick = (newView: View) => {
-    if (onViewChange) {
-      onViewChange(newView);
-    }
-  };
-
-  // The Run tab owns the fallback too: App renders RunOverview for #playbook at
-  // a run with no view (App.tsx:233), and a page no tab claims is worse than a
-  // fourth copy of this one rule. The alternative -- normalising the hash to
-  // #overview in the fallback -- would cost the property that switching away to
-  // a view-less run and back reopens the playbook tab where you left it.
-  const runTabActive = view === 'overview' || (view === 'playbook' && !hasPlaybookView);
-
+export default function TopBar({ connected, page, needsYouCount }: TopBarProps) {
   return (
     <header
       style={{
@@ -141,202 +125,49 @@ export default function TopBar({
     >
       {/* Plain inline layout, not flex: the mark is a stand-in glyph, so it has to
           sit on the text baseline, and a flex container would strip that away. */}
-      <span aria-label="Hermes" style={{ color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>
+      <a
+        href="#/runs"
+        aria-label="Hermes"
+        style={{ color: 'var(--text-primary)', whiteSpace: 'nowrap', textDecoration: 'none' }}
+      >
         <HermesMark />
         <span aria-hidden="true">ermes</span>
-      </span>
+      </a>
 
-      {/* View nav tabs - Phase E1 adds "Metrics" */}
-      <nav style={{ display: 'flex', gap: 4 }}>
-        <button
-          onClick={() => handleTabClick('overview')}
-          data-testid="tab-run"
-          style={{
-            padding: '6px 12px',
-            fontSize: 13,
-            color: runTabActive ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: runTabActive ? 'var(--wash-subtle)' : 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-md)',
-            cursor: 'pointer',
-            transition: 'all 120ms ease-out',
-          }}
-        >
-          Run
-        </button>
-        <button
-          onClick={() => handleTabClick('metrics')}
-          style={{
-            padding: '6px 12px',
-            fontSize: 13,
-            color: view === 'metrics' ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: view === 'metrics' ? 'var(--wash-subtle)' : 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-md)',
-            cursor: 'pointer',
-            transition: 'all 120ms ease-out',
-          }}
-        >
-          Metrics
-        </button>
-        <button
-          onClick={() => handleTabClick('board')}
-          style={{
-            padding: '6px 12px',
-            fontSize: 13,
-            color: view === 'board' ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: view === 'board' ? 'var(--wash-subtle)' : 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-md)',
-            cursor: 'pointer',
-            transition: 'all 120ms ease-out',
-          }}
-        >
-          Tickets
-        </button>
-        <button
-          onClick={() => handleTabClick('crew')}
-          style={{
-            padding: '6px 12px',
-            fontSize: 13,
-            color: view === 'crew' ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: view === 'crew' ? 'var(--wash-subtle)' : 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-md)',
-            cursor: 'pointer',
-            transition: 'all 120ms ease-out',
-          }}
-        >
-          Crew
-        </button>
-        <button
-          onClick={() => handleTabClick('outputs')}
-          style={{
-            padding: '6px 12px',
-            fontSize: 13,
-            color: view === 'outputs' ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: view === 'outputs' ? 'var(--wash-subtle)' : 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-md)',
-            cursor: 'pointer',
-            transition: 'all 120ms ease-out',
-          }}
-        >
-          Outputs
-        </button>
-        {/* Review keeps its place in the nav whether or not the queue has
-            anything: a tab that comes and goes is a tab nobody learns. The
-            count is what tells you there is something to do. */}
-        <button
-          onClick={() => handleTabClick('review')}
-          data-testid="tab-review"
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '6px 12px',
-            fontSize: 13,
-            color: view === 'review' ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: view === 'review' ? 'var(--wash-subtle)' : 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-md)',
-            cursor: 'pointer',
-            transition: 'all 120ms ease-out',
-          }}
-        >
-          Needs you
-          {reviewCount != null && reviewCount > 0 && (
-            <span
-              data-testid="review-count"
-              style={{
-                padding: '0 6px',
-                fontSize: 11,
-                fontFamily: 'var(--font-mono)',
-                color: 'var(--status-attention, #e3b341)',
-                background: 'var(--wash-subtle)',
-                border: '1px solid var(--border-hairline)',
-                borderRadius: 'var(--radius-lg)',
-              }}
+      <nav aria-label="Pages" style={{ display: 'flex', gap: 4 }}>
+        {PAGES.map((item) => {
+          const current = item.page === page;
+          return (
+            <a
+              key={item.page}
+              href={item.href}
+              aria-current={current ? 'page' : undefined}
+              style={itemStyle(current)}
             >
-              {reviewCount}
-            </span>
-          )}
-        </button>
-        <button
-          onClick={() => handleTabClick('activity')}
-          style={{
-            padding: '6px 12px',
-            fontSize: 13,
-            color: view === 'activity' ? 'var(--text-primary)' : 'var(--text-muted)',
-            background: view === 'activity' ? 'var(--wash-subtle)' : 'transparent',
-            border: 'none',
-            borderRadius: 'var(--radius-md)',
-            cursor: 'pointer',
-            transition: 'all 120ms ease-out',
-          }}
-        >
-          Activity
-        </button>
-        {/* The one tab that comes and goes, against the Review policy three
-            buttons up. That policy is about transient state -- an empty review
-            queue fills again, so hiding the tab would teach nothing. This is
-            about whether the run's playbook ships a view at all: for a playbook
-            without one there is no page behind the tab, ever.
-
-            `has_view` is recomputed per request (server/app.py:342), so it is
-            fixed only for as long as the server serves the same built bundle.
-            The two ways it flips mid-run are the kill switch and a dist/
-            rebuild under a live server -- both operator actions, and both make
-            the tab vanish, the pane fall back to RunOverview, and the view
-            remount when it returns. */}
-        {hasPlaybookView && (
-          <button
-            onClick={() => handleTabClick('playbook')}
-            data-testid="tab-playbook"
-            style={{
-              padding: '6px 12px',
-              fontSize: 13,
-              color: view === 'playbook' ? 'var(--text-primary)' : 'var(--text-muted)',
-              background: view === 'playbook' ? 'var(--wash-subtle)' : 'transparent',
-              border: 'none',
-              borderRadius: 'var(--radius-md)',
-              cursor: 'pointer',
-              transition: 'all 120ms ease-out',
-            }}
-          >
-            Playbook
-          </button>
-        )}
+              {item.label}
+              {/* The item always shows; the count is what says there is something to do. */}
+              {item.page === 'needs-you' && needsYouCount != null && needsYouCount > 0 && (
+                <span
+                  data-testid="needs-you-count"
+                  style={{
+                    padding: '0 6px',
+                    fontSize: 11,
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--status-attention, #e3b341)',
+                    background: 'var(--wash-subtle)',
+                    border: '1px solid var(--border-hairline)',
+                    borderRadius: 'var(--radius-lg)',
+                  }}
+                >
+                  {needsYouCount}
+                </span>
+              )}
+            </a>
+          );
+        })}
       </nav>
 
       <div style={{ flex: 1 }} />
-
-      {/* Which run every view below is about. Hidden when there is only one:
-          a picker with a single option is furniture, not a control. */}
-      {runs && runs.length > 1 && (
-        <select
-          data-testid="run-picker"
-          aria-label="Run"
-          value={selectedRunId ?? runs[0].id}
-          onChange={(e) => onRunChange?.(e.target.value)}
-          style={{
-            padding: '4px 8px',
-            fontSize: 12,
-            fontFamily: 'var(--font-mono)',
-            color: 'var(--text-secondary)',
-            background: 'var(--wash-subtle)',
-            border: '1px solid var(--border-hairline)',
-            borderRadius: 'var(--radius-md)',
-            maxWidth: 260,
-          }}
-        >
-          {runs.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.id} · {r.state}
-            </option>
-          ))}
-        </select>
-      )}
 
       <LiveDot connected={connected} />
     </header>

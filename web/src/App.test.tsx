@@ -1,186 +1,201 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, within, act } from '@testing-library/react';
 import App from './App';
 import * as client from './api/client';
-import type { RunDetail } from './api/client';
+import type { Event, Run, RunDetail, RunMetrics } from './api/client';
 import * as useEventStreamModule from './hooks/useEventStream';
 
 vi.mock('./api/client');
 vi.mock('./hooks/useEventStream');
-
-// The real loader injects a <script> tag and reads a window global; neither is
-// what this file is testing. The stub keeps the two rules App depends on:
-//
-//  1. it renders nothing unless the run has a view;
-//  2. it KEEPS THE RUN IT FIRST MOUNTED WITH.
-//
-// (2) is stateful on purpose. It is the real loader's behaviour -- it only
-// blanks its pane on the first load, so a runId change renders the previous
-// run's view_data for one round trip -- and it is the entire reason App keys
-// the element on the run. Without it modelled here the `key` can be deleted
-// for free: a stateless stub re-renders with the new runId either way, and a
-// test in PlaybookView.test.tsx would only be testing React's reconciler.
-vi.mock('./views/PlaybookView', async () => {
-  const { useState } = await import('react');
-  const PlaybookViewStub = ({
-    runId,
-    hasView,
-    liveTick,
-  }: {
-    runId: string;
-    hasView: boolean;
-    liveTick?: number;
-  }) => {
-    const [mountedWith] = useState(runId);
-    return hasView ? (
+// The host's metrics are not what this file tests; the stub names the run it was given.
+vi.mock('./views/MetricsView', () => ({
+  default: ({ runId }: { runId: string }) => <div data-testid="metrics-view">metrics for {runId}</div>,
+}));
+// Renders only for a run whose playbook has a view, with one control inside,
+// so a test can hold focus in the pane body and watch where it goes.
+vi.mock('./views/PlaybookView', () => ({
+  default: ({ runId, hasView }: { runId: string; hasView: boolean }) =>
+    hasView ? (
       <div data-testid="playbook-view">
-        playbook view for {mountedWith} · tick {String(liveTick)}
+        view for {runId} <button type="button">view action</button>
       </div>
-    ) : null;
-  };
-  return { default: PlaybookViewStub };
-});
+    ) : null,
+}));
 
-const mockRunDetail: RunDetail = {
-  id: 'run-001',
-  playbook: 'example',
-  site: 'local',
-  state: 'running',
-  phase: 'work',
-  base_ref: 'main',
-  created_at: 1785319200,
-  updated_at: 1785319500,
-  config: { issue_kind: 'bug' },
-  has_view: false,
-  tickets: {
-    queued: 5,
-    running: 2,
-    done: 10,
-    failed: 1,
-  },
-  phases: [
-    {
-      name: 'work',
-      counts: { queued: 5, running: 2, done: 10, failed: 1 },
-      current: true,
-    },
-    {
-      name: 'reduce',
-      counts: {},
-      current: false,
-    },
-  ],
+const NOW = Math.floor(Date.now() / 1000);
+
+const ZERO_METRICS: RunMetrics = {
+  run_id: '',
+  bucket_s: 60,
+  buckets: [],
+  totals: { attempts: 0, done: 0, failed: 0, results: 0, tickets: 0 },
+  retry_rate: 0,
+  mean_time_to_result_s: null,
+  by_phase: [],
+  by_state: {},
 };
 
+function run(id: string, over: Partial<Run> = {}): Run {
+  return {
+    id,
+    playbook: 'pb',
+    site: 'local',
+    state: 'running',
+    phase: 'work',
+    base_ref: 'main',
+    created_at: NOW - 3600,
+    updated_at: NOW - 60,
+    tickets: {},
+    has_view: false,
+    awaiting: 0,
+    subject: null,
+    ...over,
+  };
+}
+
+/** The `/api/runs/{id}` shape of a run: no `awaiting`, no `subject`. */
+function detailOf(r: Run, over: Partial<RunDetail> = {}): RunDetail {
+  return {
+    id: r.id,
+    playbook: r.playbook,
+    site: r.site,
+    state: r.state,
+    phase: r.phase,
+    base_ref: r.base_ref,
+    created_at: r.created_at,
+    updated_at: r.updated_at,
+    tickets: r.tickets,
+    has_view: r.has_view,
+    config: {},
+    phases: [],
+    ...over,
+  };
+}
+
+/** Serve these runs. Every `/api/runs` answer is a fresh array, as a real response is. */
+function mockHome(runs: Run[], details: RunDetail[] = runs.map((r) => detailOf(r))) {
+  vi.mocked(client.fetchRuns).mockImplementation(async () => runs.map((r) => ({ ...r })));
+  vi.mocked(client.fetchRun).mockImplementation(async (id: string) => {
+    const d = details.find((x) => x.id === id);
+    if (!d) throw Object.assign(new Error(`Run '${id}' not found`), { status: 404 });
+    return d;
+  });
+}
+
+let stream: Event[] = [];
+let nextEventId = 1000;
+
+function streamState(over: { connected?: boolean; authError?: boolean } = {}) {
+  return {
+    connected: true,
+    events: stream,
+    lastEvent: stream.at(-1) ?? null,
+    authError: false,
+    ...over,
+  } as ReturnType<typeof useEventStreamModule.useEventStream>;
+}
+
+function ev(kind: string, run_id: string | null): Event {
+  return { id: nextEventId++, ts: NOW, kind, run_id, ticket_id: null, host: null, message: null, data: {} };
+}
+
+/** Deliver events on the shared stream, all of them in one render. */
+async function deliver(rerender: ReturnType<typeof render>['rerender'], ...events: Event[]) {
+  stream = [...stream, ...events];
+  await act(async () => {
+    rerender(<App />);
+  });
+}
+
+/** Put a hash in the address as a pasted link would (no history entry). */
+function go(hash: string) {
+  window.history.replaceState(null, '', hash || window.location.pathname);
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+}
+
+const rail = () => screen.getByRole('navigation', { name: 'Runs' });
+const row = (id: string) => within(rail()).getByRole('link', { name: new RegExp(`^${id},`) });
+const findRow = (id: string) => within(rail()).findByRole('link', { name: new RegExp(`^${id},`) });
+const heading = (name: string) => screen.findByRole('heading', { level: 1, name });
+/** Health and the first runs load are in: the header can be drawn from the detail before the list arrives. */
+const settled = () => waitFor(() => expect(screen.queryByText('Loading Hermes…')).toBeNull());
+const statusRegion = () => screen.getByTestId('status-region');
+/** The pane side; the status region, which repeats the note's text, sits outside it. */
+const inMain = () => within(screen.getByRole('main'));
+
+/** Three running runs; the rail's visible order is run-c, run-b, run-a. */
+const threeRuns = () => [
+  run('run-c', { created_at: NOW - 60 }),
+  run('run-b', { created_at: NOW - 120 }),
+  run('run-a', { created_at: NOW - 180 }),
+];
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  localStorage.clear();
+  stream = [];
+  go('');
+  vi.mocked(useEventStreamModule.useEventStream).mockImplementation(() => streamState());
+  vi.mocked(client.fetchHealth).mockResolvedValue({ status: 'ok', version: '0.1.0', home: '/tmp/hermes' });
+  // Everything a view fetches on mount. Auto-mocked, each returns undefined,
+  // which is not a promise.
+  vi.mocked(client.fetchReductions).mockResolvedValue([]);
+  vi.mocked(client.fetchTickets).mockResolvedValue([]);
+  vi.mocked(client.fetchCrew).mockResolvedValue([]);
+  vi.mocked(client.fetchEvents).mockResolvedValue([]);
+  vi.mocked(client.fetchEventKinds).mockResolvedValue([]);
+  vi.mocked(client.fetchNeedsYou).mockResolvedValue([]);
+  vi.mocked(client.fetchRunMetrics).mockResolvedValue(ZERO_METRICS);
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  go('');
+});
+
 describe('App', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-
-    // App reads the review queue's size for the nav badge. Auto-mocked to
-    // undefined otherwise, which is not a promise.
-    vi.mocked(client.fetchReductions).mockResolvedValue([]);
-
-    // Default mock for useEventStream (no authError)
-    vi.spyOn(useEventStreamModule, 'useEventStream').mockReturnValue({
-      connected: true,
-      events: [],
-      lastEvent: null,
-      authError: false,
-    });
-  });
-
   it('should render empty state when no runs exist', async () => {
-    vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-      status: 'ok',
-      version: '0.1.0',
-      home: '/tmp/hermes',
-    });
-    vi.spyOn(client, 'fetchRuns').mockResolvedValue([]);
+    mockHome([]);
 
     render(<App />);
 
-    // Wait for loading to complete
-    await waitFor(() => {
-      expect(screen.getByText(/no active run/i)).toBeInTheDocument();
-    });
+    expect(await heading('No runs yet')).toBeInTheDocument();
+    expect(screen.getByText('Start one with `hermes run <playbook>`.')).toBeInTheDocument();
   });
 
-  it('should render RunOverview when runs exist', async () => {
-    vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-      status: 'ok',
-      version: '0.1.0',
-      home: '/tmp/hermes',
-    });
-    vi.spyOn(client, 'fetchRuns').mockResolvedValue([
-      {
-        id: 'run-001',
-        playbook: 'example',
-        site: 'local',
-        state: 'running',
-        phase: 'work',
-        base_ref: 'main',
-        created_at: 1785319200,
-        updated_at: 1785319200,
-        has_view: false,
-        awaiting: 0,
-        subject: null,
-        tickets: { queued: 5, running: 2, done: 10, failed: 1 },
-      },
-    ]);
-    vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+  it('should render the selected run when runs exist', async () => {
+    mockHome([run('run-001', { playbook: 'example' })]);
 
     render(<App />);
 
-    // Wait for loading to complete and verify run data is displayed
-    await waitFor(() => {
-      expect(screen.getByText(/example run/i)).toBeInTheDocument();
-    });
-
-    // Verify stat tiles show correct counts
-    expect(screen.getByText('18')).toBeInTheDocument(); // total tickets
-    expect(screen.getByText('10')).toBeInTheDocument(); // done count
-    expect(screen.getByText('2')).toBeInTheDocument(); // running count
-    expect(screen.getByText('5')).toBeInTheDocument(); // queued count
+    expect(await heading('run-001 · example')).toBeInTheDocument();
+    expect(await findRow('run-001')).toHaveAttribute('aria-current', 'page');
   });
 
-  it('should show Run tab in TopBar', async () => {
-    vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-      status: 'ok',
-      version: '0.1.0',
-      home: '/tmp/hermes',
-    });
-    vi.spyOn(client, 'fetchRuns').mockResolvedValue([
-      {
-        id: 'run-001',
-        playbook: 'example',
-        site: 'local',
-        state: 'running',
-        phase: 'work',
-        base_ref: 'main',
-        created_at: 1785319200,
-        updated_at: 1785319200,
-        has_view: false,
-        awaiting: 0,
-        subject: null,
-        tickets: { queued: 5 },
-      },
-    ]);
-    vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+  it('shows the run tabs as links, the current one marked', async () => {
+    mockHome([run('run-001')]);
+    go('#/runs/run-001/outputs');
 
     render(<App />);
 
-    await waitFor(() => {
-      expect(screen.getByText('Run')).toBeInTheDocument();
-    });
+    const tabs = await screen.findByRole('navigation', { name: 'Run tabs' });
+    expect(within(tabs).getAllByRole('link').map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['Summary', '#/runs/run-001/summary'],
+      ['Tickets', '#/runs/run-001/tickets'],
+      ['Outputs', '#/runs/run-001/outputs'],
+      ['Metrics', '#/runs/run-001/metrics'],
+    ]);
+    expect(within(tabs).getByRole('link', { name: 'Outputs' })).toHaveAttribute('aria-current', 'page');
+    expect(within(tabs).getByRole('link', { name: 'Summary' })).not.toHaveAttribute('aria-current');
   });
 
   it('should handle API error gracefully', async () => {
-    vi.spyOn(client, 'fetchHealth').mockRejectedValue(new Error('Network error'));
-    vi.spyOn(client, 'fetchRuns').mockRejectedValue(new Error('Network error'));
+    // The global error covers health only; a runs failure shows in the rail.
+    vi.mocked(client.fetchHealth).mockRejectedValue(new Error('Network error'));
+    mockHome([]);
 
     render(<App />);
 
-    // Title AND the now-rendered description both surface the failure.
     await waitFor(() => {
       expect(screen.getByText('Error loading data')).toBeInTheDocument();
     });
@@ -188,61 +203,29 @@ describe('App', () => {
   });
 
   it('should show loading state initially', () => {
-    vi.spyOn(client, 'fetchHealth').mockImplementation(() => new Promise(() => {}));
-    vi.spyOn(client, 'fetchRuns').mockImplementation(() => new Promise(() => {}));
+    vi.mocked(client.fetchHealth).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(client.fetchRuns).mockImplementation(() => new Promise(() => {}));
 
     render(<App />);
 
-    expect(screen.getByText(/loading/i)).toBeInTheDocument();
+    expect(screen.getByText('Loading Hermes…')).toBeInTheDocument();
   });
 
   it('should show Activity tab in TopBar', async () => {
-    vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-      status: 'ok',
-      version: '0.1.0',
-      home: '/tmp/hermes',
-    });
-    vi.spyOn(client, 'fetchRuns').mockResolvedValue([
-      {
-        id: 'run-001',
-        playbook: 'example',
-        site: 'local',
-        state: 'running',
-        phase: 'work',
-        base_ref: 'main',
-        created_at: 1785319200,
-        updated_at: 1785319200,
-        has_view: false,
-        awaiting: 0,
-        subject: null,
-        tickets: { queued: 5 },
-      },
-    ]);
-    vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+    mockHome([run('run-001')]);
 
     render(<App />);
 
     await waitFor(() => {
-      // Activity tab should be present
       expect(screen.getByText('Activity')).toBeInTheDocument();
     });
   });
 
   it('should display auth error banner when WebSocket reports 4401', async () => {
-    // Mock useEventStream to report authError=true and not connected
-    vi.spyOn(useEventStreamModule, 'useEventStream').mockReturnValue({
-      connected: false,
-      events: [],
-      lastEvent: null,
-      authError: true,
-    });
-
-    vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-      status: 'ok',
-      version: '0.1.0',
-      home: '/tmp/hermes',
-    });
-    vi.spyOn(client, 'fetchRuns').mockResolvedValue([]);
+    vi.mocked(useEventStreamModule.useEventStream).mockImplementation(() =>
+      streamState({ connected: false, authError: true }),
+    );
+    mockHome([]);
 
     render(<App />);
 
@@ -253,52 +236,26 @@ describe('App', () => {
 
   describe('tab in the URL', () => {
     function mockLoadedRun() {
-      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-        status: 'ok',
-        version: '0.1.0',
-        home: '/tmp/hermes',
-      });
-      vi.spyOn(client, 'fetchRuns').mockResolvedValue([
-        {
-          id: 'run-001',
-          playbook: 'example',
-          site: 'local',
-          state: 'running',
-          phase: 'work',
-          base_ref: 'main',
-          created_at: 1785319200,
-          updated_at: 1785319200,
-          has_view: false,
-          awaiting: 0,
-          subject: null,
-          tickets: { queued: 5, running: 2, done: 10, failed: 1 },
-        },
-      ]);
-      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
-      vi.spyOn(client, 'fetchCrew').mockResolvedValue([]);
+      mockHome([run('run-001', { playbook: 'example' })]);
     }
 
-    afterEach(() => {
-      window.location.hash = '';
-    });
-
     it('opens the tab named in the URL instead of the default (refresh restores it)', async () => {
-      window.location.hash = '#/crew';
+      go('#crew');
       mockLoadedRun();
 
       render(<App />);
 
-      // The Crew view renders; the default Run overview does not.
       await waitFor(() => {
         expect(screen.getByText(/no crew members/i)).toBeInTheDocument();
       });
-      expect(screen.queryByText(/example run/i)).not.toBeInTheDocument();
+      expect(window.location.hash).toBe('#/crew');
+      expect(screen.queryByRole('heading', { level: 1, name: 'run-001 · example' })).toBeNull();
     });
 
-    it('does not name the run in view on a host working on it', async () => {
-      window.location.hash = '#crew';
+    it('names the run a host is working on: the Crew page has no run in view', async () => {
+      go('#/crew');
       mockLoadedRun();
-      vi.spyOn(client, 'fetchCrew').mockResolvedValue([
+      vi.mocked(client.fetchCrew).mockResolvedValue([
         {
           id: 'host-a',
           site: 'local',
@@ -318,18 +275,16 @@ describe('App', () => {
       render(<App />);
 
       await waitFor(() => expect(screen.getByTitle('run-001/t1')).toHaveTextContent('work'));
-      expect(screen.getByTitle('run-001/t1')).not.toHaveTextContent('run-001');
+      expect(screen.getByTitle('run-001/t1')).toHaveTextContent('run-001');
     });
 
-    it('writes the tab into the URL when a tab is clicked', async () => {
+    it('goes to the Crew page when its top-bar link is clicked', async () => {
       mockLoadedRun();
 
       render(<App />);
-      await waitFor(() => {
-        expect(screen.getByText(/example run/i)).toBeInTheDocument();
-      });
+      expect(await heading('run-001 · example')).toBeInTheDocument();
 
-      screen.getByRole('button', { name: /^crew$/i }).click();
+      fireEvent.click(screen.getByRole('link', { name: 'Crew' }));
 
       await waitFor(() => {
         expect(window.location.hash).toBe('#/crew');
@@ -337,198 +292,18 @@ describe('App', () => {
     });
   });
 
-  describe('the playbook view on the Run tab', () => {
-    const withView: RunDetail = { ...mockRunDetail, playbook: 'committee', has_view: true };
-
-    function mockRuns(...ids: string[]) {
-      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-        status: 'ok',
-        version: '0.1.0',
-        home: '/tmp/hermes',
-      });
-      vi.spyOn(client, 'fetchRuns').mockResolvedValue(
-        ids.map((id) => ({
-          id,
-          playbook: 'committee',
-          site: 'local',
-          state: 'running',
-          phase: 'work',
-          base_ref: 'main',
-          created_at: 1785319200,
-          updated_at: 1785319200,
-          has_view: false,
-          awaiting: 0,
-          subject: null,
-          tickets: { queued: 5 },
-        })),
-      );
-    }
-
-    afterEach(() => {
-      window.location.hash = '';
-    });
-
-    it('is absent for a run whose playbook ships no view', async () => {
-      mockRuns('run-001');
-      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
-
-      render(<App />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/example run/i)).toBeInTheDocument();
-      });
-      expect(screen.queryByTestId('tab-playbook')).toBeNull();
-    });
-
-    it('the Run tab opens the view for a run whose playbook has one', async () => {
-      mockRuns('run-001');
-      vi.spyOn(client, 'fetchRun').mockResolvedValue(withView);
-
-      render(<App />);
-
-      await waitFor(() => {
-        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
-      });
-      expect(window.location.hash).toBe('#/runs/run-001/summary');
-      expect(screen.queryByTestId('tab-playbook')).toBeNull();
-      expect(screen.getByTestId('tab-run')).toHaveStyle({ color: 'var(--text-primary)' });
-    });
-
-    it('a legacy #playbook opens the run overview for a run with no view', async () => {
-      // A bookmarked hash outlives the run it was taken on. Blank pane, no tab
-      // to click your way out of: the one outcome the fallback exists to avoid.
-      window.location.hash = '#playbook';
-      mockRuns('run-001');
-      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
-
-      render(<App />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/example run/i)).toBeInTheDocument();
-      });
-      expect(screen.queryByTestId('playbook-view')).toBeNull();
-      expect(screen.queryByTestId('tab-playbook')).toBeNull();
-      expect(window.location.hash).toBe('#/runs/run-001/summary');
-    });
-
-    it('shows the view or the overview as the reader switches runs', async () => {
-      mockRuns('run-001', 'run-002');
-      vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) =>
-        id === 'run-001' ? withView : { ...mockRunDetail, id: 'run-002' },
-      );
-
-      render(<App />);
-
-      await waitFor(() => {
-        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
-      });
-
-      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
-
-      await waitFor(() => {
-        expect(screen.getByText(/example run/i)).toBeInTheDocument();
-      });
-      expect(screen.queryByTestId('playbook-view')).toBeNull();
-
-      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-001' } });
-
-      await waitFor(() => {
-        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
-      });
-    });
-
-    it('remounts the view when the reader switches to another run with one', async () => {
-      // Finding 10.1. The loader keeps the run it first mounted with, so
-      // without `key` on the element the pane shows run-001's view_data under
-      // run-002's id for one round trip. One round trip, easy to miss in
-      // review, invisible in CI.
-      mockRuns('run-001', 'run-002');
-      vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) => ({
-        ...withView,
-        id,
-      }));
-
-      render(<App />);
-
-      await waitFor(() => {
-        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
-      });
-
-      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
-
-      await waitFor(() => {
-        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-002');
-      });
-    });
-
-    it('hands the view the finding tick, so a new reduction refreshes it', async () => {
-      // Finding 10.2. Drop `liveTick={findingLiveTick}` and a live committee
-      // run silently stops refreshing on reduction_created -- which, for turns
-      // arriving one at a time, is the feature.
-      mockRuns('run-001');
-      vi.spyOn(client, 'fetchRun').mockResolvedValue(withView);
-
-      render(<App />);
-
-      await waitFor(() => {
-        expect(screen.getByTestId('playbook-view')).toHaveTextContent(/tick \d+/);
-      });
-    });
-
-    it('keeps the Run tab lit when #playbook falls back to the overview', async () => {
-      // Finding 10.4: RunOverview is on screen, so some tab has to claim it.
-      window.location.hash = '#playbook';
-      mockRuns('run-001');
-      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
-
-      render(<App />);
-
-      await waitFor(() => {
-        expect(screen.getByText(/example run/i)).toBeInTheDocument();
-      });
-      expect(screen.getByTestId('tab-run')).toHaveStyle({ color: 'var(--text-primary)' });
-    });
-  });
-
   describe('the tickets tab', () => {
-    function mockRuns(...ids: string[]) {
-      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-        status: 'ok',
-        version: '0.1.0',
-        home: '/tmp/hermes',
-      });
-      vi.spyOn(client, 'fetchRuns').mockResolvedValue(
-        ids.map((id) => ({
-          id,
-          playbook: 'example',
-          site: 'local',
-          state: 'running',
-          phase: 'work',
-          base_ref: 'main',
-          created_at: 1785319200,
-          updated_at: 1785319200,
-          has_view: false,
-          awaiting: 0,
-          subject: null,
-          tickets: {},
-        })),
-      );
-      vi.mocked(client.fetchTickets).mockResolvedValue([]);
-    }
+    const detail = (id: string, phases: string[]) =>
+      detailOf(run(id), { phases: phases.map((name, i) => ({ name, counts: {}, current: i === 0 })) });
 
     const phaseSelect = () =>
       screen.getByRole('option', { name: 'all phases' }).closest('select') as HTMLElement;
     const phaseOptions = () =>
       Array.from(phaseSelect().querySelectorAll('option')).map((o) => o.textContent);
 
-    afterEach(() => {
-      window.location.hash = '';
-    });
-
     it("filters by the viewed run's phases", async () => {
-      window.location.hash = '#board';
-      mockRuns('run-001');
-      vi.spyOn(client, 'fetchRun').mockResolvedValue(mockRunDetail);
+      go('#board');
+      mockHome([run('run-001')], [detail('run-001', ['work', 'reduce'])]);
 
       render(<App />);
 
@@ -537,12 +312,10 @@ describe('App', () => {
 
     it('drops the phase filter when the reader switches runs', async () => {
       // Another run's phase names filter this run's board to nothing.
-      window.location.hash = '#board';
-      mockRuns('run-001', 'run-002');
-      vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) =>
-        id === 'run-001'
-          ? mockRunDetail
-          : { ...mockRunDetail, id, phases: [{ name: 'solve', counts: {}, current: true }] },
+      go('#/runs/run-001/tickets');
+      mockHome(
+        [run('run-001'), run('run-002')],
+        [detail('run-001', ['work', 'reduce']), detail('run-002', ['solve'])],
       );
 
       render(<App />);
@@ -552,128 +325,686 @@ describe('App', () => {
         expect(client.fetchTickets).toHaveBeenLastCalledWith('run-001', { phase: 'work' }),
       );
 
-      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
+      fireEvent.click(await findRow('run-002'));
 
       await waitFor(() => expect(client.fetchTickets).toHaveBeenLastCalledWith('run-002', {}));
       expect(phaseOptions()).toEqual(['all phases', 'solve']);
+      expect(window.location.hash).toBe('#/runs/run-002/tickets');
     });
   });
+});
 
-  describe('the route', () => {
-    // A `/api/runs` row, in the shape the client types give it.
-    const row = (id: string): client.Run => ({
-      id,
-      playbook: 'example',
-      site: 'local',
-      state: 'running',
-      phase: 'work',
-      base_ref: 'main',
-      created_at: 1785319200,
-      updated_at: 1785319500,
-      has_view: false,
-      awaiting: 0,
-      subject: null,
-      tickets: {},
-    });
+describe('addresses and the rail', () => {
+  it("resolves an empty address to the default run's summary without a history entry", async () => {
+    // Default run: the first run in the Needs you group, whatever its state.
+    mockHome([
+      run('run-a', { created_at: NOW - 60 }),
+      run('run-b', { state: 'done', awaiting: 2, created_at: NOW - 7200 }),
+    ]);
+    const before = window.history.length;
 
-    function mockRuns(...ids: string[]) {
-      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-        status: 'ok',
-        version: '0.1.0',
-        home: '/tmp/hermes',
-      });
-      vi.spyOn(client, 'fetchRuns').mockResolvedValue(ids.map(row));
-      vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) => ({ ...mockRunDetail, id }));
-      vi.mocked(client.fetchCrew).mockResolvedValue([]);
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe('#/runs/run-b/summary'));
+    expect(window.history.length).toBe(before);
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+  });
+
+  it('opens a run created after the list loaded, after one refetch, with no note', async () => {
+    const a = run('run-a');
+    const b = run('run-b', { created_at: NOW - 60 });
+    vi.mocked(client.fetchRuns).mockResolvedValueOnce([a]).mockResolvedValue([a, b]);
+    vi.mocked(client.fetchRun).mockImplementation(async (id: string) => detailOf(id === 'run-b' ? b : a));
+    go('#/runs/run-b/metrics');
+
+    render(<App />);
+
+    await waitFor(() => expect(client.fetchRuns).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(row('run-b')).toHaveAttribute('aria-current', 'page'));
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+    expect(window.location.hash).toBe('#/runs/run-b/metrics');
+    expect(inMain().queryByText(/isn't in this home/)).toBeNull();
+    expect(client.fetchRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the note and the default run on the same tab when the run is still absent after one refetch', async () => {
+    mockHome([run('run-a')]);
+    go('#/runs/ghost/metrics');
+    const before = window.history.length;
+
+    render(<App />);
+
+    await waitFor(() => expect(window.location.hash).toBe('#/runs/run-a/metrics'));
+    expect(client.fetchRuns).toHaveBeenCalledTimes(2);
+    expect(window.history.length).toBe(before);
+    expect(await inMain().findByText("ghost isn't in this home")).toBeInTheDocument();
+    expect(statusRegion()).toHaveTextContent("ghost isn't in this home");
+    expect(await screen.findByTestId('metrics-view')).toHaveTextContent('metrics for run-a');
+
+    // Dismissible, and gone on the next route change either way.
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(inMain().queryByText("ghost isn't in this home")).toBeNull();
+
+    act(() => go('#/runs/ghost/metrics'));
+    expect(await inMain().findByText("ghost isn't in this home")).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('navigation', { name: 'Run tabs' })).getByRole('link', { name: 'Tickets' }));
+    await waitFor(() => expect(window.location.hash).toBe('#/runs/run-a/tickets'));
+    expect(inMain().queryByText("ghost isn't in this home")).toBeNull();
+  });
+
+  it("leaves #/runs alone and says Couldn't load runs. when the list fails", async () => {
+    vi.mocked(client.fetchRuns).mockRejectedValue(new Error('runs down'));
+    go('#/runs');
+
+    render(<App />);
+
+    expect(await heading("Couldn't load runs.")).toBeInTheDocument();
+    expect(window.location.hash).toBe('#/runs');
+  });
+
+  it('fetches the named run directly when the list fails', async () => {
+    vi.mocked(client.fetchRuns).mockRejectedValue(new Error('runs down'));
+    vi.mocked(client.fetchRun).mockResolvedValue(detailOf(run('run-a')));
+    go('#/runs/run-a/metrics');
+
+    render(<App />);
+
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+    expect(await screen.findByTestId('metrics-view')).toHaveTextContent('metrics for run-a');
+    expect(within(rail()).getByRole('alert')).toBeInTheDocument();
+  });
+
+  it('shows the note and leaves the address alone when the list failed and the run is a 404', async () => {
+    vi.mocked(client.fetchRuns).mockRejectedValue(new Error('runs down'));
+    vi.mocked(client.fetchRun).mockRejectedValue(
+      Object.assign(new Error("Run 'ghost' not found"), { status: 404 }),
+    );
+    go('#/runs/ghost/summary');
+
+    render(<App />);
+
+    expect(await inMain().findByText("ghost isn't in this home")).toBeInTheDocument();
+    expect(statusRegion()).toHaveTextContent("ghost isn't in this home");
+    expect(window.location.hash).toBe('#/runs/ghost/summary');
+  });
+
+  it('shows a runs failure only in the rail, with Retry, while the top bar still works', async () => {
+    vi.mocked(client.fetchRuns).mockRejectedValue(new Error('runs down'));
+    go('#/crew');
+
+    render(<App />);
+
+    expect(await within(rail()).findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByText('Error loading data')).toBeNull();
+    expect(await screen.findByText(/no crew members/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Crew' })).toHaveAttribute('aria-current', 'page');
+    // The count shows nothing while the list has never loaded.
+    expect(screen.queryByTestId('needs-you-count')).toBeNull();
+
+    fireEvent.click(within(rail()).getByRole('button', { name: /retry/i }));
+
+    await waitFor(() => expect(client.fetchRuns).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows the rail on a cross-run page, with its top-bar item current and no rail row current', async () => {
+    mockHome([run('run-a'), run('run-b', { created_at: NOW - 7200 })]);
+    go('#/activity');
+
+    render(<App />);
+
+    await waitFor(() => expect(row('run-a')).toBeInTheDocument());
+    expect(screen.getByRole('link', { name: 'Activity' })).toHaveAttribute('aria-current', 'page');
+    expect(
+      within(rail()).getAllByRole('link').filter((a) => a.getAttribute('aria-current') === 'page'),
+    ).toEqual([]);
+    expect(window.location.hash).toBe('#/activity');
+  });
+
+  it('opens a rail row on the last run tab used when on a cross-run page', async () => {
+    mockHome([run('run-a'), run('run-b', { created_at: NOW - 7200 })]);
+    go('#/runs/run-a/tickets');
+
+    render(<App />);
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('link', { name: 'Crew' }));
+
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Crew' })).toHaveAttribute('aria-current', 'page'));
+    expect(await findRow('run-b')).toHaveAttribute('href', '#/runs/run-b/tickets');
+  });
+
+  it('counts waiting decisions across every run in the top bar, whatever the chips hide', async () => {
+    localStorage.setItem('hermes.rail.hiddenPlaybooks', JSON.stringify(['pb-hidden']));
+    mockHome([run('run-a', { awaiting: 2 }), run('run-b', { playbook: 'pb-hidden', awaiting: 1 })]);
+
+    render(<App />);
+
+    expect(await screen.findByTestId('needs-you-count')).toHaveTextContent('3');
+  });
+
+  it("never renders the previous run's body while the next run's detail loads", async () => {
+    const a = run('run-a');
+    const b = run('run-b', { created_at: NOW - 7200 });
+    vi.mocked(client.fetchRuns).mockResolvedValue([a, b]);
+    vi.mocked(client.fetchRun).mockImplementation((id: string) =>
+      id === 'run-a' ? Promise.resolve(detailOf(a)) : new Promise<RunDetail>(() => {}),
+    );
+    go('#/runs/run-a/metrics');
+
+    render(<App />);
+    expect(await screen.findByTestId('metrics-view')).toHaveTextContent('metrics for run-a');
+
+    fireEvent.click(await findRow('run-b'));
+
+    // The header is drawn from the row at once; the body waits for run-b's detail.
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+    expect(screen.queryByTestId('metrics-view')).toBeNull();
+    expect(within(screen.getByRole('main')).getAllByRole('status').length).toBeGreaterThan(0);
+  });
+
+  it('drops a detail response for a run that is no longer selected', async () => {
+    const a = run('run-a');
+    const b = run('run-b', { created_at: NOW - 7200 });
+    let resolveA: (d: RunDetail) => void = () => {};
+    vi.mocked(client.fetchRuns).mockResolvedValue([a, b]);
+    vi.mocked(client.fetchRun).mockImplementation((id: string) =>
+      id === 'run-a'
+        ? new Promise<RunDetail>((resolve) => {
+            resolveA = resolve;
+          })
+        : Promise.resolve(detailOf(b)),
+    );
+    go('#/runs/run-a/metrics');
+
+    render(<App />);
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+    fireEvent.click(await findRow('run-b'));
+    expect(await screen.findByTestId('metrics-view')).toHaveTextContent('metrics for run-b');
+
+    await act(async () => resolveA(detailOf(a)));
+
+    expect(screen.getByTestId('metrics-view')).toHaveTextContent('metrics for run-b');
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('run-b · pb');
+  });
+
+  it('shows an alert with Retry under the header when the detail fails', async () => {
+    const a = run('run-a');
+    vi.mocked(client.fetchRuns).mockResolvedValue([a]);
+    vi.mocked(client.fetchRun).mockRejectedValueOnce(new Error('detail down')).mockResolvedValue(detailOf(a));
+    go('#/runs/run-a/metrics');
+
+    render(<App />);
+
+    const main = screen.getByRole('main');
+    expect(await within(main).findByRole('alert')).toHaveTextContent('detail down');
+    expect(within(main).getByRole('heading', { level: 1, name: 'run-a · pb' })).toBeInTheDocument();
+
+    fireEvent.click(within(main).getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByTestId('metrics-view')).toHaveTextContent('metrics for run-a');
+    expect(within(main).queryByRole('alert')).toBeNull();
+  });
+
+  it('shows the note above the empty state when the address names a run in an empty home', async () => {
+    mockHome([]);
+    go('#/runs/ghost/summary');
+
+    render(<App />);
+
+    expect(await inMain().findByText("ghost isn't in this home")).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'No runs yet' })).toBeInTheDocument();
+    expect(window.location.hash).toBe('#/runs/ghost/summary');
+  });
+});
+
+describe('keyboard', () => {
+  async function onRunC() {
+    mockHome(threeRuns());
+    go('#/runs/run-c/metrics');
+    render(<App />);
+    expect(await heading('run-c · pb')).toBeInTheDocument();
+    await settled();
+  }
+
+  it('] and [ select the next and previous visible run, each a history entry', async () => {
+    await onRunC();
+    const start = window.history.length;
+
+    fireEvent.keyDown(document.body, { key: ']' });
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+    expect(window.location.hash).toBe('#/runs/run-b/metrics');
+
+    fireEvent.keyDown(document.body, { key: '[' });
+    expect(await heading('run-c · pb')).toBeInTheDocument();
+    expect(window.location.hash).toBe('#/runs/run-c/metrics');
+    expect(window.history.length).toBe(start + 2);
+  });
+
+  it('does nothing past either end: no wrap-around', async () => {
+    await onRunC();
+
+    fireEvent.keyDown(document.body, { key: '[' });
+    expect(window.location.hash).toBe('#/runs/run-c/metrics');
+
+    act(() => go('#/runs/run-a/metrics'));
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: ']' });
+    expect(window.location.hash).toBe('#/runs/run-a/metrics');
+  });
+
+  it('a held ] leaves one history entry', async () => {
+    await onRunC();
+    const start = window.history.length;
+
+    fireEvent.keyDown(document.body, { key: ']' });
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: ']', repeat: true });
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+
+    expect(window.location.hash).toBe('#/runs/run-a/metrics');
+    expect(window.history.length).toBe(start + 1);
+  });
+
+  it('ignores [ and ] on a cross-run page', async () => {
+    mockHome(threeRuns());
+    go('#/crew');
+    render(<App />);
+    await waitFor(() => expect(row('run-c')).toBeInTheDocument());
+
+    fireEvent.keyDown(document.body, { key: ']' });
+    fireEvent.keyDown(document.body, { key: '[' });
+
+    expect(window.location.hash).toBe('#/crew');
+  });
+
+  it('ignores shortcuts with Meta, or with Ctrl but not AltGr', async () => {
+    await onRunC();
+
+    // Cmd+] is the browser's Forward; Ctrl+] is a browser or OS chord.
+    fireEvent.keyDown(document.body, { key: ']', metaKey: true });
+    fireEvent.keyDown(document.body, { key: ']', ctrlKey: true });
+    fireEvent.keyDown(document.body, { key: '/', metaKey: true });
+
+    expect(window.location.hash).toBe('#/runs/run-c/metrics');
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('accepts AltGr (Ctrl+Alt) and Alt alone', async () => {
+    await onRunC();
+
+    // Many non-US layouts type [ and ] with AltGr, which Windows reports as Ctrl+Alt.
+    fireEvent.keyDown(document.body, { key: ']', ctrlKey: true, altKey: true, modifierAltGraph: true });
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+
+    // Option on macOS.
+    fireEvent.keyDown(document.body, { key: ']', altKey: true });
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+  });
+
+  it('ignores shortcuts while composing, already handled, or under an open modal', async () => {
+    await onRunC();
+
+    fireEvent.keyDown(document.body, { key: ']', isComposing: true });
+
+    const handled = (e: KeyboardEvent) => e.preventDefault();
+    document.addEventListener('keydown', handled);
+    fireEvent.keyDown(document.body, { key: ']' });
+    document.removeEventListener('keydown', handled);
+
+    const modal = document.createElement('div');
+    modal.setAttribute('aria-modal', 'true');
+    document.body.appendChild(modal);
+    fireEvent.keyDown(document.body, { key: ']' });
+    fireEvent.keyDown(document.body, { key: '/' });
+    modal.remove();
+
+    expect(window.location.hash).toBe('#/runs/run-c/metrics');
+    expect(document.activeElement).toBe(document.body);
+  });
+
+  it('ignores shortcuts typed into text entry, but not from a checkbox', async () => {
+    await onRunC();
+    const editable = document.createElement('div');
+    editable.setAttribute('contenteditable', 'true');
+    const textEntry = [
+      document.createElement('textarea'),
+      document.createElement('select'),
+      Object.assign(document.createElement('input'), { type: 'text' }),
+      Object.assign(document.createElement('input'), { type: 'search' }),
+      editable,
+    ];
+
+    for (const el of textEntry) {
+      document.body.appendChild(el);
+      fireEvent.keyDown(el, { key: ']' });
+      el.remove();
     }
+    expect(window.location.hash).toBe('#/runs/run-c/metrics');
 
-    afterEach(() => {
-      window.location.hash = '';
+    const box = Object.assign(document.createElement('input'), { type: 'checkbox' });
+    document.body.appendChild(box);
+    fireEvent.keyDown(box, { key: ']' });
+    box.remove();
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+  });
+
+  it('steps in from the ends when the chips hide the selected run', async () => {
+    localStorage.setItem('hermes.rail.hiddenPlaybooks', JSON.stringify(['pb-x']));
+    mockHome([...threeRuns(), run('run-x', { playbook: 'pb-x', created_at: NOW - 90 })]);
+    go('#/runs/run-x/metrics');
+    render(<App />);
+    // A hidden selected run stays in the pane, and no row is highlighted.
+    expect(await heading('run-x · pb-x')).toBeInTheDocument();
+    await settled();
+
+    fireEvent.keyDown(document.body, { key: ']' });
+    expect(await heading('run-c · pb')).toBeInTheDocument();
+
+    act(() => go('#/runs/run-x/metrics'));
+    expect(await heading('run-x · pb-x')).toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: '[' });
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+  });
+
+  it('a deep link to the 30th finished run shows and highlights its row; [ and ] move within the visible rows', async () => {
+    // f-01 ended most recently; Finished shows f-01..f-10, then the selected f-30.
+    const finished = Array.from({ length: 32 }, (_, i) =>
+      run(`f-${String(i + 1).padStart(2, '0')}`, {
+        state: 'done',
+        created_at: NOW - 100_000 + i,
+        updated_at: NOW - (i + 1) * 60,
+      }),
+    );
+    mockHome(finished);
+    go('#/runs/f-30/metrics');
+    render(<App />);
+    expect(await heading('f-30 · pb')).toBeInTheDocument();
+    await waitFor(() => expect(row('f-30')).toHaveAttribute('aria-current', 'page'));
+    expect(within(rail()).queryByRole('link', { name: /^f-11,/ })).toBeNull();
+
+    // f-30 is the last visible row: ] neither wraps nor opens "show N more".
+    fireEvent.keyDown(document.body, { key: ']' });
+    expect(window.location.hash).toBe('#/runs/f-30/metrics');
+
+    fireEvent.keyDown(document.body, { key: '[' });
+    expect(await heading('f-10 · pb')).toBeInTheDocument();
+  });
+
+  it('/ focuses the filter box and prevents the typed slash, on any route', async () => {
+    mockHome(threeRuns());
+    go('#/crew');
+    render(<App />);
+    await waitFor(() => expect(row('run-c')).toBeInTheDocument());
+
+    // fireEvent returns false when the listener called preventDefault().
+    expect(fireEvent.keyDown(document.body, { key: '/' })).toBe(false);
+
+    const filter = screen.getByRole('searchbox', { name: 'Filter runs' });
+    await waitFor(() => expect(filter).toHaveFocus());
+    // A slash typed inside the box is text, not a shortcut.
+    expect(fireEvent.keyDown(filter, { key: '/' })).toBe(true);
+  });
+
+  it("/ expands a collapsed rail and writes '0'", async () => {
+    localStorage.setItem('hermes.rail.collapsed', '1');
+    await onRunC();
+    expect(screen.queryByRole('searchbox', { name: 'Filter runs' })).toBeNull();
+
+    fireEvent.keyDown(document.body, { key: '/' });
+
+    const filter = await screen.findByRole('searchbox', { name: 'Filter runs' });
+    await waitFor(() => expect(filter).toHaveFocus());
+    expect(localStorage.getItem('hermes.rail.collapsed')).toBe('0');
+  });
+
+  it('/ does nothing with no runs', async () => {
+    mockHome([]);
+    render(<App />);
+    expect(await heading('No runs yet')).toBeInTheDocument();
+
+    expect(fireEvent.keyDown(document.body, { key: '/' })).toBe(true);
+    expect(document.activeElement).toBe(document.body);
+  });
+});
+
+describe('live refresh', () => {
+  async function onRunA() {
+    mockHome([run('run-a'), run('run-b', { created_at: NOW - 7200 })]);
+    go('#/runs/run-a/metrics');
+    const view = render(<App />);
+    expect(await screen.findByTestId('metrics-view')).toHaveTextContent('metrics for run-a');
+    return view;
+  }
+
+  it('N events naming runs within 2 s cause one immediate and one trailing runs fetch', async () => {
+    const { rerender } = await onRunA();
+    expect(client.fetchRuns).toHaveBeenCalledTimes(1);
+    vi.useFakeTimers();
+
+    await deliver(rerender, ev('ticket_claimed', 'run-a'));
+    expect(client.fetchRuns).toHaveBeenCalledTimes(2);
+
+    await deliver(rerender, ev('result_recorded', 'run-b'), ev('phase_advanced', 'run-a'));
+    expect(client.fetchRuns).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(client.fetchRuns).toHaveBeenCalledTimes(3);
+
+    await act(async () => {
+      vi.advanceTimersByTime(4000);
+    });
+    expect(client.fetchRuns).toHaveBeenCalledTimes(3);
+  });
+
+  it('a crew event with no run_id causes no runs fetch', async () => {
+    const { rerender } = await onRunA();
+    vi.useFakeTimers();
+
+    await deliver(rerender, ev('crew_down', null));
+    await act(async () => {
+      vi.advanceTimersByTime(4000);
     });
 
-    it("names the default run's summary in an empty hash once the list loads", async () => {
-      mockRuns('run-001');
+    expect(client.fetchRuns).toHaveBeenCalledTimes(1);
+  });
 
-      render(<App />);
+  it('handles every event of a burst delivered in one render', async () => {
+    const { rerender } = await onRunA();
 
-      await waitFor(() => expect(window.location.hash).toBe('#/runs/run-001/summary'));
-      expect(await screen.findByText(/example run/i)).toBeInTheDocument();
+    // The run event comes first; the last event of the burst names no run.
+    await deliver(rerender, ev('needs_human', 'run-b'), ev('crew_health', null));
+
+    expect(client.fetchRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it('a first run appearing while the home is empty opens it', async () => {
+    const a = run('run-a');
+    vi.mocked(client.fetchRuns).mockResolvedValueOnce([]).mockResolvedValue([a]);
+    vi.mocked(client.fetchRun).mockResolvedValue(detailOf(a));
+    const { rerender } = render(<App />);
+    expect(await heading('No runs yet')).toBeInTheDocument();
+
+    await deliver(rerender, ev('phase_advanced', 'run-a'));
+
+    await waitFor(() => expect(window.location.hash).toBe('#/runs/run-a/summary'));
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+  });
+
+  it("refetches the selected run's detail on its own events only", async () => {
+    const { rerender } = await onRunA();
+    expect(client.fetchRun).toHaveBeenCalledTimes(1);
+
+    // Another run's event refreshes the list, not this run's detail; nor does
+    // the list refetch it (the detail is keyed on the run id, not the list).
+    await deliver(rerender, ev('ticket_claimed', 'run-b'));
+    await waitFor(() => expect(client.fetchRuns).toHaveBeenCalledTimes(2));
+    expect(client.fetchRun).toHaveBeenCalledTimes(1);
+
+    await deliver(rerender, ev('run_failed', 'run-a'));
+    expect(client.fetchRun).toHaveBeenCalledTimes(2);
+    expect(client.fetchRun).toHaveBeenLastCalledWith('run-a');
+  });
+});
+
+describe('focus and announcements', () => {
+  it('the skip link moves focus to the <h1> in <main>; the first load moves none', async () => {
+    mockHome([run('run-a')]);
+    go('#/runs/run-a/metrics');
+    render(<App />);
+    const h1 = await heading('run-a · pb');
+    expect(document.activeElement).toBe(document.body);
+
+    const skip = screen.getByRole('link', { name: 'Skip to content' });
+    // The first focusable element in the shell.
+    expect(document.querySelector('a[href], button, input, select, textarea')).toBe(skip);
+    fireEvent.click(skip);
+
+    expect(h1).toHaveFocus();
+    expect(screen.getByRole('main')).toContainElement(h1);
+    expect(window.location.hash).toBe('#/runs/run-a/metrics');
+    // One status region in the shell.
+    expect(statusRegion()).toHaveAttribute('role', 'status');
+    expect(screen.getAllByTestId('status-region')).toHaveLength(1);
+  });
+
+  it('[ / ] on a rail row moves focus to the new row and announces it', async () => {
+    mockHome(threeRuns());
+    go('#/runs/run-c/metrics');
+    render(<App />);
+    expect(await heading('run-c · pb')).toBeInTheDocument();
+    await waitFor(() => expect(row('run-c')).toBeInTheDocument());
+
+    row('run-c').focus();
+    fireEvent.keyDown(row('run-c'), { key: ']' });
+
+    await waitFor(() => expect(row('run-b')).toHaveFocus());
+    expect(statusRegion()).toHaveTextContent('run-b, pb, running');
+  });
+
+  it('] from a control the pane drops sends focus to the header <h1>', async () => {
+    mockHome([
+      run('run-c', { has_view: true, created_at: NOW - 60 }),
+      run('run-b', { has_view: true, created_at: NOW - 120 }),
+    ]);
+    go('#/runs/run-c/metrics');
+    render(<App />);
+    const action = await screen.findByRole('button', { name: 'view action' });
+    await settled();
+
+    action.focus();
+    fireEvent.keyDown(action, { key: ']' });
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveFocus());
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('run-b · pb');
+  });
+
+  it('a run-tab click keeps focus on the tab', async () => {
+    mockHome([run('run-a')]);
+    go('#/runs/run-a/metrics');
+    render(<App />);
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+    const tickets = within(screen.getByRole('navigation', { name: 'Run tabs' })).getByRole('link', {
+      name: 'Tickets',
     });
 
-    it('leaves #/runs alone when the list fails to load', async () => {
-      window.location.hash = '#/runs';
-      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
-        status: 'ok',
-        version: '0.1.0',
-        home: '/tmp/hermes',
-      });
-      vi.spyOn(client, 'fetchRuns').mockRejectedValue(new Error('Network error'));
+    tickets.focus();
+    fireEvent.click(tickets);
 
-      render(<App />);
+    await waitFor(() => expect(window.location.hash).toBe('#/runs/run-a/tickets'));
+    await waitFor(() => expect(tickets).toHaveAttribute('aria-current', 'page'));
+    expect(tickets).toHaveFocus();
+  });
 
-      await waitFor(() => expect(screen.getByText('Error loading data')).toBeInTheDocument());
-      expect(window.location.hash).toBe('#/runs');
+  it('arriving at another page moves focus to its <h1>', async () => {
+    mockHome([run('run-a')]);
+    go('#/crew');
+    render(<App />);
+    await waitFor(() => expect(row('run-a')).toBeInTheDocument());
+    const home = screen.getByRole('link', { name: 'Hermes' });
+
+    home.focus();
+    fireEvent.click(home);
+
+    const h1 = await heading('run-a · pb');
+    await waitFor(() => expect(h1).toHaveFocus());
+    expect(window.location.hash).toBe('#/runs/run-a/summary');
+  });
+
+  it('a rail click from a cross-run page leaves focus on the row', async () => {
+    mockHome([run('run-a')]);
+    go('#/crew');
+    render(<App />);
+    await waitFor(() => expect(row('run-a')).toBeInTheDocument());
+    const link = row('run-a');
+
+    link.focus();
+    fireEvent.click(link);
+
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+    expect(link).toHaveFocus();
+  });
+
+  it('the first load announces no count; a later rise is announced', async () => {
+    const a = run('run-a', { awaiting: 1 });
+    vi.mocked(client.fetchRuns).mockResolvedValueOnce([a]).mockResolvedValue([{ ...a, awaiting: 3 }]);
+    vi.mocked(client.fetchRun).mockResolvedValue(detailOf(a));
+    go('#/runs/run-a/metrics');
+    const { rerender } = render(<App />);
+    expect(await screen.findByTestId('needs-you-count')).toHaveTextContent('1');
+    expect(statusRegion().textContent).toBe('');
+
+    await deliver(rerender, ev('needs_human', 'run-a'));
+
+    await waitFor(() => expect(screen.getByTestId('needs-you-count')).toHaveTextContent('3'));
+    expect(statusRegion().textContent).toBe('3 decisions waiting on you');
+  });
+
+  it("a rise inside the 10 s window is announced at the window's end", async () => {
+    const a = run('run-a', { awaiting: 1 });
+    vi.mocked(client.fetchRuns)
+      .mockResolvedValueOnce([a])
+      .mockResolvedValueOnce([{ ...a, awaiting: 2 }])
+      .mockResolvedValue([{ ...a, awaiting: 4 }]);
+    vi.mocked(client.fetchRun).mockResolvedValue(detailOf(a));
+    go('#/runs/run-a/metrics');
+    const { rerender } = render(<App />);
+    expect(await screen.findByTestId('needs-you-count')).toHaveTextContent('1');
+    vi.useFakeTimers();
+
+    await deliver(rerender, ev('needs_human', 'run-a')); // immediate refetch: 2, announced
+    expect(statusRegion().textContent).toBe('2 decisions waiting on you');
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000); // trailing refetch: 4, inside the window
     });
+    expect(screen.getByTestId('needs-you-count')).toHaveTextContent('4');
+    expect(statusRegion().textContent).toBe('2 decisions waiting on you');
 
-    it('switching tabs keeps the run, through pages that name none', async () => {
-      // d978a44: a tab click used to send the console to the newest run.
-      window.location.hash = '#/runs/run-002/summary';
-      mockRuns('run-001', 'run-002');
-
-      render(<App />);
-      await waitFor(() => expect(client.fetchRun).toHaveBeenCalledWith('run-002'));
-      await screen.findByText(/example run/i);
-
-      fireEvent.click(screen.getByRole('button', { name: /^needs you/i }));
-      expect(window.location.hash).toBe('#/needs-you?run=run-002');
-
-      fireEvent.click(screen.getByRole('button', { name: /^crew$/i }));
-      expect(window.location.hash).toBe('#/crew');
-
-      fireEvent.click(screen.getByRole('button', { name: /^run$/i }));
-      expect(window.location.hash).toBe('#/runs/run-002/summary');
-      await screen.findByText(/example run/i);
-      expect(client.fetchRun).not.toHaveBeenCalledWith('run-001');
+    await act(async () => {
+      vi.advanceTimersByTime(8000); // the window ends
     });
+    expect(statusRegion().textContent).toBe('4 decisions waiting on you');
+  });
 
-    it('picking a run keeps the tab and drops the open ticket', async () => {
-      window.location.hash = '#/runs/run-001/tickets?ticket=run-001%2Ft-1';
-      mockRuns('run-001', 'run-002');
-      vi.mocked(client.fetchTickets).mockResolvedValue([]);
-      vi.mocked(client.fetchTicketDetail).mockReturnValue(new Promise(() => {}));
+  it("announces the selected run's state change, but not a selection", async () => {
+    const a = run('run-a', { created_at: NOW - 60 });
+    const b = run('run-b', { state: 'done', created_at: NOW - 120 });
+    vi.mocked(client.fetchRuns).mockResolvedValueOnce([a, b]).mockResolvedValue([{ ...a, state: 'failed' }, b]);
+    vi.mocked(client.fetchRun).mockImplementation(async (id: string) => detailOf(id === 'run-b' ? b : a));
+    go('#/runs/run-a/metrics');
+    const { rerender } = render(<App />);
+    expect(await heading('run-a · pb')).toBeInTheDocument();
 
-      render(<App />);
-      expect(await screen.findByRole('dialog')).toHaveTextContent('run-001/t-1');
+    fireEvent.click(await findRow('run-b'));
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+    expect(statusRegion().textContent).toBe('');
 
-      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
+    act(() => go('#/runs/run-a/metrics'));
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+    await deliver(rerender, ev('run_failed', 'run-a'));
 
-      expect(window.location.hash).toBe('#/runs/run-002/tickets');
-      await waitFor(() => expect(client.fetchTickets).toHaveBeenLastCalledWith('run-002', {}));
-      expect(screen.queryByRole('dialog')).toBeNull();
-    });
-
-    it("picking a run on a page that names none opens that run's summary", async () => {
-      window.location.hash = '#/crew';
-      mockRuns('run-001', 'run-002');
-
-      render(<App />);
-      await screen.findByText(/no crew members/i);
-
-      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
-
-      expect(window.location.hash).toBe('#/runs/run-002/summary');
-      await waitFor(() => expect(client.fetchRun).toHaveBeenLastCalledWith('run-002'));
-    });
-
-    it('a run tab does nothing in a home with no runs', async () => {
-      mockRuns();
-
-      render(<App />);
-      await screen.findByText(/no active run/i);
-
-      fireEvent.click(screen.getByRole('button', { name: /^metrics$/i }));
-
-      expect(window.location.hash).toBe('');
-    });
+    await waitFor(() => expect(statusRegion()).toHaveTextContent('run-a failed'));
   });
 });

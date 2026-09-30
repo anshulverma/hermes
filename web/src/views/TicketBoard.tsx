@@ -9,7 +9,7 @@
  * modal refetches full detail by id either way.
  */
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { fetchTickets } from '../api/client';
 import type { Ticket, TicketFilters } from '../api/client';
 import { normalizeTicketState } from '../api/normalize';
@@ -201,8 +201,23 @@ export default function TicketBoard({ runId, phases = [], liveTick }: TicketBoar
   // closing are history entries: Back closes what was opened.
   const { route, navigate } = useRoute();
   const openTicketId = route.page === 'run' ? route.ticket : null;
-  const setOpenTicketId = (ticket: string | null) =>
+  // Closing the window returns focus to the card that opened it. This is a
+  // child effect, so it runs before App's: App's "focused control vanished →
+  // <h1>" rule then finds focus on the card and leaves it there.
+  const opener = useRef<HTMLElement | null>(null);
+  const setOpenTicketId = (ticket: string | null) => {
+    if (ticket !== null) {
+      const active = document.activeElement;
+      opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    }
     navigate({ page: 'run', runId, tab: 'tickets', ticket });
+  };
+  useEffect(() => {
+    if (openTicketId !== null || !opener.current) return;
+    const card = opener.current;
+    opener.current = null;
+    if (card.isConnected) card.focus({ preventScroll: true });
+  }, [openTicketId]);
 
   // Bumped after a modal action mutates a ticket, to refetch the board.
   const [refreshTick, setRefreshTick] = useState(0);

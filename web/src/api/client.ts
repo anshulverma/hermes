@@ -117,7 +117,8 @@ async function fetchJSON<T>(url: string, options?: RequestInit): Promise<T> {
       // Body is not JSON or doesn't have detail field - use default message
     }
 
-    throw new Error(errorMessage);
+    // The status rides along so a caller can tell a missing thing (404) from an outage.
+    throw Object.assign(new Error(errorMessage), { status: response.status });
   }
 
   return response.json();

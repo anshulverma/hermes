@@ -144,6 +144,20 @@ describe('API client', () => {
 
       await expect(fetchRun('no-such-run')).rejects.toThrow('HTTP error! status: 404');
     });
+
+    it('carries the HTTP status on the error, so a caller can tell a missing run from an outage', async () => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        statusText: 'Not Found',
+        json: async () => ({ detail: "Run 'no-such-run' not found" }),
+      }) as any;
+
+      await expect(fetchRun('no-such-run')).rejects.toMatchObject({
+        message: "Run 'no-such-run' not found",
+        status: 404,
+      });
+    });
   });
 
   describe('playbook views', () => {

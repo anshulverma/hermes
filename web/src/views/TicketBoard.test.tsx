@@ -358,4 +358,20 @@ describe('TicketBoard — the open ticket is in the route', () => {
     expect(window.location.hash).toBe('#/runs/test-run/tickets');
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
+
+  it('closing the ticket window returns focus to its card', async () => {
+    window.location.hash = '#/runs/test-run/tickets';
+    render(<TicketBoard runId="test-run" />);
+    const card = (await screen.findByText('Investigate issue #1')).closest('article') as HTMLElement;
+    card.focus();
+
+    fireEvent.click(card);
+    expect(await screen.findByRole('dialog')).toHaveTextContent('test-run/t-0');
+    // Stand-in for a control inside the window that had focus and unmounts on close.
+    card.blur();
+    fireEvent.click(screen.getByRole('dialog'));
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(card).toHaveFocus();
+  });
 });

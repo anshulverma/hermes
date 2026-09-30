@@ -1,87 +1,145 @@
 /**
- * Hermes Control Plane App - Phase B4.
- * Shell wired to real /api/health + /api/runs + RunOverview + TicketBoard + CrewPanel views.
- * Phase C1: WebSocket live updates.
+ * The control plane shell: the top bar's cross-run pages, the runs rail, and
+ * beside it the run pane or a cross-run page.
+ *
+ * App owns the route, the one event stream, the runs list, the selected run's
+ * detail, the last run tab used, the rail's view state and the shell's single
+ * status region (`announce`). The rail and the pane render what it hands them.
  */
 
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import TopBar from './components/TopBar';
-import type { View } from './components/TopBar';
+import RunRail, { defaultRunId, railGroups, useRailState } from './components/RunRail';
 import RunOverview from './views/RunOverview';
 import MetricsView from './views/MetricsView';
 import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
 import Outputs from './views/Outputs';
 import PlaybookView from './views/PlaybookView';
-import { fetchReductions } from './api/client';
-import { normalizeReduction } from './api/normalize';
-import { awaitsDecision } from './util/reduction';
 import Review from './views/Review';
 import ActivityFeed from './views/ActivityFeed';
 import TokenLogin from './components/TokenLogin';
 import { useHealth, useRuns } from './hooks/useApi';
 import { useEventStream } from './hooks/useEventStream';
 import { useLiveTick, TICKET_EVENT_KINDS, CREW_EVENT_KINDS, FINDING_EVENT_KINDS } from './hooks/useLiveTick';
-import { EmptyState, CrewBackdrop } from './ds';
+import { useStreamTrigger } from './hooks/useStreamTrigger';
+import { useRoute, buildRoute, type Route, type RunTab } from './hooks/useRoute';
+import { Button, CrewBackdrop } from './ds';
 import { LoadingOverlay } from './components/Spinner';
 import { fetchRun } from './api/client';
-import type { RunDetail } from './api/client';
+import type { Event, Run, RunDetail } from './api/client';
 import { hasToken, isRemote } from './api/auth';
-import { useRoute } from './hooks/useRoute';
-import type { Route, RunTab } from './hooks/useRoute';
 
-// Today's top tabs, read off the route until the runs rail replaces them.
-const TAB_VIEW: Record<RunTab, View> = {
-  summary: 'overview',
-  tickets: 'board',
-  outputs: 'outputs',
-  metrics: 'metrics',
-};
-const VIEW_TAB: Record<'overview' | 'playbook' | 'board' | 'outputs' | 'metrics', RunTab> = {
-  overview: 'summary',
-  playbook: 'summary',
-  board: 'tickets',
-  outputs: 'outputs',
-  metrics: 'metrics',
-};
+/** The run tabs, identical for every run of every playbook. */
+const RUN_TABS: { tab: RunTab; label: string }[] = [
+  { tab: 'summary', label: 'Summary' },
+  { tab: 'tickets', label: 'Tickets' },
+  { tab: 'outputs', label: 'Outputs' },
+  { tab: 'metrics', label: 'Metrics' },
+];
 
-function routeView(route: Route): View {
-  if (route.page === 'run') return TAB_VIEW[route.tab];
-  return route.page === 'needs-you' ? 'review' : route.page;
+/** Input types a shortcut may fire from: none of them take typed text. */
+const NON_TEXT_INPUTS = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file']);
+/** At most one count announcement per window. */
+const COUNT_WINDOW_MS = 10_000;
+const RAIL = 'nav[aria-label="Runs"]';
+
+/** The rail's live trigger: every event that names a run (crew events name none). */
+const touchesARun = (e: Event) => e.run_id != null;
+
+/** Typing here must not fire a shortcut. */
+function isTextEntry(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.closest('[contenteditable]:not([contenteditable="false"])')) return true;
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  return target instanceof HTMLInputElement && !NON_TEXT_INPUTS.has(target.type);
+}
+
+/**
+ * The run `[` (dir -1) or `]` (dir 1) selects in the rail's visible order. No
+ * wrap-around; when the rail hides the selected run, `]` selects the first
+ * visible row and `[` the last.
+ */
+function stepRun(visible: Run[], runId: string | null, dir: -1 | 1): Run | null {
+  const i = visible.findIndex((r) => r.id === runId);
+  if (i === -1) return visible.length ? visible[dir === 1 ? 0 : visible.length - 1] : null;
+  return visible[i + dir] ?? null;
+}
+
+function sameRunRoute(a: Route, b: Route): boolean {
+  return a.page === 'run' && b.page === 'run' && a.runId === b.runId && a.tab === b.tab && a.ticket === b.ticket;
+}
+
+function tabStyle(current: boolean): CSSProperties {
+  return {
+    padding: '6px 12px',
+    fontSize: 13,
+    textDecoration: 'none',
+    color: current ? 'var(--text-primary)' : 'var(--text-muted)',
+    background: current ? 'var(--wash-subtle)' : 'transparent',
+    borderRadius: 'var(--radius-md)',
+  };
+}
+
+/** The skip link: straight to the page's <h1>, without touching the address. */
+function skipToContent(e: ReactMouseEvent<HTMLAnchorElement>) {
+  e.preventDefault();
+  document.querySelector<HTMLElement>('main h1')?.focus();
+}
+
+/** A pane with nothing else to show; its title is the page's <h1>. */
+function PaneMessage({ title, description }: { title: string; description?: string }) {
+  return (
+    <div
+      style={{
+        padding: 32,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 12,
+        textAlign: 'center',
+      }}
+    >
+      <h1
+        tabIndex={-1}
+        style={{ margin: 0, fontSize: 'var(--text-h3-size)', fontWeight: 500, color: 'var(--text-secondary)' }}
+      >
+        {title}
+      </h1>
+      {description && <p style={{ margin: 0, maxWidth: 380, color: 'var(--text-muted)' }}>{description}</p>}
+    </div>
+  );
 }
 
 export default function App() {
   const [authenticated, setAuthenticated] = useState(hasToken() || !isRemote());
 
   const { loading: healthLoading, error: healthError } = useHealth();
-  const { data: runs, loading: runsLoading, error: runsError } = useRuns();
-  // The page and the run being viewed live in the route, so a refresh reopens
-  // both: without the run the console could only ever show runs[0], and every
-  // other run in the database was unreachable.
+  const { data: runs, loading: runsLoading, error: runsError, refetch: refetchRuns } = useRuns();
   const { route, navigate, replace } = useRoute();
-  const view = routeView(route);
-  const pendingDefault = route.page === 'run' && route.runId === null;
-  const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
-  // The run being viewed: the one the route names, else (on a page that names
-  // none: Crew, Activity, a bare Needs you) the one already on screen, so a
-  // trip through those pages comes back to the same run (d978a44).
-  const selectedRunId =
-    (route.page === 'run' ? route.runId : route.page === 'crew' ? null : route.run) ??
-    runDetail?.id ??
-    null;
-  // How many reductions are holding a ticket for a human. Lives here, not in
-  // the Review view, because the nav has to show it before you go looking.
-  const [reviewCount, setReviewCount] = useState<number | null>(null);
+  const rail = useRailState();
+  const filterRef = useRef<HTMLInputElement>(null);
 
-  // WebSocket live event stream
-  const { connected, events, lastEvent, authError } = useEventStream();
+  // The one WebSocket: every live consumer reads its buffered events.
+  const { connected, events, authError } = useEventStream();
   const [authErrorDismissed, setAuthErrorDismissed] = useState(false);
 
-  // Per-domain live ticks derived from the shared event stream
+  // The shell's single status region, written only through announce.
+  const [status, setStatus] = useState('');
+  const announce = useCallback((message: string) => setStatus(message), []);
+
+  const selectedId = route.page === 'run' ? route.runId : null;
+
+  // A rail row on a cross-run page opens the last run tab used this session.
+  const [lastRunTab, setLastRunTab] = useState<RunTab>('summary');
+  if (route.page === 'run' && route.tab !== lastRunTab) setLastRunTab(route.tab);
+
   const ticketLiveTick = useLiveTick(events, TICKET_EVENT_KINDS);
   const crewLiveTick = useLiveTick(events, CREW_EVENT_KINDS);
   const findingLiveTick = useLiveTick(events, FINDING_EVENT_KINDS);
+  // The selected run's own reductions, so its view's transcript and verdict stay live.
+  const viewTick = useLiveTick(events, FINDING_EVENT_KINDS, selectedId);
 
   // Initialize lucide icons after mount
   useEffect(() => {
@@ -90,103 +148,349 @@ export default function App() {
     }
   }, []);
 
-  // Fetch run detail function (used both in initial load and live refresh)
-  const refreshRunDetail = useCallback((runId: string) => {
-    setDetailLoading(true);
-    fetchRun(runId)
-      .then((detail) => setRunDetail(detail))
-      .catch((err) => console.error('Failed to fetch run detail:', err))
-      .finally(() => setDetailLoading(false));
-  }, []);
+  // The selected run's detail, fetched per selected id, never per list refetch.
+  // A response for a run no longer selected is dropped, and the body renders
+  // only a detail whose id is the selected one, so it never shows the last run.
+  const [detail, setDetail] = useState<RunDetail | null>(null);
+  const [detailError, setDetailError] = useState<{ id: string; error: Error } | null>(null);
+  const [detailNonce, setDetailNonce] = useState(0);
+  const refetchDetail = useCallback(() => setDetailNonce((n) => n + 1), []);
 
-  // A route that leaves the run to the default (an empty hash, `#/runs`, a
-  // legacy `#metrics`) names it once the list has loaded, keeping its tab, so
-  // the address always names the run on screen. Not a history entry.
-  // ponytail: runs[0] (the newest) stands in for defaultRunId until the rail lands.
   useEffect(() => {
-    if (runs && runs.length > 0 && route.page === 'run' && route.runId === null) {
-      replace({ ...route, runId: runs[0].id });
-    }
-  }, [runs, route, replace]);
-
-  // Fetch the run being viewed: the one named in the URL when it exists, else
-  // the newest. A URL naming a run that is gone falls back to the newest rather
-  // than leaving the console empty.
-  useEffect(() => {
-    if (!runs || runs.length === 0 || pendingDefault) return;
-    const named =
-      selectedRunId && runs.some((r) => r.id === selectedRunId) ? selectedRunId : runs[0].id;
-    refreshRunDetail(named);
-  }, [runs, selectedRunId, pendingDefault, refreshRunDetail]);
-
-  // A tab click: a run tab keeps the run on screen and drops what was open on
-  // the old tab (the ticket); Needs you shows that run's reductions.
-  const setView = (next: View) => {
-    const runId = runDetail?.id ?? null;
-    if (next === 'crew') navigate({ page: 'crew' });
-    else if (next === 'activity') navigate({ page: 'activity', run: null, kind: null });
-    else if (next === 'review') navigate({ page: 'needs-you', run: runId });
-    else if (runId !== null) navigate({ page: 'run', runId, tab: VIEW_TAB[next], ticket: null });
-  };
-
-  // Picking a run keeps the run tab and drops the ticket; from a page that
-  // names no run it opens the run's summary.
-  const setSelectedRunId = (runId: string) =>
-    navigate({ page: 'run', runId, tab: route.page === 'run' ? route.tab : 'summary', ticket: null });
-
-  // The review queue's size, refreshed with the run and on finding events.
-  useEffect(() => {
-    const runId = runDetail?.id;
-    if (!runId) {
-      setReviewCount(null);
-      return;
-    }
-    let cancelled = false;
-    fetchReductions(runId)
-      .then((rs) => {
-        if (!cancelled) setReviewCount(rs.map(normalizeReduction).filter(awaitsDecision).length);
+    if (!selectedId) return;
+    let live = true;
+    fetchRun(selectedId)
+      .then((d) => {
+        if (!live) return;
+        setDetail(d);
+        setDetailError(null);
       })
-      .catch(() => {
-        // A count is an affordance, not information the console depends on.
-        if (!cancelled) setReviewCount(null);
+      .catch((error: Error) => {
+        if (live) setDetailError({ id: selectedId, error });
       });
     return () => {
-      cancelled = true;
+      live = false;
     };
-  }, [runDetail?.id, findingLiveTick]);
+  }, [selectedId, detailNonce]);
 
-  // Live refresh: when state-changing events arrive, re-fetch run detail
+  const onRunUpdate = useCallback(() => {
+    refetchRuns();
+    refetchDetail();
+  }, [refetchRuns, refetchDetail]);
+
+  // Live: any event naming a run refetches the list (rail, count, header); the
+  // selected run's own events refetch its detail. Each has its own throttle.
+  useStreamTrigger(events, touchesARun, refetchRuns);
+  const touchesSelected = useCallback(
+    (e: Event) => selectedId !== null && e.run_id === selectedId,
+    [selectedId],
+  );
+  useStreamTrigger(events, touchesSelected, refetchDetail);
+
+  const groups = useMemo(
+    () => railGroups(runs ?? [], rail.hidden, rail.filter, rail.showAllFinished, selectedId),
+    [runs, rail.hidden, rail.filter, rail.showAllFinished, selectedId],
+  );
+  const visible = useMemo(() => [...groups.needsYou, ...groups.active, ...groups.finished], [groups]);
+  const playbooks = useMemo(() => [...new Set((runs ?? []).map((r) => r.playbook))].sort(), [runs]);
+  // Unfiltered, and from the same response as the rail, so the two never disagree.
+  const needsYouCount = runs ? runs.reduce((sum, r) => sum + r.awaiting, 0) : null;
+
+  const row = runs?.find((r) => r.id === selectedId) ?? null;
+  const paneDetail = detail && detail.id === selectedId ? detail : null;
+  const paneError = detailError && detailError.id === selectedId ? detailError.error : null;
+  // Drawn from the list row at once; from the detail when the list failed.
+  const headerRun: Run | RunDetail | null = row ?? paneDetail;
+
+  // "<id> isn't in this home", shown until the next route change.
+  const [note, setNote] = useState<{ id: string; route: Route } | null>(null);
+  const unknownCheck = useRef<{ id: string; runs: Run[]; error: Error | null } | null>(null);
+
+  // The default run for an address that names none, and a named run the list
+  // does not have. Checked against the full list, only once it has loaded.
   useEffect(() => {
-    if (!lastEvent || !runDetail) return;
-
-    // State-changing event kinds that should trigger a run detail refresh
-    const stateChangingKinds = new Set([
-      'ticket_claimed',
-      'result_recorded',
-      'phase_advanced',
-      'needs_human',
-      'reduction_created',
-      'ticket_requeued',
-      'ticket_parked',
-      'ticket_failed',
-    ]);
-
-    if (stateChangingKinds.has(lastEvent.kind)) {
-      // Only refresh if the event is for the current run
-      if (lastEvent.run_id === runDetail.id) {
-        refreshRunDetail(runDetail.id);
-      }
+    if (route.page !== 'run' || !runs) return;
+    const fallback = defaultRunId(runs, rail.hidden);
+    if (route.runId === null) {
+      if (fallback) replace({ ...route, runId: fallback });
+      return;
     }
-  }, [lastEvent, runDetail, refreshRunDetail]);
+    if (runs.some((r) => r.id === route.runId)) {
+      unknownCheck.current = null;
+      return;
+    }
+    // Runs are never deleted, so a missing one was almost always created after
+    // the list loaded: refetch once before calling it unknown.
+    const check = unknownCheck.current;
+    if (!check || check.id !== route.runId) {
+      unknownCheck.current = { id: route.runId, runs, error: runsError };
+      refetchRuns();
+      return;
+    }
+    // A refetch that answers sets a new `data` array; one that fails keeps the
+    // old array and sets a new error. Either means the one refetch is done.
+    if (check.runs === runs && check.error === runsError) return; // not answered yet
+    unknownCheck.current = null;
+    const next: Route = fallback ? { ...route, runId: fallback, ticket: null } : route;
+    setNote({ id: route.runId, route: next });
+    announce(`${route.runId} isn't in this home`);
+    if (fallback) replace(next);
+  }, [route, runs, runsError, rail.hidden, refetchRuns, replace, announce]);
 
-  // Only the INITIAL load blanks the app. A background run-detail refresh (fired
-  // on every live event) must NOT unmount the views/drawer — it updates in place.
-  const loading = healthLoading || runsLoading || (detailLoading && !runDetail);
-  const error = healthError || runsError;
+  // The list failed, so the pane asked for its run directly: a 404 means this
+  // home has no such run. The address is left alone.
+  useEffect(() => {
+    if (runs || !runsError || !detailError || route.page !== 'run' || detailError.id !== route.runId) return;
+    if ((detailError.error as Error & { status?: number }).status !== 404) return;
+    setNote({ id: detailError.id, route });
+    announce(`${detailError.id} isn't in this home`);
+  }, [detailError, runs, runsError, route, announce]);
+
+  // The note goes on the next route change; the replace that showed it is not
+  // one (the note names that route). Setting the note is not a route change.
+  const [routeSeen, setRouteSeen] = useState(route);
+  if (route !== routeSeen) {
+    setRouteSeen(route);
+    if (note && !sameRunRoute(note.route, route)) setNote(null);
+  }
+
+  // Shortcuts: `[` / `]` step through the rail's visible rows on run routes;
+  // `/` goes to the filter box on every route.
+  const [focusFilter, setFocusFilter] = useState(0);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '[' && e.key !== ']' && e.key !== '/') return;
+      // Cmd+[ / Cmd+] are Back / Forward, and Ctrl without AltGr is a browser or
+      // OS chord. Alt alone is how many layouts type [ and ], so it is allowed.
+      if (e.metaKey || (e.ctrlKey && !e.getModifierState('AltGraph'))) return;
+      if (e.isComposing || e.defaultPrevented) return;
+      if (document.querySelector('[aria-modal="true"]') || isTextEntry(e.target)) return;
+
+      if (e.key === '/') {
+        if (!runs || runs.length === 0) return; // no filter box to go to
+        e.preventDefault();
+        if (rail.collapsed) rail.setCollapsed(false);
+        setFocusFilter((n) => n + 1);
+        return;
+      }
+      if (route.page !== 'run' || route.runId === null) return;
+      const target = stepRun(visible, route.runId, e.key === ']' ? 1 : -1);
+      if (!target) return;
+      // Focus on a rail row follows the selection: RunRail's own effect does it.
+      const next: Route = { page: 'run', runId: target.id, tab: route.tab, ticket: null };
+      // Holding the key moves through runs but leaves one history entry.
+      if (e.repeat) replace(next);
+      else navigate(next);
+      announce(`${target.id}, ${target.playbook}, ${target.state}`);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [runs, rail, route, visible, navigate, replace, announce]);
+
+  // After the render that expanded the rail, so the box exists.
+  useEffect(() => {
+    if (focusFilter) filterRef.current?.focus();
+  }, [focusFilter]);
+
+  // Focus. Arriving at another page goes to its <h1> (a rail click stays on its
+  // row); a route change that removes the focused control goes there too. `[` /
+  // `]` from a rail row: RunRail's child effect has already moved focus to the
+  // new row, which is connected, so nothing here fires. Closing the ticket
+  // window: TicketBoard's child effect has already focused the card. The first
+  // load moves nothing.
+  const lastFocused = useRef<Element | null>(null);
+  const prevPage = useRef<Route['page'] | null>(null);
+  const focusH1 = useRef(false);
+
+  useEffect(() => {
+    const onFocusIn = (e: FocusEvent) => {
+      lastFocused.current = e.target as Element;
+    };
+    document.addEventListener('focusin', onFocusIn);
+    return () => document.removeEventListener('focusin', onFocusIn);
+  }, []);
+
+  useEffect(() => {
+    const was = prevPage.current;
+    prevPage.current = route.page;
+    if (was !== null && was !== route.page) {
+      focusH1.current = !document.activeElement?.closest(RAIL);
+      return;
+    }
+    const active = document.activeElement;
+    if ((!active || active === document.body) && lastFocused.current && !lastFocused.current.isConnected) {
+      focusH1.current = true;
+    }
+  }, [route]);
+
+  // Every render: the <h1> can arrive a render after the route (the run header
+  // waits for the default run to be resolved).
+  useEffect(() => {
+    if (!focusH1.current) return;
+    const h1 = document.querySelector<HTMLElement>('main h1');
+    if (!h1) return;
+    focusH1.current = false;
+    h1.focus();
+  });
+
+  // 'N decisions waiting on you' when the count rises. The first load is the
+  // baseline; at most one announcement per window, and a rise inside the window
+  // is announced at its end if the count is still above the last one announced.
+  const countSaid = useRef<{ last: number | null; latest: number; timer: number }>({
+    last: null,
+    latest: 0,
+    timer: 0,
+  });
+  useEffect(() => {
+    if (needsYouCount === null) return;
+    const s = countSaid.current;
+    s.latest = needsYouCount;
+    if (s.last === null) {
+      s.last = needsYouCount;
+      return;
+    }
+    if (s.timer || needsYouCount <= s.last) return;
+    const say = () => {
+      s.last = s.latest;
+      announce(`${s.latest} ${s.latest === 1 ? 'decision' : 'decisions'} waiting on you`);
+      s.timer = window.setTimeout(() => {
+        s.timer = 0;
+        if (s.last !== null && s.latest > s.last) say();
+      }, COUNT_WINDOW_MS);
+    };
+    say();
+  }, [needsYouCount, announce]);
+  useEffect(() => {
+    const s = countSaid.current;
+    return () => window.clearTimeout(s.timer);
+  }, []);
+
+  // '<id> failed': the selected run's state differing between two consecutive
+  // lists. A selection change compares a list with itself, so it says nothing.
+  const prevRuns = useRef<Run[] | null>(null);
+  useEffect(() => {
+    const before = prevRuns.current;
+    prevRuns.current = runs;
+    if (!before || !runs || !selectedId) return;
+    const was = before.find((r) => r.id === selectedId);
+    const now = runs.find((r) => r.id === selectedId);
+    if (was && now && was.state !== now.state) announce(`${now.id} ${now.state}`);
+  }, [runs, selectedId, announce]);
+
+  // The global overlay covers health and the first runs load only.
+  const loading = healthLoading || runsLoading;
 
   // Show token login if remote and not authenticated
   if (!authenticated) {
     return <TokenLogin onAuthenticated={() => setAuthenticated(true)} />;
+  }
+
+  let pane: ReactNode = null;
+  if (healthError) {
+    pane = <PaneMessage title="Error loading data" description={healthError.message} />;
+  } else if (route.page === 'crew') {
+    pane = <CrewPanel liveTick={crewLiveTick} />;
+  } else if (route.page === 'activity') {
+    pane = <ActivityFeed />;
+  } else if (route.page === 'needs-you') {
+    const id = route.run ?? (runs ? defaultRunId(runs, rail.hidden) : null);
+    if (id) {
+      pane = (
+        <Review
+          key={id}
+          runId={id}
+          liveTick={findingLiveTick}
+          onGoToOutputs={() => navigate({ page: 'run', runId: id, tab: 'outputs', ticket: null })}
+        />
+      );
+    }
+  } else if (runs && runs.length === 0) {
+    pane = <PaneMessage title="No runs yet" description="Start one with `hermes run <playbook>`." />;
+  } else if (!headerRun) {
+    if (!runs && runsError && (route.runId === null || paneError)) {
+      pane = <PaneMessage title="Couldn't load runs." />;
+    } else if (route.runId !== null) {
+      pane = <LoadingOverlay label="Loading run…" />;
+    }
+  } else {
+    const id = headerRun.id;
+    const tab = route.tab;
+    pane = (
+      <>
+        <div style={{ padding: '16px 20px 0' }}>
+          <h1
+            tabIndex={-1}
+            style={{
+              margin: 0,
+              fontSize: 16,
+              fontWeight: 600,
+              fontFamily: 'var(--font-mono)',
+              color: 'var(--text-primary)',
+            }}
+          >
+            {headerRun.id} · {headerRun.playbook}
+          </h1>
+        </div>
+        <nav
+          aria-label="Run tabs"
+          style={{ display: 'flex', gap: 4, padding: '8px 16px', borderBottom: '1px solid var(--border-hairline)' }}
+        >
+          {RUN_TABS.map((t) => (
+            <a
+              key={t.tab}
+              href={buildRoute({ page: 'run', runId: id, tab: t.tab, ticket: null })}
+              aria-current={t.tab === tab ? 'page' : undefined}
+              style={tabStyle(t.tab === tab)}
+            >
+              {t.label}
+            </a>
+          ))}
+        </nav>
+        {/* Keyed on the run: nothing in one run's body survives into the next. */}
+        <div key={id} style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+          {paneDetail ? (
+            <>
+              {tab === 'summary' && <RunOverview run={paneDetail} onRunUpdate={onRunUpdate} />}
+              {tab === 'tickets' && (
+                <TicketBoard runId={id} phases={paneDetail.phases.map((p) => p.name)} liveTick={ticketLiveTick} />
+              )}
+              {tab === 'outputs' && (
+                <Outputs
+                  runId={id}
+                  liveTick={findingLiveTick}
+                  onGoToReview={() => navigate({ page: 'needs-you', run: id })}
+                />
+              )}
+              {tab === 'metrics' && (
+                <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+                  <MetricsView runId={id} />
+                  {/* Renders only a section the view declares for this tab. */}
+                  <PlaybookView
+                    runId={id}
+                    playbook={paneDetail.playbook}
+                    hasView={paneDetail.has_view}
+                    liveTick={viewTick}
+                    variant="metrics"
+                  />
+                </div>
+              )}
+            </>
+          ) : paneError ? (
+            <div style={{ padding: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
+              <span role="alert" style={{ fontSize: 13, color: 'var(--status-danger)' }}>
+                {`Couldn't load ${id}: ${paneError.message}`}
+              </span>
+              <Button variant="secondary" size="sm" onClick={refetchDetail}>
+                Retry
+              </Button>
+            </div>
+          ) : (
+            <LoadingOverlay label="Loading run…" />
+          )}
+        </div>
+      </>
+    );
   }
 
   return (
@@ -199,17 +503,14 @@ export default function App() {
         overflow: 'hidden',
       }}
     >
+      {/* The first focusable element in the shell. */}
+      <a href="#" className="skip-link" onClick={skipToContent}>
+        Skip to content
+      </a>
+
       <CrewBackdrop theme="graph" />
 
-      <TopBar
-        connected={connected}
-        view={view}
-        onViewChange={setView}
-        runs={runs ?? undefined}
-        selectedRunId={runDetail?.id ?? selectedRunId}
-        onRunChange={setSelectedRunId}
-        reviewCount={reviewCount}
-      />
+      <TopBar connected={connected} page={route.page} needsYouCount={needsYouCount} />
 
       <div
         style={{
@@ -256,97 +557,59 @@ export default function App() {
           </div>
         )}
 
+        {/* The rail stays in the layout flow, expanded or collapsed, and pushes the pane. */}
+        <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+          <RunRail
+            groups={groups}
+            playbooks={playbooks}
+            rail={rail}
+            error={runsError}
+            onRetry={refetchRuns}
+            selectedRunId={selectedId}
+            tab={route.page === 'run' ? route.tab : lastRunTab}
+            filterRef={filterRef}
+          />
+          <main
+            style={{
+              position: 'relative',
+              flex: 1,
+              minWidth: 0,
+              minHeight: 0,
+              display: 'flex',
+              flexDirection: 'column',
+            }}
+          >
+            {note && (
+              <div
+                style={{
+                  margin: '12px 20px 0',
+                  padding: '8px 12px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 12,
+                  fontSize: 13,
+                  color: 'var(--text-secondary)',
+                  background: 'var(--wash-subtle)',
+                  border: '1px solid var(--border-hairline)',
+                  borderRadius: 'var(--radius-md)',
+                }}
+              >
+                <span>{`${note.id} isn't in this home`}</span>
+                <Button variant="ghost" size="sm" onClick={() => setNote(null)}>
+                  Dismiss
+                </Button>
+              </div>
+            )}
+            {pane}
+          </main>
+        </div>
+
         {loading && <LoadingOverlay label="Loading Hermes…" />}
+      </div>
 
-        {error && (
-          <div style={{ padding: 32 }}>
-            <EmptyState
-              title="Error loading data"
-              description={error.message}
-              icon="alert-circle"
-            />
-          </div>
-        )}
-
-        {!loading && !error && runs && runs.length === 0 && (
-          <div style={{ padding: 32 }}>
-            <EmptyState
-              title="No active run"
-              description="No runs are currently active. Start a run with `hermes run <playbook>`."
-              icon="inbox"
-            />
-          </div>
-        )}
-
-        {/* The Run tab: the run's own view when its playbook ships one (a
-            legacy `#playbook` link lands here too), else the overview. */}
-        {!loading && !error && runDetail && view === 'overview' && !runDetail.has_view && (
-          <RunOverview run={runDetail} onRunUpdate={() => refreshRunDetail(runDetail.id)} />
-        )}
-
-        {!loading && !error && runDetail && view === 'metrics' && (
-          <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-            <MetricsView runId={runDetail.id} />
-            {/* Renders only a section the view declares for this tab. */}
-            <PlaybookView
-              key={`${runDetail.playbook}:${runDetail.id}`}
-              runId={runDetail.id}
-              playbook={runDetail.playbook}
-              hasView={runDetail.has_view}
-              liveTick={findingLiveTick}
-              variant="metrics"
-            />
-          </div>
-        )}
-
-        {/* Keyed on the run: a phase or resource picked on one run names
-            nothing on the next, and would filter its board to empty. */}
-        {!loading && !error && runDetail && view === 'board' && (
-          <TicketBoard
-            key={runDetail.id}
-            runId={runDetail.id}
-            phases={runDetail.phases.map((p) => p.name)}
-            liveTick={ticketLiveTick}
-          />
-        )}
-
-        {!loading && !error && view === 'crew' && (
-          <CrewPanel liveTick={crewLiveTick} runId={runDetail?.id} />
-        )}
-
-        {!loading && !error && runDetail && view === 'outputs' && (
-          <Outputs
-            runId={runDetail.id}
-            liveTick={findingLiveTick}
-            onGoToReview={() => setView('review')}
-          />
-        )}
-
-        {!loading && !error && runDetail && view === 'review' && (
-          <Review
-            runId={runDetail.id}
-            liveTick={findingLiveTick}
-            onGoToOutputs={() => setView('outputs')}
-          />
-        )}
-
-        {!loading && !error && view === 'activity' && (
-          <ActivityFeed />
-        )}
-
-        {/* Keyed on the run so switching runs remounts rather than reusing the
-            loaded component and the previous run's data: the loader only blanks
-            its pane on the FIRST load, so without this the pane would show run
-            B's id over run A's view_data for one round trip. */}
-        {!loading && !error && runDetail && view === 'overview' && runDetail.has_view && (
-          <PlaybookView
-            key={`${runDetail.playbook}:${runDetail.id}`}
-            runId={runDetail.id}
-            playbook={runDetail.playbook}
-            hasView={runDetail.has_view}
-            liveTick={findingLiveTick}
-          />
-        )}
+      <div role="status" aria-live="polite" className="visually-hidden" data-testid="status-region">
+        {status}
       </div>
     </div>
   );

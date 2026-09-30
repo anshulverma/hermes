@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { describe, it, expect } from 'vitest';
+import { render, screen, within } from '@testing-library/react';
 import TopBar from './TopBar';
 
 describe('TopBar', () => {
@@ -33,116 +33,53 @@ describe('TopBar', () => {
     expect(screen.getByText('offline')).toBeInTheDocument();
   });
 
-  it('should render Run, Metrics, Tickets, Crew, Outputs, Review and Activity tabs', () => {
-    render(<TopBar connected={true} />);
-
-    // All main tabs should be present (Phase E1 adds Metrics)
-    expect(screen.getByText('Run')).toBeInTheDocument();
-    expect(screen.getByText('Metrics')).toBeInTheDocument();
-    expect(screen.getByText('Tickets')).toBeInTheDocument();
-    expect(screen.getByText('Crew')).toBeInTheDocument();
-    expect(screen.getByText('Outputs')).toBeInTheDocument();
-    expect(screen.getByText('Needs you')).toBeInTheDocument();
-    expect(screen.getByText('Activity')).toBeInTheDocument();
-  });
-});
-
-describe('TopBar — choosing which run to look at', () => {
-  const runs = [
-    { id: 'run-5', playbook: 'research', site: 'local', state: 'done', phase: 'complete',
-      base_ref: 'main', created_at: 3, updated_at: 3, tickets: {},
-      has_view: false, awaiting: 0, subject: null },
-    { id: 'run-4', playbook: 'research', site: 'local', state: 'done', phase: 'complete',
-      base_ref: 'main', created_at: 2, updated_at: 2, tickets: {},
-      has_view: false, awaiting: 0, subject: null },
-    { id: 'run-3', playbook: 'research', site: 'local', state: 'stopped', phase: 'research',
-      base_ref: 'main', created_at: 1, updated_at: 1, tickets: {},
-      has_view: false, awaiting: 0, subject: null },
-  ];
-
-  it('lists every run, not just the newest', () => {
-    // The console used to hardcode runs[0]; every other run was unreachable.
-    render(<TopBar connected runs={runs} selectedRunId="run-5" onRunChange={() => {}} />);
-
-    const picker = screen.getByTestId('run-picker') as HTMLSelectElement;
-    expect(Array.from(picker.options).map((o) => o.value)).toEqual(['run-5', 'run-4', 'run-3']);
-  });
-
-  it('shows which run is being viewed', () => {
-    render(<TopBar connected runs={runs} selectedRunId="run-4" onRunChange={() => {}} />);
-
-    expect((screen.getByTestId('run-picker') as HTMLSelectElement).value).toBe('run-4');
-  });
-
-  it('reports a change to its caller', () => {
-    const onRunChange = vi.fn();
-    render(<TopBar connected runs={runs} selectedRunId="run-5" onRunChange={onRunChange} />);
-
-    fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-3' } });
-
-    expect(onRunChange).toHaveBeenCalledWith('run-3');
-  });
-
-  it('stays out of the way when there is nothing to choose between', () => {
-    render(<TopBar connected runs={[runs[0]]} selectedRunId="run-5" onRunChange={() => {}} />);
-
-    expect(screen.queryByTestId('run-picker')).toBeNull();
-  });
-
-  it('renders without run props at all', () => {
+  it('links the wordmark to the default run', () => {
     render(<TopBar connected />);
+    expect(screen.getByRole('link', { name: 'Hermes' })).toHaveAttribute('href', '#/runs');
+  });
 
-    expect(screen.getByLabelText('Hermes')).toBeInTheDocument();
-    expect(screen.queryByTestId('run-picker')).toBeNull();
+  it('lists the cross-run pages Needs you, Crew and Activity as links, and nothing about one run', () => {
+    render(<TopBar connected />);
+    const pages = within(screen.getByRole('navigation', { name: 'Pages' })).getAllByRole('link');
+    expect(pages.map((a) => [a.textContent, a.getAttribute('href')])).toEqual([
+      ['Needs you', '#/needs-you'],
+      ['Crew', '#/crew'],
+      ['Activity', '#/activity'],
+    ]);
+    // No run picker and no per-run tabs: the rail picks the run, the pane has its tabs.
+    expect(screen.queryByRole('combobox')).toBeNull();
+    expect(screen.queryByText('Playbook')).toBeNull();
+    expect(screen.queryByText('Metrics')).toBeNull();
+  });
+
+  it('marks the cross-run page on screen, and only it, with aria-current', () => {
+    render(<TopBar connected page="crew" />);
+    expect(screen.getByRole('link', { name: 'Crew' })).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('link', { name: 'Activity' })).not.toHaveAttribute('aria-current');
+    expect(screen.getByRole('link', { name: 'Needs you' })).not.toHaveAttribute('aria-current');
+  });
+
+  it('marks no item on a run route', () => {
+    render(<TopBar connected page="run" />);
+    const pages = within(screen.getByRole('navigation', { name: 'Pages' })).getAllByRole('link');
+    expect(pages.filter((a) => a.hasAttribute('aria-current'))).toEqual([]);
   });
 });
 
-describe('TopBar — the review queue is visible before you go looking', () => {
-  it('shows how many decisions are waiting', () => {
-    render(<TopBar connected reviewCount={3} />);
-
-    expect(screen.getByTestId('review-count')).toHaveTextContent('3');
+describe('TopBar — the Needs you count', () => {
+  it('shows how many decisions are waiting across every run', () => {
+    render(<TopBar connected needsYouCount={3} />);
+    expect(screen.getByTestId('needs-you-count')).toHaveTextContent('3');
   });
 
-  it('shows no badge when nothing is waiting', () => {
-    render(<TopBar connected reviewCount={0} />);
-
-    expect(screen.getByTestId('tab-review')).toBeInTheDocument();
-    expect(screen.queryByTestId('review-count')).toBeNull();
+  it('shows no badge when nothing is waiting, but keeps the item', () => {
+    render(<TopBar connected needsYouCount={0} />);
+    expect(screen.getByRole('link', { name: 'Needs you' })).toBeInTheDocument();
+    expect(screen.queryByTestId('needs-you-count')).toBeNull();
   });
 
   it('shows no badge before the count is known', () => {
-    render(<TopBar connected reviewCount={null} />);
-
-    expect(screen.queryByTestId('review-count')).toBeNull();
-  });
-});
-
-describe('TopBar — the playbook tab', () => {
-  it('shows no playbook tab for a run whose playbook ships no view', () => {
-    render(<TopBar connected hasPlaybookView={false} />);
-
-    expect(screen.queryByTestId('tab-playbook')).toBeNull();
-  });
-
-  it('shows no playbook tab when the caller says nothing', () => {
-    render(<TopBar connected />);
-
-    expect(screen.queryByTestId('tab-playbook')).toBeNull();
-  });
-
-  it('shows the playbook tab when the run has a view', () => {
-    render(<TopBar connected hasPlaybookView />);
-
-    expect(screen.getByTestId('tab-playbook')).toHaveTextContent('Playbook');
-  });
-
-  it('reports a click on it as the playbook view', () => {
-    const onViewChange = vi.fn();
-    render(<TopBar connected hasPlaybookView onViewChange={onViewChange} />);
-
-    fireEvent.click(screen.getByTestId('tab-playbook'));
-
-    expect(onViewChange).toHaveBeenCalledWith('playbook');
+    render(<TopBar connected needsYouCount={null} />);
+    expect(screen.queryByTestId('needs-you-count')).toBeNull();
   });
 });
