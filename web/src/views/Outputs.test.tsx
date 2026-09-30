@@ -260,9 +260,20 @@ describe('Outputs', () => {
     // Reduction 1 is pending and holds a needs-human ticket: one waits on you.
     mockFetch.mockResolvedValue({ ok: true, json: async () => mockReductions });
 
-    render(<Outputs runId="test-run" />);
+    const { rerender } = render(<Outputs runId="test-run" liveTick={0} />);
 
     const link = await screen.findByRole('link', { name: '1 waiting on you' });
     expect(link).toHaveAttribute('href', '#/needs-you?run=test-run');
+
+    // Once it is decided, nothing waits: no link, not '0 waiting on you'.
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => [mockReductions[1], mockReductions[2]],
+    });
+    rerender(<Outputs runId="test-run" liveTick={1} />);
+
+    await waitFor(() => expect(screen.queryByText('Null pointer in module X')).toBeNull());
+    expect(screen.getByText('Timeout in CI')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /waiting on you/ })).toBeNull();
   });
 });

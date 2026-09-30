@@ -68,21 +68,27 @@ const RUNS = [runRow('run-a', 'alpha', 'running', 2), runRow('run-b', 'beta', 's
 const announce = vi.fn<(message: string) => void>();
 const onDecided = vi.fn<() => void>();
 
-function renderPage(runFilter: string | null = null, streamEvents: Event[] = []) {
-  return render(
+function page(runFilter: string | null = null, streamEvents: Event[] = []) {
+  return (
     <NeedsYou
       runFilter={runFilter}
       runs={RUNS}
       streamEvents={streamEvents}
       onDecided={onDecided}
       announce={announce}
-    />,
+    />
   );
+}
+
+function renderPage(runFilter: string | null = null, streamEvents: Event[] = []) {
+  return render(page(runFilter, streamEvents));
 }
 
 const button = (name: string) => screen.getByRole('button', { name });
 const gone = (name: string) =>
   waitFor(() => expect(screen.queryByRole('button', { name })).toBeNull());
+/** Let the effects a render queued run, so an assertion sees what they did. */
+const flush = () => act(async () => {});
 
 /** Fire the refetch NeedsYou handed its stream trigger, as the throttle would. */
 async function fireStream() {
@@ -95,10 +101,12 @@ async function fireStream() {
 /** A promise the test settles itself. */
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe('NeedsYou', () => {
@@ -148,6 +156,14 @@ describe('NeedsYou', () => {
     expect(within(a).getByText('waiting 5m 0s')).toBeInTheDocument();
   });
 
+  it('a decision stamped after the shared 30 s clock waits 0s, never a negative time', async () => {
+    vi.mocked(client.fetchNeedsYou).mockResolvedValue([item(9, 'run-c', -12, 'Just arrived')]);
+    renderPage();
+
+    const c = await screen.findByRole('region', { name: 'run-c' });
+    expect(within(c).getByText('waiting 0s')).toBeInTheDocument();
+  });
+
   it("shows each item's headline and how long ago it arrived", async () => {
     renderPage();
     const a = await screen.findByRole('region', { name: 'run-a' });
@@ -178,7 +194,7 @@ describe('NeedsYou', () => {
   });
 
   it('filters to one run with a removable chip that sends focus to the heading', async () => {
-    renderPage('run-a');
+    const { rerender } = renderPage('run-a');
     await screen.findByRole('button', { name: 'Ship the cache' });
 
     expect(screen.queryByRole('button', { name: 'Pick the schema' })).toBeNull();
@@ -186,7 +202,9 @@ describe('NeedsYou', () => {
       'run-a',
     ]);
     // Two items from run-a: neither starts open.
+    await flush();
     expect(button('Ship the cache')).toHaveAttribute('aria-expanded', 'false');
+    expect(button('Rename the flag')).toHaveAttribute('aria-expanded', 'false');
     const chip = screen.getByTestId('needs-you-run-chip');
     expect(chip).toHaveTextContent('run run-a');
 
@@ -194,6 +212,15 @@ describe('NeedsYou', () => {
 
     expect(window.location.hash).toBe('#/needs-you');
     expect(document.activeElement).toBe(screen.getByRole('heading', { level: 1 }));
+
+    // App hands down the filter the address now names: none. A decision on
+    // the item the filter hid moves focus to the item after it.
+    rerender(page(null));
+    fireEvent.click(button('Pick the schema'));
+    vi.mocked(client.fetchNeedsYou).mockResolvedValue([A1, A2]);
+    fireEvent.click(button('Accept'));
+
+    await waitFor(() => expect(document.activeElement).toBe(button('Ship the cache')));
   });
 
   it('with ?run= and exactly one item, that item starts open', async () => {
@@ -202,6 +229,14 @@ describe('NeedsYou', () => {
     const toggle = await screen.findByRole('button', { name: 'Pick the schema' });
     await waitFor(() => expect(toggle).toHaveAttribute('aria-expanded', 'true'));
     expect(button('Accept')).toBeInTheDocument();
+
+    // Its toggle closes it, and a refetch does not reopen it.
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    await fireStream();
+    await flush();
+    expect(client.fetchNeedsYou).toHaveBeenCalledTimes(2);
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('expands an item into its ReductionCard with a needs-human pill, Accept, Reject and Open in run', async () => {
@@ -249,6 +284,8 @@ describe('NeedsYou', () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Pick the schema' }));
     vi.mocked(client.fetchNeedsYou).mockResolvedValue([A1, A2]);
+    const post = deferred<ReductionControlResponse>();
+    vi.mocked(client.rejectReduction).mockReturnValueOnce(post.promise);
 
     fireEvent.click(button('Reject'));
 
@@ -259,6 +296,10 @@ describe('NeedsYou', () => {
 
     fireEvent.click(button('Reject'));
 
+    // In flight: both buttons are off, as for Accept.
+    expect(button('Accept')).toBeDisabled();
+    expect(button('Reject')).toBeDisabled();
+    await act(async () => post.resolve({ review_state: 'rejected' }));
     await gone('Pick the schema');
     expect(announce).toHaveBeenCalledWith('Rejected: Pick the schema');
     expect(vi.mocked(client.rejectReduction).mock.calls).toEqual([[2]]);
@@ -312,6 +353,18 @@ describe('NeedsYou', () => {
     expect(button('Reject')).toBeEnabled();
     expect(screen.getByText('Already decided elsewhere')).toBeInTheDocument();
     expect(announce).toHaveBeenCalledTimes(1);
+
+    // A refetch that fails settles it too: the buttons return beside the page's alert.
+    vi.mocked(client.acceptReduction).mockRejectedValueOnce(
+      Object.assign(new Error('already resolved'), { status: 409 }),
+    );
+    vi.mocked(client.fetchNeedsYou).mockRejectedValueOnce(new Error('HTTP error! status: 500'));
+
+    fireEvent.click(button('Accept'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('HTTP error! status: 500');
+    await waitFor(() => expect(button('Accept')).toBeEnabled());
+    expect(button('Reject')).toBeEnabled();
   });
 
   it('409: the refetch removes an item decided elsewhere, announced once', async () => {
@@ -344,6 +397,15 @@ describe('NeedsYou', () => {
     expect(button('Pick the schema')).toBeInTheDocument();
     expect(announce).not.toHaveBeenCalled();
     expect(client.fetchNeedsYou).toHaveBeenCalledTimes(1);
+
+    // Trying again clears the old error while the new request is in flight.
+    vi.mocked(client.acceptReduction).mockReturnValueOnce(
+      deferred<ReductionControlResponse>().promise,
+    );
+    fireEvent.click(button('Accept'));
+
+    expect(button('Accept')).toBeDisabled();
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 
   it('refetches on its own stream trigger, for run events only', async () => {
@@ -396,10 +458,18 @@ describe('NeedsYou', () => {
 
     // accept_reduction emits reduction_accepted in its own commit, so the
     // stream's refetch can come back without the item before the POST does.
-    vi.mocked(client.fetchNeedsYou).mockResolvedValue([A1]);
+    // It brings a decision stamped the same second as the one in flight, with
+    // a higher id.
+    const tie = item(4, 'run-a', 7200, 'Tie the knot');
+    vi.mocked(client.fetchNeedsYou).mockResolvedValue([tie, A1]);
     await fireStream();
     await gone('Rename the flag');
     expect(button('Pick the schema')).toBeInTheDocument();
+    // The item kept in flight keeps its place: oldest first, then lowest id.
+    expect(screen.getAllByRole('heading', { level: 2 }).map((h) => h.textContent)).toEqual([
+      'run-b',
+      'run-a',
+    ]);
 
     await act(async () => post.resolve({ review_state: 'accepted' }));
 
@@ -423,32 +493,85 @@ describe('NeedsYou', () => {
 
   it('keeps focus where it is when a refetch removes another item', async () => {
     renderPage();
-    (await screen.findByRole('button', { name: 'Ship the cache' })).focus();
-    vi.mocked(client.fetchNeedsYou).mockResolvedValue([B1, A1]);
+    (await screen.findByRole('button', { name: 'Pick the schema' })).focus();
+    // The item that goes has a next item, Rename the flag: focus does not go there.
+    vi.mocked(client.fetchNeedsYou).mockResolvedValue([B1, A2]);
 
     await fireStream();
 
-    await gone('Rename the flag');
-    expect(document.activeElement).toBe(button('Ship the cache'));
+    await gone('Ship the cache');
+    expect(document.activeElement).toBe(button('Pick the schema'));
   });
 
-  it('after a decision removes the focused item, focus moves to the next item', async () => {
+  it('a refetch that lands after a newer one changes nothing', async () => {
     renderPage();
-    fireEvent.click(await screen.findByRole('button', { name: 'Ship the cache' }));
-    vi.mocked(client.fetchNeedsYou).mockResolvedValue([B1, A2]);
-    const accept = button('Accept');
-    accept.focus();
+    await screen.findByRole('button', { name: 'Pick the schema' });
+    const older = deferred<NeedsYouItem[]>();
+    const failing = deferred<NeedsYouItem[]>();
+    const newest = deferred<NeedsYouItem[]>();
+    vi.mocked(client.fetchNeedsYou)
+      .mockReturnValueOnce(older.promise)
+      .mockReturnValueOnce(failing.promise)
+      .mockReturnValueOnce(newest.promise);
+    await fireStream();
+    await fireStream();
+    await fireStream();
 
-    fireEvent.click(accept);
+    await act(async () => newest.resolve([A1, A2]));
+    await gone('Pick the schema');
+    await act(async () => older.resolve(ALL));
+    await act(async () => failing.reject(new Error('HTTP error! status: 500')));
 
-    await waitFor(() => expect(document.activeElement).toBe(button('Rename the flag')));
+    expect(screen.queryByRole('button', { name: 'Pick the schema' })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('after a decision removes its item, focus moves to the next item, else the previous one, else the heading', async () => {
+    // On screen: Pick the schema, Ship the cache, Rename the flag. Accept is
+    // clicked, never focused: focus follows the decision from wherever it was.
+    const cases: [string, NeedsYouItem[], string][] = [
+      ['Ship the cache', [B1, A2], 'Rename the flag'],
+      ['Rename the flag', [B1, A1], 'Ship the cache'],
+    ];
+    for (const [decided, left, next] of cases) {
+      vi.mocked(client.fetchNeedsYou).mockResolvedValue(ALL);
+      const { unmount } = renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: decided }));
+      vi.mocked(client.fetchNeedsYou).mockResolvedValue(left);
+
+      fireEvent.click(button('Accept'));
+
+      await waitFor(() => expect(document.activeElement).toBe(button(next)));
+      unmount();
+    }
+
+    vi.mocked(client.fetchNeedsYou).mockResolvedValue([B1]);
+    renderPage();
+    const only = await screen.findByRole('button', { name: 'Pick the schema' });
+    // One item, but no ?run=: it starts closed all the same.
+    await flush();
+    expect(only).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(only);
+    vi.mocked(client.fetchNeedsYou).mockResolvedValue([]);
+
+    fireEvent.click(button('Accept'));
+
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveFocus());
   });
 
   it('says so when nothing is waiting', async () => {
-    vi.mocked(client.fetchNeedsYou).mockResolvedValue([]);
+    const first = deferred<NeedsYouItem[]>();
+    vi.mocked(client.fetchNeedsYou).mockReturnValueOnce(first.promise);
     renderPage();
 
+    // Still loading: that is not nothing.
+    expect(screen.getByText('Loading decisions…')).toBeInTheDocument();
+    expect(screen.queryByText('Nothing is waiting on you.')).toBeNull();
+
+    await act(async () => first.resolve([]));
+
     expect(await screen.findByText('Nothing is waiting on you.')).toBeInTheDocument();
+    expect(screen.queryByText('Loading decisions…')).toBeNull();
     expect(screen.queryByRole('link', { name: 'Show all runs' })).toBeNull();
     expect(screen.queryByRole('region')).toBeNull();
   });
@@ -462,6 +585,11 @@ describe('NeedsYou', () => {
       '#/needs-you',
     );
     expect(screen.getByTestId('needs-you-run-chip')).toHaveTextContent('run run-z');
+
+    fireEvent.click(screen.getByRole('link', { name: 'Show all runs' }));
+
+    // The link is about to go: focus the page heading, not <body>.
+    expect(screen.getByRole('heading', { level: 1 })).toHaveFocus();
   });
 
   it('a failed load shows an alert with Retry', async () => {
@@ -471,10 +599,18 @@ describe('NeedsYou', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('HTTP error! status: 500');
     expect(screen.getByRole('heading', { level: 1, name: 'Needs you' })).toBeInTheDocument();
+    expect(screen.queryByText('Loading decisions…')).toBeNull();
 
     fireEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
 
     expect(await screen.findByRole('button', { name: 'Pick the schema' })).toBeInTheDocument();
     expect(screen.queryByRole('alert')).toBeNull();
+
+    // A refetch that fails after a good load keeps the list and adds the alert.
+    vi.mocked(client.fetchNeedsYou).mockRejectedValueOnce(new Error('HTTP error! status: 502'));
+    await fireStream();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('HTTP error! status: 502');
+    expect(button('Pick the schema')).toBeInTheDocument();
   });
 });

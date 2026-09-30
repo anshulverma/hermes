@@ -1174,4 +1174,27 @@ describe('the Needs you page', () => {
     expect(await inMain().findByRole('button', { name: 'Pick the schema' })).toBeInTheDocument();
     expect(within(inMain().getByRole('region', { name: 'run-001' })).queryByText('running')).toBeNull();
   });
+
+  it("announces a decision in the shell, refreshes the run list, and refetches on the app's stream", async () => {
+    mockHome([run('run-001', { tickets: { needs_human: 1 }, awaiting: 1 })]);
+    mockWaiting();
+    vi.mocked(client.acceptReduction).mockResolvedValue({ review_state: 'accepted' });
+    go('#/needs-you?run=run-001');
+    const { rerender } = render(<App />);
+    await settled();
+    const toggle = await screen.findByRole('button', { name: 'Pick the schema' });
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-expanded', 'true'));
+    const runFetches = vi.mocked(client.fetchRuns).mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }));
+
+    await waitFor(() => expect(statusRegion()).toHaveTextContent('Accepted: Pick the schema'));
+    expect(vi.mocked(client.fetchRuns).mock.calls.length).toBeGreaterThan(runFetches);
+    // The decision's own refetch; then an event on the app's one stream refetches again.
+    await waitFor(() => expect(client.fetchNeedsYou).toHaveBeenCalledTimes(2));
+
+    await deliver(rerender, ev('reduction_accepted', 'run-001'));
+
+    await waitFor(() => expect(client.fetchNeedsYou).toHaveBeenCalledTimes(3));
+  });
 });

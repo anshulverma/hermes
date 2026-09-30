@@ -384,7 +384,10 @@ export default function NeedsYou({
               </h2>
               <span style={MUTED}>{group.playbook}</span>
               {state && <span style={MUTED}>{state}</span>}
-              <span style={MUTED}>waiting {fmtSeconds(now - group.items[0].created_at)}</span>
+              {/* The shared clock ticks every 30 s: a decision can arrive stamped after it. */}
+              <span style={MUTED}>
+                waiting {fmtSeconds(Math.max(0, now - group.items[0].created_at))}
+              </span>
             </div>
             <ul
               style={{
