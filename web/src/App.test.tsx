@@ -326,6 +326,22 @@ describe('App', () => {
         expect(window.location.hash).toBe('#/crew');
       });
     });
+
+    it("hands Activity its address's run and kind filters and the shared event stream", async () => {
+      mockLoadedRun();
+      go('#/activity?run=run-001&kind=needs_human');
+
+      const { rerender } = render(<App />);
+
+      expect(await heading('Activity')).toBeInTheDocument();
+      await waitFor(() =>
+        expect(client.fetchEvents).toHaveBeenCalledWith({ order: 'desc', limit: 200, run: 'run-001', kind: 'needs_human' }),
+      );
+      expect(await inMain().findByText('No events yet.')).toBeInTheDocument();
+
+      await deliver(rerender, { ...ev('needs_human', 'run-001'), message: 'live one' });
+      expect(inMain().getByText('live one')).toBeInTheDocument();
+    });
   });
 
   describe('the summary tab', () => {

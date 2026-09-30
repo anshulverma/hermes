@@ -10,7 +10,7 @@
  * when it matches the filters.
  */
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { fetchEvents, fetchEventKinds } from '../api/client';
 import type { Event } from '../api/client';
 import { buildRoute, useRoute } from '../hooks/useRoute';
@@ -20,6 +20,12 @@ import { LoadingOverlay } from '../components/Spinner';
 const PAGE = 200;
 /** Live prepends never grow the list past this; "Load older" may, the user asked for it. */
 const CAP = 1000;
+/** The controls focus can be handed to; a number is an event row. */
+const FOCUS_TARGET = {
+  start: '[data-start-of-history]',
+  older: '[data-load-older]',
+  retry: '[role="alert"] button',
+};
 
 type ActivityFeedProps = {
   runFilter: string | null;
@@ -99,8 +105,10 @@ export default function ActivityFeed({ runFilter, kindFilter, streamEvents }: Ac
   const cursor = useRef(streamEvents.at(-1)?.id ?? 0);
   // Bumped on every first-page load, so a page answering an older filter is dropped.
   const generation = useRef(0);
-  // Where focus goes once 'Start of history' replaces "Load older".
-  const focusNext = useRef<number | 'start' | null>(null);
+  // Where focus goes when the focused control is replaced: the first row a short
+  // page added or 'Start of history', the alert's Retry after a failed "Load
+  // older", and "Load older" after that Retry. Never <body>.
+  const focusNext = useRef<number | keyof typeof FOCUS_TARGET | null>(null);
 
   useEffect(() => {
     fetchEventKinds()
@@ -145,22 +153,27 @@ export default function ActivityFeed({ runFilter, kindFilter, streamEvents }: Ac
     if (matched.length === 0) return;
     setList((prev) => {
       const rows = mergeById(matched, prev.rows);
-      // Only live prepends are capped: the oldest rows go, and "Load older" comes back for them.
-      return rows.length > CAP ? { rows: rows.slice(0, CAP), more: true } : { rows, more: prev.more };
+      // Only live prepends are capped, and never below what "Load older" loaded past
+      // CAP: the oldest rows go, and "Load older" comes back for them.
+      const cap = Math.max(CAP, prev.rows.length);
+      return rows.length > cap ? { rows: rows.slice(0, cap), more: true } : { rows, more: prev.more };
     });
   }, [streamEvents, runFilter, kindFilter]);
 
-  useEffect(() => {
-    if (focusNext.current === null) return;
-    const target =
-      focusNext.current === 'start'
-        ? '[data-start-of-history]'
-        : `[data-event-id="${focusNext.current}"]`;
-    listRef.current?.querySelector<HTMLElement>(target)?.focus();
+  // A layout effect: focus moves in the same commit that replaced the focused
+  // control, so it is never seen on <body>.
+  useLayoutEffect(() => {
+    const next = focusNext.current;
+    if (next === null) return;
     focusNext.current = null;
-  }, [list]);
+    const target = typeof next === 'number' ? `[data-event-id="${next}"]` : FOCUS_TARGET[next];
+    listRef.current?.querySelector<HTMLElement>(target)?.focus();
+  }, [list, error, loadingOlder]);
 
   const loadOlder = () => {
+    // "Load older" stays focusable while it loads (a disabled button drops focus
+    // to <body>), so a second press lands here and asks nothing more.
+    if (loadingOlder) return;
     const gen = generation.current;
     // Rows are newest first, so the last one has the smallest id shown.
     const before = list.rows[list.rows.length - 1].id;
@@ -175,17 +188,35 @@ export default function ActivityFeed({ runFilter, kindFilter, streamEvents }: Ac
     })
       .then((page) => {
         if (gen !== generation.current) return;
-        // A short page ends the history: focus its first row, or the marker when it is empty.
-        if (page.length < PAGE) focusNext.current = page.length > 0 ? page[0].id : 'start';
-        // Always appended, even past CAP.
-        setList((prev) => ({ rows: mergeById(prev.rows, page), more: page.length === PAGE }));
+        setList((prev) => {
+          // Live events trimmed the oldest rows while it loaded: the page no longer
+          // joins the list, so it is dropped, and "Load older" (back with the trim)
+          // asks again from the new smallest id.
+          if (prev.rows.at(-1)?.id !== before) return prev;
+          // A short page ends the history: focus its first row, or the marker when it is empty.
+          if (page.length < PAGE) focusNext.current = page.length > 0 ? page[0].id : 'start';
+          // Always appended, even past CAP.
+          return { rows: mergeById(prev.rows, page), more: page.length === PAGE };
+        });
         setLoadingOlder(false);
       })
       .catch((err) => {
         if (gen !== generation.current) return;
+        focusNext.current = 'retry';
         setError({ message: err.message, older: true });
         setLoadingOlder(false);
       });
+  };
+
+  // Retry takes the alert away: focus goes to what replaces it.
+  const retry = () => {
+    if (error?.older) {
+      focusNext.current = 'older';
+      loadOlder();
+    } else {
+      headingRef.current?.focus();
+      setReload((n) => n + 1);
+    }
   };
 
   const setFilters = (run: string | null, kind: string | null) =>
@@ -300,13 +331,19 @@ export default function ActivityFeed({ runFilter, kindFilter, streamEvents }: Ac
                 }}
               >
                 <span>Could not load events: {error.message}</span>
-                <Button size="sm" onClick={error.older ? loadOlder : () => setReload((n) => n + 1)}>
+                <Button size="sm" onClick={retry}>
                   Retry
                 </Button>
               </div>
             ) : more ? (
               <div style={{ padding: 12, textAlign: 'center' }}>
-                <Button size="sm" disabled={loadingOlder} onClick={loadOlder}>
+                <Button
+                  size="sm"
+                  data-load-older
+                  aria-disabled={loadingOlder}
+                  onClick={loadOlder}
+                  style={loadingOlder ? { opacity: 0.35, cursor: 'default' } : undefined}
+                >
                   Load older
                 </Button>
               </div>
