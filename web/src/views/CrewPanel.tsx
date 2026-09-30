@@ -12,16 +12,47 @@ import { LoadingOverlay } from '../components/Spinner';
 import CrewDrawer from '../components/CrewDrawer';
 import AddHostModal from '../components/AddHostModal';
 import { fmtSeconds } from '../util/time';
+import { buildRoute } from '../hooks/useRoute';
 
 const CREW_POLL_MS = 15_000;
 
 type CrewPanelProps = {
   liveTick?: number;
-  /** The run in view. The crew stays fleet-wide; this only decides whose work needs naming. */
-  runId?: string;
 };
 
-export default function CrewPanel({ liveTick, runId }: CrewPanelProps) {
+const LINK = { color: 'var(--text-link, #6ea8fe)', textDecoration: 'underline' } as const;
+const runHref = (runId: string) => buildRoute({ page: 'run', runId, tab: 'summary', ticket: null });
+// Ticket ids are `<run_id>/t-<n>` (engine/db/schema.sql:18), so the run is the prefix.
+const ticketHref = (ticket: string) =>
+  buildRoute({ page: 'run', runId: ticket.slice(0, ticket.indexOf('/')), tab: 'tickets', ticket });
+// A row is a button that opens the drawer; a link inside it navigates instead.
+const stopRow = (e: React.MouseEvent) => e.stopPropagation();
+
+const PAGE = { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' } as const;
+const HEADER = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 12,
+  padding: '20px 20px 12px',
+  borderBottom: '1px solid var(--border-hairline)',
+} as const;
+// The page's <h1>, which the skip link and arrival focus target, in every state.
+const TITLE = (
+  <h1 tabIndex={-1} style={{ margin: 0, fontSize: 16, fontWeight: 500, color: 'var(--text-primary)' }}>
+    Crew
+  </h1>
+);
+// Loading, error and empty: the header with only its title, over the state's body. Every
+// state puts TITLE first inside the same two <div>s, so React keeps one <h1> node from
+// loading to loaded and focus stays on it.
+const bare = (body: React.ReactNode) => (
+  <div style={PAGE}>
+    <div style={HEADER}>{TITLE}</div>
+    {body}
+  </div>
+);
+
+export default function CrewPanel({ liveTick }: CrewPanelProps) {
   const [crew, setCrew] = useState<CrewMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -55,7 +86,7 @@ export default function CrewPanel({ liveTick, runId }: CrewPanelProps) {
   // Only show the full-page spinner on the initial load (no data yet).
   // Background live refetches must not blank the already-rendered crew list.
   if (loading && crew.length === 0) {
-    return (
+    return bare(
       <div style={{ position: 'relative', flex: 1, minHeight: 0 }}>
         <LoadingOverlay label="Loading crew…" />
       </div>
@@ -63,7 +94,7 @@ export default function CrewPanel({ liveTick, runId }: CrewPanelProps) {
   }
 
   if (error) {
-    return (
+    return bare(
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <EmptyState
           title="Error loading crew"
@@ -75,7 +106,7 @@ export default function CrewPanel({ liveTick, runId }: CrewPanelProps) {
   }
 
   if (crew.length === 0) {
-    return (
+    return bare(
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
         <EmptyState
           title="No crew members"
@@ -88,17 +119,9 @@ export default function CrewPanel({ liveTick, runId }: CrewPanelProps) {
 
   return (
     <>
-      <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
-        <div style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          padding: '20px 20px 12px',
-          borderBottom: '1px solid var(--border-hairline)'
-        }}>
-          <h2 style={{ margin: 0, fontSize: 16, fontWeight: 500, color: 'var(--text-primary)' }}>
-            Crew
-          </h2>
+      <div style={PAGE}>
+        <div style={HEADER}>
+          {TITLE}
           <span style={{ color: 'var(--text-muted)', fontSize: 13 }}>
             {crew.length} {crew.length === 1 ? 'host' : 'hosts'}
             {` · ${crew.filter((m) => m.current_ticket).length} working`}
@@ -194,20 +217,28 @@ export default function CrewPanel({ liveTick, runId }: CrewPanelProps) {
               </div>
 
               <span
-                title={member.current_ticket ?? undefined}
                 style={{
                   fontFamily: 'var(--font-mono)',
                   fontSize: 12,
                   color: member.current_ticket ? 'var(--text-secondary)' : 'var(--text-muted)'
                 }}
               >
-                {member.current_ticket
-                  ? [
-                      member.current_phase,
-                      fmtSeconds(member.current_elapsed_s),
-                      member.current_run !== runId && member.current_run,
-                    ].filter(Boolean).join(' · ')
-                  : '—'}
+                {member.current_ticket && member.current_run ? (
+                  <>
+                    <a
+                      href={ticketHref(member.current_ticket)}
+                      title={member.current_ticket}
+                      onClick={stopRow}
+                      style={LINK}
+                    >
+                      {member.current_phase}
+                    </a>
+                    {` · ${fmtSeconds(member.current_elapsed_s)} · `}
+                    <a href={runHref(member.current_run)} onClick={stopRow} style={LINK}>
+                      {member.current_run}
+                    </a>
+                  </>
+                ) : '—'}
               </span>
             </div>
           ))}

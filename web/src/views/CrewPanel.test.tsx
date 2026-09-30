@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import CrewPanel from './CrewPanel';
 import type { CrewMember, Lease } from '../api/client';
 
@@ -106,27 +106,92 @@ describe('CrewPanel', () => {
     });
   });
 
-  it('says what each host is working on, naming the run only when it is not the one in view', async () => {
-    const { rerender } = render(<CrewPanel runId="test-run" />);
+  it("a host's current run links to #/runs/<id>/summary and its ticket to #/runs/<id>/tickets?ticket=<t>", async () => {
+    render(<CrewPanel />);
 
     await waitFor(() => {
       expect(screen.getByText('host-2')).toBeInTheDocument();
     });
-    const row = (id: string) => screen.getByText(id).closest('div[role="button"]')!;
+    const row = (id: string) => screen.getByText(id).closest('div[role="button"]') as HTMLElement;
 
     expect(screen.getByText('3 hosts · 1 working')).toBeInTheDocument();
     expect(screen.getByText('working on')).toBeInTheDocument();
-    expect(row('host-2')).toHaveTextContent('solve · 4m 0s');
-    expect(row('host-2')).not.toHaveTextContent('test-run');
+    // The run always shows: there is no "run in view" on a cross-run page.
+    expect(row('host-2')).toHaveTextContent('solve · 4m 0s · test-run');
+    expect(within(row('host-2')).getByRole('link', { name: 'test-run' })).toHaveAttribute(
+      'href',
+      '#/runs/test-run/summary',
+    );
+    // The phase text is the ticket link; the ticket id stays on hover.
+    const ticket = within(row('host-2')).getByRole('link', { name: 'solve' });
+    expect(ticket).toHaveAttribute('href', '#/runs/test-run/tickets?ticket=test-run%2Ft-1');
+    expect(ticket).toHaveAttribute('title', 'test-run/t-1');
+    // An idle host has nothing to link.
     expect(row('host-1')).toHaveTextContent('—');
+    expect(within(row('host-1')).queryByRole('link')).not.toBeInTheDocument();
 
     // The health badge says how old it is.
     expect(row('host-1')).toHaveTextContent('10s ago');
     expect(row('host-3')).toHaveTextContent('10m 0s ago');
+  });
 
-    // Looking at another run: the host is carrying someone else's work.
-    rerender(<CrewPanel runId="other-run" />);
-    expect(row('host-2')).toHaveTextContent('solve · 4m 0s · test-run');
+  it('a link click in a row navigates without opening the drawer', async () => {
+    window.location.hash = '';
+    render(<CrewPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText('host-2')).toBeInTheDocument();
+    });
+    const row = screen.getByText('host-2').closest('div[role="button"]') as HTMLElement;
+
+    fireEvent.click(within(row).getByRole('link', { name: 'test-run' }));
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/runs/test-run/summary');
+    });
+
+    fireEvent.click(within(row).getByRole('link', { name: 'solve' }));
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#/runs/test-run/tickets?ticket=test-run%2Ft-1');
+    });
+
+    // Neither click reached the row: no drawer, no lease fetch.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(mockFetch.mock.calls.some((c: any) => String(c[0]).startsWith('/api/leases'))).toBe(false);
+  });
+
+  it('keeps one focusable h1 titled Crew from loading to loaded, so focus stays on it', async () => {
+    let answer!: (crew: CrewMember[]) => void;
+    mockFetch.mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = (crew) => resolve({ ok: true, json: async () => crew });
+      }),
+    );
+    render(<CrewPanel />);
+
+    // Still loading, the title is there, so arrival focus has something to land on.
+    expect(screen.getByText('Loading crew…')).toBeInTheDocument();
+    const heading = screen.getByRole('heading', { level: 1, name: 'Crew' });
+    expect(heading).toHaveAttribute('tabindex', '-1');
+    heading.focus();
+
+    await act(async () => answer(mockCrew));
+    expect(await screen.findByText('host-1')).toBeInTheDocument();
+    // The same node, still focused: the crew arriving did not remount it.
+    expect(screen.getByRole('heading', { level: 1, name: 'Crew' })).toBe(heading);
+    expect(heading).toHaveFocus();
+  });
+
+  it('titles the empty and error states with the same focusable h1', async () => {
+    mockFetch.mockResolvedValue({ ok: true, json: async () => [] });
+    const { unmount } = render(<CrewPanel />);
+    expect(await screen.findByText('No crew members')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Crew' })).toHaveAttribute('tabindex', '-1');
+    unmount();
+
+    mockFetch.mockRejectedValue(new Error('Network error'));
+    render(<CrewPanel />);
+    expect(await screen.findByText('Error loading crew')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1, name: 'Crew' })).toHaveAttribute('tabindex', '-1');
   });
 
   it('should render health badges from real health data', async () => {
@@ -274,7 +339,7 @@ describe('CrewPanel', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const mid = { ...mockCrew[1], current_elapsed_s: 2400, heartbeat_age_s: 2400 };
-      render(<CrewPanel runId="test-run" />);
+      render(<CrewPanel />);
       await waitFor(() => {
         expect(screen.getByText('host-2')).toBeInTheDocument();
       });
@@ -293,7 +358,9 @@ describe('CrewPanel', () => {
         expect(row()).toHaveTextContent('solve · 40m 0s');
       });
       expect(row()).toHaveTextContent('40m 0s ago');
-      expect(screen.getAllByText('solve · 40m 0s')).toHaveLength(2);
+      // The open drawer's Working on line counts too. (The row's phase is a link now,
+      // so the row's text is split across elements and is checked above instead.)
+      expect(within(screen.getByRole('dialog')).getByText('solve · 40m 0s')).toBeInTheDocument();
       // Without the lease list reloading (and flashing) on every tick.
       const leaseCalls = mockFetch.mock.calls.filter((c: any) => c[0].startsWith('/api/leases'));
       expect(leaseCalls).toHaveLength(1);

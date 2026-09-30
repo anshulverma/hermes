@@ -44,7 +44,13 @@ describe('CrewDrawer', () => {
     };
     render(<CrewDrawer isOpen={true} host={busy} onClose={vi.fn()} onRefresh={vi.fn()} />);
 
-    expect(await screen.findByText('run-a/t-7')).toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: 'run-a/t-7' })).toHaveAttribute(
+      'href',
+      '#/runs/run-a/tickets?ticket=run-a%2Ft-7',
+    );
+    // The Run row names the host's run as a link to its Summary.
+    expect(screen.getByText('Run')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'run-a' })).toHaveAttribute('href', '#/runs/run-a/summary');
     expect(screen.getByText('review · 2m 5s')).toBeInTheDocument();
     expect(screen.getByText('8s ago')).toBeInTheDocument();
   });
@@ -182,5 +188,35 @@ describe('CrewDrawer', () => {
     await waitFor(() => {
       expect(screen.getByText(/authentication required/i)).toBeInTheDocument();
     });
+  });
+
+  it('links each lease card to its run and its ticket', async () => {
+    const lease = (id: string, run_id: string, ticket_id: string | null): client.Lease => ({
+      id,
+      run_id,
+      resource_class: 'cpu',
+      ticket_id,
+      host: 'worker-1',
+      acquired_at: 1000,
+      ttl_s: 1800,
+      expires_at: 2800,
+      remaining_s: 1200,
+    });
+    vi.spyOn(client, 'fetchLeases').mockResolvedValue([
+      lease('lease-1', 'run-b', 'run-b/t-3'),
+      lease('lease-2', 'run-c', null),
+    ]);
+
+    render(<CrewDrawer isOpen={true} host={mockHost} onClose={vi.fn()} onRefresh={vi.fn()} />);
+
+    expect(await screen.findByRole('link', { name: 'run-b' })).toHaveAttribute('href', '#/runs/run-b/summary');
+    expect(screen.getByRole('link', { name: 'run-b/t-3' })).toHaveAttribute(
+      'href',
+      '#/runs/run-b/tickets?ticket=run-b%2Ft-3',
+    );
+    // A lease holding no ticket still names its run, and shows no Ticket line.
+    expect(screen.getByRole('link', { name: 'run-c' })).toHaveAttribute('href', '#/runs/run-c/summary');
+    expect(screen.getAllByText('Run:')).toHaveLength(2);
+    expect(screen.getAllByText('Ticket:')).toHaveLength(1);
   });
 });

@@ -258,7 +258,7 @@ describe('App', () => {
       expect(screen.queryByRole('heading', { level: 1, name: 'run-001 · example' })).toBeNull();
     });
 
-    it('names the run a host is working on: the Crew page has no run in view', async () => {
+    it("a host's current run links to #/runs/<id>/summary and its ticket to #/runs/<id>/tickets?ticket=<t>", async () => {
       go('#/crew');
       mockLoadedRun();
       vi.mocked(client.fetchCrew).mockResolvedValue([
@@ -280,8 +280,17 @@ describe('App', () => {
 
       render(<App />);
 
-      await waitFor(() => expect(screen.getByTitle('run-001/t1')).toHaveTextContent('work'));
-      expect(screen.getByTitle('run-001/t1')).toHaveTextContent('run-001');
+      // Not `row`: that module-level helper finds rail rows.
+      const hostRow = (await screen.findByText('host-a')).closest('div[role="button"]') as HTMLElement;
+      // run-001 is the only run, and still it is named: Crew has no run in view.
+      expect(hostRow).toHaveTextContent('work · 4m 0s · run-001');
+      expect(within(hostRow).getByRole('link', { name: 'run-001' })).toHaveAttribute(
+        'href',
+        '#/runs/run-001/summary',
+      );
+      const ticket = within(hostRow).getByRole('link', { name: 'work' });
+      expect(ticket).toHaveAttribute('href', '#/runs/run-001/tickets?ticket=run-001%2Ft1');
+      expect(ticket).toHaveAttribute('title', 'run-001/t1');
     });
 
     it('goes to the Crew page when its top-bar link is clicked', async () => {

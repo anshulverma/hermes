@@ -10,6 +10,7 @@ import type { CrewMember, Lease, HealthChecklist } from '../api/client';
 import { Drawer, EmptyState, HealthBadge, Badge, Button } from '../ds';
 import { TOPBAR_HEIGHT } from './TopBar';
 import { fmtSeconds } from '../util/time';
+import { buildRoute } from '../hooks/useRoute';
 
 type CrewDrawerProps = {
   isOpen: boolean;
@@ -17,6 +18,12 @@ type CrewDrawerProps = {
   onClose: () => void;
   onRefresh?: () => void;
 };
+
+const LINK = { color: 'var(--text-link, #6ea8fe)', textDecoration: 'underline' } as const;
+const runHref = (runId: string) => buildRoute({ page: 'run', runId, tab: 'summary', ticket: null });
+// Ticket ids are `<run_id>/t-<n>` (engine/db/schema.sql:18), so the run is the prefix.
+const ticketHref = (ticket: string) =>
+  buildRoute({ page: 'run', runId: ticket.slice(0, ticket.indexOf('/')), tab: 'tickets', ticket });
 
 export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDrawerProps) {
   const [leases, setLeases] = useState<Lease[]>([]);
@@ -151,12 +158,23 @@ export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDra
                 {host.state}
               </span>
             </div>
+            {host.current_run && (
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Run</span>
+                <a href={runHref(host.current_run)} style={{ fontSize: 13, fontFamily: 'var(--font-mono)', ...LINK }}>
+                  {host.current_run}
+                </a>
+              </div>
+            )}
             {host.current_ticket && (
               <div style={{ display: 'flex', justifyContent: 'space-between' }}>
                 <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>Current ticket</span>
-                <span style={{ fontSize: 13, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+                <a
+                  href={ticketHref(host.current_ticket)}
+                  style={{ fontSize: 13, fontFamily: 'var(--font-mono)', ...LINK }}
+                >
                   {host.current_ticket}
-                </span>
+                </a>
               </div>
             )}
             {host.current_ticket && (
@@ -410,16 +428,22 @@ export default function CrewDrawer({ isOpen, host, onClose, onRefresh }: CrewDra
                       </Badge>
                     </div>
 
+                    <div>
+                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Run: </span>
+                      <a href={runHref(lease.run_id)} style={{ fontSize: 12, fontFamily: 'var(--font-mono)', ...LINK }}>
+                        {lease.run_id}
+                      </a>
+                    </div>
+
                     {lease.ticket_id && (
                       <div>
                         <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Ticket: </span>
-                        <span style={{
-                          fontSize: 12,
-                          fontFamily: 'var(--font-mono)',
-                          color: 'var(--text-primary)'
-                        }}>
+                        <a
+                          href={ticketHref(lease.ticket_id)}
+                          style={{ fontSize: 12, fontFamily: 'var(--font-mono)', ...LINK }}
+                        >
                           {lease.ticket_id}
-                        </span>
+                        </a>
                       </div>
                     )}
 
