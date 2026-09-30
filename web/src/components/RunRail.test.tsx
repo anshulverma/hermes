@@ -158,9 +158,12 @@ describe('railGroups', () => {
   it('shows a selected run beyond the cap after the newest 10 and leaves it out of the count', () => {
     const beyond = railGroups(finishedRuns(30), NONE, '', false, 'f-30');
     const within10 = railGroups(finishedRuns(30), NONE, '', false, 'f-05');
+    const firstBeyond = railGroups(finishedRuns(13), NONE, '', false, 'f-11');
 
     expect(ids(beyond.finished)).toEqual([...ids(finishedRuns(10)), 'f-30']);
     expect(beyond.moreFinished).toBe(19);
+    expect(ids(firstBeyond.finished)).toEqual([...ids(finishedRuns(10)), 'f-11']);
+    expect(firstBeyond.moreFinished).toBe(2);
     expect(ids(within10.finished)).toEqual(ids(finishedRuns(10)));
     expect(within10.moreFinished).toBe(20);
   });
@@ -412,6 +415,7 @@ describe('RunRail rows', () => {
           run('r1', { tickets: { done: 2, queued: 3 }, subject: 'Fix the flaky test' }),
           run('r2', { state: 'done', phase: null, updated_at: NOW - 7200 }),
           run('r3', { state: 'paused', phase: null, created_at: NOW - 5 * 86400 }),
+          run('r4', { state: 'failed', awaiting: 1 }),
         ]}
       />,
     );
@@ -419,6 +423,8 @@ describe('RunRail rows', () => {
     expect(row('r1')).toHaveAccessibleDescription('work started 3 minutes ago 2/5 Fix the flaky test');
     expect(row('r2')).toHaveAccessibleDescription('not started ended 2 hours ago no tickets yet');
     expect(row('r3')).toHaveAccessibleDescription('starting started 5 days ago no tickets yet');
+    // A finished run in Needs you reads its start, like every row outside Finished.
+    expect(row('r4')).toHaveAccessibleDescription('work started 3 minutes ago no tickets yet');
   });
 
   it('renders each age as a <time> with the ISO instant and the full time as its title', () => {
@@ -439,6 +445,7 @@ describe('RunRail rows', () => {
     expect(bar).toHaveAttribute('aria-valuenow', '2');
     expect(bar).toHaveAttribute('aria-valuemax', '5');
     expect(bar).toHaveAttribute('aria-valuetext', '2 of 5 done');
+    expect(bar.firstElementChild).toHaveStyle({ width: '40%' });
     expect(within(row('r1')).getByText('2/5')).toBeInTheDocument();
     expect(within(row('r2')).queryByRole('progressbar')).toBeNull();
     expect(within(row('r2')).getByTestId('rail-empty-track')).toHaveAttribute('aria-hidden', 'true');
@@ -549,12 +556,20 @@ describe('RunRail chips and filter box', () => {
   it('counts the decisions waiting in the runs it hides', () => {
     render(
       <Harness
-        runs={[run('r1'), run('r2', { playbook: 'beta', awaiting: 2 }), run('r3', { playbook: 'beta', awaiting: 1 })]}
+        runs={[
+          run('r1'),
+          run('r2', { playbook: 'beta', awaiting: 2 }),
+          run('r3', { playbook: 'beta', awaiting: 1 }),
+          run('r4', { playbook: 'gamma', awaiting: 1 }),
+        ]}
       />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'beta' }));
+    fireEvent.click(screen.getByRole('button', { name: 'gamma' }));
+    expect(screen.getByText(/^1 hidden, 1 waiting on you/)).toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole('button', { name: 'gamma' }));
+    fireEvent.click(screen.getByRole('button', { name: 'beta' }));
     expect(screen.getByText(/^2 hidden, 3 waiting on you/)).toBeInTheDocument();
   });
 
@@ -572,10 +587,44 @@ describe('RunRail chips and filter box', () => {
   it('opens the first visible row on Enter, as a click would', async () => {
     render(<Harness runs={[run('r1', { created_at: 100 }), run('r2', { created_at: 200 })]} tab="tickets" />);
 
-    fireEvent.change(filterBox(), { target: { value: 'r1' } });
+    fireEvent.change(filterBox(), { target: { value: 'r' } });
     fireEvent.keyDown(filterBox(), { key: 'Enter' });
 
-    await waitFor(() => expect(window.location.hash).toBe('#/runs/r1/tickets'));
+    await waitFor(() => expect(window.location.hash).toBe('#/runs/r2/tickets'));
+
+    // With no visible row, Enter does nothing.
+    const errors = vi.fn();
+    window.addEventListener('error', errors);
+    fireEvent.change(filterBox(), { target: { value: 'zzz' } });
+    fireEvent.keyDown(filterBox(), { key: 'Enter' });
+    window.removeEventListener('error', errors);
+    expect(errors).not.toHaveBeenCalled();
+    expect(window.location.hash).toBe('#/runs/r2/tickets');
+  });
+
+  it('ignores Enter and Escape that end an IME composition', () => {
+    render(<Harness runs={[run('r1')]} />);
+    const clicked = vi.fn();
+    row('r1').addEventListener('click', clicked);
+    fireEvent.change(filterBox(), { target: { value: 'r' } });
+
+    fireEvent.keyDown(filterBox(), { key: 'Enter', isComposing: true });
+    fireEvent.keyDown(filterBox(), { key: 'Escape', isComposing: true });
+
+    expect(clicked).not.toHaveBeenCalled();
+    expect(filterBox()).toHaveValue('r');
+  });
+
+  it('rings the filter box while it has focus', () => {
+    render(<Harness runs={[run('r1')]} />);
+    const box = filterBox().closest('label')!;
+    expect(box.style.outline).toBe('');
+
+    act(() => filterBox().focus());
+    expect(box).toHaveStyle({ outline: '2px solid var(--focus-ring)', outlineOffset: '2px' });
+
+    act(() => filterBox().blur());
+    expect(box.style.outline).toBe('');
   });
 
   it('clears the text on Escape, then returns focus to where it was before', () => {
@@ -597,23 +646,34 @@ describe('RunRail chips and filter box', () => {
     expect(screen.getByRole('button', { name: 'elsewhere' })).toHaveFocus();
   });
 
-  it("sends focus to the pane's heading on Escape when nothing had it before", () => {
-    render(<Harness runs={[run('r1')]} />);
+  it("sends focus to the pane's heading on Escape when nothing had it before, or that element is gone", () => {
+    const heading = () => screen.getByRole('heading', { level: 1, name: 'pane title' });
+    const { rerender } = render(<Harness runs={[run('a1'), run('n1', { awaiting: 1 })]} />);
     act(() => filterBox().focus());
 
     fireEvent.keyDown(filterBox(), { key: 'Escape' });
+    expect(heading()).toHaveFocus();
 
-    expect(screen.getByRole('heading', { level: 1, name: 'pane title' })).toHaveFocus();
+    act(() => row('n1').focus());
+    act(() => filterBox().focus());
+    rerender(<Harness runs={[run('a1')]} />);
+    fireEvent.keyDown(filterBox(), { key: 'Escape' });
+    expect(heading()).toHaveFocus();
   });
 
   it('reveals every Finished row on "show N more" and focuses the first one it revealed', () => {
-    render(<Harness runs={finishedRuns(13)} />);
+    const { rerender } = render(<Harness runs={finishedRuns(13)} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'show 3 more' }));
 
     expect(screen.getAllByRole('link')).toHaveLength(13);
     expect(row('f-11')).toHaveFocus();
     expect(screen.queryByRole('button', { name: /more$/ })).toBeNull();
+
+    // Only once: a later render leaves focus where it went.
+    act(() => filterBox().focus());
+    rerender(<Harness runs={finishedRuns(13)} />);
+    expect(filterBox()).toHaveFocus();
   });
 });
 
@@ -696,6 +756,28 @@ describe('RunRail selection and focus', () => {
     expect(scrolled.mock.contexts[1]).toBe(row('r2'));
   });
 
+  it('scrolls once per selection: when the row first appears, not when a refetch hides and re-shows it', () => {
+    const scrolled = vi.spyOn(Element.prototype, 'scrollIntoView');
+    const runs = [run('r1'), run('r2')];
+    const { rerender } = render(<Harness runs={[run('r1')]} selectedRunId="r2" />);
+    expect(scrolled).not.toHaveBeenCalled();
+
+    rerender(<Harness runs={runs} selectedRunId="r2" />);
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect(scrolled.mock.contexts[0]).toBe(row('r2'));
+
+    act(() => row('r1').focus());
+    rerender(<Harness runs={[run('r1')]} selectedRunId="r2" />);
+    rerender(<Harness runs={runs} selectedRunId="r2" />);
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect(row('r1')).toHaveFocus();
+
+    rerender(<Harness runs={runs} selectedRunId="r3" />);
+    rerender(<Harness runs={runs} selectedRunId="r2" />);
+    expect(scrolled).toHaveBeenCalledTimes(2);
+    expect(scrolled.mock.contexts[1]).toBe(row('r2'));
+  });
+
   it('moves focus to the newly selected row when a row had it, and leaves it elsewhere', () => {
     const runs = [run('r1'), run('r2')];
     const { rerender } = render(<Harness runs={runs} selectedRunId="r1" />);
@@ -710,8 +792,10 @@ describe('RunRail selection and focus', () => {
   });
 
   it('keeps focus on a row a refetch moves from Active to Needs you', () => {
-    const { rerender } = render(<Harness runs={[run('a1', { created_at: 200 }), run('a2', { created_at: 100 })]} />);
+    const runs = [run('a1', { created_at: 200 }), run('a2', { created_at: 100 })];
+    const { rerender } = render(<Harness runs={runs} />);
     act(() => row('a2').focus());
+    rerender(<Harness runs={[...runs]} />);
 
     rerender(<Harness runs={[run('a1', { created_at: 200 }), run('a2', { created_at: 100, awaiting: 1 })]} />);
 
@@ -729,12 +813,49 @@ describe('RunRail selection and focus', () => {
     expect(row('f-09')).toHaveFocus();
   });
 
+  it('gives focus to the row now at the index the focused row had in the last render', () => {
+    const x1 = run('x1', { state: 'done', updated_at: NOW - 30 });
+    const x2 = run('x2', { state: 'done', updated_at: NOW });
+    const { rerender } = render(<Harness runs={finishedRuns(12)} />);
+    act(() => row('f-09').focus());
+
+    rerender(<Harness runs={[...finishedRuns(12), x1]} />);
+    rerender(<Harness runs={[...finishedRuns(12), x1, x2]} />);
+
+    expect(screen.queryByRole('link', { name: /^f-09,/ })).toBeNull();
+    expect(row('f-08')).toHaveFocus();
+  });
+
+  it('forgets a row focus left for nothing (a click elsewhere), so a refetch that moves it takes no focus', async () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const { rerender } = render(<Harness runs={[run('a1', { created_at: 200 }), run('a2', { created_at: 100 })]} />);
+    act(() => row('a2').focus());
+    await act(async () => row('a2').blur());
+
+    rerender(<Harness runs={[run('a1', { created_at: 200 }), run('a2', { created_at: 100, awaiting: 1 })]} />);
+
+    expect(document.body).toHaveFocus();
+  });
+
+  it('still follows a row that lost focus with the window when a refetch moves it', async () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    const { rerender } = render(<Harness runs={[run('a1', { created_at: 200 }), run('a2', { created_at: 100 })]} />);
+    act(() => row('a2').focus());
+    await act(async () => row('a2').blur());
+
+    rerender(<Harness runs={[run('a1', { created_at: 200 }), run('a2', { created_at: 100, awaiting: 1 })]} />);
+
+    expect(row('a2')).toHaveFocus();
+  });
   it('gives focus to the filter box when the focused row and its group are gone', () => {
     const { rerender } = render(<Harness runs={[run('n1', { awaiting: 1 }), run('a1')]} />);
     act(() => row('n1').focus());
+    const focused = vi.spyOn(HTMLElement.prototype, 'focus');
 
     rerender(<Harness runs={[run('a1')]} />);
 
     expect(filterBox()).toHaveFocus();
+    expect(focused).toHaveBeenCalledTimes(1);
+    expect(focused).toHaveBeenCalledWith({ preventScroll: true });
   });
 });

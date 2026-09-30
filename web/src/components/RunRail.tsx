@@ -237,15 +237,24 @@ export default function RunRail({
   const focusedRow = useRef<FocusedRow | null>(null);
   const beforeFilter = useRef<HTMLElement | null>(null);
   const shownBeforeMore = useRef<Set<string> | null>(null);
+  // The ds Input sets `outline: none` on its <input>, so the ring goes on its wrapper.
+  const [filterFocused, setFilterFocused] = useState(false);
   const visible = [...groups.needsYou, ...groups.active, ...groups.finished];
   const total = visible.length + groups.moreFinished + groups.hiddenCount;
   const selectedShown = visible.some((r) => r.id === selectedRunId);
 
   // A new selection scrolls into view, and takes focus when a row had it
-  // (`[` / `]` pressed on a row). A background refetch does neither.
+  // (`[` / `]` pressed on a row). A background refetch does neither. Once per
+  // selection: when its row first appears (a deep link before the list
+  // loads), not again when a refetch hides and re-shows it.
+  const actedOnSelection = useRef(false);
+  useEffect(() => {
+    actedOnSelection.current = false;
+  }, [selectedRunId]);
   useEffect(() => {
     const el = selectedRunId == null ? undefined : rows.current.get(selectedRunId);
-    if (!el) return;
+    if (!el || actedOnSelection.current) return;
+    actedOnSelection.current = true;
     el.scrollIntoView({ block: 'nearest' });
     const focused = document.activeElement;
     if (focused !== el && [...rows.current.values()].some((row) => row === focused)) el.focus();
@@ -253,10 +262,15 @@ export default function RunRail({
 
   // A refetch that moves the focused row to another group or behind the cap
   // unmounts it: focus follows the run, else the row now in its old place in
-  // that group, else the filter box. Nothing scrolls.
+  // that group, else the filter box. Nothing scrolls. While the row is mounted,
+  // its index is kept to the last render's.
   useEffect(() => {
     const was = focusedRow.current;
-    if (!was || was.el.isConnected) return;
+    if (!was) return;
+    if (was.el.isConnected) {
+      was.index = groups[was.group].findIndex((r) => r.id === was.id);
+      return;
+    }
     focusedRow.current = null;
     if (document.activeElement !== document.body) return;
     const inPlace = groups[was.group][was.index];
@@ -274,11 +288,13 @@ export default function RunRail({
   }, [groups]);
 
   function onFilterFocus(e: FocusEvent<HTMLInputElement>) {
+    setFilterFocused(true);
     const from = e.relatedTarget;
     beforeFilter.current = from instanceof HTMLElement && from !== document.body ? from : null;
   }
 
   function onFilterKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.nativeEvent.isComposing) return; // Enter / Escape ending IME input
     if (e.key === 'Enter') {
       if (visible.length > 0) rows.current.get(visible[0].id)?.click();
     } else if (e.key === 'Escape') {
@@ -374,7 +390,13 @@ export default function RunRail({
                 value={rail.filter}
                 onChange={(e: any) => rail.setFilter(e.target?.value ?? e)}
                 onFocus={onFilterFocus}
+                onBlur={() => setFilterFocused(false)}
                 onKeyDown={onFilterKeyDown}
+                style={{
+                  borderRadius: 'var(--radius-lg)',
+                  outline: filterFocused ? '2px solid var(--focus-ring)' : undefined,
+                  outlineOffset: 2,
+                }}
               />
               <div role="group" aria-label="Playbooks" style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                 {playbooks.map((playbook) => {
@@ -434,8 +456,16 @@ export default function RunRail({
                           onFocus={(el) => {
                             focusedRow.current = { id: run.id, group: key, index, el };
                           }}
-                          onBlur={(movedTo) => {
-                            if (movedTo) focusedRow.current = null;
+                          onBlur={(el) => {
+                            // Forget the row once focus really left it (to another
+                            // element or a click on nothing); keep it while the row
+                            // is being removed or the window lost focus, so the
+                            // refetch rehoming above can follow it.
+                            queueMicrotask(() => {
+                              if (focusedRow.current?.el === el && el.isConnected && document.hasFocus()) {
+                                focusedRow.current = null;
+                              }
+                            });
                           }}
                         />
                       ))}
@@ -464,7 +494,7 @@ type RailRowProps = {
   now: number;
   rowRef: (el: HTMLAnchorElement | null) => void;
   onFocus: (el: HTMLAnchorElement) => void;
-  onBlur: (movedTo: EventTarget | null) => void;
+  onBlur: (el: HTMLAnchorElement) => void;
 };
 
 function RailRow({ run, ended, selected, href, now, rowRef, onFocus, onBlur }: RailRowProps) {
@@ -488,7 +518,7 @@ function RailRow({ run, ended, selected, href, now, rowRef, onFocus, onBlur }: R
         aria-describedby={describedBy}
         aria-current={selected ? 'page' : undefined}
         onFocus={(e) => onFocus(e.currentTarget)}
-        onBlur={(e) => onBlur(e.relatedTarget)}
+        onBlur={(e) => onBlur(e.currentTarget)}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
         style={{
