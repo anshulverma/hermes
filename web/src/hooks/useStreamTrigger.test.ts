@@ -112,4 +112,47 @@ describe('useStreamTrigger', () => {
     advance(5000);
     expect(onTrigger).toHaveBeenCalledTimes(1);
   });
+
+  it('an event already handled does not trigger again when a later one arrives', () => {
+    const { onTrigger, push, advance } = setup();
+    push(ev(1));
+    advance(2000);
+    expect(onTrigger).toHaveBeenCalledTimes(2);
+    push(ev(2, null, 'crew_health'));
+    advance(5000);
+    expect(onTrigger).toHaveBeenCalledTimes(2);
+  });
+
+  it('a new match applies to events in the same render', () => {
+    const onTrigger = vi.fn();
+    const hook = renderHook(
+      ({ events, sel }: { events: Event[]; sel: string }) =>
+        useStreamTrigger(events, (e) => e.run_id === sel, onTrigger),
+      { initialProps: { events: [] as Event[], sel: 'a' } },
+    );
+    act(() => {
+      hook.rerender({ events: [ev(1, 'b')], sel: 'b' });
+    });
+    expect(onTrigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('the trailing call uses the latest onTrigger', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const hook = renderHook(
+      ({ events, cb }: { events: Event[]; cb: () => void }) => useStreamTrigger(events, namesARun, cb),
+      { initialProps: { events: [] as Event[], cb: first } },
+    );
+    act(() => {
+      hook.rerender({ events: [ev(1)], cb: first });
+    });
+    act(() => {
+      hook.rerender({ events: [ev(1)], cb: second });
+    });
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+  });
 });

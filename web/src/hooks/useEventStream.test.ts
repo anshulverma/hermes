@@ -304,6 +304,14 @@ describe('useEventStream', () => {
       expect(capturedUrl).toContain('since=77');
     });
 
+    it('resumes with since=0 when hello reports an empty table', () => {
+      renderHook(() => useEventStream());
+      send({ type: 'hello', last_id: 0 });
+      dropAndReconnect();
+
+      expect(capturedUrl).toContain('since=0');
+    });
+
     it('resumes from the last event received', () => {
       const { result } = renderHook(() => useEventStream());
       send({ type: 'hello', last_id: 77 });

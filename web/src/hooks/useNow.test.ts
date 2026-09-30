@@ -11,7 +11,8 @@ const T0 = 1_750_000_000; // epoch seconds
 describe('useNow', () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.setSystemTime(T0 * 1000);
+    // Half a second past T0: useNow must still report whole seconds.
+    vi.setSystemTime(T0 * 1000 + 500);
   });
 
   afterEach(() => {

@@ -121,6 +121,13 @@ describe('useLiveTick', () => {
     expect(result.current).toBe(1);
   });
 
+  it('with runId null counts every run', () => {
+    const { result, push } = setup(TICKET_EVENT_KINDS, null);
+
+    push(makeEvent(1, 'ticket_claimed', 'run-b'));
+    expect(result.current).toBe(1);
+  });
+
   it('CREW_EVENT_KINDS: increments on crew_added and on work changing hands', () => {
     const { result, push } = setup(CREW_EVENT_KINDS);
 
