@@ -254,4 +254,92 @@ describe('RunControl', () => {
       expect(fetch).not.toHaveBeenCalled();
     });
   });
+
+  describe('Focus after a state change', () => {
+    const succeed = (state: string) =>
+      (globalThis.fetch as any).mockResolvedValue({ ok: true, json: async () => ({ state }) });
+
+    it('moves focus to Resume once the refetched state replaces Pause', async () => {
+      succeed('paused');
+      const onSuccess = vi.fn();
+      const { rerender } = render(<RunControl runId="run-001" runState="running" onSuccess={onSuccess} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+      await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+      rerender(<RunControl runId="run-001" runState="paused" onSuccess={onSuccess} />);
+
+      expect(screen.getByRole('button', { name: 'Resume' })).toHaveFocus();
+    });
+
+    it('moves focus to Pause once the refetched state replaces Resume', async () => {
+      succeed('running');
+      const onSuccess = vi.fn();
+      const { rerender } = render(<RunControl runId="run-001" runState="paused" onSuccess={onSuccess} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
+      await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+      rerender(<RunControl runId="run-001" runState="running" onSuccess={onSuccess} />);
+
+      expect(screen.getByRole('button', { name: 'Pause' })).toHaveFocus();
+    });
+
+    it('moves focus to Reopen after a confirmed Stop', async () => {
+      succeed('stopped');
+      const onSuccess = vi.fn();
+      const { rerender } = render(<RunControl runId="run-001" runState="running" onSuccess={onSuccess} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+      await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+      rerender(<RunControl runId="run-001" runState="stopped" onSuccess={onSuccess} />);
+
+      expect(screen.getByRole('button', { name: 'Reopen' })).toHaveFocus();
+    });
+
+    it('moves focus to Pause after Reopen', async () => {
+      succeed('running');
+      const onSuccess = vi.fn();
+      const { rerender } = render(<RunControl runId="run-001" runState="done" onSuccess={onSuccess} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Reopen' }));
+      await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+      rerender(<RunControl runId="run-001" runState="running" onSuccess={onSuccess} />);
+
+      expect(screen.getByRole('button', { name: 'Pause' })).toHaveFocus();
+    });
+
+    it('focuses Cancel when the Stop confirmation opens and returns focus to Stop on Cancel', () => {
+      render(<RunControl runId="run-001" runState="running" onSuccess={vi.fn()} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+      expect(screen.getByRole('button', { name: 'Stop' })).toHaveFocus();
+    });
+
+    it('leaves focus alone when the state changes without a press here', () => {
+      const { rerender } = render(<RunControl runId="run-001" runState="running" onSuccess={vi.fn()} />);
+
+      rerender(<RunControl runId="run-001" runState="paused" onSuccess={vi.fn()} />);
+
+      expect(screen.getByRole('button', { name: 'Resume' })).not.toHaveFocus();
+      expect(document.body).toHaveFocus();
+    });
+
+    it('does not move focus after a control fails', async () => {
+      (globalThis.fetch as any).mockResolvedValue({
+        ok: false,
+        status: 409,
+        json: async () => ({ detail: 'illegal transition running->paused' }),
+      });
+      const { rerender } = render(<RunControl runId="run-001" runState="running" onSuccess={vi.fn()} />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+      await screen.findByText('illegal transition running->paused');
+      rerender(<RunControl runId="run-001" runState="paused" onSuccess={vi.fn()} />);
+
+      expect(screen.getByRole('button', { name: 'Resume' })).not.toHaveFocus();
+    });
+  });
 });

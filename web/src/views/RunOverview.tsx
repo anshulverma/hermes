@@ -8,7 +8,6 @@ import type { RunDetail, Phase } from '../api/client';
 import { deriveContext } from '../api/normalize';
 import { StatTile, Card, StatusPill } from '../ds';
 import PlaybookDialog from '../components/PlaybookDialog';
-import RunControl from '../components/RunControl';
 import { fmtTime } from '../util/time';
 
 type PhaseTimelineProps = {
@@ -127,10 +126,9 @@ function ProgressBar({ done, total }: ProgressBarProps) {
 
 type RunOverviewProps = {
   run: RunDetail;
-  onRunUpdate?: () => void;
 };
 
-export default function RunOverview({ run, onRunUpdate }: RunOverviewProps) {
+export default function RunOverview({ run }: RunOverviewProps) {
   const [playbookOpen, setPlaybookOpen] = useState(false);
 
   const context = deriveContext(run);
@@ -233,11 +231,6 @@ export default function RunOverview({ run, onRunUpdate }: RunOverviewProps) {
 
           {/* Phase timeline */}
           <PhaseTimeline phases={run.phases} runState={run.state} />
-
-          {/* Run controls (Pause/Resume/Stop) - Phase D1b */}
-          <Divider />
-
-          <RunControl runId={run.id} runState={run.state} onSuccess={onRunUpdate} />
         </Card>
       </div>
 

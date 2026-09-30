@@ -3,7 +3,7 @@
  * Phase D1b: legal-transitions-only, auth headers, 409 handling.
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { pauseRun, resumeRun, stopRun, reopenRun, AuthError } from '../api/client';
 
 type RunControlProps = {
@@ -16,6 +16,31 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showStopConfirm, setShowStopConfirm] = useState(false);
+
+  // Focus follows the control that replaces the pressed one: Resume after
+  // Pause, Pause after Resume or Reopen, Reopen after a confirmed Stop. Only a
+  // success here arms it, so a background state change never moves focus.
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  const stopRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const focusPrimary = useRef(false);
+  const focusStop = useRef(false);
+
+  useEffect(() => {
+    if (!focusPrimary.current) return;
+    focusPrimary.current = false;
+    primaryRef.current?.focus();
+  }, [runState]);
+
+  // Opening the Stop confirmation focuses Cancel; Cancel hands focus back to Stop.
+  useEffect(() => {
+    if (showStopConfirm) {
+      cancelRef.current?.focus();
+    } else if (focusStop.current) {
+      focusStop.current = false;
+      stopRef.current?.focus();
+    }
+  }, [showStopConfirm]);
 
   // Determine legal actions based on run state
   const canPause = runState === 'running';
@@ -31,6 +56,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
 
     try {
       await pauseRun(runId);
+      focusPrimary.current = true;
       onSuccess?.();
     } catch (e: any) {
       if (e instanceof AuthError) {
@@ -49,6 +75,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
 
     try {
       await resumeRun(runId);
+      focusPrimary.current = true;
       onSuccess?.();
     } catch (e: any) {
       if (e instanceof AuthError) {
@@ -67,6 +94,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
 
     try {
       await reopenRun(runId);
+      focusPrimary.current = true;
       onSuccess?.();
     } catch (e: any) {
       if (e instanceof AuthError) {
@@ -86,6 +114,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
 
     try {
       await stopRun(runId);
+      focusPrimary.current = true;
       onSuccess?.();
     } catch (e: any) {
       if (e instanceof AuthError) {
@@ -99,6 +128,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
   }
 
   function handleStopCancel() {
+    focusStop.current = true;
     setShowStopConfirm(false);
   }
 
@@ -107,6 +137,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <button
+            ref={primaryRef}
             onClick={handleReopen}
             disabled={loading}
             title="Put this finished run back to running so its tickets dispatch again"
@@ -138,6 +169,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
       <div style={{ display: 'flex', gap: 8 }}>
         {canPause && (
           <button
+            ref={primaryRef}
             onClick={handlePause}
             disabled={loading}
             style={{
@@ -156,6 +188,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
 
         {canResume && (
           <button
+            ref={primaryRef}
             onClick={handleResume}
             disabled={loading}
             style={{
@@ -174,6 +207,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
 
         {canStop && !showStopConfirm && (
           <button
+            ref={stopRef}
             onClick={() => setShowStopConfirm(true)}
             disabled={loading}
             style={{
@@ -223,6 +257,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
               {loading ? 'Stopping...' : 'Confirm'}
             </button>
             <button
+              ref={cancelRef}
               onClick={handleStopCancel}
               disabled={loading}
               style={{

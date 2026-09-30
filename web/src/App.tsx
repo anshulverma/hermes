@@ -12,6 +12,7 @@ import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 're
 import TopBar from './components/TopBar';
 import RunRail, { defaultRunId, railGroups, useRailState } from './components/RunRail';
 import RunOverview from './views/RunOverview';
+import RunHeader from './components/RunHeader';
 import MetricsView from './views/MetricsView';
 import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
@@ -201,6 +202,11 @@ export default function App() {
   const paneError = detailError && detailError.id === selectedId ? detailError.error : null;
   // Drawn from the list row at once; from the detail when the list failed.
   const headerRun: Run | RunDetail | null = row ?? paneDetail;
+  // ‹ › go where `[` / `]` go (stepRun), on the same run tab, dropping `?ticket=`.
+  const stepHref = (dir: -1 | 1) => {
+    const to = stepRun(visible, selectedId, dir);
+    return to && route.page === 'run' ? buildRoute({ ...route, runId: to.id, ticket: null }) : null;
+  };
 
   // "<id> isn't in this home", shown until the next route change.
   const [note, setNote] = useState<{ id: string; route: Route } | null>(null);
@@ -418,20 +424,7 @@ export default function App() {
     const tab = route.tab;
     pane = (
       <>
-        <div style={{ padding: '16px 20px 0' }}>
-          <h1
-            tabIndex={-1}
-            style={{
-              margin: 0,
-              fontSize: 16,
-              fontWeight: 600,
-              fontFamily: 'var(--font-mono)',
-              color: 'var(--text-primary)',
-            }}
-          >
-            {headerRun.id} · {headerRun.playbook}
-          </h1>
-        </div>
+        <RunHeader run={headerRun} prevHref={stepHref(-1)} nextHref={stepHref(1)} onRunUpdate={onRunUpdate} />
         <nav
           aria-label="Run tabs"
           style={{ display: 'flex', gap: 4, padding: '8px 16px', borderBottom: '1px solid var(--border-hairline)' }}
@@ -451,7 +444,7 @@ export default function App() {
         <div key={id} style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {paneDetail ? (
             <>
-              {tab === 'summary' && <RunOverview run={paneDetail} onRunUpdate={onRunUpdate} />}
+              {tab === 'summary' && <RunOverview run={paneDetail} />}
               {tab === 'tickets' && (
                 <TicketBoard runId={id} phases={paneDetail.phases.map((p) => p.name)} liveTick={ticketLiveTick} />
               )}
