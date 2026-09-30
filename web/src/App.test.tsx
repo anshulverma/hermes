@@ -195,6 +195,19 @@ describe('App', () => {
     expect(within(tabs).getByRole('link', { name: 'Summary' })).not.toHaveAttribute('aria-current');
   });
 
+  it("refreshes Outputs on a finding event for the run on screen, never on another run's", async () => {
+    mockHome([run('run-001'), run('run-002')]);
+    go('#/runs/run-001/outputs');
+    const { rerender } = render(<App />);
+    await waitFor(() => expect(client.fetchReductions).toHaveBeenCalledTimes(1));
+
+    await deliver(rerender, ev('reduction_created', 'run-002'));
+    expect(client.fetchReductions).toHaveBeenCalledTimes(1);
+
+    await deliver(rerender, ev('reduction_created', 'run-001'));
+    await waitFor(() => expect(client.fetchReductions).toHaveBeenCalledTimes(2));
+  });
+
   it('should handle API error gracefully', async () => {
     // The global error covers health only; a runs failure shows in the rail.
     vi.mocked(client.fetchHealth).mockRejectedValue(new Error('Network error'));
@@ -351,11 +364,18 @@ describe('App', () => {
       mockRuns(noView('run-001'));
       go('#/runs/run-001/summary');
 
-      render(<App />);
+      const { rerender } = render(<App />);
 
       await waitFor(() => expect(screen.getByTestId('phase-rail')).toBeInTheDocument());
       expect(screen.getByText('work 18')).toBeInTheDocument();
       expect(screen.queryByTestId('playbook-view')).toBeNull();
+
+      // Summary reads the app's one event stream: an event lists in Recent events and refreshes the blocks.
+      const recent = screen.getByRole('region', { name: 'Recent events' });
+      await within(recent).findByText('No events.');
+      await deliver(rerender, ev('result_recorded', 'run-001'));
+      expect(await within(recent).findByText('result_recorded')).toBeInTheDocument();
+      await waitFor(() => expect(client.fetchRunMetrics).toHaveBeenCalledTimes(2));
     });
 
     it('hands the view the finding tick for the selected run only', async () => {

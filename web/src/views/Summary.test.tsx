@@ -4,7 +4,7 @@
  * loader is stubbed; its own rules are pinned in PlaybookView.test.tsx.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import Summary from './Summary';
 import * as client from '../api/client';
@@ -82,10 +82,12 @@ function event(id: number, run_id: string | null, kind: string): Event {
 /** A promise the test settles itself. */
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe('Summary', () => {
@@ -97,7 +99,12 @@ describe('Summary', () => {
     vi.mocked(client.fetchReductions).mockResolvedValue([]);
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('shows the key numbers: tickets, done, in flight, parked, failed, queued, retry rate and mean time to result', async () => {
+    vi.mocked(client.fetchRunMetrics).mockResolvedValue(metricsFor(8, 1 / 3, 90));
     render(<Summary run={run} streamEvents={[]} viewTick={0} />);
 
     expect(screen.getByText('72')).toBeInTheDocument(); // every state
@@ -108,7 +115,8 @@ describe('Summary', () => {
     expect(screen.getByText('4')).toBeInTheDocument(); // parked
     expect(screen.getByText('2')).toBeInTheDocument(); // failed
     expect(screen.getByText('15')).toBeInTheDocument(); // queued
-    expect(await screen.findByText('25%')).toBeInTheDocument();
+    // Rounded to the nearest whole percent: 33.3 reads 33%, not 34%.
+    expect(await screen.findByText('33%')).toBeInTheDocument();
     expect(screen.getByText('retry rate')).toBeInTheDocument();
     expect(screen.getByText('mean time to result')).toBeInTheDocument();
     expect(screen.getByText('1m 30s')).toBeInTheDocument();
@@ -329,6 +337,8 @@ describe('Summary', () => {
   });
 
   it("refetches metrics, waiting items and phase headlines on an event for this run, never on another run's", async () => {
+    const mountMetrics = deferred<RunMetrics>();
+    vi.mocked(client.fetchRunMetrics).mockReturnValueOnce(mountMetrics.promise);
     const { rerender } = render(<Summary run={run} streamEvents={[]} viewTick={0} />);
     await waitFor(() => expect(client.fetchRunMetrics).toHaveBeenCalledTimes(1));
     expect(client.fetchNeedsYou).toHaveBeenCalledTimes(1);
@@ -345,60 +355,119 @@ describe('Summary', () => {
     expect(client.fetchNeedsYou).toHaveBeenCalledTimes(2);
     expect(client.fetchReductions).toHaveBeenCalledTimes(2);
     expect(client.fetchEvents).toHaveBeenCalledTimes(1);
+
+    // The refetch answers first; the mount fetch's older answer, landing after it, is dropped.
+    expect(await screen.findByText('25%')).toBeInTheDocument();
+    await act(async () => {
+      mountMetrics.resolve(metricsFor(8, 0.5, 90));
+    });
+    expect(screen.getByText('25%')).toBeInTheDocument();
+    expect(screen.queryByText('50%')).toBeNull();
+  });
+
+  it('fills in on a busy run even when a fetch takes longer than the refresh window', async () => {
+    // An event every second and a 2.5 s fetch: every refresh starts before the
+    // one before it answers, and an answer newer than what is shown still lands.
+    vi.useFakeTimers();
+    vi.mocked(client.fetchRunMetrics).mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(metricsFor(8, 0.25, 90)), 2500)),
+    );
+    let stream: Event[] = [];
+    const { rerender } = render(<Summary run={run} streamEvents={stream} viewTick={0} />);
+
+    for (let id = 1; id <= 10; id++) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      stream = [...stream, event(id, 'run-001', 'result_recorded')];
+      rerender(<Summary run={run} streamEvents={stream} viewTick={0} />);
+    }
+
+    expect(screen.getByText('25%')).toBeInTheDocument();
   });
 
   it('shows its own alert and Retry when a block fails, and renders the rest', async () => {
     vi.mocked(client.fetchRunMetrics).mockRejectedValueOnce(new Error('boom'));
     vi.mocked(client.fetchEvents).mockRejectedValueOnce(new Error('boom'));
+    vi.mocked(client.fetchNeedsYou).mockRejectedValueOnce(new Error('boom'));
+    vi.mocked(client.fetchReductions).mockRejectedValueOnce(new Error('boom'));
     render(<Summary run={run} streamEvents={[]} viewTick={0} />);
 
-    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(2));
+    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(4));
     expect(screen.getByText("Couldn't load metrics.")).toBeInTheDocument();
     expect(screen.getByText("Couldn't load recent events.")).toBeInTheDocument();
+    const waiting = screen.getByRole('region', { name: 'Waiting on you here' });
+    expect(within(waiting).getByRole('alert')).toHaveTextContent("Couldn't load waiting items.");
+    expect(screen.getByText("Couldn't load phase headlines.")).toBeInTheDocument();
     expect(screen.getByText('72')).toBeInTheDocument();
-    expect(screen.getByText('Nothing waiting on you in this run.')).toBeInTheDocument();
     expect(screen.getByTestId('phase-rail')).toBeInTheDocument();
 
-    const metricsAlert = screen.getByText("Couldn't load metrics.").closest('[role="alert"]') as HTMLElement;
-    fireEvent.click(within(metricsAlert).getByRole('button', { name: 'Retry' }));
+    const alertFor = (text: string) => screen.getByText(text).closest('[role="alert"]') as HTMLElement;
+    fireEvent.click(within(alertFor("Couldn't load metrics.")).getByRole('button', { name: 'Retry' }));
 
     expect(await screen.findByText('25%')).toBeInTheDocument();
-    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getAllByRole('alert')).toHaveLength(3);
     expect(client.fetchRunMetrics).toHaveBeenCalledTimes(2);
+    expect(client.fetchNeedsYou).toHaveBeenCalledTimes(1);
+    expect(client.fetchReductions).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(within(within(waiting).getByRole('alert')).getByRole('button', { name: 'Retry' }));
+    expect(await within(waiting).findByText('Nothing waiting on you in this run.')).toBeInTheDocument();
+    expect(within(waiting).queryByRole('alert')).toBeNull();
+
+    vi.mocked(client.fetchReductions).mockResolvedValue([reduction(1, 'work', 'k', { title: 'Back' })]);
+    fireEvent.click(within(alertFor("Couldn't load phase headlines.")).getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByRole('link', { name: 'Back' })).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load phase headlines.")).toBeNull();
+
+    // Only the block that was retried refetched: recent events still show their alert.
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
     expect(client.fetchEvents).toHaveBeenCalledTimes(1);
   });
 
-  it('drops metrics, waiting items and events that land after a switch to another run', async () => {
+  it('drops metrics, waiting items, events, headlines and errors that land after a switch to another run', async () => {
     const metricsA = deferred<RunMetrics>();
     const waitingA = deferred<Waiting>();
     const eventsA = deferred<Event[]>();
+    const eventsB = deferred<Event[]>();
     vi.mocked(client.fetchRunMetrics).mockImplementation((id: string) =>
-      id === 'run-001' ? metricsA.promise : Promise.resolve(metricsFor(4, 0.5, 30)),
+      id === 'run-001' ? metricsA.promise : Promise.resolve(metricsFor(4, 2 / 3, 30)),
     );
     vi.mocked(client.fetchNeedsYou)
       .mockReturnValueOnce(waitingA.promise)
       .mockResolvedValueOnce([waitingItem(2, 'run-002', 'Fresh B item', nowS() - 60)]);
     vi.mocked(client.fetchEvents).mockImplementation((filters) =>
-      filters?.run === 'run-001' ? eventsA.promise : Promise.resolve([event(20, 'run-002', 'kind-b')]),
+      filters?.run === 'run-001' ? eventsA.promise : eventsB.promise,
     );
+    vi.mocked(client.fetchReductions).mockImplementation(async (id: string) => [
+      reduction(1, 'work', 'k', { title: id === 'run-001' ? 'A headline' : 'B headline' }),
+    ]);
 
     const { rerender } = render(<Summary run={run} streamEvents={[]} viewTick={0} />);
     rerender(<Summary run={{ ...run, id: 'run-002' }} streamEvents={[]} viewTick={0} />);
-    expect(await screen.findByText('50%')).toBeInTheDocument();
+    // Rounded to the nearest whole percent: 66.7 reads 67%, not 66%.
+    expect(await screen.findByText('67%')).toBeInTheDocument();
     expect(await screen.findByText('Fresh B item')).toBeInTheDocument();
-    expect(await screen.findByText('kind-b')).toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: 'B headline' })).toBeInTheDocument();
 
-    // run-001's answers arrive late, after the switch.
+    // run-001's answers arrive late, after the switch; its metrics fail. Its
+    // events even land before run-002's, and are dropped all the same.
     await act(async () => {
-      metricsA.resolve(metricsFor(4, 0.25, 90));
+      metricsA.reject(new Error('boom'));
       waitingA.resolve([waitingItem(1, 'run-002', 'Stale B item', nowS() - 60)]);
       eventsA.resolve([event(10, 'run-001', 'kind-a')]);
     });
 
-    expect(screen.getByText('50%')).toBeInTheDocument();
-    expect(screen.queryByText('25%')).toBeNull();
+    expect(screen.getByText('67%')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByRole('link', { name: 'A headline' })).toBeNull();
     expect(screen.getByText('Fresh B item')).toBeInTheDocument();
     expect(screen.queryByText('Stale B item')).toBeNull();
+    expect(screen.queryByText('kind-a')).toBeNull();
+
+    await act(async () => {
+      eventsB.resolve([event(20, 'run-002', 'kind-b')]);
+    });
     expect(screen.getByText('kind-b')).toBeInTheDocument();
     expect(screen.queryByText('kind-a')).toBeNull();
   });

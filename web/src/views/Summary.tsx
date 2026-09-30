@@ -7,7 +7,7 @@
  * state, elapsed time, progress and controls, so none of them repeat here.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchEvents, fetchNeedsYou, fetchReductions, fetchRunMetrics } from '../api/client';
 import type { Event, Phase, Reduction, RunDetail, RunMetrics } from '../api/client';
 import { StatTile, StatusPill } from '../ds';
@@ -32,28 +32,44 @@ type Block<T> = { data: T | null; error: Error | null; reload: () => void };
  * One block's fetch. A reload keeps what is on screen until the new response
  * lands, and a response that lands after the block has moved on (another run,
  * an unmount) is dropped instead of drawn under the wrong run.
+ *
+ * A reload does not cancel the fetch before it: on a busy run the next reload
+ * starts before a slow response lands, and cancelling would keep the block
+ * empty. Each fetch takes a number instead, and among one run's responses only
+ * one newer than the last applied is drawn (the useRuns rule).
  */
 function useBlock<T>(load: (() => Promise<T>) | null): Block<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [reloads, setReloads] = useState(0);
+  // The load of the run on screen: another run or an unmount replaces it.
+  const shown = useRef(load);
+  const issued = useRef(0);
+  const applied = useRef(0);
+
+  useEffect(() => {
+    shown.current = load;
+    return () => {
+      shown.current = null;
+    };
+  }, [load]);
 
   useEffect(() => {
     if (!load) return;
-    let current = true;
-    load().then(
-      (value) => {
-        if (!current) return;
-        setData(value);
-        setError(null);
-      },
-      (err: Error) => {
-        if (current) setError(err);
-      },
-    );
-    return () => {
-      current = false;
+    const seq = ++issued.current;
+    const apply = (draw: () => void) => {
+      if (shown.current !== load || seq <= applied.current) return;
+      applied.current = seq;
+      draw();
     };
+    load().then(
+      (value) =>
+        apply(() => {
+          setData(value);
+          setError(null);
+        }),
+      (err: Error) => apply(() => setError(err)),
+    );
   }, [load, reloads]);
 
   const reload = useCallback(() => setReloads((n) => n + 1), []);
