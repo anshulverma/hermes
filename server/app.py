@@ -9,7 +9,7 @@ import secrets
 import stat
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Annotated, Optional
+from typing import Any, Annotated, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Query
 from fastapi.responses import HTMLResponse, FileResponse, Response
@@ -1102,24 +1102,43 @@ def create_app(bind: str | None = None) -> FastAPI:
         since: int = 0,
         kind: str | None = None,
         limit: int = 200,
+        order: Literal["asc", "desc"] = "asc",
+        run: str | None = None,
+        before: int | None = None,
         _: None = Depends(require_auth_read)
     ) -> list[dict[str, Any]]:
         """Get events from the event feed.
 
         Query params (all optional):
-        - since: Return events with id > since (default 0)
+        - order: 'asc' (default) or 'desc'; anything else is a 422
+        - since: order=asc only; return events with id > since (default 0)
         - kind: Filter to specific event kind (default None = all kinds)
-        - limit: Max number of events to return (default 200)
+        - limit: Max number of events to return (default 200; 1..1000 with order=desc)
+        - run: order=desc only; only this run's events (empty = absent)
+        - before: order=desc only; only events with id < before
 
-        Returns events ordered by id ascending with fields:
+        order=asc returns events ordered by id ascending (events.since); order=desc
+        returns the newest first (events.latest). Fields:
         id, ts, kind, run_id, ticket_id, host, message, data (parsed).
         """
         from engine import events
+
+        run = run or None  # an empty run counts as absent
+        if order == "asc":
+            if run is not None or before is not None:
+                raise HTTPException(status_code=400, detail="run and before need order=desc")
+        else:
+            if since != 0:
+                raise HTTPException(status_code=400, detail="since needs order=asc")
+            if not 1 <= limit <= 1000:
+                raise HTTPException(status_code=400, detail="limit must be between 1 and 1000")
 
         home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
+            if order == "desc":
+                return events.latest(conn, run_id=run, kind=kind, before=before, limit=limit)
             # Reuse events.since with optional kind filter
             return events.since(conn, after_id=since, limit=limit, kind=kind)
         finally:

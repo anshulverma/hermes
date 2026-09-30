@@ -384,3 +384,143 @@ def test_since_kind_with_limit(conn):
     # Should return at most 2 ticket_claimed events
     assert len(rows) == 2
     assert all(r["kind"] == "ticket_claimed" for r in rows)
+
+
+class _SpyConn:
+    """Records every (sql, params) pair handed to execute, then forwards to the real connection."""
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.calls = []
+
+    def execute(self, sql, params=()):
+        self.calls.append((sql, tuple(params)))
+        return self.conn.execute(sql, params)
+
+
+def test_latest_returns_newest_first_in_since_shape(conn):
+    """latest with no filters returns every event newest first, dicts shaped exactly like since()."""
+    from engine.events import emit, latest, since
+
+    emit(conn, "run_started", run_id="r1", message="first", data={"n": 1})
+    emit(conn, "attention", run_id="r1", ticket_id="r1/t-0", host="w1", message="second")
+    emit(conn, "crew_health", host="w2", message="third")
+    conn.commit()
+
+    rows = latest(conn)
+
+    assert [r["message"] for r in rows] == ["third", "second", "first"]
+    assert rows == list(reversed(since(conn, after_id=0)))
+    assert set(rows[0]) == {"id", "ts", "kind", "run_id", "ticket_id", "host", "message", "data"}
+    assert rows[2]["data"] == {"n": 1}
+    # every filter is keyword-only
+    with pytest.raises(TypeError):
+        latest(conn, "r1")
+
+
+def test_latest_filters_by_run_id_and_never_matches_null_run_id(conn):
+    """run_id=X returns only that run's events; a null run_id (crew event) never matches."""
+    from engine.events import emit, latest
+
+    emit(conn, "attention", run_id="r1", message="a")
+    emit(conn, "attention", message="crew")
+    emit(conn, "attention", run_id="r2", message="b")
+    emit(conn, "attention", run_id="r1", message="c")
+    conn.commit()
+
+    assert [r["message"] for r in latest(conn, run_id="r1")] == ["c", "a"]
+    assert [r["message"] for r in latest(conn, run_id="r2")] == ["b"]
+    assert latest(conn, run_id="") == []
+    # without the filter the null-run event is there
+    assert [r["message"] for r in latest(conn)] == ["c", "b", "crew", "a"]
+
+
+def test_latest_filters_by_kind(conn):
+    """kind=X returns only that kind, newest first, across runs and null runs."""
+    from engine.events import emit, latest
+
+    emit(conn, "ticket_claimed", run_id="r1", message="a")
+    emit(conn, "attention", run_id="r1", message="b")
+    emit(conn, "ticket_claimed", message="c")
+    conn.commit()
+
+    assert [r["message"] for r in latest(conn, kind="ticket_claimed")] == ["c", "a"]
+    assert latest(conn, kind="run_done") == []
+
+
+def test_latest_before_is_exclusive(conn):
+    """before=N returns ids strictly below N; before the oldest id returns nothing."""
+    from engine.events import emit, latest
+
+    for i in range(5):
+        emit(conn, "attention", run_id="r1", message=f"e{i}")
+    conn.commit()
+    ids = [r["id"] for r in latest(conn)]  # newest first
+
+    assert [r["id"] for r in latest(conn, before=ids[1])] == ids[2:]
+    assert [r["id"] for r in latest(conn, before=ids[0])] == ids[1:]
+    assert latest(conn, before=ids[-1]) == []
+
+
+def test_latest_combines_run_kind_and_before(conn):
+    """run_id, kind and before together are ANDed."""
+    from engine.events import emit, latest
+
+    emit(conn, "attention", run_id="r1", message="keep-old")
+    emit(conn, "ticket_claimed", run_id="r1", message="wrong-kind")
+    emit(conn, "attention", run_id="r2", message="wrong-run")
+    emit(conn, "attention", message="null-run")
+    emit(conn, "attention", run_id="r1", message="keep-new")
+    emit(conn, "attention", run_id="r1", message="at-before")
+    conn.commit()
+    cutoff = latest(conn, limit=1)[0]["id"]
+
+    rows = latest(conn, run_id="r1", kind="attention", before=cutoff)
+
+    assert [r["message"] for r in rows] == ["keep-new", "keep-old"]
+
+
+def test_latest_respects_limit_and_defaults_to_200(conn):
+    """limit bounds the newest rows returned; the default is 200."""
+    from engine.events import emit, latest
+
+    for i in range(205):
+        emit(conn, "attention", message=f"e{i}")
+    conn.commit()
+
+    assert [r["message"] for r in latest(conn, limit=3)] == ["e204", "e203", "e202"]
+    assert len(latest(conn)) == 200
+    assert latest(conn)[-1]["message"] == "e5"
+    assert len(latest(conn, limit=1000)) == 205
+
+
+def test_latest_binds_every_value_and_omits_where_without_filters(conn):
+    """Every filter value and the limit are bound parameters, never text in the SQL; no WHERE without filters."""
+    from engine.events import emit, latest
+
+    emit(conn, "attention", run_id="r-x")
+    conn.commit()
+    spy = _SpyConn(conn)
+
+    rows = latest(spy, run_id="r-x", kind="attention", before=99, limit=7)
+
+    assert [r["run_id"] for r in rows] == ["r-x"]
+    sql, params = spy.calls[-1]
+    assert params == ("r-x", "attention", 99, 7)
+    for value in ("r-x", "attention", "99", "7"):
+        assert value not in sql
+    assert " ".join(sql.split()) == (
+        "SELECT id, ts, kind, run_id, ticket_id, host, message, data_json FROM events"
+        " WHERE run_id = ? AND kind = ? AND id < ? ORDER BY id DESC LIMIT ?"
+    )
+
+    latest(spy, before=5)
+    sql, params = spy.calls[-1]
+    assert params == (5, 200)
+    assert " ".join(sql.split()).endswith("FROM events WHERE id < ? ORDER BY id DESC LIMIT ?")
+
+    latest(spy)
+    sql, params = spy.calls[-1]
+    assert params == (200,)
+    assert "WHERE" not in sql
+    assert " ".join(sql.split()).endswith("FROM events ORDER BY id DESC LIMIT ?")

@@ -132,6 +132,65 @@ def since(conn: sqlite3.Connection, after_id: int, limit: int = 200, kind: Optio
     return rows
 
 
+def latest(
+    conn: sqlite3.Connection,
+    *,
+    run_id: Optional[str] = None,
+    kind: Optional[str] = None,
+    before: Optional[int] = None,
+    limit: int = 200,
+) -> list[dict]:
+    """
+    Return the newest events first (id descending), optionally filtered.
+
+    Only the filters that are given join the WHERE clause (no WHERE when none);
+    every value is a bound parameter. ``before`` is exclusive (id < before), and
+    ``run_id=X`` never matches an event whose run_id is null.
+
+    Args:
+        conn: SQLite connection
+        run_id: Only this run's events (default None = every run and null runs)
+        kind: Only this event kind (default None = all kinds)
+        before: Only events with id < before (default None = from the newest)
+        limit: Max number of rows to return (default 200)
+
+    Returns:
+        List of event dicts, the same shape as since():
+        id, ts, kind, run_id, ticket_id, host, message, data.
+    """
+    # Build the WHERE from the present filters only: the (? IS NULL OR id < ?) form
+    # would stop SQLite using the rowid range for `before` (SCAN instead of SEARCH).
+    clauses, params = [], []
+    for clause, value in (("run_id = ?", run_id), ("kind = ?", kind), ("id < ?", before)):
+        if value is not None:
+            clauses.append(clause)
+            params.append(value)
+    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    # ponytail: no index on run_id, so a run_id filter walks events newest-first until
+    # `limit` rows match (cheap for a live run, a full scan for an old one); an additive
+    # idx_events_run(run_id, id) migration is the upgrade.
+    rows = conn.execute(
+        "SELECT id, ts, kind, run_id, ticket_id, host, message, data_json FROM events"
+        f"{where} ORDER BY id DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "ts": row[1],
+            "kind": row[2],
+            "run_id": row[3],
+            "ticket_id": row[4],
+            "host": row[5],
+            "message": row[6],
+            "data": json.loads(row[7]) if row[7] else {},
+        }
+        for row in rows
+    ]
+
+
 def tail(conn: sqlite3.Connection, n: int) -> list[dict]:
     """
     Return the last n events (for the CLI).

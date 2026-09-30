@@ -754,6 +754,119 @@ def test_events_kind_and_limit_together(client: TestClient, seeded_run: str, tem
     assert all(e["kind"] == "ticket_claimed" for e in events)
 
 
+def _seed_events(temp_home: Path, rows: list[tuple[str, str | None]]) -> list[int]:
+    """Insert (kind, run_id) events in order into the temp queue.db; return their ids, oldest first."""
+    conn = sqlite3.connect(str(temp_home / "queue.db"))
+    ids = []
+    for i, (kind, run_id) in enumerate(rows):
+        cursor = conn.execute(
+            """INSERT INTO events (ts, kind, run_id, message, data_json)
+               VALUES (?, ?, ?, ?, ?)""",
+            (1000.0 + i, kind, run_id, f"e{i}", "{}"),
+        )
+        ids.append(cursor.lastrowid)
+    conn.commit()
+    conn.close()
+    return ids
+
+
+def test_events_desc_filters_by_run_kind_and_before_together(client: TestClient, temp_home: Path):
+    """GET /api/events?order=desc with run, kind and before ANDs them, newest first, in since()'s row shape."""
+    ids = _seed_events(temp_home, [
+        ("attention", "r1"), ("ticket_claimed", "r1"), ("attention", "r2"),
+        ("attention", None), ("attention", "r1"), ("attention", "r1"),
+    ])
+
+    response = client.get(f"/api/events?order=desc&run=r1&kind=attention&before={ids[5]}")
+
+    assert response.status_code == 200
+    events = response.json()
+    assert [e["id"] for e in events] == [ids[4], ids[0]]
+    assert set(events[0]) == {"id", "ts", "kind", "run_id", "ticket_id", "host", "message", "data"}
+    assert events[0]["run_id"] == "r1"
+    assert events[0]["message"] == "e4"
+    assert events[0]["data"] == {}
+    # no filters: every event, the null-run one included, newest first
+    everything = client.get("/api/events?order=desc").json()
+    assert [e["id"] for e in everything] == ids[::-1]
+
+
+def test_events_desc_pages_with_before_to_a_short_final_page(client: TestClient, temp_home: Path):
+    """Paging back with before=<last id seen> walks newest to oldest, ends on a short page, then []."""
+    ids = _seed_events(temp_home, [("attention", "r1")] * 5)
+
+    first = client.get("/api/events?order=desc&run=r1&limit=2").json()
+    second = client.get(f"/api/events?order=desc&run=r1&limit=2&before={first[-1]['id']}").json()
+    third = client.get(f"/api/events?order=desc&run=r1&limit=2&before={second[-1]['id']}").json()
+
+    assert [e["id"] for e in first] == [ids[4], ids[3]]
+    assert [e["id"] for e in second] == [ids[2], ids[1]]
+    assert [e["id"] for e in third] == [ids[0]]
+    assert client.get(f"/api/events?order=desc&run=r1&limit=2&before={ids[0]}").json() == []
+
+
+def test_events_run_or_before_without_desc_is_400(client: TestClient, temp_home: Path):
+    """run or before with order=asc (the default) is a 400 with the exact detail."""
+    for query in ("run=r1", "before=5", "run=r1&before=5", "order=asc&run=r1", "order=asc&before=5"):
+        response = client.get(f"/api/events?{query}")
+        assert response.status_code == 400, query
+        assert response.json() == {"detail": "run and before need order=desc"}, query
+
+
+def test_events_since_with_desc_is_400(client: TestClient, temp_home: Path):
+    """since other than 0 with order=desc is a 400; since=0 (the default) is allowed."""
+    for query in ("order=desc&since=3", "order=desc&since=-1"):
+        response = client.get(f"/api/events?{query}")
+        assert response.status_code == 400, query
+        assert response.json() == {"detail": "since needs order=asc"}, query
+    assert client.get("/api/events?order=desc&since=0").status_code == 200
+
+
+def test_events_desc_limit_outside_1_to_1000_is_400(client: TestClient, temp_home: Path):
+    """With order=desc, limit must be 1..1000 (a negative SQLite LIMIT would mean unlimited)."""
+    _seed_events(temp_home, [("attention", "r1")] * 3)
+    for limit in (0, -1, 1001):
+        response = client.get(f"/api/events?order=desc&limit={limit}")
+        assert response.status_code == 400, limit
+        assert response.json() == {"detail": "limit must be between 1 and 1000"}, limit
+    assert len(client.get("/api/events?order=desc&limit=1").json()) == 1
+    assert len(client.get("/api/events?order=desc&limit=1000").json()) == 3
+
+
+def test_events_empty_run_counts_as_absent(client: TestClient, temp_home: Path):
+    """run= (empty) is no run filter in either order: not a 400, not a run named ''."""
+    ids = _seed_events(temp_home, [("attention", "r1"), ("attention", None), ("attention", "r2")])
+
+    asc = client.get("/api/events?run=")
+    assert asc.status_code == 200
+    assert [e["id"] for e in asc.json()] == ids
+
+    desc = client.get("/api/events?order=desc&run=")
+    assert desc.status_code == 200
+    assert [e["id"] for e in desc.json()] == ids[::-1]
+
+
+def test_events_bad_order_or_before_is_422(client: TestClient, temp_home: Path):
+    """order outside asc|desc, or an empty / non-integer before, is FastAPI's 422."""
+    for query in ("order=newest", "order=DESC", "order=", "order=desc&before=", "order=desc&before=abc"):
+        assert client.get(f"/api/events?{query}").status_code == 422, query
+
+
+def test_events_default_order_is_unchanged_ascending(client: TestClient, temp_home: Path):
+    """No order (or order=asc) is today's since() path: ascending, with since / kind / limit as before."""
+    ids = _seed_events(temp_home, [("attention", "r1"), ("ticket_claimed", None), ("attention", "r2")])
+
+    default = client.get("/api/events")
+    assert default.status_code == 200
+    assert [e["id"] for e in default.json()] == ids
+    assert client.get("/api/events?order=asc").json() == default.json()
+    assert [e["id"] for e in client.get(f"/api/events?since={ids[0]}&kind=attention").json()] == [ids[2]]
+    assert client.get("/api/events?limit=2").json() == default.json()[:2]
+    # the 1..1000 limit rule is order=desc only: asc keeps since()'s plain LIMIT
+    assert client.get("/api/events?limit=0").json() == []
+    assert client.get("/api/events?order=asc&limit=1001").status_code == 200
+
+
 def test_ticket_detail_with_attempts(client: TestClient, seeded_run: str, temp_home: Path):
     """GET /api/tickets/{id} returns full ticket detail with payload, result, attempts, evidence."""
     # Get a ticket id from the seeded run
