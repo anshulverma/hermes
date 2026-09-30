@@ -60,6 +60,7 @@ describe('useRuns', () => {
   it('refetch keeps the previous rows and never sets loading back to true', async () => {
     const { fetchMock, pending } = fakeFetch();
     const { result } = renderHook(() => useRuns());
+    const firstRefetch = result.current.refetch;
     expect(result.current.loading).toBe(true);
     expect(fetchMock.mock.calls[0][0]).toBe('/api/runs');
     await settle(() => pending[0].resolve([run('run-1')]));
@@ -74,6 +75,36 @@ describe('useRuns', () => {
 
     expect(ids(result.current.data)).toEqual(['run-2', 'run-1']);
     expect(result.current.loading).toBe(false);
+    // Stable across renders, so consumers can pass it straight to a throttle.
+    expect(result.current.refetch).toBe(firstRefetch);
+  });
+
+  it('applies each response newer than the last applied, even while a later request is out', async () => {
+    const { pending } = fakeFetch();
+    const { result } = renderHook(() => useRuns());
+    act(() => result.current.refetch());
+    act(() => result.current.refetch());
+
+    await settle(() => pending[0].resolve([run('first')]));
+    expect(ids(result.current.data)).toEqual(['first']);
+    expect(result.current.loading).toBe(false);
+
+    await settle(() => pending[1].resolve([run('second')]));
+    expect(ids(result.current.data)).toEqual(['second']);
+
+    await settle(() => pending[2].resolve([run('third')]));
+    expect(ids(result.current.data)).toEqual(['third']);
+  });
+
+  it('a failed first load stops loading and reports the error', async () => {
+    const { pending } = fakeFetch();
+    const { result } = renderHook(() => useRuns());
+
+    await settle(() => pending[0].fail(500));
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.data).toBeNull();
+    expect(result.current.error?.message).toBe('boom 500');
   });
 
   it('drops a response older than the newest one applied', async () => {
