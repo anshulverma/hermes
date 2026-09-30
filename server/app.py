@@ -6,7 +6,9 @@ import math
 import os
 import re
 import secrets
+import sqlite3
 import stat
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Annotated, Literal, Optional
@@ -244,6 +246,65 @@ def ticket_subject(payload: dict[str, Any]) -> str:
     return "—"
 
 
+def reduction_row(conn: sqlite3.Connection, row: tuple) -> dict[str, Any]:
+    """One ``/api/runs/{id}/reductions`` row from ``(id, run_id, phase, kind, json, review_state)``.
+
+    member_ticket_ids is the order-stable, de-duplicated union of the json's
+    member_ticket_ids and needs_human_ticket_ids; member_tickets carries each
+    id's real state from the tickets table and skips ids that are not there.
+    The reductions route, /api/runs' awaiting and /api/needs-you all build
+    their rows here, so no two of them can disagree about a reduction.
+    """
+    rid, run_id, phase, kind, raw_json, review_state = row
+    doc = json.loads(raw_json)
+    member_ticket_ids = list(dict.fromkeys(
+        (doc.get("member_ticket_ids") or []) + (doc.get("needs_human_ticket_ids") or [])
+    ))
+    member_tickets = []
+    for mid in member_ticket_ids:
+        ticket = conn.execute(
+            "SELECT id, state, phase FROM tickets WHERE id=?", (mid,)
+        ).fetchone()
+        if ticket:
+            member_tickets.append({"id": ticket[0], "state": ticket[1], "phase": ticket[2]})
+    return {
+        "id": rid,
+        "run_id": run_id,
+        "phase": phase,
+        "kind": kind,
+        "json": doc,
+        "review_state": review_state,
+        "member_ticket_ids": member_ticket_ids,
+        "member_tickets": member_tickets,
+    }
+
+
+def awaiting_reductions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every reduction waiting on a decision, oldest first, across runs.
+
+    Each item is a ``reduction_row`` plus the run's ``playbook`` and the
+    reduction's ``created_at``. The rule is the SPA's awaitsDecision
+    (web/src/util/reduction.ts): pending, and a member ticket in needs_human.
+    It follows the Outputs tab, not tickets.reduction_id, so no count here
+    disagrees with Outputs. Output reductions stay pending forever, so only
+    runs holding a needs_human ticket have their pending reductions read.
+    """
+    rows = conn.execute(
+        """SELECT r.id, r.run_id, r.phase, r.kind, r.json, r.review_state,
+                  runs.playbook, r.created_at
+           FROM reductions r JOIN runs ON runs.id = r.run_id
+           WHERE r.review_state = 'pending'
+             AND r.run_id IN (SELECT run_id FROM tickets WHERE state = 'needs_human')
+           ORDER BY r.created_at, r.id"""
+    ).fetchall()
+    waiting = []
+    for row in rows:
+        item = reduction_row(conn, row[:6])
+        if any(t["state"] == "needs_human" for t in item["member_tickets"]):
+            waiting.append({**item, "playbook": row[6], "created_at": row[7]})
+    return waiting
+
+
 def create_app(bind: str | None = None) -> FastAPI:
     """Create the FastAPI application.
 
@@ -352,32 +413,41 @@ def create_app(bind: str | None = None) -> FastAPI:
 
     @app.get("/api/runs")
     def list_runs(_: None = Depends(require_auth_read)) -> list[dict[str, Any]]:
-        """List all runs with ticket counts by state.
+        """List all runs, newest first, with ticket counts by state.
 
-        Returns a list of runs, each with per-state ticket counts.
+        Each run also carries updated_at, has_view, subject (its first
+        ticket's heading, or null) and awaiting (how many of its reductions
+        wait on a decision). The statement count does not grow with the runs.
         """
         home = config.resolve_home()
         db_path = str(home / "queue.db")
         conn = connect(db_path)
         try:
             rows = conn.execute(
-                """SELECT id, playbook, site, state, phase, base_ref, created_at
-                   FROM runs ORDER BY created_at DESC"""
+                """SELECT id, playbook, site, state, phase, base_ref, created_at, updated_at
+                   FROM runs ORDER BY created_at DESC, id DESC"""
             ).fetchall()
 
-            runs = []
-            for row in rows:
-                run_id, playbook, site, state, phase, base_ref, created_at = row
+            tickets: dict[str, dict[str, int]] = {}
+            for run_id, state, count in conn.execute(
+                "SELECT run_id, state, COUNT(*) FROM tickets GROUP BY run_id, state"
+            ):
+                tickets.setdefault(run_id, {})[state] = count
 
-                # Get ticket counts by state
-                ticket_rows = conn.execute(
-                    """SELECT state, COUNT(*) FROM tickets
-                       WHERE run_id=? GROUP BY state""",
-                    (run_id,),
-                ).fetchall()
-                tickets = {state: count for state, count in ticket_rows}
+            subjects: dict[str, str] = {}
+            for run_id, payload_json in conn.execute(
+                """SELECT run_id, payload_json FROM tickets
+                   WHERE rowid IN (SELECT MIN(rowid) FROM tickets GROUP BY run_id)"""
+            ):
+                subject = ticket_subject(json.loads(payload_json))
+                if subject != "—":
+                    subjects[run_id] = subject
 
-                runs.append({
+            awaiting = Counter(r["run_id"] for r in awaiting_reductions(conn))
+            has_view = {name: view_playbook(name) is not None for name in {row[1] for row in rows}}
+
+            return [
+                {
                     "id": run_id,
                     "playbook": playbook,
                     "site": site,
@@ -385,10 +455,14 @@ def create_app(bind: str | None = None) -> FastAPI:
                     "phase": phase,
                     "base_ref": base_ref,
                     "created_at": created_at,
-                    "tickets": tickets,
-                })
-
-            return runs
+                    "updated_at": updated_at,
+                    "tickets": tickets.get(run_id, {}),
+                    "has_view": has_view[playbook],
+                    "subject": subjects.get(run_id),
+                    "awaiting": awaiting[run_id],
+                }
+                for run_id, playbook, site, state, phase, base_ref, created_at, updated_at in rows
+            ]
         finally:
             conn.close()
 
@@ -1201,53 +1275,22 @@ def create_app(bind: str | None = None) -> FastAPI:
             query += " ORDER BY id"
 
             rows = conn.execute(query, params).fetchall()
+            return [reduction_row(conn, row) for row in rows]
+        finally:
+            conn.close()
 
-            reductions = []
-            for row in rows:
-                (rid, r_run_id, r_phase, r_kind, r_json, r_review_state) = row
+    @app.get("/api/needs-you")
+    def get_needs_you(_: None = Depends(require_auth_read)) -> list[dict[str, Any]]:
+        """Every reduction waiting on a decision, across runs, oldest first.
 
-                # Parse json
-                reduction_json = json.loads(r_json)
-
-                # Compute de-duplicated union of member_ticket_ids
-                member_ids_from_json = reduction_json.get("member_ticket_ids") or []
-                needs_human_ids = reduction_json.get("needs_human_ticket_ids") or []
-
-                # Order-stable de-duplication: preserve first occurrence
-                seen = set()
-                member_ticket_ids = []
-                for mid in member_ids_from_json + needs_human_ids:
-                    if mid not in seen:
-                        seen.add(mid)
-                        member_ticket_ids.append(mid)
-
-                # Fetch member tickets with real states from tickets table
-                member_tickets = []
-                for mid in member_ticket_ids:
-                    ticket_row = conn.execute(
-                        """SELECT id, state, phase
-                           FROM tickets WHERE id=?""",
-                        (mid,),
-                    ).fetchone()
-                    if ticket_row:
-                        member_tickets.append({
-                            "id": ticket_row[0],
-                            "state": ticket_row[1],
-                            "phase": ticket_row[2],
-                        })
-
-                reductions.append({
-                    "id": rid,
-                    "run_id": r_run_id,
-                    "phase": r_phase,
-                    "kind": r_kind,
-                    "json": reduction_json,
-                    "review_state": r_review_state,
-                    "member_ticket_ids": member_ticket_ids,
-                    "member_tickets": member_tickets,
-                })
-
-            return reductions
+        Each item is a /api/runs/{id}/reductions row plus the run's playbook
+        and the reduction's created_at (epoch seconds); [] when none waits.
+        """
+        home = config.resolve_home()
+        db_path = str(home / "queue.db")
+        conn = connect(db_path)
+        try:
+            return awaiting_reductions(conn)
         finally:
             conn.close()
 
