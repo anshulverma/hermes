@@ -145,7 +145,7 @@ describe('ActivityFeed', () => {
   it('takes the run chip and the kind select from the route, and both navigate', async () => {
     mockFetchEventKinds.mockResolvedValue(['needs_human', 'ticket_claimed']);
     mockFetchEvents.mockResolvedValue([ev(1, { kind: 'needs_human' })]);
-    render(el({ runFilter: 'r1', kindFilter: 'needs_human' }));
+    const { rerender } = render(el({ runFilter: 'r1', kindFilter: 'needs_human' }));
 
     await screen.findByText('event 1');
     expect(mockFetchEvents).toHaveBeenCalledWith({ order: 'desc', limit: 200, run: 'r1', kind: 'needs_human' });
@@ -163,6 +163,13 @@ describe('ActivityFeed', () => {
     expect(parseRoute(window.location.hash).route).toEqual({ page: 'activity', run: null, kind: 'needs_human' });
     // The chip is going away: focus lands on the page heading, not <body>.
     expect(screen.getByRole('heading', { level: 1, name: 'Activity' })).toHaveFocus();
+
+    // A kind the home does not list (a pasted link) still reads as the filter,
+    // never 'all events' over a filtered list, and 'all events' clears it.
+    rerender(el({ runFilter: null, kindFilter: 'unlisted_kind' }));
+    expect(select).toHaveValue('unlisted_kind');
+    fireEvent.change(select, { target: { value: 'all' } });
+    expect(parseRoute(window.location.hash).route).toEqual({ page: 'activity', run: null, kind: null });
   });
 
   it('changing a filter discards the loaded pages and refetches', async () => {

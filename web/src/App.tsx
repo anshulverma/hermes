@@ -602,7 +602,15 @@ export default function App() {
                 }}
               >
                 <span>{`${note.id} isn't in this home`}</span>
-                <Button variant="ghost" size="sm" onClick={() => setNote(null)}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setNote(null);
+                    // The button goes with the note: focus the page heading, not <body>.
+                    document.querySelector<HTMLElement>('main h1')?.focus();
+                  }}
+                >
                   Dismiss
                 </Button>
               </div>

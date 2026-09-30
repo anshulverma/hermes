@@ -407,6 +407,15 @@ describe('App', () => {
 
       await deliver(rerender, ev('reduction_created', 'run-001'));
       await waitFor(() => expect(screen.getByTestId('playbook-view')).toHaveTextContent('tick 1'));
+
+      // The Metrics tab's section of the view gets the same tick.
+      act(() => go('#/runs/run-001/metrics'));
+      await screen.findByTestId('metrics-view');
+      await waitFor(() => expect(screen.getByTestId('playbook-view')).toHaveTextContent('tick 1'));
+      await deliver(rerender, ev('reduction_created', 'run-002'));
+      expect(screen.getByTestId('playbook-view')).toHaveTextContent('tick 1');
+      await deliver(rerender, ev('reduction_created', 'run-001'));
+      await waitFor(() => expect(screen.getByTestId('playbook-view')).toHaveTextContent('tick 2'));
     });
 
     it('remounts the view when the reader switches to another run with one', async () => {
@@ -495,8 +504,11 @@ describe('App', () => {
 
 describe('addresses and the rail', () => {
   it("resolves an empty address to the default run's summary without a history entry", async () => {
-    // Default run: the first run in the Needs you group, whatever its state.
+    // Default run: the first run in the Needs you group, whatever its state, among
+    // the runs the chips show (run-s would be first, but its chip is off).
+    localStorage.setItem('hermes.rail.hiddenPlaybooks', JSON.stringify(['scoring']));
     mockHome([
+      run('run-s', { playbook: 'scoring', awaiting: 1, created_at: NOW - 30 }),
       run('run-a', { created_at: NOW - 60 }),
       run('run-b', { state: 'done', awaiting: 2, created_at: NOW - 7200 }),
     ]);
@@ -541,8 +553,12 @@ describe('addresses and the rail', () => {
     expect(await screen.findByTestId('metrics-view')).toHaveTextContent('metrics for run-a');
 
     // Dismissible, and gone on the next route change either way.
-    fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+    const dismiss = screen.getByRole('button', { name: 'Dismiss' });
+    dismiss.focus();
+    fireEvent.click(dismiss);
     expect(inMain().queryByText("ghost isn't in this home")).toBeNull();
+    // The button goes with the note: focus lands on the page heading, not <body>.
+    expect(screen.getByRole('heading', { level: 1, name: 'run-a · pb' })).toHaveFocus();
 
     act(() => go('#/runs/ghost/metrics'));
     expect(await inMain().findByText("ghost isn't in this home")).toBeInTheDocument();
@@ -986,9 +1002,11 @@ describe('keyboard', () => {
     render(<App />);
     await waitFor(() => expect(row('run-c')).toBeInTheDocument());
 
-    // fireEvent returns false when the listener called preventDefault(). The rows can be
-    // drawn a moment before the listener that knows about them is registered.
-    await waitFor(() => expect(fireEvent.keyDown(document.body, { key: '/' })).toBe(false));
+    // The rows can be drawn a moment before the listener that knows about them is
+    // registered: flush that effect, then press once. fireEvent returns false when
+    // the listener called preventDefault().
+    await act(async () => {});
+    expect(fireEvent.keyDown(document.body, { key: '/' })).toBe(false);
 
     const filter = screen.getByRole('searchbox', { name: 'Filter runs' });
     await waitFor(() => expect(filter).toHaveFocus());
@@ -1102,6 +1120,22 @@ describe('live refresh', () => {
     expect(client.fetchRun).toHaveBeenCalledTimes(2);
     expect(client.fetchRun).toHaveBeenLastCalledWith('run-a');
   });
+
+  it('refreshes the Tickets tab on a ticket event and the Crew page on a crew event', async () => {
+    mockHome([run('run-001')]);
+    go('#/runs/run-001/tickets');
+    const { rerender } = render(<App />);
+    await waitFor(() => expect(client.fetchTickets).toHaveBeenCalledTimes(1));
+
+    await deliver(rerender, ev('ticket_claimed', 'run-001'));
+    await waitFor(() => expect(client.fetchTickets).toHaveBeenCalledTimes(2));
+
+    act(() => go('#/crew'));
+    await waitFor(() => expect(client.fetchCrew).toHaveBeenCalledTimes(1));
+
+    await deliver(rerender, ev('crew_health', null));
+    await waitFor(() => expect(client.fetchCrew).toHaveBeenCalledTimes(2));
+  });
 });
 
 describe('focus and announcements', () => {
@@ -1124,6 +1158,13 @@ describe('focus and announcements', () => {
     // One status region in the shell.
     expect(statusRegion()).toHaveAttribute('role', 'status');
     expect(screen.getAllByTestId('status-region')).toHaveLength(1);
+    // One banner, the top bar's, which the shell spec finds by getByRole('banner'):
+    // RunHeader's <header> sits inside <main>, and that takes its landmark away.
+    // Testing Library calls every <header> a banner, so count them as a browser does.
+    expect(screen.getByRole('main').querySelector('header')).toContainElement(h1);
+    const banners = [...document.querySelectorAll('header')].filter((h) => !h.closest('article, aside, main, nav, section'));
+    expect(banners).toHaveLength(1);
+    expect(banners[0]).toContainElement(screen.getByRole('link', { name: 'Hermes' }));
   });
 
   it('[ / ] on a rail row moves focus to the new row and announces it', async () => {
@@ -1300,14 +1341,15 @@ describe('focus and announcements', () => {
     expect(statusRegion().textContent).toBe('4 decisions waiting on you');
   });
 
-  it('says nothing when the count holds at, or comes back to, the last one announced', async () => {
+  it('says nothing when the count holds at, or comes back to, the last one announced, then says the next rise', async () => {
     const a = run('run-a', { awaiting: 1 });
     vi.mocked(client.fetchRuns)
       .mockResolvedValueOnce([a])
       .mockResolvedValueOnce([{ ...a, awaiting: 2 }])
       .mockResolvedValueOnce([{ ...a, awaiting: 2, state: 'failed' }])
       .mockResolvedValueOnce([{ ...a, awaiting: 1, state: 'failed' }])
-      .mockResolvedValue([{ ...a, awaiting: 2, state: 'failed' }]);
+      .mockResolvedValueOnce([{ ...a, awaiting: 2, state: 'failed' }])
+      .mockResolvedValue([{ ...a, awaiting: 3, state: 'failed' }]);
     vi.mocked(client.fetchRun).mockResolvedValue(detailOf(a));
     go('#/runs/run-a/metrics');
     const { rerender } = render(<App />);
@@ -1332,6 +1374,11 @@ describe('focus and announcements', () => {
     });
     expect(screen.getByTestId('needs-you-count')).toHaveTextContent('2');
     expect(statusRegion().textContent).toBe('run-a failed');
+
+    // The window closed with nothing to say, so the next rise is said at once.
+    await deliver(rerender, ev('needs_human', 'run-a')); // immediate refetch: 3
+    expect(screen.getByTestId('needs-you-count')).toHaveTextContent('3');
+    expect(statusRegion().textContent).toBe('3 decisions waiting on you');
   });
 
   it("announces the selected run's state change, but not a selection", async () => {

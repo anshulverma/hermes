@@ -329,6 +329,25 @@ describe('Summary', () => {
     expect(client.fetchEvents).toHaveBeenCalledWith({ run: 'run-001', order: 'desc', limit: 10 });
   });
 
+  it("keeps this run's live events after the shared stream's 500-event buffer drops them", async () => {
+    vi.mocked(client.fetchEvents).mockResolvedValue([event(5, 'run-001', 'fetched_kind')]);
+    const { rerender } = render(<Summary run={run} streamEvents={[]} viewTick={0} />);
+    const recent = screen.getByRole('region', { name: 'Recent events' });
+    await within(recent).findByText('fetched_kind');
+
+    const live = [event(10, 'run-001', 'live_kind')];
+    rerender(<Summary run={run} streamEvents={live} viewTick={0} />);
+    expect(within(recent).getByText('live_kind')).toBeInTheDocument();
+
+    // 500 events of another run follow, and the buffer keeps only the newest 500.
+    const others = Array.from({ length: 500 }, (_, i) => event(11 + i, 'run-002', 'other'));
+    rerender(<Summary run={run} streamEvents={[...live, ...others].slice(-500)} viewTick={0} />);
+
+    expect(within(recent).getByText('live_kind')).toBeInTheDocument();
+    expect(within(recent).getByText('fetched_kind')).toBeInTheDocument();
+    expect(within(recent).getAllByRole('listitem')).toHaveLength(2);
+  });
+
   it("reads 'No events.' when the run has none", async () => {
     render(<Summary run={run} streamEvents={[]} viewTick={0} />);
 

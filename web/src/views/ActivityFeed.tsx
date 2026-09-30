@@ -293,7 +293,8 @@ export default function ActivityFeed({ runFilter, kindFilter, streamEvents }: Ac
           }}
         >
           <option value="all">all events</option>
-          {availableKinds.map((kind) => (
+          {/* The route's kind even when the home does not list it, so the select never reads 'all events' over a filtered list. */}
+          {(kindFilter && !availableKinds.includes(kindFilter) ? [...availableKinds, kindFilter] : availableKinds).map((kind) => (
             <option key={kind} value={kind}>
               {kind}
             </option>

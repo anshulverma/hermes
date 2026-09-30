@@ -39,7 +39,7 @@ test('overscroll-behavior is on the element that propagates it', async ({ page }
 
 test('the top bar does not move when the page is scrolled', async ({ page }) => {
   await ready(page);
-  const bar = page.locator('header');
+  const bar = page.getByRole('banner');
   const before = await bar.boundingBox();
 
   await page.mouse.move(720, 500);
@@ -60,7 +60,7 @@ test('scrolling past the end of a view does not drag the top bar', async ({ page
   await expect(page.getByLabel('Hermes')).toBeVisible();
   await page.waitForTimeout(600);
 
-  const bar = page.locator('header');
+  const bar = page.getByRole('banner');
   const before = await bar.boundingBox();
 
   await page.mouse.move(720, 600);
@@ -73,7 +73,7 @@ test('scrolling past the end of a view does not drag the top bar', async ({ page
 
 test('the top bar spans the window and sits flush at the top', async ({ page }) => {
   await ready(page);
-  const box = (await page.locator('header').boundingBox())!;
+  const box = (await page.getByRole('banner').boundingBox())!;
   const width = page.viewportSize()!.width;
 
   expect(box.x).toBe(0);

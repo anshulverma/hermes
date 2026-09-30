@@ -254,7 +254,20 @@ export default function Summary({ run, streamEvents, viewTick }: SummaryProps) {
   const forThisRun = useCallback((e: Event) => e.run_id === id, [id]);
   useStreamTrigger(streamEvents, forThisRun, refetch);
 
-  const recent = events.data && mergeRecent(events.data, streamEvents, id);
+  // This run's live events, kept here: the shared buffer drops its oldest past
+  // 500, and a busy home would take them off the list. The cursor rule: the
+  // mount fetch covers what was buffered at mount.
+  const [live, setLive] = useState<Event[]>([]);
+  const cursor = useRef(streamEvents.at(-1)?.id ?? 0);
+  useEffect(() => {
+    const fresh = streamEvents.filter((e) => e.id > cursor.current);
+    if (fresh.length === 0) return;
+    cursor.current = fresh[fresh.length - 1].id;
+    const mine = fresh.filter((e) => e.run_id === id);
+    if (mine.length > 0) setLive((prev) => [...prev, ...mine].slice(-10));
+  }, [streamEvents, id]);
+
+  const recent = events.data && mergeRecent(events.data, live, id);
 
   return (
     <div
