@@ -157,6 +157,15 @@ describe('API client', () => {
         message: "Run 'no-such-run' not found",
         status: 404,
       });
+
+      // An outage carries its own status, not 404.
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 500,
+        json: async () => ({}),
+      }) as any;
+
+      await expect(fetchRun('r')).rejects.toMatchObject({ status: 500 });
     });
   });
 

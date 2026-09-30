@@ -126,9 +126,11 @@ export default function App() {
   const { connected, events, authError } = useEventStream();
   const [authErrorDismissed, setAuthErrorDismissed] = useState(false);
 
-  // The shell's single status region, written only through announce.
-  const [status, setStatus] = useState('');
-  const announce = useCallback((message: string) => setStatus(message), []);
+  // The shell's single status region, written only through announce. Each call
+  // gets a new key, so the region's text is replaced and read out even when it
+  // repeats the last announcement.
+  const [status, setStatus] = useState({ text: '', n: 0 });
+  const announce = useCallback((message: string) => setStatus((s) => ({ text: message, n: s.n + 1 })), []);
 
   const selectedId = route.page === 'run' ? route.runId : null;
 
@@ -307,20 +309,34 @@ export default function App() {
   const lastFocused = useRef<Element | null>(null);
   const prevPage = useRef<Route['page'] | null>(null);
   const focusH1 = useRef(false);
+  // The href of the rail row last clicked (the filter box's Enter clicks one
+  // too): a rail navigation is the route change that lands on it. Focus sitting
+  // on a row says nothing, since Back / Forward leave it there.
+  const railClick = useRef<string | null>(null);
 
   useEffect(() => {
     const onFocusIn = (e: FocusEvent) => {
       lastFocused.current = e.target as Element;
     };
+    const onClick = (e: MouseEvent) => {
+      const link = e.target instanceof Element ? e.target.closest(`${RAIL} a[href]`) : null;
+      railClick.current = link?.getAttribute('href') ?? null;
+    };
     document.addEventListener('focusin', onFocusIn);
-    return () => document.removeEventListener('focusin', onFocusIn);
+    document.addEventListener('click', onClick, true);
+    return () => {
+      document.removeEventListener('focusin', onFocusIn);
+      document.removeEventListener('click', onClick, true);
+    };
   }, []);
 
   useEffect(() => {
     const was = prevPage.current;
     prevPage.current = route.page;
+    const fromRail = railClick.current === window.location.hash;
+    railClick.current = null;
     if (was !== null && was !== route.page) {
-      focusH1.current = !document.activeElement?.closest(RAIL);
+      focusH1.current = !fromRail;
       return;
     }
     const active = document.activeElement;
@@ -599,7 +615,7 @@ export default function App() {
       </div>
 
       <div role="status" aria-live="polite" className="visually-hidden" data-testid="status-region">
-        {status}
+        <span key={status.n}>{status.text}</span>
       </div>
     </div>
   );

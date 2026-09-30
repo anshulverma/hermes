@@ -208,12 +208,20 @@ describe('App', () => {
     expect(screen.getByText('Network error')).toBeInTheDocument();
   });
 
-  it('should show loading state initially', () => {
-    vi.mocked(client.fetchHealth).mockImplementation(() => new Promise(() => {}));
+  it('should show loading state initially', async () => {
+    let healthy: (h: Awaited<ReturnType<typeof client.fetchHealth>>) => void = () => {};
+    vi.mocked(client.fetchHealth).mockImplementation(() => new Promise((resolve) => (healthy = resolve)));
     vi.mocked(client.fetchRuns).mockImplementation(() => new Promise(() => {}));
 
     render(<App />);
 
+    expect(screen.getByText('Loading Hermes…')).toBeInTheDocument();
+
+    // Health alone does not lift it: it covers the first runs load too.
+    await act(async () => {
+      healthy({ status: 'ok', version: '0.1.0', home: '/tmp/hermes' });
+      await new Promise((r) => setTimeout(r, 30));
+    });
     expect(screen.getByText('Loading Hermes…')).toBeInTheDocument();
   });
 
@@ -507,6 +515,23 @@ describe('addresses and the rail', () => {
     expect(inMain().queryByText("ghost isn't in this home")).toBeNull();
   });
 
+  it('shows the note and the default run when the one refetch fails', async () => {
+    const a = run('run-a');
+    vi.mocked(client.fetchRuns).mockResolvedValueOnce([a]).mockRejectedValue(new Error('runs down'));
+    vi.mocked(client.fetchRun).mockImplementation(async (id: string) => {
+      if (id === 'run-a') return detailOf(a);
+      throw Object.assign(new Error(`Run '${id}' not found`), { status: 404 });
+    });
+    go('#/runs/ghost/metrics');
+
+    render(<App />);
+
+    // A failed refetch is an answer too: the old rows stand, and ghost is not among them.
+    await waitFor(() => expect(window.location.hash).toBe('#/runs/run-a/metrics'));
+    expect(client.fetchRuns).toHaveBeenCalledTimes(2);
+    expect(await inMain().findByText("ghost isn't in this home")).toBeInTheDocument();
+  });
+
   it("leaves #/runs alone and says Couldn't load runs. when the list fails", async () => {
     vi.mocked(client.fetchRuns).mockRejectedValue(new Error('runs down'));
     go('#/runs');
@@ -531,8 +556,10 @@ describe('addresses and the rail', () => {
 
   it('shows the note and leaves the address alone when the list failed and the run is a 404', async () => {
     vi.mocked(client.fetchRuns).mockRejectedValue(new Error('runs down'));
-    vi.mocked(client.fetchRun).mockRejectedValue(
-      Object.assign(new Error("Run 'ghost' not found"), { status: 404 }),
+    vi.mocked(client.fetchRun).mockImplementation((id: string) =>
+      id === 'ghost'
+        ? Promise.reject(Object.assign(new Error("Run 'ghost' not found"), { status: 404 }))
+        : new Promise<RunDetail>(() => {}),
     );
     go('#/runs/ghost/summary');
 
@@ -541,6 +568,27 @@ describe('addresses and the rail', () => {
     expect(await inMain().findByText("ghost isn't in this home")).toBeInTheDocument();
     expect(statusRegion()).toHaveTextContent("ghost isn't in this home");
     expect(window.location.hash).toBe('#/runs/ghost/summary');
+    expect(await heading("Couldn't load runs.")).toBeInTheDocument();
+
+    // The note names the run in the address, not the last one that was a 404.
+    act(() => go('#/runs/run-a/summary'));
+    await waitFor(() => expect(window.location.hash).toBe('#/runs/run-a/summary'));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    expect(inMain().queryByText("ghost isn't in this home")).toBeNull();
+  });
+
+  it('shows no note when the list failed and the run fetch failed any other way', async () => {
+    vi.mocked(client.fetchRuns).mockRejectedValue(new Error('runs down'));
+    vi.mocked(client.fetchRun).mockRejectedValue(Object.assign(new Error('boom'), { status: 500 }));
+    go('#/runs/run-a/summary');
+
+    render(<App />);
+
+    expect(await heading("Couldn't load runs.")).toBeInTheDocument();
+    expect(inMain().queryByText(/isn't in this home/)).toBeNull();
+    expect(statusRegion().textContent).toBe('');
   });
 
   it('shows a runs failure only in the rail, with Retry, while the top bar still works', async () => {
@@ -644,8 +692,17 @@ describe('addresses and the rail', () => {
 
   it('shows an alert with Retry under the header when the detail fails', async () => {
     const a = run('run-a');
-    vi.mocked(client.fetchRuns).mockResolvedValue([a]);
-    vi.mocked(client.fetchRun).mockRejectedValueOnce(new Error('detail down')).mockResolvedValue(detailOf(a));
+    const b = run('run-b', { created_at: NOW - 7200 });
+    vi.mocked(client.fetchRuns).mockResolvedValue([a, b]);
+    // run-a: fails, then answers, then never answers again.
+    let aCalls = 0;
+    vi.mocked(client.fetchRun).mockImplementation((id: string) => {
+      if (id === 'run-b') return Promise.resolve(detailOf(b));
+      aCalls++;
+      if (aCalls === 1) return Promise.reject(new Error('detail down'));
+      if (aCalls === 2) return Promise.resolve(detailOf(a));
+      return new Promise<RunDetail>(() => {});
+    });
     go('#/runs/run-a/metrics');
 
     render(<App />);
@@ -657,6 +714,33 @@ describe('addresses and the rail', () => {
     fireEvent.click(within(main).getByRole('button', { name: 'Retry' }));
 
     expect(await screen.findByTestId('metrics-view')).toHaveTextContent('metrics for run-a');
+    expect(within(main).queryByRole('alert')).toBeNull();
+
+    // The success cleared the error: back on run-a while it loads, it does not return.
+    fireEvent.click(await findRow('run-b'));
+    await waitFor(() => expect(screen.getByTestId('metrics-view')).toHaveTextContent('metrics for run-b'));
+    fireEvent.click(await findRow('run-a'));
+    expect(await heading('run-a · pb')).toBeInTheDocument();
+    expect(within(main).queryByRole('alert')).toBeNull();
+  });
+
+  it("keeps one run's detail failure off the next run", async () => {
+    const a = run('run-a');
+    const b = run('run-b', { created_at: NOW - 7200 });
+    vi.mocked(client.fetchRuns).mockResolvedValue([a, b]);
+    vi.mocked(client.fetchRun).mockImplementation((id: string) =>
+      id === 'run-a' ? Promise.reject(new Error('detail down')) : new Promise<RunDetail>(() => {}),
+    );
+    go('#/runs/run-a/metrics');
+
+    render(<App />);
+
+    const main = screen.getByRole('main');
+    expect(await within(main).findByRole('alert')).toHaveTextContent('detail down');
+
+    fireEvent.click(await findRow('run-b'));
+
+    expect(await heading('run-b · pb')).toBeInTheDocument();
     expect(within(main).queryByRole('alert')).toBeNull();
   });
 
@@ -738,6 +822,8 @@ describe('keyboard', () => {
     // Cmd+] is the browser's Forward; Ctrl+] is a browser or OS chord.
     fireEvent.keyDown(document.body, { key: ']', metaKey: true });
     fireEvent.keyDown(document.body, { key: ']', ctrlKey: true });
+    // Ctrl+Alt without AltGraph is still a Ctrl chord: the check is AltGraph, not altKey.
+    fireEvent.keyDown(document.body, { key: ']', ctrlKey: true, altKey: true });
     fireEvent.keyDown(document.body, { key: '/', metaKey: true });
 
     expect(window.location.hash).toBe('#/runs/run-c/metrics');
@@ -789,6 +875,13 @@ describe('keyboard', () => {
       editable,
     ];
 
+    // Every contenteditable value but "false" takes text.
+    for (const value of ['', 'plaintext-only']) {
+      const el = document.createElement('div');
+      el.setAttribute('contenteditable', value);
+      textEntry.push(el);
+    }
+
     for (const el of textEntry) {
       document.body.appendChild(el);
       fireEvent.keyDown(el, { key: ']' });
@@ -796,11 +889,17 @@ describe('keyboard', () => {
     }
     expect(window.location.hash).toBe('#/runs/run-c/metrics');
 
-    const box = Object.assign(document.createElement('input'), { type: 'checkbox' });
-    document.body.appendChild(box);
-    fireEvent.keyDown(box, { key: ']' });
-    box.remove();
-    expect(await heading('run-b · pb')).toBeInTheDocument();
+    // Every input type that takes no text fires: ] and [ in turn, run-c ↔ run-b.
+    let at = 'run-c';
+    for (const type of ['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file']) {
+      const box = Object.assign(document.createElement('input'), { type });
+      document.body.appendChild(box);
+      fireEvent.keyDown(box, { key: at === 'run-c' ? ']' : '[' });
+      box.remove();
+      at = at === 'run-c' ? 'run-b' : 'run-c';
+      await waitFor(() => expect(window.location.hash).toBe(`#/runs/${at}/metrics`));
+    }
+    expect(await heading('run-c · pb')).toBeInTheDocument();
   });
 
   it('steps in from the ends when the chips hide the selected run', async () => {
@@ -851,13 +950,19 @@ describe('keyboard', () => {
     render(<App />);
     await waitFor(() => expect(row('run-c')).toBeInTheDocument());
 
-    // fireEvent returns false when the listener called preventDefault().
-    expect(fireEvent.keyDown(document.body, { key: '/' })).toBe(false);
+    // fireEvent returns false when the listener called preventDefault(). The rows can be
+    // drawn a moment before the listener that knows about them is registered.
+    await waitFor(() => expect(fireEvent.keyDown(document.body, { key: '/' })).toBe(false));
 
     const filter = screen.getByRole('searchbox', { name: 'Filter runs' });
     await waitFor(() => expect(filter).toHaveFocus());
     // A slash typed inside the box is text, not a shortcut.
     expect(fireEvent.keyDown(filter, { key: '/' })).toBe(true);
+
+    // And every later press goes there again.
+    filter.blur();
+    fireEvent.keyDown(document.body, { key: '/' });
+    await waitFor(() => expect(filter).toHaveFocus());
   });
 
   it("/ expands a collapsed rail and writes '0'", async () => {
@@ -974,7 +1079,8 @@ describe('focus and announcements', () => {
     const skip = screen.getByRole('link', { name: 'Skip to content' });
     // The first focusable element in the shell.
     expect(document.querySelector('a[href], button, input, select, textarea')).toBe(skip);
-    fireEvent.click(skip);
+    // fireEvent returns false when the listener called preventDefault(): the link's own navigation is cancelled.
+    expect(fireEvent.click(skip)).toBe(false);
 
     expect(h1).toHaveFocus();
     expect(screen.getByRole('main')).toContainElement(h1);
@@ -996,6 +1102,18 @@ describe('focus and announcements', () => {
 
     await waitFor(() => expect(row('run-b')).toHaveFocus());
     expect(statusRegion()).toHaveTextContent('run-b, pb, running');
+
+    // The same words again are read out again: the region's DOM changes on every announce.
+    fireEvent.click(row('run-c'));
+    expect(await heading('run-c · pb')).toBeInTheDocument();
+    const changes: MutationRecord[] = [];
+    const observer = new MutationObserver((records) => changes.push(...records));
+    observer.observe(statusRegion(), { childList: true, subtree: true, characterData: true });
+    fireEvent.keyDown(row('run-c'), { key: ']' });
+    await waitFor(() => expect(row('run-b')).toHaveFocus());
+    await waitFor(() => expect(changes.length).toBeGreaterThan(0));
+    observer.disconnect();
+    expect(statusRegion()).toHaveTextContent('run-b, pb, running');
   });
 
   it('] from a control the pane drops sends focus to the header <h1>', async () => {
@@ -1013,6 +1131,15 @@ describe('focus and announcements', () => {
 
     await waitFor(() => expect(screen.getByRole('heading', { level: 1 })).toHaveFocus());
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('run-b · pb');
+
+    // Nothing focused, and the control last focused is still on screen: focus stays put.
+    const tab = within(screen.getByRole('navigation', { name: 'Run tabs' })).getByRole('link', { name: 'Tickets' });
+    tab.focus();
+    tab.blur();
+    fireEvent.keyDown(document.body, { key: '[' });
+    expect(await heading('run-c · pb')).toBeInTheDocument();
+    expect(tab).toBeInTheDocument();
+    expect(document.activeElement).toBe(document.body);
   });
 
   it('a run-tab click keeps focus on the tab', async () => {
@@ -1061,6 +1188,36 @@ describe('focus and announcements', () => {
     expect(link).toHaveFocus();
   });
 
+  it('Back and Forward to another page move focus to its <h1>, even from a rail row', async () => {
+    mockHome([run('run-a'), run('run-b', { created_at: NOW - 7200 })]);
+    go('#/crew');
+    render(<App />);
+    await waitFor(() => expect(row('run-b')).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('link', { name: 'Activity' }));
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Activity' })).toHaveFocus());
+    const link = row('run-b');
+    link.focus();
+    fireEvent.click(link);
+    expect(await heading('run-b · pb')).toBeInTheDocument();
+    expect(link).toHaveFocus();
+    // A click on the row already selected goes nowhere, so it is no rail navigation either.
+    fireEvent.click(link);
+
+    // The row is still on screen, and focused, but it is not how the reader got here.
+    const traverse = (delta: -1 | 1) =>
+      act(
+        () =>
+          new Promise<void>((resolve) => {
+            window.addEventListener('hashchange', () => resolve(), { once: true });
+            window.history.go(delta);
+          }),
+      );
+    await traverse(-1);
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'Activity' })).toHaveFocus());
+    await traverse(1);
+    await waitFor(() => expect(screen.getByRole('heading', { level: 1, name: 'run-b · pb' })).toHaveFocus());
+  });
+
   it('the first load announces no count; a later rise is announced', async () => {
     const a = run('run-a', { awaiting: 1 });
     vi.mocked(client.fetchRuns).mockResolvedValueOnce([a]).mockResolvedValue([{ ...a, awaiting: 3 }]);
@@ -1098,9 +1255,47 @@ describe('focus and announcements', () => {
     expect(statusRegion().textContent).toBe('2 decisions waiting on you');
 
     await act(async () => {
-      vi.advanceTimersByTime(8000); // the window ends
+      vi.advanceTimersByTime(7999); // 1 ms before the window ends
+    });
+    expect(statusRegion().textContent).toBe('2 decisions waiting on you');
+    await act(async () => {
+      vi.advanceTimersByTime(1); // the window ends
     });
     expect(statusRegion().textContent).toBe('4 decisions waiting on you');
+  });
+
+  it('says nothing when the count holds at, or comes back to, the last one announced', async () => {
+    const a = run('run-a', { awaiting: 1 });
+    vi.mocked(client.fetchRuns)
+      .mockResolvedValueOnce([a])
+      .mockResolvedValueOnce([{ ...a, awaiting: 2 }])
+      .mockResolvedValueOnce([{ ...a, awaiting: 2, state: 'failed' }])
+      .mockResolvedValueOnce([{ ...a, awaiting: 1, state: 'failed' }])
+      .mockResolvedValue([{ ...a, awaiting: 2, state: 'failed' }]);
+    vi.mocked(client.fetchRun).mockResolvedValue(detailOf(a));
+    go('#/runs/run-a/metrics');
+    const { rerender } = render(<App />);
+    expect(await screen.findByTestId('needs-you-count')).toHaveTextContent('1');
+    vi.useFakeTimers();
+
+    await deliver(rerender, ev('needs_human', 'run-a')); // immediate refetch: 2, announced
+    expect(statusRegion().textContent).toBe('2 decisions waiting on you');
+    await act(async () => {
+      vi.advanceTimersByTime(2000); // trailing refetch: still 2, and the run failed
+    });
+    expect(statusRegion().textContent).toBe('run-a failed');
+    await act(async () => {
+      vi.advanceTimersByTime(10_000); // the window ends at the count last announced
+    });
+    expect(statusRegion().textContent).toBe('run-a failed');
+
+    await deliver(rerender, ev('ticket_claimed', 'run-a')); // immediate refetch: down to 1
+    expect(screen.getByTestId('needs-you-count')).toHaveTextContent('1');
+    await act(async () => {
+      vi.advanceTimersByTime(2000); // trailing refetch: back up to 2, no higher than announced
+    });
+    expect(screen.getByTestId('needs-you-count')).toHaveTextContent('2');
+    expect(statusRegion().textContent).toBe('run-a failed');
   });
 
   it("announces the selected run's state change, but not a selection", async () => {
