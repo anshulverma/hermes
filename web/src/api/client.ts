@@ -27,10 +27,18 @@ export type Run = {
   playbook: string;
   site: string;
   state: string;
-  phase: string;
+  phase: string | null;
   base_ref: string;
-  created_at: string;
+  // Epoch seconds.
+  created_at: number;
+  updated_at: number;
   tickets: Record<string, number>;
+  // The run's playbook ships its own view. Required, not optional: an absent
+  // field would read as "no view" by accident rather than by answer.
+  has_view: boolean;
+  // Decisions waiting on the operator (the awaiting rule, server-side).
+  awaiting: number;
+  subject: string | null;
 };
 
 export type Phase = {
@@ -39,13 +47,10 @@ export type Phase = {
   current: boolean;
 };
 
-export type RunDetail = Run & {
+// /api/runs/{id} returns neither `awaiting` nor `subject`.
+export type RunDetail = Omit<Run, 'awaiting' | 'subject'> & {
   config: Record<string, any>;
-  updated_at: string;
   phases: Phase[];
-  // The run's playbook ships its own view. Required, not optional: an absent
-  // field would read as "no view" by accident rather than by answer.
-  has_view: boolean;
 };
 
 export type Ticket = {
@@ -348,6 +353,11 @@ export type Event = {
 };
 
 export type EventFilters = {
+  // 'desc' is newest first and the only order that takes `run` / `before`;
+  // 'asc' (the server's default) is the `since` path.
+  order?: 'asc' | 'desc';
+  run?: string;
+  before?: number;
   since?: number;
   kind?: string;
   limit?: number;
@@ -355,6 +365,9 @@ export type EventFilters = {
 
 export async function fetchEvents(filters?: EventFilters): Promise<Event[]> {
   const params = new URLSearchParams();
+  if (filters?.order) params.append('order', filters.order);
+  if (filters?.run) params.append('run', filters.run);
+  if (filters?.before !== undefined) params.append('before', filters.before.toString());
   if (filters?.since !== undefined) params.append('since', filters.since.toString());
   if (filters?.kind) params.append('kind', filters.kind);
   if (filters?.limit !== undefined) params.append('limit', filters.limit.toString());
@@ -392,6 +405,17 @@ export async function fetchReductions(runId: string, phase?: string): Promise<Re
   const queryString = params.toString();
   const url = `/api/runs/${runId}/reductions${queryString ? '?' + queryString : ''}`;
   return fetchJSON<Reduction[]>(url);
+}
+
+// One /api/needs-you item: a full /api/runs/{id}/reductions row plus its run's
+// playbook and when the reduction was made (epoch seconds).
+export type NeedsYouItem = Reduction & {
+  playbook: string;
+  created_at: number;
+};
+
+export async function fetchNeedsYou(): Promise<NeedsYouItem[]> {
+  return fetchJSON<NeedsYouItem[]>('/api/needs-you');
 }
 
 /**

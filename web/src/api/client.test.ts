@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { fetchHealth, fetchRuns, fetchRun, fetchReductions, fetchViewData, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, abandonTicket, retryTicket, setTicketPriority, acceptReduction, rejectReduction, type HealthResponse, type Run, type Reduction, type HealthChecklist } from './client';
+import { fetchHealth, fetchRuns, fetchRun, fetchReductions, fetchNeedsYou, fetchEvents, fetchViewData, pauseRun, AuthError, probeCrew, addCrew, reprobeCrew, drainCrew, removeCrew, requeueTicket, abandonTicket, retryTicket, setTicketPriority, acceptReduction, rejectReduction, type HealthResponse, type Run, type Reduction, type NeedsYouItem, type HealthChecklist } from './client';
 import { clearToken, setToken } from './auth';
 
 describe('API client', () => {
@@ -66,12 +66,30 @@ describe('API client', () => {
           state: 'running',
           phase: 'gather',
           base_ref: 'main',
-          created_at: '2026-07-29T10:00:00Z',
+          created_at: 1785319200,
+          updated_at: 1785319500,
           tickets: {
             queued: 5,
             in_flight: 2,
             done: 10,
           },
+          has_view: false,
+          awaiting: 1,
+          subject: 'Fix the flaky login test',
+        },
+        {
+          id: 'run-002',
+          playbook: 'mechanic',
+          site: 'local',
+          state: 'queued',
+          phase: null,
+          base_ref: 'main',
+          created_at: 1785319600,
+          updated_at: 1785319600,
+          tickets: {},
+          has_view: false,
+          awaiting: 0,
+          subject: null,
         },
       ];
 
@@ -182,6 +200,75 @@ describe('API client', () => {
       await fetchReductions('run-001', 'reduce');
       // Verify URL construction (first arg of first call)
       expect((fetch as any).mock.calls[0][0]).toBe('/api/runs/run-001/reductions?phase=reduce');
+    });
+  });
+
+  describe('fetchNeedsYou', () => {
+    it('should fetch every waiting decision from /api/needs-you, raw', async () => {
+      const items: NeedsYouItem[] = [
+        {
+          id: 7,
+          run_id: 'run-001',
+          phase: 'decision',
+          kind: 'verdict',
+          json: { verdict: 'ship it' },
+          review_state: 'pending',
+          member_ticket_ids: ['run-001/decision'],
+          member_tickets: [{ id: 'run-001/decision', state: 'needs_human', phase: 'decision' }],
+          playbook: 'mechanic',
+          created_at: 1785319200,
+        },
+      ];
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => items,
+      }) as any;
+
+      const result = await fetchNeedsYou();
+
+      expect((fetch as any).mock.calls[0][0]).toBe('/api/needs-you');
+      expect(result).toEqual(items);
+      // Raw engine state: NeedsYou normalizes it, as Outputs does.
+      expect(result[0].member_tickets[0].state).toBe('needs_human');
+    });
+  });
+
+  describe('fetchEvents', () => {
+    beforeEach(() => {
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      }) as any;
+    });
+
+    it('should keep the ascending since path unchanged', async () => {
+      await fetchEvents();
+      await fetchEvents({ since: 42, kind: 'ticket_claimed', limit: 50 });
+
+      expect((fetch as any).mock.calls.map((call: any[]) => call[0])).toEqual([
+        '/api/events',
+        '/api/events?since=42&kind=ticket_claimed&limit=50',
+      ]);
+    });
+
+    it('should send order, run, kind and limit for a newest-first page', async () => {
+      await fetchEvents({ order: 'desc', run: 'run-001', kind: 'reduction_created', limit: 200 });
+
+      expect((fetch as any).mock.calls[0][0]).toBe(
+        '/api/events?order=desc&run=run-001&kind=reduction_created&limit=200',
+      );
+    });
+
+    it('should send before for an older page', async () => {
+      await fetchEvents({ order: 'desc', before: 500, limit: 200 });
+
+      expect((fetch as any).mock.calls[0][0]).toBe('/api/events?order=desc&before=500&limit=200');
+    });
+
+    it('should leave out an empty run', async () => {
+      await fetchEvents({ order: 'desc', run: '' });
+
+      expect((fetch as any).mock.calls[0][0]).toBe('/api/events?order=desc');
     });
   });
 

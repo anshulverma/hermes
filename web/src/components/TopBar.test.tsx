@@ -50,11 +50,14 @@ describe('TopBar', () => {
 describe('TopBar — choosing which run to look at', () => {
   const runs = [
     { id: 'run-5', playbook: 'research', site: 'local', state: 'done', phase: 'complete',
-      base_ref: 'main', created_at: '3', tickets: {} },
+      base_ref: 'main', created_at: 3, updated_at: 3, tickets: {},
+      has_view: false, awaiting: 0, subject: null },
     { id: 'run-4', playbook: 'research', site: 'local', state: 'done', phase: 'complete',
-      base_ref: 'main', created_at: '2', tickets: {} },
+      base_ref: 'main', created_at: 2, updated_at: 2, tickets: {},
+      has_view: false, awaiting: 0, subject: null },
     { id: 'run-3', playbook: 'research', site: 'local', state: 'stopped', phase: 'research',
-      base_ref: 'main', created_at: '1', tickets: {} },
+      base_ref: 'main', created_at: 1, updated_at: 1, tickets: {},
+      has_view: false, awaiting: 0, subject: null },
   ];
 
   it('lists every run, not just the newest', () => {
