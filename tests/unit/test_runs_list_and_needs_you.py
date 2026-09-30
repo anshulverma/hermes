@@ -113,9 +113,11 @@ def test_runs_list_subject_is_the_first_tickets_heading_or_null(client, temp_hom
     conn.commit()
     conn.close()
 
-    subjects = {run["id"]: run["subject"] for run in client.get("/api/runs").json()}
+    data = client.get("/api/runs").json()
+    subjects = {run["id"]: run["subject"] for run in data}
 
     assert subjects == {"r-none": None, "r-blank": None, "r-goal": "Fix the flake"}
+    assert {run["id"]: run["tickets"] for run in data}["r-none"] == {}
 
 
 def test_runs_list_computes_has_view_once_per_playbook(client, temp_home, monkeypatch):
@@ -298,15 +300,24 @@ def test_needs_you_needs_a_token_off_loopback(temp_home):
     assert response.json() == []
 
 
-def test_runs_without_a_needs_human_ticket_never_parse_their_reductions(client, temp_home):
+def test_runs_without_a_needs_human_ticket_never_parse_their_reductions(client, temp_home, monkeypatch):
     """Output reductions stay pending forever; only a run holding a
     needs_human ticket may pay for reading its reduction JSON."""
+    import server.app as app_module
+    real_connect = app_module.connect
+    statements: list[str] = []
+
+    def traced_connect(path):
+        conn = real_connect(path)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(app_module, "connect", traced_connect)
     conn = _db(temp_home)
     _run(conn, "r-out", created_at=100.0)
     _ticket(conn, "r-out/t-0", "r-out", "done")
     _reduction(conn, "r-out", "this is not json")
     conn.commit()
-    conn.close()
 
     runs = client.get("/api/runs")
     needs_you = client.get("/api/needs-you")
@@ -315,3 +326,20 @@ def test_runs_without_a_needs_human_ticket_never_parse_their_reductions(client, 
     assert runs.json()[0]["awaiting"] == 0
     assert needs_you.status_code == 200
     assert needs_you.json() == []
+    # No needs_human ticket anywhere: no statement even scans reductions.
+    assert [s for s in statements if "reductions" in s] == []
+
+    # Once another run holds one, only that run's reductions are read.
+    _run(conn, "r-nh", created_at=200.0)
+    _ticket(conn, "r-nh/t-0", "r-nh", "needs_human")
+    _reduction(conn, "r-nh", {"needs_human_ticket_ids": ["r-nh/t-0"]})
+    conn.commit()
+    conn.close()
+
+    runs = client.get("/api/runs")
+    needs_you = client.get("/api/needs-you")
+
+    assert runs.status_code == 200
+    assert {r["id"]: r["awaiting"] for r in runs.json()} == {"r-out": 0, "r-nh": 1}
+    assert needs_you.status_code == 200
+    assert len(needs_you.json()) == 1

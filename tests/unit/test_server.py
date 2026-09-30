@@ -824,12 +824,14 @@ def test_events_since_with_desc_is_400(client: TestClient, temp_home: Path):
 
 def test_events_desc_limit_outside_1_to_1000_is_400(client: TestClient, temp_home: Path):
     """With order=desc, limit must be 1..1000 (a negative SQLite LIMIT would mean unlimited)."""
-    _seed_events(temp_home, [("attention", "r1")] * 3)
+    ids = _seed_events(temp_home, [("attention", "r1")] * 3)
     for limit in (0, -1, 1001):
         response = client.get(f"/api/events?order=desc&limit={limit}")
         assert response.status_code == 400, limit
         assert response.json() == {"detail": "limit must be between 1 and 1000"}, limit
-    assert len(client.get("/api/events?order=desc&limit=1").json()) == 1
+    one = client.get("/api/events?order=desc&limit=1")
+    assert one.status_code == 200
+    assert [e["id"] for e in one.json()] == [ids[2]]
     assert len(client.get("/api/events?order=desc&limit=1000").json()) == 3
 
 
@@ -862,6 +864,9 @@ def test_events_default_order_is_unchanged_ascending(client: TestClient, temp_ho
     assert client.get("/api/events?order=asc").json() == default.json()
     assert [e["id"] for e in client.get(f"/api/events?since={ids[0]}&kind=attention").json()] == [ids[2]]
     assert client.get("/api/events?limit=2").json() == default.json()[:2]
+    # an empty kind matches no event, in either order
+    assert client.get("/api/events?kind=").json() == []
+    assert client.get("/api/events?order=desc&kind=").json() == []
     # the 1..1000 limit rule is order=desc only: asc keeps since()'s plain LIMIT
     assert client.get("/api/events?limit=0").json() == []
     assert client.get("/api/events?order=asc&limit=1001").status_code == 200

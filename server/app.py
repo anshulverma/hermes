@@ -289,12 +289,16 @@ def awaiting_reductions(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     disagrees with Outputs. Output reductions stay pending forever, so only
     runs holding a needs_human ticket have their pending reductions read.
     """
+    if conn.execute("SELECT 1 FROM tickets WHERE state = 'needs_human' LIMIT 1").fetchone() is None:
+        return []
+    # run_id before review_state: review_state sits after the json column, so
+    # testing it first walks every reduction's JSON pages, other runs included.
     rows = conn.execute(
         """SELECT r.id, r.run_id, r.phase, r.kind, r.json, r.review_state,
                   runs.playbook, r.created_at
            FROM reductions r JOIN runs ON runs.id = r.run_id
-           WHERE r.review_state = 'pending'
-             AND r.run_id IN (SELECT run_id FROM tickets WHERE state = 'needs_human')
+           WHERE r.run_id IN (SELECT run_id FROM tickets WHERE state = 'needs_human')
+             AND r.review_state = 'pending'
            ORDER BY r.created_at, r.id"""
     ).fetchall()
     waiting = []
