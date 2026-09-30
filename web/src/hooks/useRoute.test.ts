@@ -26,6 +26,8 @@ const LEGACY: [string, Route, string | null][] = [
     '#/runs/run-14/tickets?ticket=run-14%2Ft-3',
   ],
   ['#board?run=run-14', { page: 'run', runId: 'run-14', tab: 'tickets', ticket: null }, '#/runs/run-14/tickets'],
+  // The old run picker kept a ticket from the previous run: run wins, the ticket goes.
+  ['#board?run=run-14&ticket=run-9%2Ft-2', { page: 'run', runId: 'run-14', tab: 'tickets', ticket: null }, '#/runs/run-14/tickets'],
   ['#outputs?run=run-14', { page: 'run', runId: 'run-14', tab: 'outputs', ticket: null }, '#/runs/run-14/outputs'],
   ['#findings?run=run-14', { page: 'run', runId: 'run-14', tab: 'outputs', ticket: null }, '#/runs/run-14/outputs'],
   ['#metrics?run=run-14', { page: 'run', runId: 'run-14', tab: 'metrics', ticket: null }, '#/runs/run-14/metrics'],
@@ -134,7 +136,7 @@ describe('parseRoute', () => {
   });
 
   it('leaves an empty, bare or unrecognised hash to the default run', () => {
-    for (const hash of ['', '#', '#/', '#/runs', '#/runs/', '#bogus', '#/bogus', '#/crew/extra', '#/runs//summary']) {
+    for (const hash of ['', '#', '#/', '#/runs', '#/runs/', '#bogus', '#/bogus', '#/crew/extra', '#/needs-you/extra', '#/activity/extra', '#/runs//summary']) {
       expect(parseRoute(hash), hash).toEqual({ route: PENDING, canonical: null });
     }
   });
@@ -201,9 +203,12 @@ describe('useRoute', () => {
   it('converts every legacy hash opened mid-session, on hashchange', () => {
     const { result } = renderHook(() => useRoute());
     for (const [hash, route, canonical] of LEGACY) {
+      const entries = window.history.length;
       hashChange(hash);
       expect(result.current.route, hash).toEqual(route);
       expect(window.location.hash, hash).toBe(canonical ?? hash);
+      // One entry for the hash the reader set; the conversion replaces it.
+      expect(window.history.length, hash).toBe(entries + 1);
     }
   });
 
