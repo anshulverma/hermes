@@ -19,7 +19,10 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
 
   // Focus follows the control that replaces the pressed one: Resume after
   // Pause, Pause after Resume or Reopen, Reopen after a confirmed Stop. Only a
-  // success here arms it, so a background state change never moves focus.
+  // success here arms it, so a background state change never moves focus. It
+  // moves only when focus was lost or is still in here: if you have moved on by
+  // the time the new state arrives, a stray Space must not press Resume or Reopen.
+  const rootRef = useRef<HTMLDivElement>(null);
   const primaryRef = useRef<HTMLButtonElement>(null);
   const stopRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -29,6 +32,8 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
   useEffect(() => {
     if (!focusPrimary.current) return;
     focusPrimary.current = false;
+    const active = document.activeElement;
+    if (active && active !== document.body && !rootRef.current?.contains(active)) return;
     primaryRef.current?.focus();
   }, [runState]);
 
@@ -134,7 +139,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
 
   if (isTerminal) {
     return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div ref={rootRef} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <button
             ref={primaryRef}
@@ -165,7 +170,7 @@ export default function RunControl({ runId, runState, onSuccess }: RunControlPro
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div ref={rootRef} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', gap: 8 }}>
         {canPause && (
           <button

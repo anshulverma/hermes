@@ -88,19 +88,27 @@ describe('RunHeader', () => {
   });
 
   it('shows the start time and the elapsed time up to now while the run is live', () => {
-    render(header({ run: row({ state: 'running', created_at: 1_000_000 }) }));
+    const { rerender } = render(header({ run: row({ state: 'running', created_at: 1_000_000 }) }));
 
     const started = screen.getByText(fmtTime(1_000_000));
     expect(started.tagName).toBe('TIME');
     expect(started).toHaveAttribute('datetime', new Date(1_000_000_000).toISOString());
     expect(screen.getByText('10m 0s elapsed')).toBeInTheDocument();
+
+    // A start stamped ahead of this browser's clock reads 0s, never negative.
+    rerender(header({ run: row({ state: 'running', created_at: 1_000_700 }) }));
+    expect(screen.getByText('0s elapsed')).toBeInTheDocument();
   });
 
   it("measures a finished run's elapsed time to updated_at, not now", () => {
-    render(header({ run: row({ state: 'done', created_at: 1_000_000, updated_at: 1_000_125 }) }));
-
-    expect(screen.getByText('2m 5s elapsed')).toBeInTheDocument();
-    expect(screen.queryByText('10m 0s elapsed')).not.toBeInTheDocument();
+    for (const state of ['done', 'failed', 'stopped']) {
+      const { unmount } = render(
+        header({ run: row({ state, created_at: 1_000_000, updated_at: 1_000_125 }) }),
+      );
+      expect(screen.getByText('2m 5s elapsed')).toBeInTheDocument();
+      expect(screen.queryByText('10m 0s elapsed')).not.toBeInTheDocument();
+      unmount();
+    }
   });
 
   it('draws a progressbar whose valuetext is the done, in flight and failed caption', () => {
@@ -108,11 +116,14 @@ describe('RunHeader', () => {
     render(header({ run: row({ tickets }) }));
 
     const caption = '3 of 10 done · 3 in flight · 1 failed';
-    const bar = screen.getByRole('progressbar');
+    const bar = screen.getByRole('progressbar', { name: 'Tickets' });
+    expect(bar).toHaveAttribute('aria-valuemin', '0');
     expect(bar).toHaveAttribute('aria-valuenow', '3');
     expect(bar).toHaveAttribute('aria-valuemax', '10');
     expect(bar).toHaveAttribute('aria-valuetext', caption);
     expect(screen.getByText(caption)).toBeInTheDocument();
+    // done, in flight, failed segments, each its share of all 10 tickets.
+    expect([...bar.children].map((c) => (c as HTMLElement).style.width)).toEqual(['30%', '30%', '10%']);
   });
 
   it('drops zero in-flight and failed terms from the caption', () => {

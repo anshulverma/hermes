@@ -268,7 +268,13 @@ describe('RunControl', () => {
       await waitFor(() => expect(onSuccess).toHaveBeenCalled());
       rerender(<RunControl runId="run-001" runState="paused" onSuccess={onSuccess} />);
 
-      expect(screen.getByRole('button', { name: 'Resume' })).toHaveFocus();
+      const resume = screen.getByRole('button', { name: 'Resume' });
+      expect(resume).toHaveFocus();
+
+      // One press moves focus once: the next state change leaves it alone.
+      resume.blur();
+      rerender(<RunControl runId="run-001" runState="running" onSuccess={onSuccess} />);
+      expect(document.body).toHaveFocus();
     });
 
     it('moves focus to Pause once the refetched state replaces Resume', async () => {
@@ -278,6 +284,8 @@ describe('RunControl', () => {
 
       fireEvent.click(screen.getByRole('button', { name: 'Resume' }));
       await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+      // Focus still inside the control (tabbed on to Stop) still follows.
+      screen.getByRole('button', { name: 'Stop' }).focus();
       rerender(<RunControl runId="run-001" runState="running" onSuccess={onSuccess} />);
 
       expect(screen.getByRole('button', { name: 'Pause' })).toHaveFocus();
@@ -318,6 +326,31 @@ describe('RunControl', () => {
       expect(screen.getByRole('button', { name: 'Stop' })).toHaveFocus();
     });
 
+    it('leaves focus where you moved it before the refetched state arrived, and stays disarmed', async () => {
+      succeed('paused');
+      const onSuccess = vi.fn();
+      const view = (runState: string) => (
+        <>
+          <input aria-label="Filter runs" />
+          <RunControl runId="run-001" runState={runState} onSuccess={onSuccess} />
+        </>
+      );
+      const { rerender } = render(view('running'));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+      await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+      const filter = screen.getByRole('textbox', { name: 'Filter runs' });
+      filter.focus();
+      rerender(view('paused'));
+
+      expect(filter).toHaveFocus();
+
+      // The press was used up: a later state change with focus lost moves nothing.
+      filter.blur();
+      rerender(view('running'));
+      expect(document.body).toHaveFocus();
+    });
+
     it('leaves focus alone when the state changes without a press here', () => {
       const { rerender } = render(<RunControl runId="run-001" runState="running" onSuccess={vi.fn()} />);
 
@@ -331,15 +364,26 @@ describe('RunControl', () => {
       (globalThis.fetch as any).mockResolvedValue({
         ok: false,
         status: 409,
-        json: async () => ({ detail: 'illegal transition running->paused' }),
+        json: async () => ({ detail: 'illegal transition' }),
       });
-      const { rerender } = render(<RunControl runId="run-001" runState="running" onSuccess={vi.fn()} />);
+      const presses = [
+        { from: 'running', press: ['Pause'], to: 'paused' },
+        { from: 'running', press: ['Stop', 'Confirm'], to: 'stopped' },
+        { from: 'paused', press: ['Resume'], to: 'running' },
+        { from: 'done', press: ['Reopen'], to: 'running' },
+      ];
+      for (const { from, press, to } of presses) {
+        const { rerender, unmount } = render(
+          <RunControl runId="run-001" runState={from} onSuccess={vi.fn()} />,
+        );
 
-      fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
-      await screen.findByText('illegal transition running->paused');
-      rerender(<RunControl runId="run-001" runState="paused" onSuccess={vi.fn()} />);
+        for (const name of press) fireEvent.click(screen.getByRole('button', { name }));
+        await screen.findByText('illegal transition');
+        rerender(<RunControl runId="run-001" runState={to} onSuccess={vi.fn()} />);
 
-      expect(screen.getByRole('button', { name: 'Resume' })).not.toHaveFocus();
+        expect(document.body, press.join(' then ')).toHaveFocus();
+        unmount();
+      }
     });
   });
 });

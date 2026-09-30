@@ -134,6 +134,22 @@ describe('the run header in App', () => {
     expect(h.compareDocumentPosition(summaryTab) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("points ‹ › at the rail's visible neighbours, on the current run tab without ?ticket=", async () => {
+    // run-b waits on you, so the rail reads run-b (Needs you) above run-a (Active),
+    // the reverse of the list's order.
+    rows = [row('run-a', { created_at: 1_000_200 }), row('run-b', { created_at: 1_000_100, awaiting: 1 })];
+    vi.mocked(client.fetchRun).mockReturnValue(new Promise<RunDetail>(() => {}));
+    render(<App />);
+    go('#/runs/run-a/tickets?ticket=run-a/t-1');
+
+    await waitFor(() =>
+      expect(screen.getByRole('heading', { level: 1, name: 'run-a · pb' })).toBeInTheDocument(),
+    );
+    const h = header();
+    expect(within(h).getByRole('link', { name: 'Previous run' })).toHaveAttribute('href', '#/runs/run-b/tickets');
+    expect(within(h).getByRole('link', { name: 'Next run' })).toHaveAttribute('aria-disabled', 'true');
+  });
+
   it('renders no header, so no ‹ ›, when the home has no runs', async () => {
     rows = [];
     render(<App />);
@@ -194,6 +210,9 @@ describe('the run header in App', () => {
       return { state: 'paused' };
     });
     await mount();
+    // Summary, drawn once the detail arrives, adds no second set of controls.
+    await screen.findByText('No phases yet.');
+    expect(screen.getAllByRole('button', { name: 'Pause' })).toHaveLength(1);
     const runsCalls = vi.mocked(client.fetchRuns).mock.calls.length;
     const detailCalls = vi.mocked(client.fetchRun).mock.calls.length;
 
