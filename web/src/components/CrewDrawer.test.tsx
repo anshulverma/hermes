@@ -51,6 +51,8 @@ describe('CrewDrawer', () => {
     // The Run row names the host's run as a link to its Summary.
     expect(screen.getByText('Run')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'run-a' })).toHaveAttribute('href', '#/runs/run-a/summary');
+    // Run comes before the ticket.
+    expect(screen.getByText('Run').compareDocumentPosition(screen.getByText('Current ticket')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByText('review · 2m 5s')).toBeInTheDocument();
     expect(screen.getByText('8s ago')).toBeInTheDocument();
   });
@@ -210,6 +212,8 @@ describe('CrewDrawer', () => {
     render(<CrewDrawer isOpen={true} host={mockHost} onClose={vi.fn()} onRefresh={vi.fn()} />);
 
     expect(await screen.findByRole('link', { name: 'run-b' })).toHaveAttribute('href', '#/runs/run-b/summary');
+    // Each card names its run before its ticket.
+    expect(screen.getAllByText('Run:')[0].compareDocumentPosition(screen.getAllByText('Ticket:')[0]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getByRole('link', { name: 'run-b/t-3' })).toHaveAttribute(
       'href',
       '#/runs/run-b/tickets?ticket=run-b%2Ft-3',

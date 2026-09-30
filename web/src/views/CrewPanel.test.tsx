@@ -157,6 +157,11 @@ describe('CrewPanel', () => {
     // Neither click reached the row: no drawer, no lease fetch.
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(mockFetch.mock.calls.some((c: any) => String(c[0]).startsWith('/api/leases'))).toBe(false);
+
+    // A click anywhere else in a row still opens the drawer.
+    const idle = screen.getByText('host-1').closest('div[role="button"]') as HTMLElement;
+    fireEvent.click(within(idle).getByText('—'));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
   });
 
   it('keeps one focusable h1 titled Crew from loading to loaded, so focus stays on it', async () => {
@@ -178,6 +183,7 @@ describe('CrewPanel', () => {
     expect(await screen.findByText('host-1')).toBeInTheDocument();
     // The same node, still focused: the crew arriving did not remount it.
     expect(screen.getByRole('heading', { level: 1, name: 'Crew' })).toBe(heading);
+    expect(heading).toHaveAttribute('tabindex', '-1');
     expect(heading).toHaveFocus();
   });
 
