@@ -397,7 +397,7 @@ export default function App() {
   } else if (route.page === 'crew') {
     pane = <CrewPanel liveTick={crewLiveTick} />;
   } else if (route.page === 'activity') {
-    pane = <ActivityFeed />;
+    pane = <ActivityFeed runFilter={route.run} kindFilter={route.kind} streamEvents={events} />;
   } else if (route.page === 'needs-you') {
     // Cross-run: no selected run, and no run list needed (the state labels drop out without it).
     pane = (
