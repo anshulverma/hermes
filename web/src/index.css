@@ -65,3 +65,41 @@ body {
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-md);
 }
+
+/* Summary: a main column (the playbook's view or the phase timeline, each its
+   own scroller) beside a 320px side column that scrolls on its own, so Summary
+   itself never scrolls. Below 1024px the side column moves under the main one,
+   full width, capped at 40% of the height. */
+.summary-columns {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 16px;
+}
+
+.summary-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+.summary-side {
+  width: 320px;
+  flex-shrink: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+@media (max-width: 1023px) {
+  .summary-columns {
+    flex-direction: column;
+  }
+
+  .summary-side {
+    width: auto;
+    max-height: 40%;
+  }
+}

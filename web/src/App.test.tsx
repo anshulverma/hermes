@@ -13,14 +13,20 @@ vi.mock('./views/MetricsView', () => ({
 }));
 // Renders only for a run whose playbook has a view, with one control inside,
 // so a test can hold focus in the pane body and watch where it goes.
-vi.mock('./views/PlaybookView', () => ({
-  default: ({ runId, hasView }: { runId: string; hasView: boolean }) =>
-    hasView ? (
+// It keeps the run it first mounted with, like the real loader, so a body that is
+// not keyed on the run shows up as the previous run's id.
+vi.mock('./views/PlaybookView', async () => {
+  const { useState } = await import('react');
+  const PlaybookViewStub = ({ runId, hasView, liveTick }: { runId: string; hasView: boolean; liveTick?: number }) => {
+    const [mountedWith] = useState(runId);
+    return hasView ? (
       <div data-testid="playbook-view">
-        view for {runId} <button type="button">view action</button>
+        playbook view for {mountedWith} · tick {String(liveTick)} <button type="button">view action</button>
       </div>
-    ) : null,
-}));
+    ) : null;
+  };
+  return { default: PlaybookViewStub };
+});
 
 const NOW = Math.floor(Date.now() / 1000);
 
@@ -289,6 +295,106 @@ describe('App', () => {
       await waitFor(() => {
         expect(window.location.hash).toBe('#/crew');
       });
+    });
+  });
+
+  describe('the summary tab', () => {
+    // 'work' totals 18 tickets, so its pill reads 'work 18'.
+    const phases: RunDetail['phases'] = [
+      { name: 'work', counts: { queued: 5, running: 2, done: 10, failed: 1 }, current: true },
+      { name: 'reduce', counts: {}, current: false },
+    ];
+    const withView = (id: string) => run(id, { playbook: 'pb-view', has_view: true });
+    const noView = (id: string) => run(id, { playbook: 'pb' });
+
+    /** Serve these rows, each detail carrying the two phases above. */
+    function mockRuns(...rows: Run[]) {
+      mockHome(rows, rows.map((r) => detailOf(r, { phases })));
+    }
+
+    const tabHrefs = () =>
+      within(screen.getByRole('navigation', { name: 'Run tabs' }))
+        .getAllByRole('link')
+        .map((a) => a.getAttribute('href'));
+
+    it('Summary shows the playbook view for a run that has one', async () => {
+      mockRuns(withView('run-001'));
+      go('#/runs/run-001/summary');
+
+      render(<App />);
+
+      await waitFor(() =>
+        expect(screen.getByTestId('playbook-view')).toHaveTextContent('playbook view for run-001'),
+      );
+      expect(screen.queryByTestId('phase-rail')).toBeNull();
+      expect(window.location.hash).toBe('#/runs/run-001/summary');
+    });
+
+    it('Summary shows the phase timeline for a run whose playbook ships no view', async () => {
+      mockRuns(noView('run-001'));
+      go('#/runs/run-001/summary');
+
+      render(<App />);
+
+      await waitFor(() => expect(screen.getByTestId('phase-rail')).toBeInTheDocument());
+      expect(screen.getByText('work 18')).toBeInTheDocument();
+      expect(screen.queryByTestId('playbook-view')).toBeNull();
+    });
+
+    it('hands the view the finding tick for the selected run only', async () => {
+      // Drop liveTick={viewTick} and a live run's view stops refreshing on
+      // reduction_created, which for turns arriving one at a time is the feature.
+      mockRuns(withView('run-001'), noView('run-002'));
+      go('#/runs/run-001/summary');
+      const { rerender } = render(<App />);
+      await waitFor(() => expect(screen.getByTestId('playbook-view')).toHaveTextContent('tick 0'));
+
+      await deliver(rerender, ev('reduction_created', 'run-002'));
+      expect(screen.getByTestId('playbook-view')).toHaveTextContent('tick 0');
+
+      await deliver(rerender, ev('reduction_created', 'run-001'));
+      await waitFor(() => expect(screen.getByTestId('playbook-view')).toHaveTextContent('tick 1'));
+    });
+
+    it('remounts the view when the reader switches to another run with one', async () => {
+      // The loader keeps the run it first mounted with (so does the stub at the
+      // top of this file): without the body's key the pane shows run-001's view
+      // under run-002 for one round trip.
+      mockRuns(withView('run-001'), withView('run-002'));
+      go('#/runs/run-001/summary');
+      render(<App />);
+      await waitFor(() => expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001'));
+
+      act(() => go('#/runs/run-002/summary'));
+
+      await waitFor(() => expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-002'));
+    });
+
+    it('shows the same four run tabs, and no Playbook tab, whether or not the run has a view', async () => {
+      mockRuns(withView('run-001'), noView('run-002'));
+      go('#/runs/run-001/summary');
+      render(<App />);
+      await waitFor(() => expect(screen.getByTestId('playbook-view')).toBeInTheDocument());
+      expect(tabHrefs()).toEqual([
+        '#/runs/run-001/summary',
+        '#/runs/run-001/tickets',
+        '#/runs/run-001/outputs',
+        '#/runs/run-001/metrics',
+      ]);
+      expect(screen.queryByRole('link', { name: 'Playbook' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Playbook' })).toBeNull();
+
+      act(() => go('#/runs/run-002/summary'));
+
+      await waitFor(() => expect(screen.getByTestId('phase-rail')).toBeInTheDocument());
+      expect(tabHrefs()).toEqual([
+        '#/runs/run-002/summary',
+        '#/runs/run-002/tickets',
+        '#/runs/run-002/outputs',
+        '#/runs/run-002/metrics',
+      ]);
+      expect(screen.queryByRole('link', { name: 'Playbook' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Playbook' })).toBeNull();
     });
   });
 

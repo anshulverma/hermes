@@ -11,7 +11,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from 'react';
 import TopBar from './components/TopBar';
 import RunRail, { defaultRunId, railGroups, useRailState } from './components/RunRail';
-import RunOverview from './views/RunOverview';
+import Summary from './views/Summary';
 import RunHeader from './components/RunHeader';
 import MetricsView from './views/MetricsView';
 import TicketBoard from './views/TicketBoard';
@@ -138,7 +138,6 @@ export default function App() {
 
   const ticketLiveTick = useLiveTick(events, TICKET_EVENT_KINDS);
   const crewLiveTick = useLiveTick(events, CREW_EVENT_KINDS);
-  const findingLiveTick = useLiveTick(events, FINDING_EVENT_KINDS);
   // The selected run's own reductions, so its view's transcript and verdict stay live.
   const viewTick = useLiveTick(events, FINDING_EVENT_KINDS, selectedId);
 
@@ -406,7 +405,7 @@ export default function App() {
         <Review
           key={id}
           runId={id}
-          liveTick={findingLiveTick}
+          liveTick={viewTick}
           onGoToOutputs={() => navigate({ page: 'run', runId: id, tab: 'outputs', ticket: null })}
         />
       );
@@ -444,14 +443,14 @@ export default function App() {
         <div key={id} style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
           {paneDetail ? (
             <>
-              {tab === 'summary' && <RunOverview run={paneDetail} />}
+              {tab === 'summary' && <Summary run={paneDetail} streamEvents={events} viewTick={viewTick} />}
               {tab === 'tickets' && (
                 <TicketBoard runId={id} phases={paneDetail.phases.map((p) => p.name)} liveTick={ticketLiveTick} />
               )}
               {tab === 'outputs' && (
                 <Outputs
                   runId={id}
-                  liveTick={findingLiveTick}
+                  liveTick={viewTick}
                   onGoToReview={() => navigate({ page: 'needs-you', run: id })}
                 />
               )}
