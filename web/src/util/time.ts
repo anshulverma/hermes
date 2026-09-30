@@ -43,3 +43,23 @@ export function fmtSeconds(s: number | null | undefined): string {
   const remainingM = Math.floor((sec % 3600) / 60);
   return `${h}h ${remainingM}m`;
 }
+
+const RELATIVE = new Intl.RelativeTimeFormat('en', { numeric: 'always' });
+
+/**
+ * How long before `now` an epoch-second stamp was, both in epoch seconds (`now`
+ * comes from useNow): 'just now' under 60 s, else the largest whole unit of
+ * minutes, hours or days ('3 minutes ago', '2 hours ago', '5 days ago'). A
+ * negative difference (clock skew between server and browser) counts as 0.
+ * Render it as
+ *   <time dateTime={new Date(ts * 1000).toISOString()} title={fmtTime(ts)}>
+ *     {fmtAgo(ts, now)}
+ *   </time>
+ */
+export function fmtAgo(ts: number, now: number): string {
+  const s = Math.max(0, now - ts);
+  if (s < 60) return 'just now';
+  if (s < 3600) return RELATIVE.format(-Math.floor(s / 60), 'minute');
+  if (s < 86400) return RELATIVE.format(-Math.floor(s / 3600), 'hour');
+  return RELATIVE.format(-Math.floor(s / 86400), 'day');
+}

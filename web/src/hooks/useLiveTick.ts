@@ -30,24 +30,33 @@ export const FINDING_EVENT_KINDS: ReadonlySet<string> = Object.freeze(new Set([
 ]));
 
 /**
- * Returns a counter that increments only when a new (not-yet-seen) event
- * whose kind is in `kinds` arrives via `lastEvent`.
+ * Returns a counter that increments when the stream brings events whose kind
+ * is in `kinds` and, when `runId` is given (not null), whose run_id is that
+ * run. Reads `events` with a cursor: it starts at the newest event buffered at
+ * mount (the caller's own fetch covers older ones) and handles every later
+ * event once, in id order, so a burst React batches into one render is never
+ * cut to its last event.
  *
  * Pass one of the module-level frozen sets (TICKET_EVENT_KINDS, etc.) so
- * the identity is stable across renders and the effect does not loop.
+ * the identity is stable across renders.
  */
-export function useLiveTick(lastEvent: Event | null, kinds: ReadonlySet<string>): number {
+export function useLiveTick(
+  events: Event[],
+  kinds: ReadonlySet<string>,
+  runId?: string | null,
+): number {
   const [tick, setTick] = useState(0);
-  const lastSeenIdRef = useRef<number | null>(null);
+  const cursorRef = useRef(events.at(-1)?.id ?? 0);
 
   useEffect(() => {
-    if (!lastEvent) return;
-    if (lastEvent.id === lastSeenIdRef.current) return;
-    lastSeenIdRef.current = lastEvent.id;
-    if (kinds.has(lastEvent.kind)) {
-      setTick((n) => n + 1);
+    let hit = false;
+    for (const e of events) {
+      if (e.id <= cursorRef.current) continue;
+      cursorRef.current = e.id;
+      if (kinds.has(e.kind) && (runId == null || e.run_id === runId)) hit = true;
     }
-  }, [lastEvent, kinds]);
+    if (hit) setTick((n) => n + 1);
+  }, [events, kinds, runId]);
 
   return tick;
 }

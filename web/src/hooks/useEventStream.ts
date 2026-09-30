@@ -27,6 +27,11 @@ export function useEventStream(since?: number): EventStreamState {
   const reconnectTimeoutRef = useRef<number | null>(null);
 
   useEffect(() => {
+    // The stream's cursor: hello's last_id, then each event's id. Every
+    // reconnect passes it as `since`, so the server replays what was committed
+    // while the socket was down instead of starting again at MAX(id).
+    let cursor = since;
+
     function connect() {
       // Derive WebSocket URL from current origin (http:// -> ws://, https:// -> wss://)
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -38,8 +43,8 @@ export function useEventStream(since?: number): EventStreamState {
       if (token) {
         params.append('token', token);
       }
-      if (since !== undefined) {
-        params.append('since', since.toString());
+      if (cursor !== undefined) {
+        params.append('since', cursor.toString());
       }
 
       const queryString = params.toString();
@@ -56,12 +61,14 @@ export function useEventStream(since?: number): EventStreamState {
         try {
           const msg = JSON.parse(event.data);
 
-          if (msg.type === 'event' && msg.event) {
+          if (msg.type === 'hello' && typeof msg.last_id === 'number') {
+            cursor = msg.last_id;
+          } else if (msg.type === 'event' && msg.event) {
             const newEvent = msg.event as Event;
+            cursor = newEvent.id;
             setEvents((prev) => [...prev, newEvent].slice(-MAX_EVENTS_BUFFER));
             setLastEvent(newEvent);
           }
-          // Ignore hello messages (just acknowledges connection)
         } catch (err) {
           console.error('Failed to parse WebSocket message:', err);
         }

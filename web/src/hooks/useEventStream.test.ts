@@ -4,7 +4,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook, waitFor, act } from '@testing-library/react';
 import { useEventStream } from './useEventStream';
 import { clearToken, setToken } from '../api/auth';
 
@@ -266,6 +266,58 @@ describe('useEventStream', () => {
 
       // Should NOT set auth error (transient, will reconnect)
       expect(result.current.authError).toBeFalsy();
+    });
+  });
+
+  describe('cursor: hello last_id, then each event; a reconnect resumes with since', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function send(msg: object) {
+      act(() => {
+        eventListeners.get('message')![0]({ data: JSON.stringify(msg) });
+      });
+    }
+
+    /** Drops the socket with a transient code and waits out the 3 s backoff. */
+    function dropAndReconnect() {
+      act(() => {
+        eventListeners.get('close')![0]({ type: 'close', code: 1006 });
+      });
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+    }
+
+    it("resumes from hello's last_id when no event arrived before the drop", () => {
+      renderHook(() => useEventStream());
+      expect(capturedUrl).not.toContain('since=');
+
+      send({ type: 'hello', last_id: 77 });
+      dropAndReconnect();
+
+      expect(capturedUrl).toContain('since=77');
+    });
+
+    it('resumes from the last event received', () => {
+      const { result } = renderHook(() => useEventStream());
+      send({ type: 'hello', last_id: 77 });
+      for (const id of [78, 80]) {
+        send({
+          type: 'event',
+          event: { id, ts: 1234567890, kind: 'run_done', run_id: 'r1', ticket_id: null, host: null, message: null, data: {} },
+        });
+      }
+      expect(result.current.events.map((e) => e.id)).toEqual([78, 80]);
+
+      dropAndReconnect();
+
+      expect(capturedUrl).toContain('since=80');
     });
   });
 });

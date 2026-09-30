@@ -75,13 +75,13 @@ export default function App() {
   const [reviewCount, setReviewCount] = useState<number | null>(null);
 
   // WebSocket live event stream
-  const { connected, lastEvent, authError } = useEventStream();
+  const { connected, events, lastEvent, authError } = useEventStream();
   const [authErrorDismissed, setAuthErrorDismissed] = useState(false);
 
   // Per-domain live ticks derived from the shared event stream
-  const ticketLiveTick = useLiveTick(lastEvent, TICKET_EVENT_KINDS);
-  const crewLiveTick = useLiveTick(lastEvent, CREW_EVENT_KINDS);
-  const findingLiveTick = useLiveTick(lastEvent, FINDING_EVENT_KINDS);
+  const ticketLiveTick = useLiveTick(events, TICKET_EVENT_KINDS);
+  const crewLiveTick = useLiveTick(events, CREW_EVENT_KINDS);
+  const findingLiveTick = useLiveTick(events, FINDING_EVENT_KINDS);
 
   // Initialize lucide icons after mount
   useEffect(() => {
