@@ -6,8 +6,18 @@
 
 import LiveDot from './LiveDot';
 
-import type { View } from '../hooks/useHashView';
 import type { Run } from '../api/client';
+
+/** What each top tab opens; App maps the route onto these. */
+export type View =
+  | 'overview'
+  | 'metrics'
+  | 'board'
+  | 'crew'
+  | 'outputs'
+  | 'review'
+  | 'activity'
+  | 'playbook';
 
 /**
  * Height of the app chrome, in px.

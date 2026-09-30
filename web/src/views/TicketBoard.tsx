@@ -2,7 +2,7 @@
  * TicketBoard - kanban view with real tickets from API.
  * Ported from web/prototype/app/TicketBoard.jsx with REAL data.
  *
- * The open ticket lives in the URL hash (`#board?ticket=<id>`), not in local
+ * The open ticket lives in the route (`#/runs/<run>/tickets?ticket=<id>`), not in local
  * state alone, so a refresh reopens it and the address bar is a link worth
  * sending. The board holds only the id; the ticket object is looked up in the
  * loaded rows, and synthesised from the id when a filter is hiding it -- the
@@ -17,7 +17,7 @@ import { Button, StatusPill, TICKET_STATES, TONES } from '../ds';
 import TicketModal from '../components/TicketModal';
 import HermesTicketCard from '../components/HermesTicketCard';
 import { LoadingOverlay } from '../components/Spinner';
-import { useHashParam } from '../hooks/useHashView';
+import { useRoute } from '../hooks/useRoute';
 
 // Lane definitions matching prototype
 const TICKET_LANES = [
@@ -197,8 +197,12 @@ export default function TicketBoard({ runId, phases = [], liveTick }: TicketBoar
   const [resource, setResource] = useState('all resources');
   const [stateFilter, setStateFilter] = useState<string | undefined>(undefined);
 
-  // The open ticket, addressed by the URL so a refresh reopens it.
-  const [openTicketId, setOpenTicketId] = useHashParam('ticket');
+  // The open ticket, addressed by the URL so a refresh reopens it. Opening and
+  // closing are history entries: Back closes what was opened.
+  const { route, navigate } = useRoute();
+  const openTicketId = route.page === 'run' ? route.ticket : null;
+  const setOpenTicketId = (ticket: string | null) =>
+    navigate({ page: 'run', runId, tab: 'tickets', ticket });
 
   // Bumped after a modal action mutates a ticket, to refetch the board.
   const [refreshTick, setRefreshTick] = useState(0);

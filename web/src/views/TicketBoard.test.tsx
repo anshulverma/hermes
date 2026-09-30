@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import TicketBoard from './TicketBoard';
 import type { Ticket } from '../api/client';
@@ -309,5 +309,53 @@ describe('TicketBoard — state chips earn their place', () => {
     await waitFor(() =>
       expect(screen.getByTestId('state-chip-queued').getAttribute('aria-pressed')).toBe('true'),
     );
+  });
+});
+
+describe('TicketBoard — the open ticket is in the route', () => {
+  beforeEach(() => {
+    // The list for the board; the modal's detail fetch never settles, so the
+    // modal shows the row it was handed.
+    mockFetch.mockReset();
+    mockFetch.mockImplementation((url: string) =>
+      url.startsWith('/api/tickets/')
+        ? new Promise(() => {})
+        : Promise.resolve({ ok: true, json: async () => mockTickets }),
+    );
+  });
+
+  afterEach(() => {
+    window.location.hash = '';
+  });
+
+  it('opens the ticket the route names', async () => {
+    window.location.hash = '#/runs/test-run/tickets?ticket=test-run%2Ft-1';
+    render(<TicketBoard runId="test-run" />);
+
+    expect(await screen.findByRole('dialog')).toHaveTextContent('test-run/t-1');
+  });
+
+  it('opening a card writes the ticket into the route as a history entry', async () => {
+    window.location.hash = '#/runs/test-run/tickets';
+    render(<TicketBoard runId="test-run" />);
+    await waitFor(() => expect(screen.getByText('Investigate issue #1')).toBeInTheDocument());
+    const entries = window.history.length;
+
+    fireEvent.click(screen.getByText('Investigate issue #1'));
+
+    expect(window.location.hash).toBe('#/runs/test-run/tickets?ticket=test-run%2Ft-0');
+    expect(window.history.length).toBe(entries + 1);
+    expect(await screen.findByRole('dialog')).toHaveTextContent('test-run/t-0');
+  });
+
+  it('closing the ticket keeps the Tickets route', async () => {
+    // useHashParam rebuilt `#<view>?…` and would have written `#overview`.
+    window.location.hash = '#/runs/test-run/tickets?ticket=test-run%2Ft-1';
+    render(<TicketBoard runId="test-run" />);
+
+    fireEvent.click(await screen.findByRole('dialog'));
+
+    expect(window.location.hash).toBe('#/runs/test-run/tickets');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 });

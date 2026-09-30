@@ -283,7 +283,7 @@ describe('App', () => {
     });
 
     it('opens the tab named in the URL instead of the default (refresh restores it)', async () => {
-      window.location.hash = '#crew';
+      window.location.hash = '#/crew';
       mockLoadedRun();
 
       render(<App />);
@@ -332,12 +332,12 @@ describe('App', () => {
       screen.getByRole('button', { name: /^crew$/i }).click();
 
       await waitFor(() => {
-        expect(window.location.hash).toBe('#crew');
+        expect(window.location.hash).toBe('#/crew');
       });
     });
   });
 
-  describe('the playbook tab', () => {
+  describe('the playbook view on the Run tab', () => {
     const withView: RunDetail = { ...mockRunDetail, playbook: 'committee', has_view: true };
 
     function mockRuns(...ids: string[]) {
@@ -380,25 +380,21 @@ describe('App', () => {
       expect(screen.queryByTestId('tab-playbook')).toBeNull();
     });
 
-    it('is present, and opens the view, for a run whose playbook has one', async () => {
+    it('the Run tab opens the view for a run whose playbook has one', async () => {
       mockRuns('run-001');
       vi.spyOn(client, 'fetchRun').mockResolvedValue(withView);
 
       render(<App />);
 
       await waitFor(() => {
-        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
-      });
-
-      screen.getByTestId('tab-playbook').click();
-
-      await waitFor(() => {
         expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
       });
-      expect(window.location.hash).toBe('#playbook');
+      expect(window.location.hash).toBe('#/runs/run-001/summary');
+      expect(screen.queryByTestId('tab-playbook')).toBeNull();
+      expect(screen.getByTestId('tab-run')).toHaveStyle({ color: 'var(--text-primary)' });
     });
 
-    it('falls back to the run overview when #playbook names a run with no view', async () => {
+    it('a legacy #playbook opens the run overview for a run with no view', async () => {
       // A bookmarked hash outlives the run it was taken on. Blank pane, no tab
       // to click your way out of: the one outcome the fallback exists to avoid.
       window.location.hash = '#playbook';
@@ -412,9 +408,10 @@ describe('App', () => {
       });
       expect(screen.queryByTestId('playbook-view')).toBeNull();
       expect(screen.queryByTestId('tab-playbook')).toBeNull();
+      expect(window.location.hash).toBe('#/runs/run-001/summary');
     });
 
-    it('appears and disappears as the reader switches runs', async () => {
+    it('shows the view or the overview as the reader switches runs', async () => {
       mockRuns('run-001', 'run-002');
       vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) =>
         id === 'run-001' ? withView : { ...mockRunDetail, id: 'run-002' },
@@ -423,19 +420,20 @@ describe('App', () => {
       render(<App />);
 
       await waitFor(() => {
-        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
+        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
       });
 
       fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
 
       await waitFor(() => {
-        expect(screen.queryByTestId('tab-playbook')).toBeNull();
+        expect(screen.getByText(/example run/i)).toBeInTheDocument();
       });
+      expect(screen.queryByTestId('playbook-view')).toBeNull();
 
       fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-001' } });
 
       await waitFor(() => {
-        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
+        expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
       });
     });
 
@@ -452,10 +450,6 @@ describe('App', () => {
 
       render(<App />);
 
-      await waitFor(() => {
-        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
-      });
-      screen.getByTestId('tab-playbook').click();
       await waitFor(() => {
         expect(screen.getByTestId('playbook-view')).toHaveTextContent('run-001');
       });
@@ -475,11 +469,6 @@ describe('App', () => {
       vi.spyOn(client, 'fetchRun').mockResolvedValue(withView);
 
       render(<App />);
-
-      await waitFor(() => {
-        expect(screen.getByTestId('tab-playbook')).toBeInTheDocument();
-      });
-      screen.getByTestId('tab-playbook').click();
 
       await waitFor(() => {
         expect(screen.getByTestId('playbook-view')).toHaveTextContent(/tick \d+/);
@@ -567,6 +556,124 @@ describe('App', () => {
 
       await waitFor(() => expect(client.fetchTickets).toHaveBeenLastCalledWith('run-002', {}));
       expect(phaseOptions()).toEqual(['all phases', 'solve']);
+    });
+  });
+
+  describe('the route', () => {
+    // A `/api/runs` row, in the shape the client types give it.
+    const row = (id: string): client.Run => ({
+      id,
+      playbook: 'example',
+      site: 'local',
+      state: 'running',
+      phase: 'work',
+      base_ref: 'main',
+      created_at: 1785319200,
+      updated_at: 1785319500,
+      has_view: false,
+      awaiting: 0,
+      subject: null,
+      tickets: {},
+    });
+
+    function mockRuns(...ids: string[]) {
+      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
+        status: 'ok',
+        version: '0.1.0',
+        home: '/tmp/hermes',
+      });
+      vi.spyOn(client, 'fetchRuns').mockResolvedValue(ids.map(row));
+      vi.spyOn(client, 'fetchRun').mockImplementation(async (id: string) => ({ ...mockRunDetail, id }));
+      vi.mocked(client.fetchCrew).mockResolvedValue([]);
+    }
+
+    afterEach(() => {
+      window.location.hash = '';
+    });
+
+    it("names the default run's summary in an empty hash once the list loads", async () => {
+      mockRuns('run-001');
+
+      render(<App />);
+
+      await waitFor(() => expect(window.location.hash).toBe('#/runs/run-001/summary'));
+      expect(await screen.findByText(/example run/i)).toBeInTheDocument();
+    });
+
+    it('leaves #/runs alone when the list fails to load', async () => {
+      window.location.hash = '#/runs';
+      vi.spyOn(client, 'fetchHealth').mockResolvedValue({
+        status: 'ok',
+        version: '0.1.0',
+        home: '/tmp/hermes',
+      });
+      vi.spyOn(client, 'fetchRuns').mockRejectedValue(new Error('Network error'));
+
+      render(<App />);
+
+      await waitFor(() => expect(screen.getByText('Error loading data')).toBeInTheDocument());
+      expect(window.location.hash).toBe('#/runs');
+    });
+
+    it('switching tabs keeps the run, through pages that name none', async () => {
+      // d978a44: a tab click used to send the console to the newest run.
+      window.location.hash = '#/runs/run-002/summary';
+      mockRuns('run-001', 'run-002');
+
+      render(<App />);
+      await waitFor(() => expect(client.fetchRun).toHaveBeenCalledWith('run-002'));
+      await screen.findByText(/example run/i);
+
+      fireEvent.click(screen.getByRole('button', { name: /^needs you/i }));
+      expect(window.location.hash).toBe('#/needs-you?run=run-002');
+
+      fireEvent.click(screen.getByRole('button', { name: /^crew$/i }));
+      expect(window.location.hash).toBe('#/crew');
+
+      fireEvent.click(screen.getByRole('button', { name: /^run$/i }));
+      expect(window.location.hash).toBe('#/runs/run-002/summary');
+      await screen.findByText(/example run/i);
+      expect(client.fetchRun).not.toHaveBeenCalledWith('run-001');
+    });
+
+    it('picking a run keeps the tab and drops the open ticket', async () => {
+      window.location.hash = '#/runs/run-001/tickets?ticket=run-001%2Ft-1';
+      mockRuns('run-001', 'run-002');
+      vi.mocked(client.fetchTickets).mockResolvedValue([]);
+      vi.mocked(client.fetchTicketDetail).mockReturnValue(new Promise(() => {}));
+
+      render(<App />);
+      expect(await screen.findByRole('dialog')).toHaveTextContent('run-001/t-1');
+
+      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
+
+      expect(window.location.hash).toBe('#/runs/run-002/tickets');
+      await waitFor(() => expect(client.fetchTickets).toHaveBeenLastCalledWith('run-002', {}));
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it("picking a run on a page that names none opens that run's summary", async () => {
+      window.location.hash = '#/crew';
+      mockRuns('run-001', 'run-002');
+
+      render(<App />);
+      await screen.findByText(/no crew members/i);
+
+      fireEvent.change(screen.getByTestId('run-picker'), { target: { value: 'run-002' } });
+
+      expect(window.location.hash).toBe('#/runs/run-002/summary');
+      await waitFor(() => expect(client.fetchRun).toHaveBeenLastCalledWith('run-002'));
+    });
+
+    it('a run tab does nothing in a home with no runs', async () => {
+      mockRuns();
+
+      render(<App />);
+      await screen.findByText(/no active run/i);
+
+      fireEvent.click(screen.getByRole('button', { name: /^metrics$/i }));
+
+      expect(window.location.hash).toBe('');
     });
   });
 });

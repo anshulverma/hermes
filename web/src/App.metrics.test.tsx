@@ -88,7 +88,7 @@ describe('the Metrics tab', () => {
       lastEvent: null,
       authError: false,
     });
-    window.location.hash = '#metrics';
+    window.location.hash = '#/runs/run-001/metrics';
   });
 
   afterEach(() => {
@@ -116,5 +116,15 @@ describe('the Metrics tab', () => {
 
     await waitFor(() => expect(screen.getByTestId('metrics-view')).toHaveTextContent('run-001'));
     expect(screen.queryByTestId('playbook-view')).toBeNull();
+  });
+
+  it("lands a legacy #metrics on the default run's Metrics once the list loads", async () => {
+    window.location.hash = '#metrics';
+    mockRuns([run('run-001', false)]);
+
+    render(<App />);
+
+    await waitFor(() => expect(screen.getByTestId('metrics-view')).toHaveTextContent('run-001'));
+    expect(window.location.hash).toBe('#/runs/run-001/metrics');
   });
 });
