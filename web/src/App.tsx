@@ -18,7 +18,7 @@ import TicketBoard from './views/TicketBoard';
 import CrewPanel from './views/CrewPanel';
 import Outputs from './views/Outputs';
 import PlaybookView from './views/PlaybookView';
-import Review from './views/Review';
+import NeedsYou from './views/NeedsYou';
 import ActivityFeed from './views/ActivityFeed';
 import TokenLogin from './components/TokenLogin';
 import { useHealth, useRuns } from './hooks/useApi';
@@ -399,17 +399,16 @@ export default function App() {
   } else if (route.page === 'activity') {
     pane = <ActivityFeed />;
   } else if (route.page === 'needs-you') {
-    const id = route.run ?? (runs ? defaultRunId(runs, rail.hidden) : null);
-    if (id) {
-      pane = (
-        <Review
-          key={id}
-          runId={id}
-          liveTick={viewTick}
-          onGoToOutputs={() => navigate({ page: 'run', runId: id, tab: 'outputs', ticket: null })}
-        />
-      );
-    }
+    // Cross-run: no selected run, and no run list needed (the state labels drop out without it).
+    pane = (
+      <NeedsYou
+        runFilter={route.run}
+        runs={runs}
+        streamEvents={events}
+        onDecided={refetchRuns}
+        announce={announce}
+      />
+    );
   } else if (runs && runs.length === 0) {
     pane = <PaneMessage title="No runs yet" description="Start one with `hermes run <playbook>`." />;
   } else if (!headerRun) {
@@ -451,7 +450,6 @@ export default function App() {
                 <Outputs
                   runId={id}
                   liveTick={viewTick}
-                  onGoToReview={() => navigate({ page: 'needs-you', run: id })}
                 />
               )}
               {tab === 'metrics' && (

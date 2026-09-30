@@ -8,7 +8,7 @@
  * a reduction holding no such ticket has no decision in it — offering the
  * buttons anyway implies an authority they do not have, since they would flip a
  * flag and move nothing. The ones that really are waiting on a person live in
- * Review, which this links to when it has any.
+ * Needs you, which this links to, filtered to this run, when it has any.
  */
 
 import { useState, useEffect } from 'react';
@@ -19,15 +19,14 @@ import { EmptyState } from '../ds';
 import { LoadingOverlay } from '../components/Spinner';
 import ReductionCard from '../components/ReductionCard';
 import { awaitsDecision } from '../util/reduction';
+import { buildRoute } from '../hooks/useRoute';
 
 type OutputsProps = {
   runId: string;
   liveTick?: number;
-  /** Send the reader to the review queue when something is waiting there. */
-  onGoToReview?: () => void;
 };
 
-export default function Outputs({ runId, liveTick, onGoToReview }: OutputsProps) {
+export default function Outputs({ runId, liveTick }: OutputsProps) {
   const [reductions, setReductions] = useState<Reduction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
@@ -104,11 +103,10 @@ export default function Outputs({ runId, liveTick, onGoToReview }: OutputsProps)
             .map(([kind, n]) => `${n} ${kind}`)
             .join(' · ')}
         </span>
-        {waiting > 0 && onGoToReview && (
-          <button
-            type="button"
-            data-testid="go-to-review"
-            onClick={onGoToReview}
+        {waiting > 0 && (
+          <a
+            data-testid="go-to-needs-you"
+            href={buildRoute({ page: 'needs-you', run: runId })}
             style={{
               marginLeft: 'auto',
               padding: '4px 10px',
@@ -117,11 +115,11 @@ export default function Outputs({ runId, liveTick, onGoToReview }: OutputsProps)
               background: 'var(--wash-subtle)',
               border: '1px solid var(--border-hairline)',
               borderRadius: 'var(--radius-md)',
-              cursor: 'pointer',
+              textDecoration: 'none',
             }}
           >
             {waiting} waiting on you
-          </button>
+          </a>
         )}
       </div>
 

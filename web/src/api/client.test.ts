@@ -841,6 +841,8 @@ describe('API client', () => {
         }) as any;
 
         await expect(acceptReduction(1)).rejects.toThrow("reduction 1 is 'accepted', not 'pending'; already resolved");
+        // The status survives, so Needs you can tell "decided elsewhere" from a failure.
+        await expect(acceptReduction(1)).rejects.toMatchObject({ status: 409 });
       });
 
       it('should throw AuthError on 401', async () => {

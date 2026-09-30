@@ -1114,3 +1114,55 @@ describe('focus and announcements', () => {
     await waitFor(() => expect(statusRegion()).toHaveTextContent('run-a failed'));
   });
 });
+
+describe('the Needs you page', () => {
+  /** One decision waiting in run-001, as /api/needs-you returns it. */
+  function mockWaiting() {
+    vi.mocked(client.fetchNeedsYou).mockResolvedValue([
+      {
+        id: 7,
+        run_id: 'run-001',
+        phase: 'decide',
+        kind: 'verdict',
+        json: { title: 'Pick the schema' },
+        review_state: 'pending',
+        member_ticket_ids: ['run-001/t-1'],
+        member_tickets: [{ id: 'run-001/t-1', state: 'needs_human', phase: 'decide' }],
+        playbook: 'pb',
+        created_at: NOW - 50,
+      },
+    ]);
+  }
+
+  it('renders the cross-run page at #/needs-you, filtered by ?run', async () => {
+    mockHome([run('run-001', { tickets: { needs_human: 1 }, awaiting: 1 })]);
+    mockWaiting();
+    go('#/needs-you?run=run-001');
+
+    render(<App />);
+
+    expect(await heading('Needs you')).toBeInTheDocument();
+    const toggle = await screen.findByRole('button', { name: 'Pick the schema' });
+    // ?run= with exactly one item: it starts open, with its ruling buttons.
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-expanded', 'true'));
+    expect(screen.getByRole('button', { name: 'Accept' })).toBeEnabled();
+    expect(screen.getByTestId('needs-you-run-chip')).toHaveTextContent('run run-001');
+    // The group's state label comes from App's own run list, handed down as `runs`.
+    const group = screen.getByRole('region', { name: 'run-001' });
+    expect(await within(group).findByText('running')).toBeInTheDocument();
+  });
+
+  it('still lists what needs you when the run list fails', async () => {
+    vi.mocked(client.fetchRuns).mockRejectedValue(new Error('database is locked'));
+    mockWaiting();
+    go('#/needs-you');
+
+    render(<App />);
+
+    // Cross-run pages keep working without the list (spec, Errors): no run
+    // needs to be selected, and the group header just drops its state label.
+    expect(await heading('Needs you')).toBeInTheDocument();
+    expect(await inMain().findByRole('button', { name: 'Pick the schema' })).toBeInTheDocument();
+    expect(within(inMain().getByRole('region', { name: 'run-001' })).queryByText('running')).toBeNull();
+  });
+});

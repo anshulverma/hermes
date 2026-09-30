@@ -255,4 +255,14 @@ describe('Outputs', () => {
     // Outputs should still be on screen (no blanking spinner)
     expect(screen.getByText('Null pointer in module X')).toBeInTheDocument();
   });
+
+  it("links 'N waiting on you' to this run on Needs you", async () => {
+    // Reduction 1 is pending and holds a needs-human ticket: one waits on you.
+    mockFetch.mockResolvedValue({ ok: true, json: async () => mockReductions });
+
+    render(<Outputs runId="test-run" />);
+
+    const link = await screen.findByRole('link', { name: '1 waiting on you' });
+    expect(link).toHaveAttribute('href', '#/needs-you?run=test-run');
+  });
 });
