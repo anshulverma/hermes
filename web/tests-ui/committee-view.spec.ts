@@ -138,7 +138,19 @@ const DECISION = {
   ended: 'turn cap',
 };
 
-/** Idempotent: the run's rows are deleted before they are written again. */
+/** Run B of the rail scenario: running, phase `work`, no tickets, nothing waiting. */
+const LIVE = `${RUN}-live`;
+/** What `reductionHeadline` makes of the decision. There is no `title` and no
+ *  nested object, so it falls through to the verdict's first sentence. */
+const DECISION_HEADLINE = DECISION.verdict.split('\n')[0];
+/** The needs_human ticket the decision holds, so the decision waits on the user. */
+const DECISION_TICKET = `${RUN}/decision`;
+
+/** Idempotent: the run's rows are deleted before they are written again, the
+ *  tickets first. E2E_HOME persists between runs, node:sqlite turns foreign
+ *  keys on, and tickets.reduction_id references reductions with no ON DELETE,
+ *  so deleting the decision while its ticket still points at it would fail on
+ *  the second run. */
 function seed(): void {
   // The snapshots the playbook writes at `open` and after each junior turn --
   // and nothing at ORIGINAL or REVISED, so a server that still opened a
@@ -154,8 +166,10 @@ function seed(): void {
   const db = new DatabaseSync(`${HOME}/queue.db`);
   try {
     const now = Date.now() / 1000;
+    db.prepare('DELETE FROM tickets WHERE run_id = ?').run(RUN);
     db.prepare('DELETE FROM reductions WHERE run_id = ?').run(RUN);
     db.prepare('DELETE FROM runs WHERE id = ?').run(RUN);
+    db.prepare('DELETE FROM runs WHERE id = ?').run(LIVE);
     db.prepare(
       `INSERT INTO runs (id, playbook, site, base_ref, config_json, state, phase,
                          created_at, updated_at)
@@ -176,10 +190,25 @@ function seed(): void {
       const phase = `t${String(t.turn).padStart(2, '0')}-${t.role}`;
       insert.run(RUN, phase, 'turn', JSON.stringify(json), now + i, now + i);
     });
-    insert.run(
-      RUN, 'decision', 'decision', JSON.stringify(DECISION),
+    // The decision holds a needs_human ticket, so it waits on the user:
+    // /api/runs counts it in `awaiting` and /api/needs-you lists it. Accepting
+    // the verdict now settles that ticket too.
+    const decision = insert.run(
+      RUN, 'decision', 'decision',
+      JSON.stringify({ ...DECISION, needs_human_ticket_ids: [DECISION_TICKET] }),
       now + TURNS.length, now + TURNS.length,
     );
+    db.prepare(
+      `INSERT INTO tickets (id, run_id, phase, state, reduction_id, created_at, updated_at)
+       VALUES (?, ?, 'decision', 'needs_human', ?, ?, ?)`,
+    ).run(DECISION_TICKET, RUN, decision.lastInsertRowid, now, now);
+
+    // Run B of the rail scenario: running, no tickets. The scenario ends it.
+    db.prepare(
+      `INSERT INTO runs (id, playbook, site, base_ref, config_json, state, phase,
+                         created_at, updated_at)
+       VALUES (?, 'committee', 'local', 'main', '{}', 'running', 'work', ?, ?)`,
+    ).run(LIVE, now, now);
   } finally {
     db.close();
   }
@@ -453,7 +482,10 @@ test('the seeded run is served with a view', async ({ request }) => {
 
 test('the committee tab renders the meeting oldest-first', async ({ page }) => {
   await openCommittee(page);
-  await expect(page.locator('[data-testid="tab-playbook"]')).toBeVisible();
+  // The legacy #playbook link converted on load, and the view renders in Summary.
+  await expect(page).toHaveURL(new RegExp(`#/runs/${RUN}/summary$`));
+  await expect(page.getByRole('main').getByRole('link', { name: 'Summary', exact: true }))
+    .toHaveAttribute('aria-current', 'page');
 
   // Every persona who spoke is named, including the one whose turn failed.
   for (const name of ['Dana Whitfield', 'Maya Okonkwo', 'Alex Moreau', 'Ruth Delgado', 'Sam Iyer']) {
@@ -597,10 +629,14 @@ test('one injected script tag, and the host React is the only React', async ({ p
   // a bundler inlined it.
   expect(await page.evaluate(() => (window as any).HermesView_committee != null)).toBe(true);
 
-  // Leaving the tab and coming back must not inject a second copy.
+  // Leaving Summary and coming back must not inject a second copy. The legacy
+  // hashes set mid-session convert on hashchange.
   await page.evaluate((run) => { window.location.hash = `outputs?run=${run}`; }, RUN);
-  await expect(page.locator('[data-testid="tab-playbook"]')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`#/runs/${RUN}/outputs$`));
+  await expect(page.getByRole('main').getByRole('link', { name: 'Summary', exact: true }))
+    .toHaveAttribute('href', `#/runs/${RUN}/summary`);
   await page.evaluate((run) => { window.location.hash = `playbook?run=${run}`; }, RUN);
+  await expect(page).toHaveURL(new RegExp(`#/runs/${RUN}/summary$`));
   await expect(page.getByText('Dana Whitfield').first()).toBeVisible();
   await expect(tag).toHaveCount(1);
 
@@ -821,4 +857,104 @@ test.describe('an up-front 1:1 before the first turn', () => {
     await group.getByRole('button').first().click();
     await expect(group.getByText(ONE_ON_ONE_GUEST_SAYS)).toBeVisible();
   });
+});
+
+// --- the runs view: the rail, the tab it keeps, Back, Needs you, a live move ---
+
+test('the runs rail keeps the tab across runs, Back retraces it, Needs you opens the decision in its run, and a run that ends moves to Finished live', async ({ page }) => {
+  const rail = page.getByRole('navigation', { name: 'Runs', exact: true });
+  const main = page.getByRole('main');
+  const row = (name: string) => rail.getByRole('link', { name, exact: true });
+  const tab = (name: string) => main.getByRole('link', { name, exact: true });
+  const title = (id: string) =>
+    main.getByRole('heading', { level: 1, name: `${id} · committee`, exact: true });
+  const at = (hash: string) => expect(page).toHaveURL(new RegExp(`${hash}$`));
+
+  // Run A waits on the user (its decision holds a needs_human ticket), so its
+  // row names the wait; run B is running with nothing waiting.
+  const rowA = row(`${RUN}, committee, done, 1 waiting on you`);
+  const rowB = row(`${LIVE}, committee, running`);
+
+  // From a cross-run page a row opens the last run tab used this session:
+  // Summary, the default.
+  await page.goto('/#/crew');
+  await expect(rowA).toBeVisible({ timeout: 15000 });
+  await rowA.click();
+  await at(`#/runs/${RUN}/summary`);
+  await expect(title(RUN)).toBeVisible();
+  await expect(rowA).toHaveAttribute('aria-current', 'page');
+
+  // Switching runs keeps the tab: with A on Outputs, B's row opens B's Outputs.
+  await tab('Outputs').click();
+  await at(`#/runs/${RUN}/outputs`);
+  await expect(rowB).toHaveAttribute('href', `#/runs/${LIVE}/outputs`);
+  await rowB.click();
+  await at(`#/runs/${LIVE}/outputs`);
+  await expect(title(LIVE)).toBeVisible();
+  await expect(rowB).toHaveAttribute('aria-current', 'page');
+
+  // B's tab changes and B stays selected.
+  await tab('Tickets').click();
+  await at(`#/runs/${LIVE}/tickets`);
+  await expect(title(LIVE)).toBeVisible();
+
+  // Each click was a history entry: Back to B's previous tab, then to run A.
+  await page.goBack();
+  await at(`#/runs/${LIVE}/outputs`);
+  await expect(title(LIVE)).toBeVisible();
+  await page.goBack();
+  await at(`#/runs/${RUN}/outputs`);
+  await expect(title(RUN)).toBeVisible();
+
+  // Needs you, across runs: the decision previews inline with its ruling buttons...
+  await page.getByRole('link', { name: /^Needs you/ }).click();
+  await at('#/needs-you');
+  await expect(main.getByRole('heading', { level: 1, name: 'Needs you', exact: true }))
+    .toBeVisible();
+  await main.getByRole('button', { name: DECISION_HEADLINE }).click();
+  // Two pills read 'needs human' in the open card: its status and its member
+  // ticket's. Scope to the decision's item and pin both (strict mode).
+  const decisionPills = main
+    .getByRole('listitem')
+    .filter({ hasText: DECISION_HEADLINE })
+    .getByTitle('needs human', { exact: true });
+  await expect(decisionPills).toHaveCount(2);
+  await expect(decisionPills.first()).toBeVisible();
+  await expect(main.getByRole('button', { name: 'Accept', exact: true })).toBeEnabled();
+  await expect(main.getByRole('button', { name: 'Reject', exact: true })).toBeEnabled();
+
+  // ...and "Open in run" lands on the run's Summary, focus on its heading.
+  await main.getByRole('link', { name: 'Open in run', exact: true }).click();
+  await at(`#/runs/${RUN}/summary`);
+  await expect(title(RUN)).toBeFocused();
+  await expect(main.getByText('Dana Whitfield').first()).toBeVisible({ timeout: 15000 });
+
+  // B sits in Active until its master ends it: below the Active heading.
+  const active = rail.getByRole('heading', { name: 'Active', exact: true });
+  await expect(active).toBeVisible();
+  await expect(rowB).toBeVisible();
+  expect((await active.boundingBox())!.y).toBeLessThan((await rowB.boundingBox())!.y);
+
+  // End B the way the engine does, the row and then its run_done event, and
+  // leave the page alone. A reload would drop this marker.
+  await page.evaluate(() => { (window as any).__noReload = true; });
+  const db = new DatabaseSync(`${HOME}/queue.db`);
+  try {
+    const now = Date.now() / 1000;
+    db.prepare(`UPDATE runs SET state = 'done', updated_at = ? WHERE id = ?`).run(now, LIVE);
+    db.prepare(`INSERT INTO events (ts, kind, run_id) VALUES (?, 'run_done', ?)`).run(now, LIVE);
+  } finally {
+    db.close();
+  }
+
+  // Within 4 s (a stream poll of at most 1 s, the throttle's leading refetch,
+  // the fetch) its row reads done under Finished and the running row is gone.
+  // Finished is the last group, so "below its heading" means "in Finished".
+  const ended = row(`${LIVE}, committee, done`);
+  await expect(ended).toBeVisible({ timeout: 4000 });
+  await expect(rowB).toHaveCount(0);
+  const finished = rail.getByRole('heading', { name: 'Finished', exact: true });
+  await expect(finished).toBeVisible();
+  expect((await finished.boundingBox())!.y).toBeLessThan((await ended.boundingBox())!.y);
+  expect(await page.evaluate(() => (window as any).__noReload)).toBe(true);
 });
