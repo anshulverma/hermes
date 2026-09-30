@@ -18,3 +18,7 @@ globalThis.window.HermesUI = {
   getToken,
   renderMermaid: async () => '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
 };
+
+// jsdom has no scrollIntoView. RunRail scrolls the selected row with it, so
+// every test gets this no-op; a test that checks the call spies on it.
+Element.prototype.scrollIntoView = function scrollIntoView() {};
